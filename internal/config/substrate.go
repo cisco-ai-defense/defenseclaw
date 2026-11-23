@@ -74,10 +74,13 @@ type SubstrateConfig struct {
 	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
 	Unattended        SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
 	RateLimits        SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc           SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM               SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress            SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets           []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// Usage is per-person and per-actor model spend through the leader
+	// (substrate_usage.go).
+	Usage   SubstrateUsageConfig   `mapstructure:"usage" yaml:"usage,omitempty"`
+	Extproc SubstrateExtprocConfig `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM     SubstrateLLMConfig     `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress  SubstrateEgressConfig  `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets []SubstrateSecret      `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -206,6 +209,13 @@ type SubstrateIdentityConfig struct {
 	// administrators on the admin listener. The gateway's --admin-groups
 	// flag adds to them.
 	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
+	// KubeSignIn false turns the Kubernetes sign-in off (nil = on). It
+	// applies only with no oidc.issuer on an install that is not managed
+	// (Config.SubstrateKubeSignIn). The gateway's --no-kube-sign-in flag
+	// turns it off too. The gateway reads it at start only (restart it after
+	// a change), and routing.admin users entries match against the issuers
+	// people can sign in with then (GAP-0939, GAP-0968).
+	KubeSignIn *bool `mapstructure:"kube_sign_in" yaml:"kube_sign_in,omitempty"`
 }
 
 // SubstrateOIDCConfig is the people's identity provider (launcher sign-in).
@@ -741,6 +751,7 @@ func (s *SubstrateConfig) Validate() error {
 	if r := s.Unattended.TelemetrySampling; r != nil && (*r < 0 || *r > 1) {
 		bad("unattended.telemetry_sampling", "%v is outside 0-1", *r)
 	}
+	s.Usage.validate(bad)
 	if s.RateLimits.PerActorRPS < 0 {
 		bad("rate_limits.per_actor_rps", "must not be negative")
 	}
@@ -1048,7 +1059,9 @@ const substrateWorkloadSubjectHint = `%q must be exact or end in ":*" or "/*" (f
 
 func httpsURL(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
+	// '#' and '?' anywhere, empty ones too: the person key is
+	// issuer#subject, so an issuer ending in '#' would be ambiguous.
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && !strings.ContainsAny(raw, "#?")
 }
 
 // SubstrateVersionRange is a space-separated list of comparisons, every one

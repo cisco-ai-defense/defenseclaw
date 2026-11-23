@@ -363,6 +363,70 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 	if c, ok := doctorBundles(ctx, s, signedIn); ok {
 		d.checks = append(d.checks, c)
 	}
+
+	// 8. Cluster budgets: the leader, the spend feed and the price table.
+	if signedIn {
+		u, err := s.Client.Usage(ctx, api.UsageQuery{By: "model", Since: "24h"})
+		if c, ok := doctorBudgetsRow(u, err); ok {
+			d.checks = append(d.checks, c)
+		}
+		if err == nil {
+			d.checks = append(d.checks, substrateCheck{ID: "usage_person_key", Status: doctorOK, Summary: doctorPersonKeyNotice})
+		}
+	}
+}
+
+// doctorPersonKeyNotice names the one change to how an agent's usage is
+// owned: its calls are counted under the person key (issuer and subject), not
+// the bare subject, which two sign-in servers can share. Usage rows exported
+// before the change keep the old id and are not rewritten (until 1.0.13).
+const doctorPersonKeyNotice = "usage of your agents is counted under your person key (issuer and subject), not the bare subject, so " +
+	"one subject at two sign-in servers is two people; usage rows exported before this change keep the old id and are not rewritten"
+
+// doctorBudgetsRow is the cluster_budgets row: whether the cluster's leader
+// answers usage (the leader), whether every budget has a spend (the feed) and
+// whether the calls of the last day had a price (the price table). ok is
+// false when the cluster cannot say (an older cluster, no access).
+func doctorBudgetsRow(u api.UsageAnswer, err error) (substrateCheck, bool) {
+	const id = "cluster_budgets"
+	if err != nil {
+		e, ok := api.AsError(err)
+		if !ok {
+			return substrateCheck{}, false
+		}
+		switch e.Reason {
+		case "usage_disabled":
+			return substrateCheck{ID: id, Status: doctorSkip, Summary: "usage is turned off on this cluster (substrate.usage.enabled: false), so actor and batch budgets are not counted across its replicas"}, true
+		case "usage_unavailable":
+			return substrateCheck{ID: id, Status: doctorWarn, Summary: "the cluster's leader did not answer usage, so budget spend cannot be read",
+				Fix: "ask your administrator to check the leader pods (kubectl get pods -l app.kubernetes.io/component=leader)"}, true
+		}
+		return substrateCheck{}, false
+	}
+	var unpriced int64
+	for _, r := range u.Rows {
+		if d := r.UsageCalls - r.CostCalls; d > 0 {
+			unpriced += d
+		}
+	}
+	unknown := 0
+	for _, b := range u.Budgets {
+		if b.SpentUSD == nil && !b.Exceeded {
+			unknown++
+		}
+	}
+	var problems []string
+	if unknown > 0 {
+		problems = append(problems, fmt.Sprintf("the spend of %d budget(s) is not known yet (the leader's spend feed has not answered)", unknown))
+	}
+	if unpriced > 0 {
+		problems = append(problems, fmt.Sprintf("%d call(s) in the last day had no known price (the model is not in the price table), so budgets do not count them", unpriced))
+	}
+	if len(problems) == 0 {
+		return substrateCheck{ID: id, Status: doctorOK, Summary: "the leader answers usage, every budget has a spend and the calls of the last day were priced"}, true
+	}
+	return substrateCheck{ID: id, Status: doctorWarn, Summary: strings.Join(problems, "; "),
+		Fix: "ask your administrator to add the model to observability.pricing in the chart values, or to check the leader"}, true
 }
 
 const doctorBundleFix = "apply a bundle signed by a key of the bundle-anchors Secret (defenseclaw substrate bundle apply), " +

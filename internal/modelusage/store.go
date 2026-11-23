@@ -187,7 +187,7 @@ func openUsageDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open model usage store: %w", err)
 	}
 	db.SetMaxOpenConns(2)
-	for _, stmt := range []string{
+	for _, stmt := range append([]string{
 		"PRAGMA journal_mode=WAL",
 		fmt.Sprintf("PRAGMA busy_timeout=%d", storeBusyMillis),
 		"PRAGMA journal_size_limit=8388608",
@@ -207,7 +207,7 @@ func openUsageDB(path string) (*sql.DB, error) {
 			cost_usd_sum REAL, cost_calls INTEGER NOT NULL,
 			PRIMARY KEY (hour_start, group_name, connector, model)
 		) WITHOUT ROWID`,
-	} {
+	}, remoteSchema...) {
 		if _, err := db.Exec(stmt); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("model usage store: %w", err)
@@ -246,11 +246,14 @@ func dim(v string) string {
 // OwnerID is the stable owner key of a verified caller: kind and subject.
 // An unverified call has the empty owner, which only an admin query reads.
 func OwnerID(f CallFacts) string {
-	subject := strings.TrimSpace(f.Subject)
+	subject, kind := strings.TrimSpace(f.Subject), f.SubjectKind
+	if key := strings.TrimSpace(f.OwnerKey); key != "" {
+		subject, kind = key, f.OwnerKind
+	}
 	if !f.IdentityVerified || subject == "" {
 		return ""
 	}
-	return dim(ownerKind(f.SubjectKind, subject) + ":" + subject)
+	return dim(ownerKind(kind, subject) + ":" + subject)
 }
 
 // ownerKind is the useridentity kind of an owner: posix_uid, windows_sid, or
@@ -460,6 +463,7 @@ func (s *Store) pruneLocked() {
 	cutoff := now.UTC().Add(-time.Duration(days) * 24 * time.Hour).Truncate(time.Hour).Unix()
 	_, _ = s.db.Exec("DELETE FROM model_usage WHERE hour_start < ?", cutoff)
 	_, _ = s.db.Exec("DELETE FROM model_usage_group WHERE hour_start < ?", cutoff)
+	_, _ = s.db.Exec("DELETE FROM model_usage_remote WHERE hour_start < ?", cutoff)
 }
 
 // Querier is what the usage API reads. The local Store is the default; a
@@ -475,13 +479,16 @@ var _ Querier = (*Store)(nil)
 
 // Query selects usage rolled up by one dimension.
 type Query struct {
-	By       string    // model | connector | route | profile | role | provider | user | group | hour
+	By       string    // model | connector | route | profile | role | provider | user | group | hour | day | actor | batch | atespace
 	From, To time.Time // To zero = now
 	// Owner is the caller whose rows are returned when AllOwners is false. It
 	// is applied in the SQL WHERE clause, never after the fetch.
 	Owner     string
 	AllOwners bool
-	Limit     int
+	// Batch limits the rollup to one batch id (the cluster leader's rows;
+	// a laptop row has none).
+	Batch string
+	Limit int
 }
 
 // Row is one rolled-up line. CostUSD is nil when no call in the bucket had a
@@ -507,6 +514,10 @@ var ErrAdminOnly = errors.New("this rollup is available to administrators only")
 var byColumn = map[string]string{
 	"model": "model", "connector": "connector", "route": "route_decision", "profile": "profile",
 	"role": "call_role", "provider": "provider", "user": "owner", "hour": "hour_start",
+	// actor, batch and atespace are filled by the cluster leader's rows only;
+	// day is the UTC day of the hour bucket.
+	"actor": "actor", "batch": "batch", "atespace": "atespace",
+	"day": "strftime('%Y-%m-%d', hour_start, 'unixepoch')",
 }
 
 // Run executes the query. A non-admin caller gets only their own rows; the
@@ -540,7 +551,7 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	if q.By == "hour" {
+	if q.By == "hour" || q.By == "day" {
 		limit = 1000 // a timeline is never cut to the most expensive hours
 	}
 	args := []any{from.UTC().Truncate(time.Hour).Unix(), to.UTC().Unix()}
@@ -581,11 +592,15 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 		where += " AND owner = ?"
 		args = append(args, q.Owner)
 	}
+	if q.Batch != "" {
+		where += " AND batch = ?"
+		args = append(args, q.Batch)
+	}
 	if q.By == "user" && !q.AllOwners {
 		col = "owner" // the caller own bucket only
 	}
 	query := fmt.Sprintf(`SELECT CAST(%s AS TEXT), SUM(calls), SUM(errors), SUM(usage_calls), SUM(input), SUM(output), SUM(cache_read), SUM(cache_creation),
-		SUM(reasoning), SUM(cost_usd_sum), SUM(cost_calls), SUM(latency_ms_sum) FROM model_usage WHERE %s GROUP BY %s
+		SUM(reasoning), SUM(cost_usd_sum), SUM(cost_calls), SUM(latency_ms_sum) FROM model_usage_all WHERE %s GROUP BY %s
 		ORDER BY %s LIMIT ?`, col, where, col, orderFor(q.By, col))
 	rows, err := db.QueryContext(ctx, query, append(args, limit)...)
 	if err != nil {
@@ -605,7 +620,7 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 		}
 		out = append(out, r)
 	}
-	if q.By == "hour" {
+	if q.By == "hour" || q.By == "day" {
 		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	}
 	return out, rows.Err()
@@ -623,7 +638,7 @@ func storeConnector(c string) string {
 // orderFor is the ORDER BY of a rollup: a timeline newest first (so the cap
 // keeps the latest hours), anything else most expensive first.
 func orderFor(by, col string) string {
-	if by == "hour" {
+	if by == "hour" || by == "day" {
 		return col + " DESC"
 	}
 	return "SUM(COALESCE(cost_usd_sum,0)) DESC, SUM(calls) DESC"

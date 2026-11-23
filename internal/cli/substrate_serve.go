@@ -55,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/spendleader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -201,6 +202,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if !cfg.Substrate.Enabled {
 			return errors.New("serve: substrate.enabled is false in the configuration")
 		}
+		// Before anything reads the issuers (startup checks, routing.admin
+		// warnings and matching): pin whether this gateway lets Kubernetes
+		// people sign in. substrate.identity is restart-only, so a live
+		// reload must not move the issuers away from the verifiers built now
+		// (GAP-0939, GAP-0968).
+		config.PinKubeSignIn(substrateKubeSignIn(cfg))
 		// Managed: policy_dir is the root-owned vendor folder the chart's
 		// init container seeds (substrate-datadir --policies) and mounts
 		// read-only; the gateway account must not write its own policy.
@@ -381,9 +388,12 @@ func (substrateNoPeople) Verify(context.Context, string) (identity.Person, error
 }
 
 // substrateKubeSignIn reports whether people sign in with Kubernetes
-// credentials: no OIDC issuer, not a managed install, not turned off.
+// credentials: no OIDC issuer, not a managed install, not turned off by
+// substrate.identity.kube_sign_in or --no-kube-sign-in. runServe pins the
+// answer at start (config.PinKubeSignIn), so the routing.admin issuers agree
+// with the verifiers for the life of the process (GAP-0939, GAP-0968).
 func substrateKubeSignIn(c *config.Config) bool {
-	return c.Substrate.Identity.OIDC.Issuer == "" && !managed.IsManagedEnterprise(c.DeploymentMode) && !serveFlags.noKubeSignIn
+	return c.SubstrateKubeSignIn() && !serveFlags.noKubeSignIn
 }
 
 func substrateKubePeople() *identity.KubeTokenVerifier {
@@ -572,6 +582,17 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 		}
 		out.PolicyReset = substratePolicyResetter()
+		// T-COST: spend and usage live on the leader. substrate.usage.enabled
+		// false leaves both unset: no counter swap, no usage sink, no push
+		// loop, and the usage API answers usage_disabled.
+		if c.Substrate.Usage.UsageEnabled() {
+			spend := &spendleader.Client{Leader: toLeader}
+			out.SpendLeader = spend
+			out.UsageSyncInterval = c.Substrate.Usage.EffectiveSyncInterval()
+			out.Usage = gateway.NewSubstrateLeaderUsage(spend, live, regs)
+		} else {
+			out.UsageDisabled = true
+		}
 		if people != nil {
 			adminTLS := servingTLS
 			if !serveFlags.plainHTTP {
@@ -734,6 +755,13 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		}).run(ctx)
 	}
 	chains.Register(srv)
+	// Cluster spend and usage of the gateway replicas (T-COST): on the store
+	// volume, only for the gateway peer, off with substrate.usage.enabled.
+	closeSpend, err := serveSpendUsage(srv, cfg, serveFlags.storeDir)
+	if err != nil {
+		return err
+	}
+	defer closeSpend()
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
 	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore), store, relay)))

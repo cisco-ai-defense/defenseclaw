@@ -4645,6 +4645,8 @@ class SubstrateIdentityConfig:
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
     # Groups whose members are Substrate administrators (GAP-0191).
     admin_groups: list[str] = field(default_factory=list)
+    # False turns the Kubernetes sign-in off (None = on, GAP-0939).
+    kube_sign_in: bool | None = None
 
 
 @dataclass
@@ -4664,6 +4666,13 @@ class SubstrateUnattendedConfig:
 class SubstrateRateLimitsConfig:
     per_actor_rps: float | None = None
     per_atespace_rps: float | None = None
+
+
+@dataclass
+class SubstrateUsageConfig:
+    # Go internal/config/substrate_usage.go: None = on; 1s-30s, None = 5s.
+    enabled: bool | None = None
+    sync_interval: str = ""
 
 
 @dataclass
@@ -4857,6 +4866,7 @@ class SubstrateConfig:
     workspace_max_bytes: int | None = None
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
+    usage: SubstrateUsageConfig = field(default_factory=SubstrateUsageConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
     egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
@@ -8129,6 +8139,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))
     limits = _mapping(raw.get("rate_limits"))
+    usage = _mapping(raw.get("usage"))
     extproc = _mapping(raw.get("extproc"))
     llm = _mapping(raw.get("llm"))
     egress = _mapping(raw.get("egress"))
@@ -8190,6 +8201,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 for w in ident.get("workload_oidc") or []
             ],
             admin_groups=_string_list(ident.get("admin_groups")),
+            kube_sign_in=_optional_bool(ident.get("kube_sign_in")),
         ),
         services=SubstrateServicesConfig(
             actor=str(services.get("actor", "") or ""),
@@ -8211,6 +8223,10 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         rate_limits=SubstrateRateLimitsConfig(
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
             per_atespace_rps=_optional_number(limits.get("per_atespace_rps"), float),
+        ),
+        usage=SubstrateUsageConfig(
+            enabled=_optional_bool(usage.get("enabled")),
+            sync_interval=_duration_text(usage.get("sync_interval")),
         ),
         extproc=_merge_substrate_extproc(extproc),
         llm=SubstrateLLMConfig(

@@ -151,6 +151,19 @@ chart's profile is the observability default unless config names one. */ -}}
 {{- $_ := set $obs "defaults" $obsDefaults -}}
 {{- $_ := set $cfg "observability" $obs -}}
 {{- end -}}
+{{- /* Cost for budgets and usage: the gateway prices a call from
+observability.pricing and counts nothing without tokenomics, so the chart turns
+tokenomics on and seeds the reviewed price table unless config sets them. */ -}}
+{{- if .Values.observability.tokenomics.enabled -}}
+{{- $obs := get $cfg "observability" | default dict -}}
+{{- $tok := get $obs "tokenomics" | default dict -}}
+{{- if not (hasKey $tok "enabled") }}{{ $_ := set $tok "enabled" true }}{{ end -}}
+{{- $_ := set $obs "tokenomics" $tok -}}
+{{- if and .Values.observability.tokenomics.defaultPricing (not (hasKey $obs "pricing")) -}}
+{{- $_ := set $obs "pricing" (omit (.Files.Get "files/default-pricing.json" | fromJson) "_comment" "_sources") -}}
+{{- end -}}
+{{- $_ := set $cfg "observability" $obs -}}
+{{- end -}}
 {{- /* The local collector (observability.local.enabled) is the try-out
 target: export to it unless config names a destination chart-collector
 (GAP-0272). Its Service address is private, so the destination allows
@@ -213,13 +226,14 @@ would never start.
 */}}
 {{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
 {{/* The gateway's Kubernetes sign-in is on (internal/cli substrateKubeSignIn):
-no substrate.identity.oidc.issuer, not a managed install, and not turned
-off with --no-kube-sign-in in custom gateway args. The flag is a Go bool:
+no substrate.identity.oidc.issuer, not a managed install, not turned off by
+substrate.identity.kube_sign_in false, and not turned off with
+--no-kube-sign-in in custom gateway args. The flag is a Go bool:
 --no-kube-sign-in and --no-kube-sign-in=<true value> turn it off, =false
 keeps it on, and the last one wins, as the gateway parses it. */}}
 {{- define "dc.kubeSignIn" -}}
 {{- $issuer := dig "substrate" "identity" "oidc" "issuer" "" (.Values.config | default dict) -}}
-{{- $off := false -}}
+{{- $off := eq (toString (dig "substrate" "identity" "kube_sign_in" "" (.Values.config | default dict))) "false" -}}
 {{- range (.Values.gateway.args | default list) -}}
 {{- $a := toString . -}}
 {{- if eq $a "--no-kube-sign-in" -}}

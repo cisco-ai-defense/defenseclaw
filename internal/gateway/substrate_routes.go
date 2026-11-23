@@ -29,10 +29,12 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -105,9 +107,11 @@ type SubstrateActorActions interface {
 	Delete(ctx context.Context, atespace, name string) error
 }
 
-// SubstrateUsage answers usage for one owner ("" for every owner).
+// SubstrateUsage answers a usage query: one owner's rows, or every owner's
+// for an administrator (SubstrateUsageQuery.All). The owner is set by the
+// handler from the verified person, never by the request.
 type SubstrateUsage interface {
-	Usage(ctx context.Context, ownerID, batchID string) (any, error)
+	Usage(ctx context.Context, q SubstrateUsageQuery) (SubstrateUsageAnswer, error)
 }
 
 // SubstrateProfileResolver picks the profile and launcher atespace of a
@@ -295,6 +299,13 @@ func substrateVisible(c substrateCaller, reg registry.Registration) bool {
 // says what its asks do (D12, GAP-0388): unattended_asks deny or queue from
 // its profile, and with queue how long an ask waits for a person. An actor
 // in policy_conflict carries the controller's mark (GAP-0398).
+// readViewBudgets reads the budget keys of regs before their views.
+func (st *substrateState) readViewBudgets(ctx context.Context, regs ...registry.Registration) {
+	if st.readBudgets != nil {
+		st.readBudgets(ctx, regs)
+	}
+}
+
 func (st *substrateState) actorView(reg registry.Registration) map[string]any {
 	v := map[string]any{
 		"atespace": reg.Atespace, "name": reg.Name, "uid": reg.UID, "registration_key": reg.Key,
@@ -315,6 +326,11 @@ func (st *substrateState) actorView(reg registry.Registration) map[string]any {
 	}
 	if pc := substratePolicyConflictView(reg); pc != nil {
 		v["policy_conflict"] = pc
+	}
+	if st.budget != nil && !reg.Deleted {
+		if cell := st.budget(reg); cell != "" {
+			v["budget"] = cell
+		}
 	}
 	return v
 }
@@ -570,6 +586,7 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		}
 		// GAP-0167: the person sees which agents hold a worker.
 		states := substrateLiveStates(r.Context(), st.cfg.Lookup, regs)
+		st.readViewBudgets(r.Context(), regs...)
 		out := make([]map[string]any, 0, len(regs))
 		for i, reg := range regs {
 			v := st.actorView(reg)
@@ -720,6 +737,7 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
+		st.readViewBudgets(r.Context(), reg)
 		v := st.actorView(reg)
 		// GAP-0410: status shows a crashed agent as crashed.
 		if st.cfg.Lookup == nil {
@@ -819,6 +837,7 @@ func (a *APIServer) substrateBatches(st *substrateState, r *http.Request, batchI
 	if substrateAllView(r) {
 		a.substrateAuditAdminRead(st, r, "batches", len(regs), "")
 	}
+	st.readViewBudgets(r.Context(), regs...)
 	out := map[substrateBatchKey][]map[string]any{}
 	for _, reg := range regs {
 		if reg.BatchID != "" {
@@ -886,25 +905,86 @@ func (a *APIServer) substrateGetBatch(st *substrateState) http.HandlerFunc {
 
 func (a *APIServer) substrateUsage(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if st.cfg.UsageDisabled {
+			writeSubstrateJSONError(w, http.StatusNotImplemented, "usage_disabled")
+			return
+		}
 		if st.cfg.Usage == nil {
 			writeSubstrateJSONError(w, http.StatusNotImplemented, "usage_unavailable")
 			return
 		}
-		c, _ := substrateCallerFrom(r.Context())
-		owner := ownerOf(c.person).ID()
-		if c.admin && r.URL.Query().Get("all") == "1" {
-			owner = ""
+		c, ok := substrateCallerFrom(r.Context())
+		qs := r.URL.Query()
+		all := ok && c.admin && qs.Get("all") == "1"
+		owner := ""
+		if !all {
+			// "" means every owner: a caller with no person (or a route
+			// without the person middleware) must not read it.
+			if owner = substrateUsageOwner(ownerOf(c.person)); !ok || owner == "" {
+				writeSubstrateJSONError(w, http.StatusForbidden, "usage_forbidden")
+				return
+			}
+			if !c.admin && substrateUsersSeeNone(a.liveConfig()) {
+				// routing.admin.visibility.users_see: none hides a person's own usage too.
+				writeSubstrateJSONError(w, http.StatusForbidden, "usage_hidden")
+				return
+			}
 		}
-		u, err := st.cfg.Usage.Usage(r.Context(), owner, r.URL.Query().Get("batch"))
+		since, err := parseSubstrateUsageSince(qs.Get("since"))
+		limit, _ := strconv.Atoi(qs.Get("limit"))
 		if err != nil {
+			writeSubstrateJSONError(w, http.StatusBadRequest, "usage_bad_since")
+			return
+		}
+		u, err := st.cfg.Usage.Usage(r.Context(), SubstrateUsageQuery{
+			Owner: owner, All: all, By: qs.Get("by"), Since: since, Batch: qs.Get("batch"), Limit: limit})
+		switch {
+		case errors.Is(err, errSubstrateUsageBy):
+			writeSubstrateJSONError(w, http.StatusBadRequest, "usage_bad_by")
+			return
+		case errors.Is(err, errSubstrateUsageAdminOnly):
+			writeSubstrateJSONError(w, http.StatusForbidden, "usage_forbidden")
+			return
+		case err != nil:
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "usage_unavailable")
 			return
 		}
-		if owner == "" {
-			a.substrateAuditAdminRead(st, r, "usage", 1, "")
+		if all {
+			a.substrateAuditAdminRead(st, r, "usage", len(u.Rows), "")
 		}
 		writeSubstrateJSON(w, http.StatusOK, u)
 	}
+}
+
+// substrateUsersSeeNone reports routing.admin.visibility.users_see: none.
+func substrateUsersSeeNone(cfg *config.Config) bool {
+	return cfg != nil && cfg.Routing.Admin != nil && cfg.Routing.Admin.Visibility.EffectiveUsersSee() == config.RoutingUsersSeeNone
+}
+
+var (
+	errSubstrateUsageBy        = errors.New("usage: unknown rollup")
+	errSubstrateUsageAdminOnly = errors.New("usage: administrators only")
+)
+
+// parseSubstrateUsageSince reads ?since= as a Go duration or Nd days ("" is
+// the default of 24 h).
+func parseSubstrateUsageSince(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	if strings.HasSuffix(v, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+		if err != nil || n <= 0 {
+			return 0, errors.New("bad since")
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, errors.New("bad since")
+	}
+	return d, nil
 }
 
 // substrateCalloutAuthorized compares the callout's service token in

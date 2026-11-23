@@ -151,8 +151,17 @@ type SubstrateConfig struct {
 	// subject matches and its profile (SubstrateWorkloadEntry over the live
 	// config); nil leaves the workload answer out of the actor list.
 	WorkloadEntry func(subject string) (entry, profile string)
-	// Usage answers own-only usage (stream 10 seam; nil: 501).
+	// Usage answers the usage API (own rows; an administrator's all=1 reads
+	// every owner). Nil: 501 usage_unavailable.
 	Usage SubstrateUsage
+	// UsageDisabled is substrate.usage.enabled: false: the usage API answers
+	// 501 usage_disabled, and the replica counts no spend on the leader.
+	UsageDisabled bool
+	// SpendLeader moves this replica's budget spend and usage onto the
+	// leader (nil: not a cluster replica, or usage disabled).
+	SpendLeader SubstrateSpendLeader
+	// UsageSyncInterval is substrate.usage.sync_interval (0: the default).
+	UsageSyncInterval time.Duration
 	// Bundles applies and shows signed policy bundles (nil: 501).
 	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
@@ -261,6 +270,12 @@ type substrateState struct {
 	// logOut is the gateway log (stderr); now is the clock. Tests set both.
 	logOut io.Writer
 	now    func() time.Time
+	// budget is the BUDGET cell of an agent (substrateActorBudget); nil
+	// when the server has no live config.
+	budget func(reg registry.Registration) string
+	// readBudgets reads the budget keys of regs before a view
+	// (substrateReadBudgetKeys); nil with budget.
+	readBudgets func(ctx context.Context, regs []registry.Registration)
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.
@@ -327,6 +342,16 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 		if _, err := cryptorand.Read(st.receiptKey); err != nil {
 			return fmt.Errorf("substrate: skill receipt key: %w", err)
 		}
+	}
+	st.budget = func(reg registry.Registration) string {
+		now := time.Now()
+		if st.now != nil {
+			now = st.now()
+		}
+		return substrateActorBudget(a.liveConfig(), reg, now)
+	}
+	st.readBudgets = func(ctx context.Context, regs []registry.Registration) {
+		substrateReadBudgetKeys(ctx, a.liveConfig(), regs)
 	}
 	st.audit = func(ctx context.Context, severity, summary string, details map[string]any) {
 		if a.logger != nil {

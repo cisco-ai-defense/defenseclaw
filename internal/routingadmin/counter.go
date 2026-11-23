@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,6 +132,68 @@ func (c *LocalCounter) Push(ctx context.Context, epoch string, rows []SeedRow) e
 // Totals sums every other epoch's spend per (key, day) since since (all
 // keys: the device holds only its own).
 func (c *LocalCounter) Totals(ctx context.Context, epoch string, since time.Time, _ []string) ([]SeedRow, error) {
+	return c.TotalsPage(ctx, epoch, since, TotalsQuery{})
+}
+
+// TotalsQuery selects part of Totals, in (day, key) order (the cluster
+// leader answers a replica's read page by page with it).
+type TotalsQuery struct {
+	// AfterDay and AfterKey start after that (day, key) row; Limit bounds
+	// the rows (0: all).
+	AfterDay, AfterKey string
+	Limit              int
+	// ByKey keeps, of the capped keys (actor:, batch:), only those in Keys;
+	// KeysOnly keeps only the keys in Keys.
+	ByKey, KeysOnly bool
+	Keys            []string
+	// Over (with ByKey, not KeysOnly) also keeps, per query, the capped keys
+	// at or over a budget's limit in its window, so a replica that let a
+	// blocked key go (evicted and stored) still reads it as blocked until
+	// the next read (GAP-0892). Their rows are only those of the budget's
+	// own window (OverQuery.Since), not every day of the read (GAP-0942).
+	Over []OverQuery
+}
+
+// OverQuery asks for the keys of one budget (Prefix, "<scope>:<id>:") whose
+// spend since Since (the first day of the budget's period) is at or over
+// Limit: at most Max of them (OverFull reports a budget with more).
+type OverQuery struct {
+	Prefix string
+	Since  time.Time
+	Limit  float64
+	Max    int
+}
+
+// overSQL lists the keys of one OverQuery (args: overArgs).
+const overSQL = `SELECT charge_key FROM budget_spend WHERE epoch != ? AND day >= ? AND substr(charge_key, 1, ?) = ?
+	GROUP BY charge_key HAVING SUM(usd) >= ? ORDER BY charge_key LIMIT ?`
+
+func overArgs(epoch string, o OverQuery, limit int) []any {
+	return []any{epoch, o.Since.UTC().Format(time.DateOnly), len(o.Prefix), o.Prefix, o.Limit, limit}
+}
+
+// SumQuery asks for the spend of one budget's keys (Prefix,
+// "<scope>:<id>:") since Since, the first day of its period; Limit counts
+// the keys at or over it.
+type SumQuery struct {
+	Prefix string
+	Since  time.Time
+	Limit  float64
+}
+
+// PrefixSum is the stored spend of one budget's keys, every epoch (each
+// replica pushes before it reads): Total over all keys, Peak the highest
+// key, Subjects the keys, Exceeded the keys at or over the limit (the admin
+// view of a cluster, GAP-0894).
+type PrefixSum struct {
+	Prefix             string
+	Total, Peak        float64
+	Subjects, Exceeded int
+}
+
+// PrefixSums sums each query's keys in SQL over every epoch: one row per
+// budget, never a row per key.
+func (c *LocalCounter) PrefixSums(ctx context.Context, q []SumQuery) ([]PrefixSum, error) {
 	if c == nil {
 		return nil, errors.New("budget spend: no counter")
 	}
@@ -138,8 +201,87 @@ func (c *LocalCounter) Totals(ctx context.Context, epoch string, since time.Time
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT day, charge_key, SUM(usd) FROM budget_spend
-		WHERE epoch != ? AND day >= ? GROUP BY day, charge_key`, epoch, since.UTC().Format(time.DateOnly))
+	out := make([]PrefixSum, 0, len(q))
+	for _, s := range q {
+		var total, peak sql.NullFloat64
+		var subjects, exceeded sql.NullInt64
+		err := db.QueryRowContext(ctx, `SELECT COUNT(*), SUM(s), MAX(s), SUM(s >= ?) FROM (
+			SELECT SUM(usd) AS s FROM budget_spend WHERE day >= ? AND substr(charge_key, 1, ?) = ?
+			GROUP BY charge_key HAVING SUM(usd) > 0)`,
+			s.Limit, s.Since.UTC().Format(time.DateOnly), len(s.Prefix), s.Prefix).Scan(&subjects, &total, &peak, &exceeded)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PrefixSum{Prefix: s.Prefix, Total: total.Float64, Peak: peak.Float64,
+			Subjects: int(subjects.Int64), Exceeded: int(exceeded.Int64)})
+	}
+	return out, nil
+}
+
+// OverFull lists the budget ids of over with more than Max over-limit keys:
+// the read could not name them all, so a managed deny budget refuses a key
+// this process does not hold (Ledger.SetOverFull).
+func (c *LocalCounter) OverFull(ctx context.Context, epoch string, over []OverQuery) ([]string, error) {
+	if c == nil {
+		return nil, errors.New("budget spend: no counter")
+	}
+	db, err := c.open()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, o := range over {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+overSQL+`)`, overArgs(epoch, o, o.Max+1)...).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n > o.Max {
+			ids = append(ids, budgetIDOfKey(o.Prefix))
+		}
+	}
+	return ids, nil
+}
+
+// TotalsPage is Totals restricted by q, sorted by (day, key) in SQL.
+func (c *LocalCounter) TotalsPage(ctx context.Context, epoch string, since time.Time, q TotalsQuery) ([]SeedRow, error) {
+	if c == nil {
+		return nil, errors.New("budget spend: no counter")
+	}
+	db, err := c.open()
+	if err != nil {
+		return nil, err
+	}
+	query := `SELECT day, charge_key, SUM(usd) FROM budget_spend WHERE epoch != ? AND day >= ?`
+	args := []any{epoch, since.UTC().Format(time.DateOnly)}
+	if q.AfterDay != "" {
+		query += ` AND (day > ? OR (day = ? AND charge_key > ?))`
+		args = append(args, q.AfterDay, q.AfterDay, q.AfterKey)
+	}
+	if q.ByKey || q.KeysOnly {
+		in := "0"
+		if len(q.Keys) > 0 {
+			in = "charge_key IN (?" + strings.Repeat(",?", len(q.Keys)-1) + ")"
+			for _, k := range q.Keys {
+				args = append(args, k)
+			}
+		}
+		if q.KeysOnly {
+			query += " AND " + in
+		} else {
+			for _, o := range q.Over {
+				in += " OR (day >= ? AND charge_key IN (" + overSQL + "))"
+				args = append(args, o.Since.UTC().Format(time.DateOnly))
+				args = append(args, overArgs(epoch, o, o.Max)...)
+			}
+			query += ` AND ((substr(charge_key, 1, 6) != 'actor:' AND substr(charge_key, 1, 6) != 'batch:') OR ` + in + `)`
+		}
+	}
+	query += ` GROUP BY day, charge_key ORDER BY day, charge_key`
+	if q.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, q.Limit)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

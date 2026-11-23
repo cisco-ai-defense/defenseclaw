@@ -131,6 +131,7 @@ func TestChartRefusesBadValues(t *testing.T) {
 	helm := helmBinary(t)
 	for name, set := range map[string]string{
 		"hpa below 2":               "gateway.hpa.minReplicas=1",
+		"budget store on cluster":   "config.routing.admin.budget_store.url=x", // the leader counts budgets; a pod store file is lost on restart
 		"short digest":              "image.digest=sha256:abc",
 		"empty relay secret":        "gateway.relaySessionSecret=",   // rendered secretName: "" and a hook Role naming ""
 		"empty llm secret":          "gateway.llmCredentialsSecret=", // rendered secretName: "" on the llm-credentials volume (GAP-0236)
@@ -671,5 +672,22 @@ func TestGAP0584PolicyAlertsReadEverySeriesUnlessScoped(t *testing.T) {
 		"--set", "metrics.prometheusRule.namespaceLabel=k8s_namespace_name"))
 	if !strings.Contains(scoped, `defenseclaw_substrate_policy_conflicts_total{k8s_namespace_name="defenseclaw-system"}[10m]`) {
 		t.Error("namespaceLabel set: the rules do not select the release's namespace")
+	}
+}
+
+// TestChartDefaultPricingMatchesBundle: the chart's files/default-pricing.json
+// is the reviewed table of bundles/pricing, byte for byte, so the chart never
+// seeds a price the bundle does not hold.
+func TestChartDefaultPricingMatchesBundle(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("..", "..", "..", "bundles", "pricing", "default-pricing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(chartDir, "files", "default-pricing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("deploy/helm/defenseclaw-substrate/files/default-pricing.json differs from bundles/pricing/default-pricing.json: copy it again")
 	}
 }

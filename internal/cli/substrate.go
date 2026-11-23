@@ -237,6 +237,9 @@ func substrateAPIMessage(e *api.Error) string {
 		// GAP-0262: the cluster gateway cannot verify any sign-in.
 		return "the cluster cannot check your sign-in: " + why + " (" + e.Reason + "). Ask your administrator to run defenseclaw-gateway substrate doctor --cluster"
 	}
+	if m := substrateUsageMessage(e.Reason); m != "" {
+		return m
+	}
 	switch {
 	case e.Unauthorized() && (e.Reason == "subject" || e.Reason == "claims"):
 		// The token is valid but its identity is not one the cluster
@@ -289,6 +292,26 @@ func substrateAPIMessage(e *api.Error) string {
 		return "the cluster could not do that right now (" + orWord(e.Reason, "unavailable") + "); try again in a minute"
 	}
 	return e.Error()
+}
+
+// substrateUsageMessage says a usage refusal in plain words ("" for a reason
+// this CLI does not know).
+func substrateUsageMessage(reason string) string {
+	switch reason {
+	case "usage_disabled":
+		return "usage is turned off on this cluster (substrate.usage.enabled: false); ask your administrator"
+	case "usage_unavailable":
+		return "usage is not available right now: the cluster's leader did not answer; try again in a minute"
+	case "usage_hidden":
+		return "your administrator has turned off per-person usage views for users (routing.admin.visibility.users_see: none)"
+	case "usage_forbidden":
+		return "only administrators may read everyone's usage"
+	case "usage_bad_by":
+		return "the cluster does not know that --by rollup"
+	case "usage_bad_since":
+		return "the cluster could not read --since; use a window such as 24h or 7d"
+	}
+	return ""
 }
 
 func orWord(v, def string) string {

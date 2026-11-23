@@ -2409,47 +2409,7 @@
       "minProperties": 1,
       "description": "Subjects an assignment selects. Keys combine with AND, the values of one key with OR. Only verified identity facts are compared; headers, hook payloads and claimed facts never select a profile.",
       "properties": {
-        "substrate": {
-            "type": "object",
-            "additionalProperties": false,
-            "minProperties": 1,
-            "description": "Agent Substrate actors: atespaces (an atespace glob matches only atespaces DefenseClaw created or lists), templates (<atespace>/<template>) and verified workload principals. Never selects a host subject.",
-            "properties": {
-              "atespaces": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 4096,
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 63,
-                  "pattern": "^[a-z0-9*?\\[\\]-]{1,63}$"
-                }
-              },
-              "templates": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 4096,
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128,
-                  "pattern": "^[a-z0-9*?\\[\\]-]{1,63}/[a-z0-9*?\\[\\]-]{1,63}$"
-                }
-              },
-              "workloads": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 4096,
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 512,
-                  "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
-                }
-              }
-            }
-          },
+        "substrate": { "$ref": "#/$defs/substrateActorMatch" },
         "groups": {
           "type": "array",
           "minItems": 1,
@@ -5683,7 +5643,7 @@
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
-      "description": "Requests a rule selects. Keys combine with AND, the values of one key with OR. groups, users and agents compare against a verified caller only.",
+      "description": "Requests a rule selects. Keys combine with AND, the values of one key with OR. groups, users and agents compare against a verified caller only. substrate selects Agent Substrate actor calls only and needs substrate.enabled.",
       "properties": {
         "groups": {
           "type": "array",
@@ -5697,6 +5657,7 @@
           }
         },
         "users": {
+          "description": "Users this rule selects: a name, uid:/sid:, or issuer#subject (an Agent Substrate person of exactly that issuer; with more than one trusted issuer a bare name selects only the primary issuer's person).",
           "type": "array",
           "minItems": 1,
           "maxItems": 4096,
@@ -5737,6 +5698,48 @@
           "type": "string",
           "pattern": "^([Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
           "description": "LOW, MEDIUM, HIGH or CRITICAL, in any case."
+        },
+        "substrate": { "$ref": "#/$defs/substrateActorMatch" }
+      }
+    },
+    "substrateActorMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Agent Substrate actors: atespaces (an atespace glob matches only atespaces DefenseClaw created or lists), templates (<atespace>/<template>) and verified workload principals. Never selects a host subject.",
+      "properties": {
+        "atespaces": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z0-9*?\\[\\]-]{1,63}$"
+          }
+        },
+        "templates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[a-z0-9*?\\[\\]-]{1,63}/[a-z0-9*?\\[\\]-]{1,63}$"
+          }
+        },
+        "workloads": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
+          }
         }
       }
     },
@@ -5761,7 +5764,9 @@
           "enum": [
             "user",
             "group",
-            "connector"
+            "connector",
+            "actor",
+            "batch"
           ]
         },
         "subject": {
@@ -5769,7 +5774,7 @@
           "minLength": 1,
           "maxLength": 512,
           "pattern": "^\\S(.*\\S)?$",
-          "description": "user: a users entry or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *."
+          "description": "user: a users entry (a name, or issuer#subject for one person of one trusted issuer) or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *; actor: * (each Agent Substrate actor its own limit); batch: * (each batch of one person its own limit)."
         },
         "period": {
           "type": "string",
@@ -5789,6 +5794,13 @@
           "type": "string",
           "pattern": "^(warn|deny|downgrade:[^,\\s]+(,[^,\\s]+)*)$",
           "description": "warn, deny (managed devices only; OSS reports it) or downgrade:<alias>[,<alias>...]."
+        },
+        "warn_at_percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99,
+          "default": 80,
+          "description": "deny and downgrade budgets: raise budget_warn:<id> once spend reaches this share of limit_usd; 0 turns it off. A warn budget ignores it."
         }
       },
       "allOf": [
@@ -5825,6 +5837,10 @@
               }
             }
           }
+        },
+        {
+          "if": { "properties": { "scope": { "enum": ["actor", "batch"] } } },
+          "then": { "properties": { "subject": { "const": "*" } } }
         }
       ]
     },
@@ -7854,6 +7870,10 @@
                 }
               }
             },
+            "kube_sign_in": {
+              "type": "boolean",
+              "default": true
+            },
             "admin_groups": {
               "type": "array",
               "maxItems": 256,
@@ -8090,6 +8110,22 @@
               "type": "number",
               "minimum": 0,
               "default": 500
+            }
+          }
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Model spend and usage of actor calls, per person and per actor, counted across gateway replicas through the leader.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Off: replicas push nothing, the leader serves no usage or spend method and the usage API answers usage_disabled."
+            },
+            "sync_interval": {
+              "$ref": "#/$defs/duration",
+              "description": "How often a replica sends spend and usage to the leader, 1s to 30s (default 5s)."
             }
           }
         },
