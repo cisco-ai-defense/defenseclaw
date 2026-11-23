@@ -29,10 +29,11 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 		for _, mode := range []string{"observe", "action"} {
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
 				// A place is private by its permission bits; a Windows path has
-				// none to read, so a copy of a key keeps the block of rel there
-				// (rel-1-0-10:GAP-0710): a block in action mode, allowed with the
-				// finding in observe mode.
-				keepsRelBlock := runtime.GOOS == "windows" && !tc.block
+				// none to read, so a copy of an own key keeps the block of rel
+				// there (rel-1-0-10:GAP-0710): a block in action mode, allowed
+				// with the finding in observe mode. The other routine rows are
+				// allowed there too.
+				keepsRelBlock := runtime.GOOS == "windows" && !tc.block && strings.Contains(tc.command, "~/.ssh/id_")
 				if runtime.GOOS == "windows" && strings.HasPrefix(tc.command, "find / ") {
 					// In Git Bash / is the Git install folder, not a folder above
 					// a C:/Users home, so find / reaches no DefenseClaw state there
