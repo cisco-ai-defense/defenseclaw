@@ -192,13 +192,17 @@ func windowsNestedReadings(request trustedActionRequest) []windowsNestedReading 
 	}
 	var nested []windowsNestedReading
 	if facts.Parse.Dialect == actionfacts.DialectPowerShell {
-		if text, changed, cut := psparse.ArgumentCommandReading(command); changed && !cut.Any() {
+		if text, changed, group, cut := psparse.ArgumentCommandReadingWithGroup(command); changed && !cut.Any() {
 			twin := windowsReadingTwin(request)
 			twin.Input = input
 			twin.Input.Args, twin.Input.Argv = nil, nil
 			twin.Input.Command, twin.LegacyText = text, text
 			twin.Input.DialectHint = actionfacts.DialectPowerShell
-			nested = append(nested, windowsNestedReading{request: twin})
+			// The original rule dispatch does not see a pipeline hidden
+			// inside a parsed (group) header. Only that evaluated group
+			// needs the command-rule reading; ordinary argument readings
+			// retain their existing path-effect-only reading.
+			nested = append(nested, windowsNestedReading{request: twin, unjudged: group})
 		}
 	}
 	reading := actionfacts.HostScriptReadings(input, facts, 0, false)

@@ -285,6 +285,37 @@ type hostWord struct {
 	// folder from the caller's home or environment ($HOME\.ssh, "$env:TEMP\x"):
 	// only a -WorkingDirectory value may be one (folderValueWord).
 	folder bool
+	// enc is the value of a quoted literal word that is outside the static
+	// class only because it holds a tab, CR or LF. Only an -EncodedCommand
+	// value reads it: the host decoder (Convert.FromBase64String) skips those
+	// blanks wherever they stand and runs the script (rel-1-0-10:GAP-1199).
+	enc string
+}
+
+// encodedText is the word an -EncodedCommand value hands the host decoder: a
+// static word, or a quoted word whose only runes outside the static class are
+// the blanks the decoder skips (enc).
+func (w hostWord) encodedText() (string, bool) {
+	if w.static {
+		return w.text, true
+	}
+	return w.enc, w.enc != ""
+}
+
+// encodedWord returns the value of a quoted literal that is outside the static
+// class only because of a tab, CR or LF (HostBase64 drops them, as the host
+// decoder does). Every other rune keeps the quoted-literal class, so a backtick
+// escape, a variable or a non-ASCII rune still leaves the word unread
+// (rel-1-0-10:GAP-1199).
+func encodedWord(e Expr) string {
+	v, ok := e.(*StringLit)
+	if !ok || !v.Static || v.Fused || v.Bare || v.Kind == StrBare || v.Kind == StrHereSingle || v.Kind == StrHereDouble {
+		return ""
+	}
+	if !strings.ContainsAny(v.Value, "\t\r\n") || !safeQuotedLiteral(HostBase64(v.Raw)) || !safeQuotedLiteral(HostBase64(v.Value)) {
+		return ""
+	}
+	return v.Value
 }
 
 func hostWords(c *Command) []hostWord {
@@ -313,17 +344,25 @@ func hostWords(c *Command) []hostWord {
 			}
 		case *Arg:
 			v, ok := nativeWord(e.Value)
-			out = append(out, hostWord{text: v, static: ok, folder: !ok && folderValueWord(e.Value)})
+			w := hostWord{text: v, static: ok}
+			if !ok {
+				w.folder, w.enc = folderValueWord(e.Value), encodedWord(e.Value)
+			}
+			out = append(out, w)
 		case Expr:
 			v, ok := nativeWord(e)
-			out = append(out, hostWord{text: v, static: ok})
+			w := hostWord{text: v, static: ok}
+			if !ok {
+				w.enc = encodedWord(e)
+			}
+			out = append(out, w)
 		}
 		// An element glued to its neighbour (-c'x', a'b' c) is merged by the caller
 		// into one native argument or split in a way the AST does not show: neither
 		// word is certain (review 9 R9-4).
 		if prevEnd >= 0 && s0 == prevEnd {
 			for k := prevStart; k < len(out); k++ {
-				out[k].static, out[k].folder = false, false
+				out[k].static, out[k].folder, out[k].enc = false, false, ""
 			}
 		}
 		prevStart, prevEnd = start, s1
@@ -559,11 +598,12 @@ func joinRest(words []hostWord, kind, dialect string, src Node) NestedScript {
 
 func decodeWord(w hostWord, src Node) NestedScript {
 	ns := NestedScript{Kind: KindEncodedCommand, Dialect: "powershell", Source: src}
-	if !w.static {
+	text, ok := w.encodedText()
+	if !ok {
 		ns.Reason = ReasonNonLiteral
 		return ns
 	}
-	if dec, ok := DecodeEncodedCommand(w.text); ok {
+	if dec, ok := DecodeEncodedCommand(text); ok {
 		ns.Text, ns.Static = dec, true
 	} else {
 		ns.Reason = ReasonNonLiteral

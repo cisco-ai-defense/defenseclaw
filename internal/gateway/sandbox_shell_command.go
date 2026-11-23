@@ -58,8 +58,8 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 }
 
 // shellCommandJudgeTool is the tool a shell call's command alone is judged
-// as: the PowerShell tool for Copilot's powershell tool, whose commands
-// Copilot runs in PowerShell, else actionTool. On Windows the call itself is
+// as: the PowerShell tool for Copilot's powershell and Kiro's execute_pwsh
+// tools, whose commands run in PowerShell, else actionTool. On Windows the call itself is
 // judged as shell (agentHookTrustedActionTool), in the dialect its text
 // infers, and a launcher line inferred as POSIX loses the backslashes of an
 // unquoted Windows path: pwsh -wd C:\Users\a\.defenseclaw -Command
@@ -70,7 +70,9 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 // tool; that reading only adds to the call's verdict.
 func shellCommandJudgeTool(connectorName, toolName, actionTool string) string {
 	if strings.EqualFold(strings.TrimSpace(connectorName), "copilot") &&
-		strings.EqualFold(strings.TrimSpace(toolName), "powershell") {
+		strings.EqualFold(strings.TrimSpace(toolName), "powershell") ||
+		strings.EqualFold(strings.TrimSpace(connectorName), "kiro") &&
+			strings.EqualFold(strings.TrimSpace(toolName), "execute_pwsh") {
 		return "powershell"
 	}
 	return actionTool
