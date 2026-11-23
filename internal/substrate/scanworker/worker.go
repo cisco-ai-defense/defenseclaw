@@ -451,7 +451,8 @@ func checkJob(dir string) error {
 
 // RuntimeScanner runs the release's scanner runtime at launcher: skill-scanner
 // with the gateway's static settings, or the plugin scanner. contain runs
-// each scanner command (nil: the scanner's namespace containment).
+// each scanner command with the accepted job path (nil: the scanner's
+// namespace containment).
 func RuntimeScanner(launcher string, contain func(*exec.Cmd, string) error) ScanFunc {
 	return func(ctx context.Context, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
 		return runtimeScan(ctx, launcher, contain, kind, dir, st)

@@ -47,10 +47,9 @@ import (
 //
 // The scanner shares the worker's user, so the container's own limits do not
 // keep it from the worker: its Landlock domain allows writes only beneath the
-// scratch folder (and to /dev/null), so it cannot rewrite the shared scan
-// folder, its socket or a queued job (GAP-0873), and it may not signal the
-// worker (GAP-0874; Landlock signal scoping, or a seccomp filter on kernels
-// without it).
+// scratch folder (and to /dev/null), and reads only its private job and the
+// runtime (GAP-0873, GAP-0902). It may not signal the worker (GAP-0874;
+// Landlock signal scoping, or a seccomp filter on kernels without it).
 const containPodMode = "pod-scanner"
 
 // podSweepTimeout bounds how long a sweep waits for the killed processes to
@@ -332,7 +331,8 @@ func emptyFolder(dir string) error {
 
 // execPodScanner is the trusted stage between the scan worker and the
 // scanner: it enters the scanner's Landlock domain and filter, which allow
-// writes only beneath scratch, then execs it.
+// writes only beneath scratch and reads only the private job and runtime,
+// then execs it.
 func execPodScanner(argv []string, scratch, readJob string) int {
 	if os.Getppid() != 1 || !filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratch == "/" ||
 		(readJob != "" && (!filepath.IsAbs(readJob) || filepath.Clean(readJob) != readJob || readJob == "/")) {
