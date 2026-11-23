@@ -390,7 +390,7 @@ func parseSQLCLI(argv []string, engine string, multi bool) (exactSQLCLI, bool) {
 				index++
 				value = argv[index]
 			}
-			if !flag && (!exactSQLScalar(value, maxCommandBytes) || unresolvedSQLMutationValue(value)) {
+			if !flag && (!exactSQLScalar(value, maxCommandBytes) || unresolvedSQLCLIValue(engine, key, value)) {
 				return exactSQLCLI{}, false
 			}
 			if key == "option" {
@@ -771,6 +771,45 @@ func exactSQLIdentity(value string) bool {
 		}
 	}
 	return true
+}
+
+// unresolvedSQLCLIValue is unresolvedSQLMutationValue of an option value of
+// a SQL client, except that the tags of each complete PostgreSQL dollar quote
+// ($$...$$, $tag$...$tag$) in a psql query are SQL quoting, not a template
+// placeholder: the text is checked without them, so the server-side readers
+// see a COPY ... TO PROGRAM $$id$$ as the quoted form (GAP-1950). Each reader
+// still parses the query exactly; a lone $, a parameter ($1) or an
+// unterminated tag stays unresolved.
+func unresolvedSQLCLIValue(engine, key, value string) bool {
+	if engine == "postgresql" && key == "query" && strings.Contains(value, "$") {
+		value = withoutPostgreSQLDollarTags(value)
+	}
+	return unresolvedSQLMutationValue(value)
+}
+
+// withoutPostgreSQLDollarTags is text with the opening and closing tag of
+// each complete dollar quote removed and its body kept; a $ that opens no
+// complete dollar quote is kept.
+func withoutPostgreSQLDollarTags(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		tag, ok := "", false
+		if text[i] == '$' {
+			tag, ok = sqlDollarTag(text[i:])
+		}
+		end := -1
+		if ok {
+			end = strings.Index(text[i+len(tag):], tag)
+		}
+		if end < 0 {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		out.WriteString(text[i+len(tag) : i+len(tag)+end])
+		i += len(tag) + end + len(tag)
+	}
+	return out.String()
 }
 
 func unresolvedSQLMutationValue(value string) bool {
