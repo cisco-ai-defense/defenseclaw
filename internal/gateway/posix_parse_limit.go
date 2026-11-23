@@ -195,18 +195,40 @@ const posixDataWordTitle = "Shell word past the analysis bound is data to the lo
 // record of the word the analysis did not read: the call keeps the verdict of
 // its twin, and the record is no action raise. A limit finding the call
 // already carries, or a record a twin left, is kept as it is. The record is
-// marked (dataWordRecord) so no cap logic reads it as a cap the call hit
+// marked (boundRecord) so no cap logic reads it as a cap the call hit
 // (rel-1-0-10:GAP-0760).
 func withPosixDataWordRecord(findings []RuleFinding) []RuleFinding {
-	if boundedLimitIndex(findings) >= 0 || slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.dataWordRecord }) {
+	return withBoundRecord(findings, posixDataWordTitle, bounded.Of(bounded.Bytes).Reason()+"; operand")
+}
+
+// withSQLASTCapRecord adds the detection-only record of the SQL facts
+// reader's cap hits in set: the SQL past the bound gets no SQL fact and the
+// legacy SQL readers judge it as at 1.0.10, so the hit is recorded in the
+// decision and raises nothing by itself (DET111 ruling on T20 review P3-1:
+// a large benign SQL text must not start alerting).
+func withSQLASTCapRecord(findings []RuleFinding, set bounded.CapSet) []RuleFinding {
+	return withBoundRecord(findings, sqlASTCapRecordTitle+" ("+set.Reason()+")", set.Reason())
+}
+
+// sqlASTCapRecordTitle is the reason of the record a SQL facts cap leaves.
+const sqlASTCapRecordTitle = "SQL text past the SQL facts bound, judged by the SQL rules only"
+
+// withBoundRecord adds a detection-only record with title (one per title) to
+// the findings of a call: INFO, recorded only (no action raise) and marked
+// boundRecord, so no cap logic reads it as a cap the call hit. A limit
+// finding the call already carries says more and is kept alone.
+func withBoundRecord(findings []RuleFinding, title, evidence string) []RuleFinding {
+	if boundedLimitIndex(findings) >= 0 || slices.ContainsFunc(findings, func(f RuleFinding) bool {
+		return f.boundRecord && f.Title == title
+	}) {
 		return findings
 	}
 	record := trustedActionLimitFindings(false)[0]
-	record.Title = posixDataWordTitle
-	record.Evidence = bounded.Of(bounded.Bytes).Reason() + "; operand"
+	record.Title = title
+	record.Evidence = evidence
 	record.Severity = "INFO" // a record is no CRITICAL on an allowed call
 	record.Proof = record.Proof.Record()
-	record.dataWordRecord = true
+	record.boundRecord = true
 	return append(slices.Clip(findings), record)
 }
 

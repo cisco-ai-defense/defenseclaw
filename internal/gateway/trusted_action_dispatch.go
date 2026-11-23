@@ -503,9 +503,13 @@ func dispatchTrustedActionOnce(
 	// other defer, so a limit finding any of them raises is kept as it is and
 	// the record never stands in for it.
 	var unreadDataWord bool
+	var sqlASTCaps bounded.CapSet
 	defer func() {
 		if unreadDataWord {
 			findings = withPosixDataWordRecord(findings)
+		}
+		if sqlASTCaps.Any() {
+			findings = withSQLASTCapRecord(findings, sqlASTCaps)
 		}
 	}()
 	// A DefenseClaw state write that only a partial reading proves is at
@@ -1093,6 +1097,8 @@ func dispatchTrustedActionOnce(
 	// A Kubernetes request cut that dropped a request a reader proves
 	// something from is TRUNCATED as well (DET111 T20 review P2-3).
 	set := semantic.FactOnlyCuts(facts)
+	// A SQL facts cap hit is recorded only (DET111 ruling on T20 review P3-1).
+	sqlASTCaps = facts.SQLASTCaps()
 	if kubeCut, lost := facts.KubeRequestCaps(); lost {
 		set = set.Union(kubeCut)
 	}
