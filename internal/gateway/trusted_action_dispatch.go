@@ -585,7 +585,8 @@ func dispatchTrustedActionOnce(
 			}
 			effectRequest := request
 			defer func() {
-				findings = joinEffectFindings(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
+				findings = joinEffectFindings(withFloorRaiseOnlyMark(effectRequest, findings, 0),
+					effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
@@ -5945,7 +5946,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		case index < 0:
 			findings = append(findings, proven)
 		case strength(proven) > strength(findings[index]):
-			findings[index] = proven
+			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
 		}
 	}
 	return findings
@@ -6028,16 +6029,7 @@ func withProvenFindingsBeforeUnprovenKeysBlock(findings []RuleFinding) []RuleFin
 // beside the whole action's result. An enforcing or alert-only proof replaces
 // a weaker finding for the same rule; a sibling removes nothing.
 func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
-	rank := func(finding RuleFinding) int {
-		switch {
-		case finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID):
-			return 3
-		case finding.contributesToAlertOnly():
-			return 2
-		default:
-			return 1
-		}
-	}
+	rank := findingEnforcementRank
 	findings, alone = withEffectsFoldedEitherWay(findings, alone)
 	for _, finding := range alone {
 		key := trustedActionFindingKey(finding.RuleID)
@@ -6050,7 +6042,7 @@ func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
 			(rank(finding) == rank(findings[index]) &&
 				canonicalTrustedRuleID(finding.RuleID) == key &&
 				canonicalTrustedRuleID(findings[index].RuleID) != key) {
-			findings[index] = finding
+			findings[index] = withFloorRaiseOnlyOf(finding, findings[index])
 		}
 	}
 	return findings
@@ -6072,7 +6064,7 @@ func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding 
 		if index < 0 {
 			findings = append(findings, proven)
 		} else {
-			findings[index] = proven
+			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
 		}
 	}
 	return findings
