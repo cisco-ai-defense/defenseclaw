@@ -346,6 +346,17 @@ func WriteRegistryFiles(ctx context.Context, ex osw.Execer, sandbox string, plan
 	return nil
 }
 
+// StartRegistryFiles reads the agent's home, plans the registry files
+// for entries and writes them: the agent-start step of B1 2.6.
+func StartRegistryFiles(ctx context.Context, ex osw.Execer, sandbox string, entries []RegistryEntry) (RegistryPlan, error) {
+	probe := ProbeRegistryFiles(ctx, ex, sandbox)
+	if probe.ReadError != nil {
+		return RegistryPlan{}, probe.ReadError
+	}
+	plan := PlanRegistryFiles(entries, probe)
+	return plan, WriteRegistryFiles(ctx, ex, sandbox, plan)
+}
+
 var (
 	registryHostRE  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$`)
 	registryValueRE = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,128}$`)

@@ -361,6 +361,8 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 
 	// 6. Attach through the gateway.
 	d.checks = append(d.checks, doctorAttach(ctx, s, mine, signedIn))
+	// 6b. How that agent gets its registry placeholders (B1 2.6, S7).
+	d.checks = append(d.checks, doctorRegistryFiles(ctx, s, mine, signedIn))
 
 	// 7. Policy bundles (administrators, when the cluster has them on).
 	if c, ok := doctorBundles(ctx, s, signedIn); ok {
