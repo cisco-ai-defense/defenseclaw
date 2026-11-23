@@ -30,7 +30,17 @@ import (
 // A reload that changes a scan record folder rebuilds the service.
 func TestAIDiscoveryRebuildsWhenSandboxesTurnOn(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("no sandboxes on Windows")
+		// No sandboxes on Windows (rel-1-0-10:GAP-1617): turning the openshell
+		// switch changes no scan folder, so the discovery service is kept.
+		oldCfg := config.DefaultConfig()
+		oldCfg.DataDir = t.TempDir()
+		oldCfg.OpenShell.Enabled = false
+		newCfg := *oldCfg
+		newCfg.OpenShell.Enabled = true
+		if aiDiscoveryNeedsRestart(oldCfg, &newCfg) || aiDiscoveryNeedsRestart(&newCfg, oldCfg) {
+			t.Fatal("turning sandboxes on or off rebuilt the discovery service on a host that has no sandbox scan folder")
+		}
+		return
 	}
 	oldCfg := config.DefaultConfig()
 	oldCfg.DataDir = t.TempDir()
