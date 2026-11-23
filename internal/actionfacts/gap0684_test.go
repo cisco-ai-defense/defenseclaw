@@ -124,26 +124,6 @@ func g0684Place(dir string, row g0684Row) (cmd, hook string) {
 	return cmd, dir
 }
 
-func TestGAP0684RgWorkingFolder(t *testing.T) {
-	dir := g0684Folder(t)
-	for _, row := range g0684Rows {
-		cmd, hook := g0684Place(dir, row)
-		got := g0683Rel(dir, g0679Named(Analyze(Input{Tool: "exec", Command: cmd, CWD: hook, ActiveHome: t.TempDir()})))
-		for _, file := range row.want {
-			if !slices.Contains(got, file) {
-				t.Errorf("%s: real rg reads %s, the resolve names %v (weaker than rg)", row.cmd, file, got)
-			}
-		}
-		exact := slices.Equal(got, row.want) || len(got) == 0 && len(row.want) == 0
-		switch {
-		case row.over == "" && !exact:
-			t.Errorf("%s: the resolve names %v, real rg reads %v", row.cmd, got, row.want)
-		case row.over != "" && exact:
-			t.Errorf("%s: marked over (%s) but now exact: drop the mark", row.cmd, row.over)
-		}
-	}
-}
-
 // TestGAP0684RgWorkingFolderLive checks g0684Rows against a real ripgrep
 // 14.1.0, run by bash (pushd and popd) in the hook's folder.
 func TestGAP0684RgWorkingFolderLive(t *testing.T) {

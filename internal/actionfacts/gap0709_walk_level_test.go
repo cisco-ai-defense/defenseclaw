@@ -69,7 +69,7 @@ func TestGAP0709ParseWalksWhenTheRecordIsRead(t *testing.T) {
 		}
 		found := false
 		for _, read := range copied.CredentialPathReads() {
-			found = found || strings.HasSuffix(read.Resolved, "/src/.env") || strings.HasSuffix(read.Value, "src/.env")
+			found = found || strings.HasSuffix(filepath.ToSlash(read.Resolved), "/src/.env") || strings.HasSuffix(filepath.ToSlash(read.Value), "src/.env")
 		}
 		if !found {
 			t.Fatalf("%s: the parse walked before its record was read: %+v", command, copied.CredentialPathReads())
