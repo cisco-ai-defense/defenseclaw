@@ -547,6 +547,13 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
+			ActivityFeed: &activity.Reader{Leader: toLeader},
+			ActivityConfig: func() config.SubstrateActivityConfig {
+				if cur := live(); cur != nil {
+					return cur.Substrate.Activity
+				}
+				return c.Substrate.Activity
+			},
 			Chains: &chainstate.Client{Leader: toLeader},
 			// The controller's, the callout's and the leader's records reach
 			// the OTLP destinations through this replica (GAP-0450, GAP-0453).

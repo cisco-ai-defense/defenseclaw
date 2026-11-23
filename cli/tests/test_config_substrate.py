@@ -75,6 +75,7 @@ _FULL = {
                     "mcp_bridge": {"enabled": "off", "max_servers": 2, "message_max_bytes": 65536},
                     "idle_close": "1h"},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
+    "activity": {"status_window": "30s", "notifications": "off"},
     "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "on", "body_max_bytes": 1048576,
                 "mcp_hosts": ["mcp.example.com=docs"], "body_hosts": ["api.example.com"],
                 "cluster_domains": ["svc.cluster.local"], "actor_trust_domain": "cluster.local",
@@ -210,6 +211,23 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(saved, [{"name": "github", "hosts": []}, {"name": "gitlab"}])
             again = self._load(tmpdir).substrate.secret_templates
             self.assertEqual([t.hosts for t in again], [[], None])
+
+    def test_notifications_substrate_defaults_are_not_written_and_off_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, {})
+            cfg = self._load(tmpdir)
+            self.assertTrue(cfg.notifications.substrate.asks)
+            self.assertTrue(cfg.notifications.substrate.task_end)
+            self.assertEqual(cfg.substrate.activity.status_window, "")
+            cfg.gateway.api_port = 19000
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())
+            self.assertNotIn("substrate", saved.get("notifications", {}))
+            cfg.notifications.substrate.task_end = False
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())
+            self.assertEqual(saved["notifications"]["substrate"], {"asks": True, "task_end": False})
+            self.assertFalse(self._load(tmpdir).notifications.substrate.task_end)
 
     def test_set_from_python_writes_only_what_is_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:

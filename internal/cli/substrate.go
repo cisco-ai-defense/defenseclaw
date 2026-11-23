@@ -345,7 +345,7 @@ func substrateTable(w io.Writer, header []string, rows [][]string) {
 func init() {
 	substrateCmd.AddCommand(
 		newSubstrateLoginCmd(), newSubstrateLogoutCmd(), newSubstrateWhoamiCmd(),
-		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(),
+		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(), newSubstrateWatchCmd(),
 		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(), newSubstrateRecoverCmd(),
 		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(), newSubstratePortCmd(),
 		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateRevokeCmd(), newSubstrateUsageCmd(),

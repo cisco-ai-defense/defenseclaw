@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import platform
+import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -46,4 +48,28 @@ def desktop_notification_capability(system: str | None = None) -> DesktopNotific
     )
 
 
-__all__ = ["DesktopNotificationCapability", "desktop_notification_capability"]
+_DESKTOP_TOOLS = {"darwin": "osascript", "linux": "notify-send"}
+
+
+def desktop_notifier_tool_missing(
+    system: str | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> str:
+    """Name the program native delivery needs when it is not on PATH, else "".
+
+    macOS needs ``osascript`` and Linux needs ``notify-send``; Windows uses the
+    shell API and needs nothing. Mirrors Go ``notify.DesktopToolCheck``.
+    """
+
+    resolved = (system if system is not None else platform.system()).strip().lower()
+    tool = _DESKTOP_TOOLS.get(resolved, "")
+    if tool and which(tool) is None:
+        return tool
+    return ""
+
+
+__all__ = [
+    "DesktopNotificationCapability",
+    "desktop_notification_capability",
+    "desktop_notifier_tool_missing",
+]

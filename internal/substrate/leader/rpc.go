@@ -500,8 +500,18 @@ type Client struct {
 	Retry time.Duration
 }
 
+type noRetryKey struct{}
+
+// WithoutRetry makes every Call under ctx a single attempt: a best-effort
+// read (the agent activity of list and status, GAP-1018) fails at once on a
+// leader that cannot be reached instead of retrying until ctx ends.
+func WithoutRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noRetryKey{}, true)
+}
+
 // Call sends one call and decodes its answer into out (may be nil). The
-// same request ID is used on every retry. ctx bounds the whole call.
+// same request ID is used on every retry. ctx bounds the whole call; under
+// WithoutRetry there is no retry.
 func (c *Client) Call(ctx context.Context, method, requestID string, in, out any) error {
 	if requestID == "" {
 		requestID = NewRequestID()
@@ -517,6 +527,7 @@ func (c *Client) Call(ctx context.Context, method, requestID string, in, out any
 	}
 	deadline := time.Now().Add(retry)
 	backoff := 100 * time.Millisecond
+	single := ctx.Value(noRetryKey{}) != nil
 	for {
 		resp, err := c.once(ctx, method, payload)
 		if err == nil && resp.Error == nil {
@@ -529,7 +540,7 @@ func (c *Client) Call(ctx context.Context, method, requestID string, in, out any
 			err = resp.Error
 		}
 		retryable := IsNotLeader(err) || isTransport(err)
-		if !retryable || time.Now().Add(backoff).After(deadline) {
+		if !retryable || single || time.Now().Add(backoff).After(deadline) {
 			return err
 		}
 		select {

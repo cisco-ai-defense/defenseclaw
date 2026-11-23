@@ -222,13 +222,13 @@ them and how long ago they started. Administrators see only their own agents unl
 			now := time.Now()
 			rows := make([][]string, 0, len(live))
 			for _, a := range live {
-				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
+				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateActivityCell(a, now), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
 				if all {
 					row = append(row, substrateListOwner(a))
 				}
 				rows = append(rows, row)
 			}
-			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}
+			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "ACTIVITY", "AGE", "BATCH"}
 			if all {
 				header = append(header, "OWNER")
 			}
@@ -311,6 +311,10 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if err != nil {
 					return substrateFail(err)
 				}
+				// Only the one-agent answer names the pending asks.
+				if one, err := s.Client.Get(ctx, a.Atespace, a.Name); err == nil && one.Activity != nil {
+					a.Activity = one.Activity
+				}
 				if asJSON {
 					return writeSubstrateJSON(w, a)
 				}
@@ -321,6 +325,9 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				fmt.Fprintf(w, "Started:   %s ago\n", substrateAge(a.CreatedAt, time.Now()))
 				if a.State != "" {
 					fmt.Fprintf(w, "State:     %s\n", a.State)
+				}
+				for _, line := range substrateActivityLines(a, time.Now()) {
+					fmt.Fprintln(w, line)
 				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)

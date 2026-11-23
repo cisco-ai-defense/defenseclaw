@@ -172,6 +172,8 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 
 	// 3. The optional tools the secret sources run (gh, op, security).
 	doctorSecretSources(d)
+	// 4. The desktop notifier `watch` uses (off by default; never a failure).
+	d.checks = append(d.checks, substrateNotifierCheck())
 
 	name := ""
 	if openErr != nil {

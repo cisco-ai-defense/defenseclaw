@@ -2107,6 +2107,39 @@
     ]
   },
   {
+    "path": "substrate watch",
+    "use": "watch [name]",
+    "short": "Say when one of your agents needs an answer or finishes its task",
+    "long": "Follows your agents (all of them, or the one you name) and prints a line when one raises an ask\nor when a --task run ends. With notifications on (notifications.enabled and notifications.substrate in config.yaml),\nit also shows a desktop notification, once per ask. A notification names the kind and the host or tool of an ask,\nnever its arguments. An administrator can turn notifications off for the cluster (substrate.activity.notifications: off).\nCtrl-C stops it.",
+    "args": [
+      {
+        "name": "name",
+        "required": false
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "every",
+        "type": "duration",
+        "default": "10s",
+        "usage": "how often to look (at least 2s)",
+        "metavar": "DURATION"
+      },
+      {
+        "name": "once",
+        "type": "bool",
+        "default": "false",
+        "usage": "look once, print what is new and stop"
+      }
+    ]
+  },
+  {
     "path": "substrate whoami",
     "use": "whoami",
     "short": "Show who you are signed in as",

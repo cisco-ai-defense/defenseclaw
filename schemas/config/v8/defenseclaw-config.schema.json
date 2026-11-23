@@ -3425,6 +3425,20 @@
           "minimum": 0,
           "maximum": 1000000,
           "default": 12
+        },
+        "substrate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asks": {
+              "type": "boolean",
+              "default": true
+            },
+            "task_end": {
+              "type": "boolean",
+              "default": true
+            }
+          }
         }
       }
     },
@@ -8791,6 +8805,23 @@
                   }
                 }
               }
+            }
+          }
+        },
+        "activity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status_window": {
+              "$ref": "#/$defs/duration"
+            },
+            "notifications": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "off"
+              ],
+              "default": "auto"
             }
           }
         }

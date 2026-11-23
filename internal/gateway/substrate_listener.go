@@ -168,6 +168,11 @@ type SubstrateConfig struct {
 	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
 	Activity SubstrateActivitySink
+	// ActivityFeed is the leader's activity snapshot, read by list and
+	// status for the agent state (B3.6; nil: no activity in the answers).
+	ActivityFeed SubstrateActivityFeed
+	// ActivityConfig is the live substrate.activity block (nil: defaults).
+	ActivityConfig func() config.SubstrateActivityConfig
 	// Skills scans the skill folders the kit attaches (GAP-0039); nil
 	// scans nothing.
 	Skills SubstrateSkillScanner
@@ -329,6 +334,9 @@ const (
 
 type substrateState struct {
 	cfg SubstrateConfig
+	// activityAsks remembers a failed pending-asks read of list and status
+	// (GAP-1018).
+	activityAsks substrateActivityAsksDown
 	// taskEnds bounds the task-end audit rows per actor.
 	taskEnds substrateTaskEnds
 	// streams counts the open port forwards and MCP bridges per actor on
@@ -888,6 +896,11 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 			}
 			// Gateway receive time only (E15): nothing the actor sends.
 			st.cfg.Activity.ObserveActivity(kind, actor.Atespace, actor.UID, time.Now())
+			// While a model stream is open the agent is thinking: report it
+			// every 10 s. Off (status_window 0s) adds no timer.
+			if route.llm && st.activityConfig().EffectiveStatusWindow() > 0 {
+				defer substrateReportOpenModel(st.cfg.Activity, actor.Atespace, actor.UID)()
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

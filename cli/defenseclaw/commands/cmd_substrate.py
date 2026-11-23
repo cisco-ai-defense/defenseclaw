@@ -1587,6 +1587,26 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("watch",),
+        "Say when one of your agents needs an answer or finishes its task",
+        long=(
+            "Follows your agents (all of them, or the one you name) and prints a line when one raises an ask\n"
+            "or when a --task run ends. With notifications on (notifications.enabled and notifications.substrate "
+            "in config.yaml),\n"
+            "it also shows a desktop notification, once per ask. A notification names the kind and the host or "
+            "tool of an ask,\n"
+            "never its arguments. An administrator can turn notifications off for the cluster "
+            "(substrate.activity.notifications: off).\n"
+            "Ctrl-C stops it."
+        ),
+        args=(_Arg("name", required=False),),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("every", "duration", "how often to look (at least 2s)", default="10s", metavar="DURATION"),
+            _Flag("once", "bool", "look once, print what is new and stop"),
+        ),
+    ),
+    _Cmd(
         ("whoami",),
         "Show who you are signed in as",
         long="Shows the account, groups and expiry of your sign-in for the cluster. The token itself is never shown.",
