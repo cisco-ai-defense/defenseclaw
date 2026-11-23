@@ -57,7 +57,8 @@ func pluginCustodyQuote(p string) string {
 // (windowsCustodyUserTree): an entry granted at a drive root, an operating
 // system or installer folder, or any folder another account owns gets a step
 // by hand and no command, since removing it there changes every folder that
-// inherits from it (GAP-1899).
+// inherits from it (GAP-1899). A folder Administrators owns is this account's
+// only below its own profile folder (GAP-1910, GAP-1911).
 func explainPluginArtifactRefusal(path, trustedOwnerSID string, cause error) error {
 	if cause == nil {
 		return nil
@@ -127,27 +128,51 @@ func (j *windowsCustodyJudge) unsafePrivateDACL(cause error, refusal *safefile.U
 // clean, that windowsCustodyOwnElement accepts. A folder outside it is shared
 // with other accounts or belongs to Windows or an installer (GAP-1899).
 func windowsCustodyUserTree(chain []hookAPIDirectoryElement, clean string, extra *windows.SID) []string {
+	profile := windowsCustodyAdministratorsScope(extra)
 	var tree []string
 	for _, element := range chain {
-		if windowsCustodyOwnElement(element.path, extra) {
+		if windowsCustodyOwnElement(element.path, extra, profile) {
 			tree = append(tree, element.path)
 		}
 	}
-	if clean != "" && windowsCustodyOwnElement(clean, extra) {
+	if clean != "" && windowsCustodyOwnElement(clean, extra, profile) {
 		tree = append(tree, clean)
 	}
 	return tree
+}
+
+// windowsCustodyAdministratorsScope is the folder below which a folder or file
+// BUILTIN\Administrators owns is still this account's own: the effective
+// user's profile folder. An elevated run of this account makes its new folders
+// there Administrators-owned, and the profile's inherited full control lets
+// this account change them whether or not the next run is elevated (GAP-1911).
+// Outside the profile an Administrators-owned folder is shared by every
+// administrator (another administrator's C:\src, an installer's folder, a
+// vendor's ProgramData folder), so a command there would change other
+// accounts' access, elevated or not (GAP-1910). It is empty, and
+// Administrators is never this account, for a run that verifies another
+// account (extra) and when the profile cannot be read.
+func windowsCustodyAdministratorsScope(extra *windows.SID) string {
+	if extra != nil {
+		return ""
+	}
+	profile, err := windowsEffectiveUserProfile()
+	if err != nil || !filepath.IsAbs(profile) {
+		return ""
+	}
+	return filepath.Clean(profile)
 }
 
 // windowsCustodyOwnElement reports whether path is a folder or file of this
 // account's own tree: not a volume root, not an operating system or installer
 // folder (managed.AdvisoryAncestorPath), not a reparse point, and owned by this
 // account (the effective user, or the per-user target a privileged guardian
-// verifies), or by Administrators when this process runs elevated for itself
-// (an elevated administrator's new folders are owned by Administrators).
+// verifies), or by Administrators strictly below profile
+// (windowsCustodyAdministratorsScope) and reached from it through plain
+// folders only (a junction inside the profile may lead to a shared folder).
 // LocalSystem and TrustedInstaller own Windows' folders, never the user's. Any
 // read that fails is outside the tree.
-func windowsCustodyOwnElement(path string, extra *windows.SID) bool {
+func windowsCustodyOwnElement(path string, extra *windows.SID, profile string) bool {
 	if path == "" || !filepath.IsAbs(path) || filepath.Dir(path) == path || managed.AdvisoryAncestorPath(path) {
 		return false
 	}
@@ -172,7 +197,8 @@ func windowsCustodyOwnElement(path string, extra *windows.SID) bool {
 		return false
 	}
 	if managed.IsWindowsTrustedAdminOwner(owner) {
-		return extra == nil && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && windows.GetCurrentProcessToken().IsElevated()
+		return extra == nil && profile != "" && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) &&
+			winpath.RejectReparseBelow(profile, path) == nil
 	}
 	if extra != nil {
 		return owner.Equals(extra)

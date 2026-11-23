@@ -46,3 +46,19 @@ func defaultWindowsEffectiveUserSID() (*windows.SID, error) {
 	}
 	return user.User.Sid.Copy()
 }
+
+// windowsEffectiveUserProfile is the profile folder of the same identity as
+// windowsEffectiveUserSID: the impersonated thread user when one is installed,
+// and the process user otherwise.
+func windowsEffectiveUserProfile() (string, error) {
+	var token windows.Token
+	err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token)
+	if err == nil {
+		defer token.Close()
+		return token.GetUserProfileDirectory()
+	}
+	if !errors.Is(err, windows.ERROR_NO_TOKEN) {
+		return "", err
+	}
+	return windows.GetCurrentProcessToken().GetUserProfileDirectory()
+}
