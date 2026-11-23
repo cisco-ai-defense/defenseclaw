@@ -289,8 +289,10 @@ fully blockable multi-step proof. Every profile scored 4 TP, 10 TN, 0 FP, and
 artifacts, intervening mutation, failed steps, and incomplete chains.
 
 On these contextual datasets the rules do not block by design, because the
-evidence in the call does not prove the effect. The judge and the decision
-model cover them: see the end-to-end rows above.
+evidence in the call does not prove the effect. The decision model and the
+judge add contextual detection (see the per-set table above): cascade recall
+is 0.386 on AgentDojo and 0.955 on Agentic RedTeam, but 0.000 on InjecAgent,
+where the measured cascade detected none of the 80 attacks.
 
 | Dataset | Result | Why it did not become a default block |
 | --- | --- | --- |

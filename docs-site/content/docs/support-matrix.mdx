@@ -347,7 +347,6 @@ Every other bug that 1.0.4 listed here is fixed in 1.0.5; the release notes list
 ### Agents and hooks
 
 - **Busy hosts:** when many agent sessions start at once or the CPU is saturated, a few ordinary calls can be denied with "gateway is running but did not answer", "hook client disconnected before the gateway decision was delivered", or on managed Windows after an upgrade `runtime_state_invalid` once a minute. Retry the call, and don't start many sessions at once on a small host.
-- **Amp and Kiro on per-user Windows:** not certified. Antigravity, Cursor (command line) and Devin are.
 
 ### Action mode
 
