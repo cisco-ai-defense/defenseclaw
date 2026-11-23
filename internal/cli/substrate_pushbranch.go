@@ -52,7 +52,11 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 	if err := workspace.CheckCloneRef(branch); err != nil || strings.HasPrefix(branch, "refs/") {
 		return cliusage.WithExitCode(fmt.Errorf("--push-branch %q is not a branch name git takes", branch), 2)
 	}
-	settings, _ := s.Client.Launcher(ctx)
+	settings, err := s.Client.Launcher(ctx)
+	if err != nil {
+		// RV4-9: without them neither push_branch nor https_rewrite is known.
+		return fmt.Errorf("could not read the cluster's settings, so nothing was pushed: %w", substrateFail(err))
+	}
 	if strings.EqualFold(settings.Git.PushBranch, config.SubstrateGitPushDeny) {
 		return cliusage.WithExitCode(errors.New("this cluster turned off pull --push-branch (substrate.git.push_branch: deny); "+
 			"bring the work home with --branch NAME and push from your computer"), substrateExitRefused)
@@ -80,6 +84,9 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 		}
 		return substrateFail(err)
 	}
+	// The review copied the objects origin lacks into a folder in the
+	// actor, which the push sends from; remove it when this run ends.
+	defer p.Discard(context.WithoutCancel(ctx), rel.Client.BranchExec)
 	target := p.PushURL
 	if p.Commits == 0 {
 		fmt.Fprintf(w, "Nothing to push: %s already has all of the agent's work.\n", target)

@@ -30,6 +30,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 type rv4 struct {
@@ -266,7 +268,7 @@ func TestRV4MergeOnlyContentIsReviewed(t *testing.T) {
 	s := rv4Setup(t)
 	merge(s, func() {
 		s.write(".github/workflows/evil.yml", "on: push\n")
-		s.write("conf/app.cfg", "token: "+PushPlaceholder+"\n")
+		s.write("conf/app.cfg", "token: "+kit.PlaceholderSecret+"\n")
 		s.write("conf/aws.ini", "aws_access_key_id = AKIA"+"7Q2M9X4B6C8D3F5H\n")
 	})
 	p := s.prepare()

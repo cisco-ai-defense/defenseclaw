@@ -25,10 +25,17 @@ package workspace
 //
 // The agent can write its checkout's git config and refs, so the review
 // and the push read neither (RV4): they run in a scratch git directory
-// over the checkout's objects, with the image's system config only, and
-// talk to the one https address the review names. What origin lacks comes
-// from that address's ls-remote, and the "pushed before" record is kept on
-// this computer.
+// with the image's system config only, and talk to the one https address
+// the review names. What origin lacks comes from that address's ls-remote,
+// and the "pushed before" record is kept on this computer.
+//
+// The agent can also write its object store's metadata (RV-SYNC5): a
+// checkout that borrows objects (objects/info/alternates) is refused, the
+// scratch directory reads the checkout's own loose objects and packs
+// only (never its info/ files: alternates, commit-graph), and the review
+// packs the objects origin lacks into a copy that the push then sends
+// from (GAP-0797). The push moves origin's branch only from the state the
+// review saw, with a lease that git and the server check (GAP-0798).
 
 import (
 	"context"
@@ -47,13 +54,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
-
-// PushPlaceholder is the value the actor image's credential helpers and
-// config files carry in a credential's place (kit.PlaceholderSecret). A
-// pushed change that writes it is flagged: it is no secret, but it means a
-// config file now names a credential the repository should not hold (B1.9).
-const PushPlaceholder = "placeholder-not-a-secret"
 
 // pushReplacedPattern finds the placeholders an upload with replaced
 // credentials (S9a) writes in a file (DC_SECRET_<n>, the pattern pull
@@ -87,15 +89,19 @@ type BranchPush struct {
 	// change.
 	Commits int
 	Files   []string
-	// Placeholder lists the files whose new lines carry PushPlaceholder;
+	// Placeholder lists the files whose new lines carry kit.PlaceholderSecret (the value the
+	// actor image's credential helpers carry in a credential's place);
 	// RunsCode the ones that can run code (CI, hooks, scripts) where the
 	// branch lands; Secrets the secret findings in the new lines.
 	Placeholder []string
 	RunsCode    []string
 	Secrets     []osw.ScanFinding
-	// objects is the checkout's object directory, which the scratch git
-	// directory of the push reads.
-	objects string
+	// objects is the checkout's object directory; snapshot the folder in
+	// the actor holding the review's copy of the objects origin lacks,
+	// which the push sends from ("" once the push or Discard removed it).
+	objects, snapshot string
+	// seen is origin's refs as the review read them (ref -> commit).
+	seen map[string]string
 }
 
 // Flagged reports whether the push needs a careful look.
@@ -105,8 +111,8 @@ func (p *BranchPush) Flagged() bool {
 
 // BranchPushError is a push refusal in plain words.
 type BranchPushError struct {
-	// Kind is no_checkout, no_origin, no_commit, not_https, replaced_copy,
-	// exists, refused, mismatch or failed.
+	// Kind is no_checkout, no_origin, no_commit, not_https, alternates,
+	// replaced_copy, exists, moved, refused, mismatch or failed.
 	Kind string
 	Msg  string
 }
@@ -144,52 +150,79 @@ fi
 printf 'dir\t%s\000url\t%s\000head\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$url" "$head" "$commit" "$made" "$objs"
 `
 
-// pushScratch is the start of the review and push scripts: a scratch git
-// directory over the checkout's objects ($1), with no repository or user
-// config, no templates, no hooks and no replace refs, so nothing the agent
-// set in its checkout changes where the push goes, what it carries, or
-// what the review sees. g runs git there.
-const pushScratch = `set -u
-objs=$1 url=$2
+// pushGit is the start of the review and push scripts: no repository or
+// user config, no templates, hooks, replace refs, commit-graph, multi-pack
+// index or bitmaps, so nothing the agent set in its checkout changes where
+// the push goes, what it carries, or what the review sees. g runs git.
+const pushGit = `set -u
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE
 export GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
-s=$(mktemp -d) || exit 6
-trap 'rm -rf "$s"' EXIT
-git init -q --bare --template= "$s/g" || exit 6
-export GIT_DIR=$s/g GIT_OBJECT_DIRECTORY=$objs
-g() { git -c core.quotePath=false -c core.hooksPath=/dev/null "$@"; }
+g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false "$@"; }
 `
 
-// pushReviewScript lists what origin lacks: ls-remote of the push address
-// gives the commits origin has, and the range is the pushed commit ($3)
-// without those the checkout holds. Names come NUL-ended (-z), so git
-// quotes none of them. Each part goes out as a frame "NAME LENGTH\0" and
-// LENGTH bytes, so no file name can end a part early. A merge is diffed
-// against its first parent (--diff-merges=first-parent, git 2.31+), so
-// content that only the merge commit adds is listed, flagged and scanned.
-const pushReviewScript = pushScratch + `c=$3
+// pushReviewScript lists what origin lacks and makes the push's copy
+// ($snap, printed as the "snapshot" frame): a bare git directory g whose
+// pack holds every object origin lacks, packed from the checkout's own
+// store ($1) at review time. Its one alternate, v, is a view of that store
+// with the loose object folders and packs only, so the agent's info/
+// files (alternates, commit-graph) are never read; v is read only for the
+// commits origin already has. A checkout that borrows objects is refused
+// (exit 12). ls-remote of the push address gives the commits origin has
+// (the "refs" frame), and the range is the pushed commit ($3) without
+// those the checkout holds. Names come NUL-ended (-z), so git quotes none
+// of them. Each part goes out as a frame "NAME LENGTH\0" and LENGTH
+// bytes, so no file name can end a part early. A merge is diffed against
+// its first parent (--diff-merges=first-parent, git 2.31+), so content
+// that only the merge commit adds is listed, flagged and scanned.
+const pushReviewScript = pushGit + `objs=$1 url=$2 c=$3
+for f in alternates http-alternates; do
+  [ -e "$objs/info/$f" ] && [ -n "$(tr -d ' \t\r\n' < "$objs/info/$f" 2>/dev/null)" ] && { echo "objects/info/$f" >&2; exit 12; }
+done
+s=$(mktemp -d) && snap=$(mktemp -d) || exit 6
+ok=0
+trap 'rm -rf "$s"; [ "$ok" = 1 ] || rm -rf "$snap"' EXIT
+mkdir -p "$snap/v/info" || exit 6
+[ -d "$objs/pack" ] && { ln -s "$objs/pack" "$snap/v/pack" || exit 6; }
+for d in "$objs"/[0-9a-f][0-9a-f]; do [ -d "$d" ] && { ln -s "$d" "$snap/v/" || exit 6; }; done
+git init -q --bare --template= "$snap/g" || exit 6
+printf '%s\n' "$snap/v" > "$snap/g/objects/info/alternates" || exit 6
+export GIT_DIR=$snap/g
 g ls-remote "$url" > "$s/refs" || exit 11
 { printf '%s\n' "$c"; cut -f1 "$s/refs" | sort -u | g cat-file --batch-check='%(objectname) %(objecttype)' |
   awk '$2 == "commit" || $2 == "tag" { print "^" $1 }'; } > "$s/range" || exit 6
 g rev-list --count --stdin < "$s/range" > "$s/commits" || exit 6
+if [ "$(cat "$s/commits")" != 0 ]; then
+  g pack-objects --revs -q "$snap/g/objects/pack/pack" < "$s/range" > /dev/null || exit 13
+fi
 names() { g log --diff-merges=first-parent --format= --name-only -z --no-renames "$@" --stdin < "$s/range"; }
 names > "$s/file" || exit 6
 names -G"$4" > "$s/placeholder" || exit 6
 names -G"$5" > "$s/replaced" || exit 6
 : > "$s/patch"
 [ "$(cat "$s/commits")" = 0 ] || g log -p --diff-merges=first-parent --no-color --no-ext-diff --no-textconv --no-renames --format= -U0 --stdin < "$s/range" > "$s/patch" || exit 6
-for f in commits file placeholder replaced patch; do
+printf '%s' "$snap" > "$s/snapshot"
+for f in commits file placeholder replaced patch refs snapshot; do
   printf '%s %s\000' "$f" "$(wc -c < "$s/$f" | tr -d ' ')" && cat "$s/$f" || exit 6
 done
+ok=1
 `
 
-// pushScript pushes $3 to refs/heads/$4 of the push address. $6 is the
-// commit this computer pushed to that branch before ("" for none): a
-// branch origin has is refused unless it is at that commit.
-const pushScript = pushScratch + `c=$3 b=$4 label=$5 prev=$6
+// pushScript pushes $3 to refs/heads/$4 of the push address from the
+// review's copy ($1); Discard removes the copy. $6 is the commit this
+// computer pushed to that branch before ("" for none): a branch origin has
+// is refused unless it is at that commit. $7 is the branch as the review
+// saw it ("" for none): the push is refused when origin's branch is not
+// there now (exit 10), and it carries a lease on that state, so a writer
+// that moves the branch during the push makes git or the server refuse it.
+const pushScript = pushGit + `snap=$1 url=$2 c=$3 b=$4 label=$5 prev=$6 seen=$7
+[ -f "$snap/g/objects/info/alternates" ] || { echo "the review's copy of the objects is gone" >&2; exit 6; }
+export GIT_DIR=$snap/g
+s=$(mktemp -d) || exit 6
+trap 'rm -rf "$s"' EXIT
 heads() { g ls-remote --heads "$url" > "$s/heads" && awk -v r="refs/heads/$b" '$2 == r { print $1; exit }' "$s/heads"; }
 cur=$(heads) || { echo "ls-remote failed" >&2; exit 6; }
 if [ -n "$cur" ] && [ "$cur" != "$prev" ]; then echo "exists $cur" >&2; exit 7; fi
+[ "$cur" = "$seen" ] || { echo "moved ${cur:-gone}" >&2; exit 10; }
 if [ -n "$cur" ] && ! g merge-base --is-ancestor "$cur" "$c" 2>/dev/null; then
   # The branch holds this computer's earlier push of the agent's
   # uncommitted work, which is not in the agent's history: join the two,
@@ -199,11 +232,14 @@ if [ -n "$cur" ] && ! g merge-base --is-ancestor "$cur" "$c" 2>/dev/null; then
   export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
   c=$(g commit-tree "$c^{tree}" -p "$cur" -p "$c" -m "defenseclaw: work of agent $label") || exit 8
 fi
-g push --no-verify --no-follow-tags --no-recurse-submodules "$url" "$c:refs/heads/$b" >/dev/null || exit 8
+g push --no-verify --no-follow-tags --no-recurse-submodules --force-with-lease="refs/heads/$b:$seen" "$url" "$c:refs/heads/$b" >/dev/null || exit 8
 got=$(heads) || exit 9
 [ "$got" = "$c" ] || { echo "mismatch $got" >&2; exit 9; }
 printf 'pushed\t%s\n' "$c"
 `
+
+// pushDiscardScript removes the review's copy when nothing is pushed.
+const pushDiscardScript = `rm -rf -- "$1"`
 
 // pushEnv keeps git from prompting in the actor.
 var pushEnv = map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true", "SSH_ASKPASS": "/bin/true"}
@@ -240,7 +276,7 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 		return nil, &BranchPushError{Kind: "not_https", Msg: "the agent's origin " + safeRemote(p.URL) +
 			" is not an https address the cluster can add a credential for; ask your administrator to add it to substrate.git.https_rewrite, or bring the work home with --branch NAME"}
 	}
-	out, stderr, code, err = run(ctx, []string{"sh", "-c", pushReviewScript, "sh", p.objects, p.PushURL, p.Commit, PushPlaceholder, pushReplacedPattern},
+	out, stderr, code, err = run(ctx, []string{"sh", "-c", pushReviewScript, "sh", p.objects, p.PushURL, p.Commit, kit.PlaceholderSecret, pushReplacedPattern},
 		p.Dir, pushEnv, 5*time.Minute)
 	if err != nil {
 		return nil, err
@@ -249,6 +285,11 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 	case 0:
 	case 11:
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the branches of " + p.PushURL + " from the agent: " + lastLine(stderr, "")}
+	case 12:
+		return nil, &BranchPushError{Kind: "alternates", Msg: "not pushed: the agent's checkout borrows objects from another store (" + lastLine(stderr, "") +
+			"), and pull --push-branch pushes only what the checkout holds itself. Bring the work home with --branch NAME and push it from your computer"}
+	case 13:
+		return nil, &BranchPushError{Kind: "failed", Msg: "not pushed: the agent's checkout is missing objects its commits need: " + lastLine(stderr, "")}
 	default:
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's commits: " + lastLine(stderr, "")}
 	}
@@ -256,6 +297,8 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 	if !ok {
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's commits: the answer was cut short"}
 	}
+	p.snapshot = parts["snapshot"]
+	p.seen = pushRefs(parts["refs"])
 	p.Commits, _ = strconv.Atoi(strings.TrimSpace(parts["commits"]))
 	p.Files = pushNames(parts["file"])
 	for _, f := range p.Files {
@@ -269,6 +312,7 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 		// credentials put in the copy: pushed, they would replace the
 		// person's lines upstream (RV6-4). This holds on any computer,
 		// with or without the copy's record.
+		p.Discard(ctx, run)
 		return nil, &BranchPushError{Kind: "replaced_copy", Msg: "not pushed: the agent's commits put credential placeholders (DC_SECRET_<n>) in " +
 			strings.Join(quoteNames(r, 3), ", ") + " where your credential lines were, so the push would replace them upstream. " +
 			"Bring the work home with pull --branch NAME on the computer you ran the agent from, then push it from there"}
@@ -277,6 +321,29 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 		p.Secrets = scanAddedLines(parts["patch"])
 	}
 	return p, nil
+}
+
+// pushRefs reads ls-remote output (commit\tref lines) into ref -> commit.
+func pushRefs(raw string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(raw, "\n") {
+		if c, ref, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok {
+			if _, dup := m[ref]; !dup {
+				m[ref] = c
+			}
+		}
+	}
+	return m
+}
+
+// Discard removes the review's copy of the objects in the actor, after
+// the push or when nothing is pushed.
+func (p *BranchPush) Discard(ctx context.Context, run BranchExec) {
+	if p == nil || p.snapshot == "" {
+		return
+	}
+	_, _, _, _ = run(ctx, []string{"sh", "-c", pushDiscardScript, "sh", p.snapshot}, p.Dir, pushEnv, time.Minute)
+	p.snapshot = ""
 }
 
 // pushRecords reads NUL-ended key\tvalue records; the first of a key wins.
@@ -390,13 +457,18 @@ func scanAddedLines(patch string) []osw.ScanFinding {
 	return out
 }
 
-// Push pushes p.Commit to refs/heads/branch of p.PushURL from the actor and
-// checks with ls-remote that the branch is there. prev is the commit this
-// computer pushed to that branch before (PushedBefore), "" for none. It
-// never forces: a branch origin has moves only when it is at prev, and
-// then forward only (p.Commit becomes what was pushed).
+// Push pushes p.Commit to refs/heads/branch of p.PushURL from the actor,
+// with the objects the review copied, and checks with ls-remote that the
+// branch is there. prev is the commit this computer pushed to that branch
+// before (PushedBefore), "" for none. It never forces: a branch origin has
+// moves only when it is at prev, and then forward only (p.Commit becomes
+// what was pushed); and only from the state the review saw.
 func (p *BranchPush) Push(ctx context.Context, run BranchExec, branch, name, prev string) error {
-	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushScript, "sh", p.objects, p.PushURL, p.Commit, branch, name, prev}, p.Dir, pushEnv, 10*time.Minute)
+	if p.snapshot == "" {
+		return &BranchPushError{Kind: "failed", Msg: "not pushed: the review's copy of the agent's commits is gone; run pull --push-branch again"}
+	}
+	seen := p.seen["refs/heads/"+branch]
+	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushScript, "sh", p.snapshot, p.PushURL, p.Commit, branch, name, prev, seen}, p.Dir, pushEnv, 10*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -410,8 +482,13 @@ func (p *BranchPush) Push(ctx context.Context, run BranchExec, branch, name, pre
 		return nil
 	case 7:
 		return &BranchPushError{Kind: "exists", Msg: "branch " + branch + " already exists on origin; pick a new name"}
+	case 10:
+		return p.moved(branch, name)
 	case 8:
 		low := strings.ToLower(stderr)
+		if strings.Contains(low, "stale info") {
+			return p.moved(branch, name)
+		}
 		if strings.Contains(low, "non-fast-forward") || strings.Contains(low, "fetch first") || strings.Contains(low, "rejected") && !strings.Contains(low, "403") {
 			return &BranchPushError{Kind: "exists", Msg: "branch " + branch + " on origin has commits the agent's work does not have; nothing was forced. Pick a new name"}
 		}
@@ -428,6 +505,12 @@ func (p *BranchPush) Push(ctx context.Context, run BranchExec, branch, name, pre
 	default:
 		return &BranchPushError{Kind: "failed", Msg: "git could not push from the agent: " + lastLine(stderr, "")}
 	}
+}
+
+// moved is the refusal when origin's branch is not where the review saw it.
+func (p *BranchPush) moved(branch, name string) error {
+	return &BranchPushError{Kind: "moved", Msg: "not pushed: branch " + branch + " on origin changed after the review, so nothing was pushed. " +
+		"Run defenseclaw substrate pull " + name + " --push-branch " + branch + " again to review it as it is now"}
 }
 
 func short(c string) string {

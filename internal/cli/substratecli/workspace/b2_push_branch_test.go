@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // localExec runs the actor scripts in a local shell (the relay exec runs
@@ -99,7 +101,7 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	head := gitT(t, repo, "rev-parse", "HEAD")
 	os.MkdirAll(filepath.Join(repo, ".github/workflows"), 0o755)
 	os.WriteFile(filepath.Join(repo, ".github/workflows/ci.yml"), []byte("on: push\n"), 0o644)
-	os.WriteFile(filepath.Join(repo, "npmrc"), []byte("//r/:_authToken="+PushPlaceholder+"\n"), 0o644)
+	os.WriteFile(filepath.Join(repo, "npmrc"), []byte("//r/:_authToken="+kit.PlaceholderSecret+"\n"), 0o644)
 	p, err := PrepareBranchPush(ctx, localExec, root, "a1", nil)
 	if err != nil {
 		t.Fatal(err)

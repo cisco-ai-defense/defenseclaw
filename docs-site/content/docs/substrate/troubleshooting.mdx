@@ -315,6 +315,9 @@ the flag can only tighten it.
 ### `pull --push-branch` is refused (Preview)
 
 - **"branch ... already exists on origin"** or **"has commits the agent's work does not have"**: the push never forces. Only a branch you pushed from this computer with `--push-branch` moves forward. Pick a new branch name.
+- **"branch ... on origin changed after the review"**: someone created, moved or deleted the branch between the review and the push, so nothing was pushed. Run the same `pull --push-branch` again to review the branch as it is now.
+- **"the agent's checkout borrows objects from another store"**: the checkout uses `objects/info/alternates`, and the push carries only what the checkout holds itself. Bring the work home with `pull NAME --branch BRANCH` and push from your computer.
+- **"could not read the cluster's settings"**: the launcher could not read the cluster's settings, so it did not push. Check that you can reach the cluster, then run again.
 - **"your profile turned off pull --push-branch"** or **"this cluster turned off pull --push-branch"**: `git_push: deny` or `substrate.git.push_branch: deny`. They turn off this command only; an agent's own `git push` follows the egress rules. Bring the work home with `pull NAME --branch BRANCH` and push from your computer.
 - **"replaced your credentials with placeholders"** or **"credential placeholders (`DC_SECRET_<n>`)"**: a tracked file in the folder was sent with credentials replaced, or the agent's commits add a placeholder, so a push would put the placeholders upstream in place of your lines. Run `pull NAME --branch BRANCH` on the computer you sent it from, then push from there.
 - **"... refused the push"**: the credential the cluster binds to that host cannot write to the repository. Ask your administrator for one with write access, or push from your computer.
