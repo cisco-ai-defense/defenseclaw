@@ -264,7 +264,7 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		// Setup would stop at the other account's gateway (GAP-0307).
 		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
 	}
-	if st.Enabled && st.ManagedOff() != sandboxapi.ManagedOffProfile {
+	if st.Enabled && st.ManagedOff() != sandboxapi.ManagedOffProfile && st.ManagedOff() != sandboxapi.ManagedOffOrganization {
 		state = "on"
 	}
 	row("Sandboxes", state)
@@ -1354,7 +1354,14 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 		if st != nil && !st.Enabled {
 			// Concatenated, so the hint scan reads the suggested command
 			// (TestSandboxHintsNameCommandsThatExist).
-			return errors.New("the administrator has turned sandboxes off (openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then run `" + CommandName + " delete " + strings.Join(o.Names, " ") + "` again")
+			again := "run `" + CommandName + " delete " + strings.Join(o.Names, " ") + "` again"
+			if st.Managed != nil {
+				// Why sandboxes are off is sandboxapi.Status.ManagedOff, in the
+				// words of `sandbox status`, never "the administrator turned
+				// them off" for a profile's denial or another account's gateway.
+				return errors.New(st.OffMessage() + " Kept sandboxes cannot be deleted until the account gateway runs; once sandboxes are on for your account, " + again)
+			}
+			return errors.New("the administrator has turned sandboxes off (openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then " + again)
 		}
 	}
 	var errs []error

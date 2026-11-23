@@ -135,6 +135,15 @@ const (
 	ManagedOffSetting
 )
 
+// Closed reports a reason that closes sandboxes for the account by decision:
+// the organization's switch, the account's profile, or a setting the
+// organization manages. Nothing the account or its install does changes it,
+// so no row may tell the account what its sandboxes need or will do; install
+// problems and another account's gateway are not Closed (they can clear).
+func (k ManagedOffKind) Closed() bool {
+	return k == ManagedOffOrganization || k == ManagedOffProfile || k == ManagedOffSetting
+}
+
 // ManagedOff is the one decision of why sandboxes are off for the caller on a
 // managed computer, and the only place that orders the reasons: the
 // organization's switch (it holds for every account, and nothing below

@@ -812,6 +812,8 @@ func managedDockerNotNeeded(off sandboxapi.ManagedOffKind) string {
 		return "not needed: " + sandboxapi.OrganizationOffReason
 	case sandboxapi.ManagedOffProfile:
 		return "not needed: " + sandboxapi.AccountNotAllowedReason
+	case sandboxapi.ManagedOffSetting:
+		return "not needed: sandboxes are off on this computer; your organization manages this setting"
 	case sandboxapi.ManagedOffUnavailable:
 		return "not needed now: sandboxes can't run on this computer (see Sandbox runtime)"
 	case sandboxapi.ManagedOffElsewhere:
@@ -1223,16 +1225,17 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 // organization has turned them off it renders no OpenShell gateway
 // configuration and installs no driver, so checking them would send the user
 // to an administrator step that cannot help; the row says the same reason as
-// the others instead (GAP-2023). Any other reason leaves the driver checks as
-// they are: a profile's denial changes nothing the administrator rendered.
+// the others instead (GAP-2023). The same holds for a profile's denial or a
+// setting that is off: the driver is no reason for any of them. An install
+// reason or another account's gateway leaves the driver checks as they are.
 func (a *App) managedDriverRow(m *sandboxapi.ManagedStatus, off sandboxapi.ManagedOffKind, rendered *openshell.RenderedPaths) *openshell.Check {
 	c := managedDriverCheck(m)
-	if off == sandboxapi.ManagedOffOrganization {
+	if off.Closed() {
 		if c == nil {
 			c = &openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Detail: "managed by your organization"}
 		}
 		c.Status, c.Fix = openshell.StatusSkip, nil
-		c.Detail += "; not needed: " + sandboxapi.OrganizationOffReason
+		c.Detail += "; " + managedDockerNotNeeded(off)
 		return c
 	}
 	if c = a.withAdminVMDriver(c, m); c != nil {
@@ -1372,6 +1375,13 @@ func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStat
 // organization, the profile or the install is the cause.
 func (a *App) managedDockerCheck(ctx context.Context, m *sandboxapi.ManagedStatus, off sandboxapi.ManagedOffKind) openshell.Check {
 	c := openshell.Check{ID: "managed-docker", Title: "Docker", Status: openshell.StatusPass}
+	if off.Closed() {
+		// Closed for the account (organization, profile or setting): Docker
+		// is not needed whatever it answers, and "your agent images are
+		// built in it" would say sandboxes run.
+		c.Status, c.Detail = openshell.StatusSkip, managedDockerNotNeeded(off)
+		return c
+	}
 	engine, err := a.DockerEngine(ctx)
 	if err != nil {
 		if detail := managedDockerNotNeeded(off); detail != "" {

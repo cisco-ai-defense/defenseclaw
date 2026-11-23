@@ -239,12 +239,18 @@ func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver)
 		}
 		runDriver, _ := openshell.LookupDriver(string(rep.Driver))
 		images := a.imagesCheck(ctx, image.MicroVMTarget(runDriver))
-		if st.managed != nil && st.managed.Unavailable != "" && images.Status == openshell.StatusWarn {
+		if st.managed != nil && (st.managed.Unavailable != "" || st.offKind.Closed()) && images.Status == openshell.StatusWarn {
 			// Nothing builds while sandboxes can't run for the account (no
-			// docker or kvm access): the Sandbox runtime row names why and
-			// whom to ask, and a build now would only fail (GAP-0460).
+			// docker or kvm access, or closed by the organization, the
+			// profile or a setting): the Sandbox runtime row names why and
+			// whom to ask, and a build now would only fail (GAP-0460). A
+			// closed account is not told a run builds them.
 			images.Status, images.Fix = openshell.StatusSkip, nil
-			images.Detail += "; they are built once sandboxes are available for your account (see Sandbox runtime)"
+			if st.offKind.Closed() {
+				images.Detail = "not needed: sandboxes are off for your account (see Sandbox runtime)"
+			} else {
+				images.Detail += "; they are built once sandboxes are available for your account (see Sandbox runtime)"
+			}
 		}
 		rep.Checks = append(rep.Checks, images, a.wrappersCheck(ctx, managed))
 		switch {
@@ -261,7 +267,7 @@ func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver)
 			if a.GOOS == "darwin" {
 				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.offKind))
 			}
-			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
+			if c := managedDockerGroupCheck(a.GOOS, st.managed, st.offKind, dockerGroup); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 		case managed:
@@ -831,10 +837,10 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			// Nothing the user can turn on or hand over: the organization
 			// manages it, and another account is only ever "another account".
 			c.Status, c.Detail = openshell.StatusSkip, "running; "+managedOffState(st)
-		case st.Managed != nil && !st.Available && st.ManagedOff() == sandboxapi.ManagedOffProfile:
-			// The profile refuses the account: no sandbox runs for it,
-			// whatever the gateway does, and it is not another account's
-			// fault.
+		case st.Managed != nil && !st.Available && (st.ManagedOff() == sandboxapi.ManagedOffProfile || st.ManagedOff() == sandboxapi.ManagedOffOrganization):
+			// The organization's switch or the profile closes sandboxes for
+			// the account: no sandbox runs for it, whatever the gateway
+			// does, and it is not another account's fault.
 			c.Status, c.Detail = openshell.StatusSkip, "running; "+managedOffState(st)
 		case !st.Enabled && st.GatewayElsewhere != "":
 			// The Gateway service row names the one cause and the way on;
@@ -843,7 +849,8 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		case !st.Enabled:
 			c.Status, c.Detail = openshell.StatusWarn, "openshell.enabled is false: sandboxes are off"
 			c.Fix = &openshell.Fix{Summary: "turn sandboxes on", Command: CommandName + " setup"}
-		case st.Managed != nil && st.PortConflict != nil:
+		case st.Managed != nil && st.PortConflict != nil && st.ManagedOff() != sandboxapi.ManagedOffUnavailable:
+			// An install reason (the case below) outranks the port.
 			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusSkip, "running; sandbox port is occupied (see Sandbox "+st.PortConflict.Name+" port)"
 		case !st.Available && st.Managed != nil && st.Managed.Unavailable == "" && st.Running == 0 && st.GatewayElsewhere == "":

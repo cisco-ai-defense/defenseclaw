@@ -301,6 +301,9 @@ func (a *App) awaitDaemon(ctx context.Context, api API) error {
 			switch {
 			case err != nil:
 				why = apiError(err).Error()
+			case st.Managed != nil && st.ManagedOff() != sandboxapi.ManagedOffNone:
+				// The one reason of `sandbox status` (sandboxapi.Status.ManagedOff).
+				why = strings.TrimRight(st.OffMessage(), ". ")
 			case !st.Enabled:
 				why = "sandboxes are off"
 			case !st.Available:
