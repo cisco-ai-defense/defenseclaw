@@ -62,7 +62,7 @@ var det111R1VerdictPending = map[string]string{
 // det111R1WindowsPending are the Windows host rows (managed cells) whose
 // verdict does not reach the unknown tier yet, with the lane that closes each.
 var det111R1WindowsPending = map[string]string{
-	"GAP-1577/var4": "Windows host Start-Process shell body still misses the effects call (S3-PRE effectCall)",
+	"GAP-1577/var4":                          "Windows host Start-Process shell body still misses the effects call (S3-PRE effectCall)",
 	"GAP-0998/seed":                          "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
 	"GAP-0998/seed2":                         "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
 	"GAP-1550/seed":                          "the automatic PowerShell $HOME stays dynamic (S3-R1)",
