@@ -271,24 +271,55 @@ func (st *substrateState) auditSkill(ctx context.Context, action, severity, conn
 	st.action(ctx, action, severity, details)
 }
 
-// skillArchiveMagic are the leading bytes of archive formats; at offset 257
-// a tar header says "ustar".
-var skillArchiveMagic = [][]byte{
-	[]byte("PK\x03\x04"), {0x1f, 0x8b}, []byte("BZh"), {0xfd, '7', 'z', 'X', 'Z', 0x00},
-	{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c}, {0x28, 0xb5, 0x2f, 0xfd},
-}
+// skillArchiveMagic are the leading bytes of archive and compression
+// formats (gzip, bzip2, xz, zstd, lz4, lzma, cpio, ar); at offset 257 a tar
+// header says "ustar". skillArchiveAnywhere are the headers found anywhere
+// in a file (GAP-0933): a zip local, central or end record, and the rar and
+// 7z signatures, so a script with an archive appended or a self-extracting
+// archive is found too. Each is long enough that text does not hold it.
+var (
+	skillArchiveMagic = [][]byte{
+		{0x1f, 0x8b}, {0xfd, '7', 'z', 'X', 'Z', 0x00}, {0x28, 0xb5, 0x2f, 0xfd}, {0x04, 0x22, 0x4d, 0x18},
+		{0x5d, 0x00, 0x00}, []byte("070701"), []byte("070702"), []byte("070707"), {0xc7, 0x71}, []byte("!<arch>\n"),
+	}
+	skillArchiveAnywhere = [][]byte{
+		[]byte("PK\x03\x04"), []byte("PK\x01\x02"), []byte("PK\x05\x06"), []byte("PK\x07\x08"),
+		[]byte("Rar!\x1a\x07"), {'7', 'z', 0xbc, 0xaf, 0x27, 0x1c},
+	}
+	// skillArchiveExt are archive file names, whatever their content.
+	skillArchiveExt = map[string]bool{
+		".zip": true, ".jar": true, ".war": true, ".ear": true, ".apk": true, ".whl": true, ".egg": true, ".nupkg": true,
+		".vsix": true, ".xpi": true, ".crx": true, ".tar": true, ".tgz": true, ".gz": true, ".bz2": true, ".tbz": true,
+		".tbz2": true, ".xz": true, ".txz": true, ".zst": true, ".tzst": true, ".lz4": true, ".lzma": true, ".lz": true,
+		".7z": true, ".rar": true, ".cpio": true, ".ar": true, ".deb": true, ".rpm": true, ".cab": true, ".iso": true,
+		".dmg": true, ".z": true, ".sz": true, ".br": true,
+	}
+)
 
-// skillArchiveFile is the first file of a folder whose content is an
-// archive (zip, gzip, bzip2, xz, 7z, zstd, tar), by its leading bytes, as a
-// path inside the folder; "" when there is none. The static analyzers read
-// files as they are, so a clean verdict says nothing of what an archive
-// holds (B5.4 skill_archive): the fail mode decides.
+// skillArchiveScanMax bounds the bytes of one file searched for archive
+// headers (the kit attaches at most substrateAttachedMaxBytes per post).
+const skillArchiveScanMax = substrateAttachedMaxBytes
+
+// skillArchiveFile is the first file of a folder that is an archive (by
+// name, leading bytes, a bzip2 "BZh1".."BZh9" header, or an archive header
+// anywhere in it), as a path inside the folder; "" when there is none. The
+// static analyzers read files as they are, so a clean verdict says nothing
+// of what an archive holds (B5.4 skill_archive): the fail mode decides. The
+// search is linear in the attached bytes and bounded by skillArchiveScanMax.
 func skillArchiveFile(dir string, files []SubstrateAttachedFile) string {
 	for _, f := range files {
 		c := f.Content
-		hit := len(c) >= 262 && bytes.Equal(c[257:262], []byte("ustar"))
+		if len(c) > skillArchiveScanMax {
+			c = c[:skillArchiveScanMax]
+		}
+		hit := skillArchiveExt[strings.ToLower(path.Ext(f.Path))] ||
+			(len(c) >= 262 && bytes.Equal(c[257:262], []byte("ustar"))) ||
+			(len(c) >= 4 && bytes.HasPrefix(c, []byte("BZh")) && c[3] >= '1' && c[3] <= '9')
 		for _, m := range skillArchiveMagic {
 			hit = hit || bytes.HasPrefix(c, m)
+		}
+		for _, m := range skillArchiveAnywhere {
+			hit = hit || bytes.Contains(c, m)
 		}
 		if hit {
 			return strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(f.Path, "/")), dir+"/")
