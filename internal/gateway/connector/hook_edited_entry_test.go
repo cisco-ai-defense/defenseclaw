@@ -31,6 +31,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+// windowsEditedHookEntryCases names the golden cases that hold an edited
+// entry when the data directory is a Windows drive path: only a copy of a hook
+// script that a POSIX absolute path names, in a folder outside the data
+// directory. Every other case is false there.
+var windowsEditedHookEntryCases = map[string]bool{
+	"copilot preToolUse repointed at a copy in another folder": true,
+}
+
 // The doctor's Python mirror (cli/defenseclaw/hook_integrity.py,
 // edited_hook_script) reads the same golden, so the two cannot drift.
 func TestEditedHookCommandGolden(t *testing.T) {
@@ -58,9 +66,6 @@ func TestEditedHookCommandGolden(t *testing.T) {
 // every other entry is intact (GAP-0906). cli/tests/test_hook_integrity.py
 // reads the same golden.
 func TestEditedHookEntriesGolden(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher, not a hook script")
-	}
 	data, err := os.ReadFile(filepath.Join("testdata", "hook_edited_entries.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +91,16 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.Name, err)
 		}
-		if got := hookDocumentHoldsEditedEntry(decoded, dataDir, tc.Script); got != tc.Edited {
-			t.Errorf("%s: hookDocumentHoldsEditedEntry = %v, want %v", tc.Name, got, tc.Edited)
+		want := tc.Edited
+		if runtime.GOOS == "windows" {
+			// Windows registers the native launcher, so its data directory is
+			// a drive path that no hook script command names: an entry under
+			// it is not an edited hook script. A copy of a hook script at a
+			// POSIX absolute path in another folder still is one.
+			want = windowsEditedHookEntryCases[tc.Name]
+		}
+		if got := hookDocumentHoldsEditedEntry(decoded, dataDir, tc.Script); got != want {
+			t.Errorf("%s: hookDocumentHoldsEditedEntry = %v, want %v", tc.Name, got, want)
 		}
 	}
 }

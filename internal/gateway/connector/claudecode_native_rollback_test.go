@@ -13,7 +13,8 @@ import (
 
 func TestClaudeCodeNativeUnixRollbackKeepsEarlierHookShape(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix registration")
+		claudeCodeWindowsRollbackKeepsEarlierHookShape(t)
+		return
 	}
 	root := t.TempDir()
 	profile := filepath.Join(root, "profile with spaces")
