@@ -289,10 +289,10 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 	// So is a session of an ended sign-in: a plain logout ends that one
 	// token, and an end by time covers the sign-in's own issue time, so a
 	// session a lagging replica handed out after the end is refused too
-	// (GAP-0744). Compat shim: a session minted by released 1.0.10 names no
-	// sign-in, and lives at most MaxSessionLifetime (1 h) across the upgrade;
-	// Issue never mints one now (RV4-03). After 1.0.11, pending the owner's
-	// OK, remove the shim and refuse a session that names no sign-in.
+	// (GAP-0744). A session minted by released 1.0.10 names no sign-in, and
+	// lives at most MaxSessionLifetime (1 h) across the upgrade; Issue never
+	// mints one now (RV4-03). Compat shim for sessions minted by released
+	// 1.0.10: remove in 1.0.12 and refuse a session that names no sign-in.
 	if s.SignInKey != "" {
 		if status, reason := st.substrateRevocationRefusal(s.Person, s.SignInKey, s.SignInIssuedAt); status != 0 {
 			a.substrateAuditRelayDenied(st, r, "MEDIUM", reason, target, s.Person)
