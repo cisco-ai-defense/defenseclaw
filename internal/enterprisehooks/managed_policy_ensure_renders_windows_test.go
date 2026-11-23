@@ -216,4 +216,34 @@ func TestDeferredClaudeKeepIsDecidedOutsideTransactionLock(t *testing.T) {
 	if got, err := os.ReadFile(fixture.policyPath); err != nil || !bytes.Equal(got, direct) {
 		t.Fatalf("staging did not keep the drop-in authenticated under the lock: err=%v", err)
 	}
+
+	// The drop-in changes, between the unlocked read and the lock, to bytes
+	// keep refuses: the yes for the earlier read is not used for them, and
+	// staging publishes its own rendering (GAP-1885, review note P4-3).
+	asked, underLock = nil, 0
+	keepOnly := direct
+	keep = func(published []byte) bool {
+		asked = append(asked, append([]byte(nil), published...))
+		if locked {
+			underLock++
+		}
+		return bytes.Equal(published, keepOnly)
+	}
+	onLock = func() {
+		if err := windowsManagedPolicyWriter(fixture.policyPath, current, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := windowsManagedPolicyWriter(statePath, stateBody, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := installWindowsClaudeManagedPolicyKeepingPublished(versionless, keep, setup, fixture.targetSID); err != nil {
+		t.Fatalf("staging after a change to a refused drop-in: %v", err)
+	}
+	if underLock != 1 || len(asked) != 2 || !bytes.Equal(asked[0], direct) || !bytes.Equal(asked[1], current) {
+		t.Fatalf("after a change to a refused drop-in keep was asked %d times, %d under the lock; want the changed drop-in asked under the lock", len(asked), underLock)
+	}
+	if got, err := os.ReadFile(fixture.policyPath); err != nil || !bytes.Equal(got, versionless) {
+		t.Fatalf("staging kept a changed drop-in on the answer for the earlier read: err=%v", err)
+	}
 }

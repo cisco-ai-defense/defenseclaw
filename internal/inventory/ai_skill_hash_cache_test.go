@@ -37,6 +37,7 @@ func TestGAP1816UnchangedSkillFolderIsNotReadAgain(t *testing.T) {
 		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
 	}, nil)
 	cleanupPreparedDiscoveryService(t, svc)
+	svc.skillClock = skillClockAfterTheWrites
 
 	first := *svc.skillFacts(dir, false)
 	if first.ContentStatus != SkillContentOK || svc.skillBytesRead == 0 {

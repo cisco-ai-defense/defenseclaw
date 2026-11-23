@@ -6,9 +6,6 @@ package cli
 import (
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -101,22 +98,20 @@ func TestEnterpriseHookWindowsRouteOnlyRendersPerSID(t *testing.T) {
 	}
 }
 
-// A managed Linux or macOS host whose only routed connectors are claudecode
-// and codex has no hook-native target that mints the per-user credential
-// key, so the route render must mint it; verify only loads it
-// (rel-1-0-10:GAP-0763).
+// A managed host whose only routed connectors are claudecode and codex has
+// no hook-native target that mints the per-user credential key, so the route
+// render must mint it; verify only loads it (rel-1-0-10:GAP-0763). On
+// Windows the key custody is the protected DACL the gateway service reads,
+// the identity is a SID and the credential also binds the route epoch the
+// gateway publishes (rel-1-0-10:GAP-1514).
 func TestEnterpriseHookRouteOnlyRenderMintsTheMissingKeyAndVerifyDoesNot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the Windows key custody needs the gateway service account")
-	}
 	prevCfg, prevLog := cfg, enterpriseHookRouteOnlyLog
 	t.Cleanup(func() { cfg, enterpriseHookRouteOnlyLog = prevCfg, prevLog })
 	var log strings.Builder
 	enterpriseHookRouteOnlyLog = &log
-	dataDir := filepath.Join(t.TempDir(), "data")
-	if err := os.Mkdir(dataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dataDir := enterpriseHookTokenTestDataDir(t)
+	user, _ := enterpriseHookTestUserIdentities()
+	epoch := publishEnterpriseHookTestRouteEpoch(t, dataDir)
 	cfg = &config.Config{DataDir: dataDir, DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = "standalone"
 	cfg.Routing.Enabled = true
@@ -127,7 +122,7 @@ func TestEnterpriseHookRouteOnlyRenderMintsTheMissingKeyAndVerifyDoesNot(t *test
 
 	// Verify expects the route and reports why it cannot be derived
 	// (route_config_drift with the cause, rel-1-0-10:GAP-0800).
-	if r := enterpriseHookVerifyRouteOnly("codex", "alice", "1001", "127.0.0.1:18970"); r == nil || r.Token != "" || !strings.Contains(r.Unavailable, "per-user credential key is missing") {
+	if r := enterpriseHookVerifyRouteOnly("codex", "alice", user, "127.0.0.1:18970"); r == nil || r.Token != "" || !strings.Contains(r.Unavailable, "per-user credential key is missing") {
 		t.Fatalf("verify without a key = %+v", r)
 	}
 	if !strings.Contains(log.String(), "per-user credential key is missing") {
@@ -137,7 +132,7 @@ func TestEnterpriseHookRouteOnlyRenderMintsTheMissingKeyAndVerifyDoesNot(t *test
 		t.Fatalf("verify minted a key: %q %v", key, err)
 	}
 
-	rendered := enterpriseHookRouteOnly("codex", "alice", "1001", "127.0.0.1:18970")
+	rendered := enterpriseHookRouteOnly("codex", "alice", user, "127.0.0.1:18970")
 	if rendered == nil || rendered.Token == "" || rendered.BaseURL != "http://127.0.0.1:18970/r/codex" {
 		t.Fatalf("render on a host without a key = %+v (log %q)", rendered, log.String())
 	}
@@ -145,15 +140,20 @@ func TestEnterpriseHookRouteOnlyRenderMintsTheMissingKeyAndVerifyDoesNot(t *test
 	if err != nil || key == "" {
 		t.Fatalf("render did not mint the key: %v", err)
 	}
-	want, err := connector.ManagedRouteToken(key, nil, "codex", "1001")
+	keyPath, err := connector.UserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnterpriseHookSecretCustody(t, dataDir, keyPath, "per-user credential key")
+	want, err := connector.ManagedRouteToken(key, epoch, "codex", user)
 	if err != nil || rendered.Token != want {
 		t.Fatalf("rendered route credential is not the one the gateway derives: %v", err)
 	}
-	verified := enterpriseHookVerifyRouteOnly("codex", "alice", "1001", "127.0.0.1:18970")
+	verified := enterpriseHookVerifyRouteOnly("codex", "alice", user, "127.0.0.1:18970")
 	if verified == nil || verified.Token != rendered.Token {
 		t.Fatal("verify after the render does not expect the rendered credential")
 	}
-	if claude := enterpriseHookRouteOnly("claudecode", "alice", "1001", "127.0.0.1:18970"); claude == nil || claude.Token == rendered.Token {
+	if claude := enterpriseHookRouteOnly("claudecode", "alice", user, "127.0.0.1:18970"); claude == nil || claude.Token == rendered.Token {
 		t.Fatalf("claudecode render = %+v", claude)
 	}
 }
