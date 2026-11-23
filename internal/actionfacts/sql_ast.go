@@ -336,6 +336,11 @@ func appendUniqueSQL(values []string, value string) []string {
 // start alerting (DET111 ruling on T20 review P3-1).
 func (f Facts) SQLASTCaps() bounded.CapSet { return f.sqlASTCaps }
 
+// SQLUnreadDanger reports SQL the facts reader left unread past its
+// statement cap that holds a modeled danger keyword (sqlUnreadDanger): the
+// gateway then grades the cap as the truncated row, not as a record.
+func (f Facts) SQLUnreadDanger() bool { return f.sqlUnreadDanger }
+
 func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact, bounded.CapSet) {
 	inputs := exactSQLMutationInputs(input, facts)
 	mutations := make([]SQLMutationFact, 0, len(inputs))
@@ -361,7 +366,7 @@ func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact,
 		// Each statement of a multi-statement inline query is judged as
 		// its bare form (DET111 ruling B on GAP-1926); a statement a
 		// rolled back transaction undoes changes no data.
-		statements, capped := sqlStatementCandidates(candidate)
+		statements, capped, _ := sqlStatementCandidates(candidate)
 		if capped {
 			caps = caps.Union(bounded.Of(bounded.Items))
 		}

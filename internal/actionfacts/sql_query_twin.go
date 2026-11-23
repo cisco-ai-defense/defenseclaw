@@ -36,7 +36,13 @@ const maxSQLQueryChunks = maxCommandBytes / maxScalarBytes
 // read; the call keeps the truncation record (the cut raises nothing by
 // itself). A query with no complete statement within the bound leaves the
 // stand-in x, as a data word does.
-func sqlQueryWordChunks(word sqlQueryWord, value string) []string {
+//
+// unreadDanger reports that the statements left unread hold a modeled
+// server-program, server file read or drop-database keyword
+// (sqlUnreadDanger): the cut then takes the truncated row instead of the
+// record (DET111 ruling on T23 review P3-1), so padding a query past the
+// bounds does not hide them; a benign rest keeps the record.
+func sqlQueryWordChunks(word sqlQueryWord, value string) (chunks []string, unreadDanger bool) {
 	option := ""
 	if word.glued {
 		name, query, _ := strings.Cut(value, "=")
@@ -44,16 +50,17 @@ func sqlQueryWordChunks(word sqlQueryWord, value string) []string {
 	}
 	query, ends := sqlQueryShortened(word.engine, value)
 	if len(option)+len(query) <= maxScalarBytes {
-		return []string{sqlQueryChunkWord(option, query)}
+		return []string{sqlQueryChunkWord(option, query)}, false
 	}
-	var chunks []string
-	for start := 0; len(chunks) < maxSQLQueryChunks; {
+	start := 0
+	for len(chunks) < maxSQLQueryChunks {
 		rest := query[start:]
 		if strings.TrimSpace(rest) == "" {
 			break
 		}
 		if len(option)+len(rest) <= maxScalarBytes {
 			chunks = append(chunks, sqlQueryChunkWord(option, rest))
+			start = len(query)
 			break
 		}
 		// The chunk ends after its last complete statement within the
@@ -73,7 +80,34 @@ func sqlQueryWordChunks(word sqlQueryWord, value string) []string {
 	if len(chunks) == 0 {
 		chunks = []string{sqlQueryChunkWord(option, "")}
 	}
-	return chunks
+	return chunks, sqlUnreadDanger(word.engine, query[start:])
+}
+
+// sqlUnreadDangerPattern is the modeled keywords of the SQL readers' danger
+// families: a server program (COPY ... TO/FROM PROGRAM, xp_cmdshell), a server
+// file read (LOAD_FILE, pg_read_file, pg_read_binary_file) and dropping a
+// database or schema. RE2: linear in the text.
+var sqlUnreadDangerPattern = lazyMustCompile(`\b(?:(?:TO|FROM)\s+PROGRAM|XP_CMDSHELL|LOAD_FILE|PG_READ_(?:BINARY_)?FILE|DROP\s+(?:DATABASE|SCHEMA))\b`)
+
+// sqlUnreadDanger is the bounded keyword scan of SQL text no reader read:
+// only its SQL outside quotes and comments (sqlSpans), so a keyword inside a
+// literal is data, as it is to the server. The text is within the command
+// bound, and the scan is one pass over it.
+func sqlUnreadDanger(engine, rest string) bool {
+	if strings.TrimSpace(rest) == "" {
+		return false
+	}
+	var bare strings.Builder
+	bare.Grow(len(rest))
+	sqlSpans(engine, rest, func(kind sqlSpanKind, start, end int) {
+		switch kind {
+		case sqlSpanByte:
+			bare.WriteString(rest[start:end])
+		default:
+			bare.WriteByte(' ')
+		}
+	})
+	return sqlUnreadDangerPattern.MatchString(strings.ToUpper(bare.String()))
 }
 
 // sqlQueryChunkWord is the shell word of one chunk of an inline query.
@@ -198,12 +232,15 @@ type sqlStatement struct {
 // statement trimmed; a statement of only space and comments is left out. At
 // most maxSQLASTStatements are read; capped reports that more were left
 // unread.
-func sqlStatements(engine, query string) (statements []sqlStatement, capped bool) {
+func sqlStatements(engine, query string) (statements []sqlStatement, capped bool, unread string) {
 	start, content := 0, false
 	var bare strings.Builder
 	flush := func(end int) {
 		if content {
 			if len(statements) == maxSQLASTStatements {
+				if !capped {
+					unread = query[start:]
+				}
 				capped = true
 			} else {
 				statements = append(statements, sqlStatement{
@@ -231,7 +268,7 @@ func sqlStatements(engine, query string) (statements []sqlStatement, capped bool
 		}
 	})
 	flush(len(query))
-	return statements, capped
+	return statements, capped, unread
 }
 
 // sqlQuotedEnd is the offset just after the quote that closes the quoted

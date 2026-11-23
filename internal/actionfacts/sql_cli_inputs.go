@@ -21,20 +21,25 @@ import (
 // wider surface only raises. The commands are the analysis's own, already
 // within its bounds; caps holds the statement cap of a query read only in
 // part.
-func sqlCLIReadInputs(input Input, facts Facts) (inputs []exactSQLMutationInput, caps bounded.CapSet) {
+//
+// unreadDanger reports a query whose statements past the cap hold a modeled
+// danger keyword (sqlUnreadDanger): the cap then takes the truncated row,
+// not the record (DET111 ruling on T23 review P3-1).
+func sqlCLIReadInputs(input Input, facts Facts) (inputs []exactSQLMutationInput, caps bounded.CapSet, unreadDanger bool) {
 	if input.Tool == "sql_query" || !facts.Authoritative() {
-		return nil, caps
+		return nil, caps, false
 	}
 	for _, command := range facts.Commands {
 		for _, query := range exactSQLCLICommandInputs(command, true) {
-			statements, capped := sqlStatementCandidates(query)
+			statements, capped, danger := sqlStatementCandidates(query)
 			if capped {
 				caps = caps.Union(bounded.Of(bounded.Items))
 			}
+			unreadDanger = unreadDanger || danger
 			inputs = append(inputs, statements...)
 		}
 	}
-	return inputs, caps
+	return inputs, caps, unreadDanger
 }
 
 // sqlStatementCandidates is the inline query of a SQL client read statement
@@ -48,14 +53,15 @@ func sqlCLIReadInputs(input Input, facts Facts) (inputs []exactSQLMutationInput,
 // commits implicitly ends it first (MySQL and Snowflake commit before DDL
 // and before a nested BEGIN). capped reports statements past
 // maxSQLASTStatements, which are not read.
-func sqlStatementCandidates(candidate exactSQLMutationInput) (candidates []exactSQLMutationInput, capped bool) {
+func sqlStatementCandidates(candidate exactSQLMutationInput) (candidates []exactSQLMutationInput, capped, unreadDanger bool) {
 	if candidate.source == SQLMutationQueryStructured {
-		return []exactSQLMutationInput{candidate}, false
+		return []exactSQLMutationInput{candidate}, false, false
 	}
-	statements, capped := sqlStatements(candidate.engine, candidate.query)
+	statements, capped, unread := sqlStatements(candidate.engine, candidate.query)
 	if len(statements) <= 1 && !capped {
-		return []exactSQLMutationInput{candidate}, false
+		return []exactSQLMutationInput{candidate}, false, false
 	}
+	unreadDanger = capped && sqlUnreadDanger(candidate.engine, unread)
 	candidates = make([]exactSQLMutationInput, len(statements))
 	open := -1 // index of the first statement of the open transaction
 	undo := func(end int) {
@@ -83,7 +89,7 @@ func sqlStatementCandidates(candidate exactSQLMutationInput) (candidates []exact
 	if open >= 0 && !capped {
 		undo(len(statements))
 	}
-	return candidates, capped
+	return candidates, capped, unreadDanger
 }
 
 type sqlTransactionStatement uint8
