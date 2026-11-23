@@ -312,13 +312,17 @@ const readStabilityMetadataRetries = 3
 
 var errReadMetadataChanged = errors.New("safefile: file metadata changed while reading")
 
+// retryMetadataChange is readStabilityRetriesMetadataChange; a test sets it
+// to check the retry on a platform that does not retry.
+var retryMetadataChange = readStabilityRetriesMetadataChange
+
 func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
 		data, err := readRegularFileBoundedOnce(path, maxBytes, afterRead)
 		if !errors.Is(err, errReadMetadataChanged) {
 			return data, err
 		}
-		if !readStabilityRetriesMetadataChange || attempt >= readStabilityMetadataRetries {
+		if !retryMetadataChange || attempt >= readStabilityMetadataRetries {
 			return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
 		}
 	}

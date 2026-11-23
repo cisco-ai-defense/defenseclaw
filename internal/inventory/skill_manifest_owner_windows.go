@@ -16,9 +16,12 @@
 
 package inventory
 
-import "io/fs"
+import (
+	"io/fs"
+	"os"
+)
 
 // skillManifestOwned keeps every SKILL.md on Windows: a hard link there
 // needs write access to its target, so a user cannot link in a file they
 // cannot read.
-func skillManifestOwned(string, fs.FileInfo, []byte) bool { return true }
+func skillManifestOwned(*os.File, fs.FileInfo) bool { return true }

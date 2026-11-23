@@ -16,7 +16,12 @@ Some agents read a machine-wide policy file that standard users cannot change. F
 Only agents you select in the config are protected; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect). DefenseClaw's entries are derived from the config (`guardrail.connectors` and `enterprise.machine_policy`) and never read back as policy. The next `ensure`, `repair` or `reconcile` rewrites a changed entry, and `verify` reports the drift until then. Change the config, not the vendor file.
 
 You may maintain your own settings in vendor policy files. After an administrator
-or MDM changes one, run `reconcile` or `ensure` as root. While a managed hook's
+or MDM changes one, run `reconcile` or `ensure` as root. On Linux and macOS,
+Codex `/etc/codex/requirements.toml` is shared with DefenseClaw: `ensure` and
+`repair` put back the file DefenseClaw last published, and only `reconcile`
+accepts your edit of it. Keep your own lines after DefenseClaw's settings
+block and before its hooks block; the guardian puts back a line added outside
+them and any change inside DefenseClaw's blocks. While a managed hook's
 current vendor policy differs from the digest in the trusted runtime descriptor,
 the hook keeps sending every call to the gateway, which inspects it under the
 managed policy, and raises a `HIGH` runtime alert
@@ -128,7 +133,7 @@ For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode
 | Linux and macOS | The lifecycle (`ensure`, install, upgrade, repair) | The lifecycle | The lifecycle |
 | Windows | The lifecycle at install, upgrade and repair; the guardian repairs it | The guardian, with Windows-specific code | The guardian, with the machine-policy engine that Linux and macOS use |
 
-On every OS the guardian keeps each enrolled user's DefenseClaw runtime in step with the policy, and `verify` reports any drift. On Linux and macOS the guardian never writes machine policy itself: when DefenseClaw's Claude Code drop-in is edited or deleted it logs a tamper and starts the lifecycle's config-apply job, whose `ensure` puts the drop-in back within seconds.
+On every OS the guardian keeps each enrolled user's DefenseClaw runtime in step with the policy, and `verify` reports any drift. On Linux and macOS the guardian never writes machine policy itself: when DefenseClaw's Claude Code drop-in, or DefenseClaw's part of Codex `requirements.toml`, is edited or deleted it logs a tamper and starts the lifecycle's config-apply job, whose `ensure` puts the file back within seconds.
 
 On Windows, Codex's `requirements.toml` stays installed for every enabled Codex deployment, including one with zero enrolled users. The lifecycle writes it at install, upgrade or repair, and the guardian repairs it. If `%ProgramData%\OpenAI\Codex`, or the `OpenAI` folder above it, is deleted, the standalone guardian recreates it on its next pass with the protection Setup gives it, and logs that it did. A link on that path is not followed or changed: the guardian names the link once, with the `cmd /c rmdir` command that removes it, and keeps refusing until it is gone. `status` reports a Codex install it could not enroll and names missing policy; treat that warning as a protection failure and stop Codex use until repair succeeds.
 

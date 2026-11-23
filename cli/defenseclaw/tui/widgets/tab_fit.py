@@ -80,6 +80,10 @@ LABEL_PRIORITY: tuple[str, ...] = (
     "plugins",
     "tools",
     "sandboxes",
+    # The sandbox credential vault ranks beside Sandboxes: unranked, it tied
+    # for last and was the first tab left a bare "K" at 160 columns, while
+    # Audit, which gives up its name, keeps its count (GAP-1997).
+    "vault",
     "logs",
     "audit",
     "inventory",
@@ -87,6 +91,7 @@ LABEL_PRIORITY: tuple[str, ...] = (
     "ai",
     "runtime",
     "registries",
+    "routing",
 )
 
 

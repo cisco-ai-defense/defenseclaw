@@ -101,6 +101,7 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 	// OpenCodePluginPath stays canonical: it is the path OpenCode's managed
 	// config names; enterprisepolicy inspects it under Root.
 	opts.SkipTrustChecks = m.skipTrust
+	opts.AdoptAdministratorEdits = env.adoptMachinePolicyEdits
 	opts.Now = env.Now
 	if cfg != nil {
 		var err error
@@ -625,6 +626,13 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 	p.render.PolicyViewDigests = make(map[string]string, len(covered))
 	p.render.PolicyViewUserSources = make(map[string]map[string]string)
 	for _, name := range covered {
+		// The trusted pin is the view of the bytes this publish wrote, never
+		// of whatever is on disk: a Codex requirements file that is not what
+		// the publish just recorded (another writer between the write and
+		// this read) is refused, not pinned (GAP-1928).
+		if name == enterprisepolicy.ConnectorCodex && codexMergedBy(result) && env.codexRequirementsDrifted(policyOpts) {
+			return &codedError{code: codeMachinePolicy, err: errors.New("pin codex policy view: requirements.toml changed after DefenseClaw published it; run ensure again once no other tool writes it")}
+		}
 		digest, digestErr := enterprisepolicy.PolicyViewDigest(policyOpts, name)
 		if digestErr != nil {
 			return &codedError{code: codeMachinePolicy, err: fmt.Errorf("pin %s policy view: %w", name, digestErr)}
@@ -662,6 +670,47 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return nil
 	}
 	return &codedError{code: codeApply, err: errors.New("the plan has no runtime descriptor")}
+}
+
+// codexRequirementsDrifted reports whether the Codex requirements file is
+// not the bytes DefenseClaw's ownership record (under the state directory of
+// this host) says it last wrote.
+func (e *Env) codexRequirementsDrifted(opts enterprisepolicy.Options) bool {
+	opts.StateDir = e.P(opts.StateDir)
+	return enterprisepolicy.CodexRequirementsDrifted(opts)
+}
+
+// codexMergedBy reports whether result published the Codex requirements
+// file with ownership merge, the only mode that writes it and records what
+// it wrote.
+func codexMergedBy(result enterprisepolicy.Result) bool {
+	for _, state := range result.States {
+		if state.Connector == enterprisepolicy.ConnectorCodex {
+			return state.Ownership == config.MachinePolicyOwnershipMerge
+		}
+	}
+	return false
+}
+
+// requireRepairedMachinePolicy fails a repair after which verify would still
+// find the vendor machine policy wrong. Repair returned ok while the Codex
+// requirements file it was to put back stayed tampered (GAP-1928): it runs
+// verify's policy-view check once more against the deployment repair
+// committed.
+func (l *lifecycle) requireRepairedMachinePolicy() {
+	env, r := l.env, l.result
+	if len(r.Errors) > 0 {
+		return
+	}
+	record, err := env.loadDeployment()
+	if err != nil || record == nil || len(record.MachinePolicyConnectors) == 0 {
+		return
+	}
+	// The publish pins only the bytes it wrote (publishMachinePolicy), so a
+	// view that differs from its pin here is a file repair did not put back.
+	if drift, _ := l.policyViewPinProblems(record.MachinePolicyConnectors); len(drift) > 0 {
+		r.AddError(codeMachinePolicy, "repair did not put back DefenseClaw's vendor machine policy, so verify still fails: "+strings.Join(drift, "; "))
+	}
 }
 
 // policyViewAlert is how status names what an unproven policy view does to
@@ -1162,7 +1211,12 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 		r.AddWarning(codeMachinePolicy, err.Error())
 		return
 	}
+	// Reconcile is how an administrator accepts an edit of a shared vendor
+	// file: this publish keeps it, and the verified view is re-pinned below.
+	// Ensure and repair put back the published file instead (GAP-1928).
+	env.adoptMachinePolicyEdits = true
 	result, publishErr := env.MachinePolicy.Publish(validated.Loaded)
+	env.adoptMachinePolicyEdits = false
 	if isCoded(publishErr, codeMachinePolicy) {
 		r.AddWarning(codeMachinePolicy, publishErr.Error())
 		return

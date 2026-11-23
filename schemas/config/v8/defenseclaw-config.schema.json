@@ -939,6 +939,9 @@
         "approvals": {
           "$ref": "#/$defs/openShellApprovals"
         },
+        "vault": {
+          "$ref": "#/$defs/openShellVault"
+        },
         "resources": {
           "$ref": "#/$defs/openShellResources"
         },
@@ -1253,6 +1256,19 @@
           "default": 3000
         },
         "agent_proposals": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": true
+        }
+      }
+    },
+    "openShellVault": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_capture": {
           "type": [
             "boolean",
             "null"
@@ -3641,6 +3657,11 @@
         },
         "include_network_domains": {
           "type": "boolean"
+        },
+        "include_skill_content_hashes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Read skill-folder files to compute content fingerprints and skill facts. Set false to keep skill discovery without reading or hashing skill-folder contents or attaching skill facts."
         },
         "include_user_email": {
           "type": "boolean",

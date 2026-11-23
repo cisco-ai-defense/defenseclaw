@@ -338,8 +338,8 @@ func editedDefenseClawHookCommand(command, scriptName string) bool {
 // Windows form: the word must lie under a .defenseclaw directory, or be the
 // exact script name under an edited data directory, so a user's script in
 // another folder stays. The doctor's rule (hookDocumentHoldsEditedEntry),
-// shared with cli/defenseclaw/hook_integrity.py, keeps the POSIX-only
-// editedDefenseClawHookCommand.
+// shared with cli/defenseclaw/hook_integrity.py, reads the Windows form too,
+// narrowed to what each connector's repair removes (editedHookEntryClaimed).
 func editedDefenseClawHookCommandByAnyPath(command, scriptName string) bool {
 	if editedDefenseClawHookCommand(command, scriptName) {
 		return true
@@ -455,7 +455,9 @@ func editedDefenseClawHookEntry(raw interface{}, scriptName string) bool {
 }
 
 // hookScriptBaseName is the script name editedDefenseClawHookEntry matches
-// for a hook script path Setup writes.
+// for a hook script path Setup writes. A Windows hook command (a launcher,
+// adapter or bridge) is not such a path, so the Hermes, Copilot and Kiro
+// passes, whose command is one there, name their script instead (GAP-1942).
 func hookScriptBaseName(hookScript string) string {
 	return path.Base(filepath.ToSlash(strings.TrimSpace(hookScript)))
 }

@@ -7,7 +7,7 @@ package observability
 // exact family ID. Physical trace producers use this authority so SDK span
 // control attributes stay in parity when an individual family advances.
 func FamilySchemaVersion(familyID string) (int64, bool) {
-	contract, ok := generatedFamilyBaseContracts[familyID]
+	contract, ok := generatedFamilyBaseContracts()[familyID]
 	if !ok || contract.familySchemaVersion == 0 {
 		return 0, false
 	}

@@ -16,7 +16,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+# These are this folder's own modules, found through the sys.path line above. isort cannot classify them the same way
+# everywhere (a repo-root build/ folder makes build first-party and wc_lib third-party, GAP-1014), so each import is its own block.
 import build as B  # noqa: E402, N812
+
+# isort: split
 import wc_lib as L  # noqa: E402, N812
 
 SCHEMA = HERE.parents[2] / "benchmarks" / "schema" / "case-v1.schema.json"

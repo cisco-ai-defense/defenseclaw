@@ -12,8 +12,23 @@
 
 package inventory
 
-import "github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+import (
+	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+)
 
 // agentBinaryDirs are the folders the hook enumerator looks for agents in
 // for home (replaceable in tests).
 var agentBinaryDirs = enterprisehooks.UnixAgentSearchDirs
+
+// Only the fixed machine binary directories are known to be system locations.
+// An arbitrary PATH hit outside scanned homes may belong to another account.
+func systemAgentInstallLocation(path string) bool {
+	for _, dir := range enterprisehooks.UnixAgentSearchDirs("") {
+		if filepath.IsAbs(dir) && sameInventoryPath(filepath.Dir(path), dir) {
+			return true
+		}
+	}
+	return false
+}
