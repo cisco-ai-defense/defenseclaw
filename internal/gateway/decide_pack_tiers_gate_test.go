@@ -35,7 +35,7 @@ func TestTierGateReadsThePackTierAndTable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, decide.TiersFile), []byte(column), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { packTables.Delete(dir) })
+	t.Cleanup(func() { packTableFallback.Delete(dir) })
 	table := packTable(dir)
 	if table == decide.Builtin() {
 		t.Fatal("a column that changes a cell decided with the built-in table")
@@ -58,7 +58,7 @@ func TestTierGateReadsThePackTierAndTable(t *testing.T) {
 	// A shipped pack's tiers.yaml is the built-in table itself.
 	for _, tier := range []string{"default", "permissive", "strict"} {
 		shipped := filepath.Join(guardrailPoliciesRoot(t), tier)
-		t.Cleanup(func() { packTables.Delete(shipped) })
+		t.Cleanup(func() { packTableFallback.Delete(shipped) })
 		if packTable(shipped) != decide.Builtin() {
 			t.Errorf("shipped %s pack: its table is not decide.Builtin()", tier)
 		}
