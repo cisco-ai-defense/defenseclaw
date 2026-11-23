@@ -756,10 +756,21 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, run sandb
 	if st, err = a.readyManaged(ctx, api, st, run, beforeReady); err != nil {
 		return nil, err
 	}
+	if !st.Available && st.Managed != nil {
+		// Why sandboxes are off for the account is sandboxapi.Status.ManagedOff,
+		// the order `sandbox status` and `sandbox doctor` read: a reason that
+		// holds before another account's gateway (the install's, here: no
+		// release that runs a sandbox) is the one named, never the retry
+		// hint that cannot help (GAP-2024).
+		switch st.ManagedOff() {
+		case sandboxapi.ManagedOffOrganization, sandboxapi.ManagedOffProfile, sandboxapi.ManagedOffUnavailable:
+			return nil, &DisabledError{Message: st.OffMessage(), Enabled: st.Enabled}
+		}
+	}
 	if !st.Available && st.Managed != nil && st.PortConflict != nil {
 		return nil, errors.New(st.PortConflict.Message())
 	}
-	if !st.Available && st.Managed != nil && st.GatewayElsewhere != "" {
+	if !st.Available && st.Managed != nil && st.ManagedOff() == sandboxapi.ManagedOffElsewhere {
 		// Another account runs sandboxes on this computer now: the daemon's
 		// one-account-at-a-time text and who to contact (GAP-0461).
 		if ready {

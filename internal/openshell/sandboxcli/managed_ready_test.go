@@ -76,7 +76,8 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	off.daemon.status.Available, off.daemon.status.Managed = false, managedStatusFixture()
 	off.daemon.status.Managed.Unavailable = "OpenShell is not installed on this computer"
 	err := off.Run(bg, RunOptions{Harness: "claude"})
-	if err == nil || !strings.Contains(err.Error(), "sandboxes are unavailable") {
+	// The install reason, in the words of sandbox status (GAP-2024).
+	if err == nil || !strings.Contains(err.Error(), "OpenShell is not installed on this computer") || strings.Contains(err.Error(), "another account") {
 		t.Fatalf("unavailable run: %v", err)
 	}
 	if r := off.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 0 {

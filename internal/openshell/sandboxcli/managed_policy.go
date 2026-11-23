@@ -1218,6 +1218,29 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 	return &c
 }
 
+// managedDriverRow is the doctor's Sandbox driver row on a managed computer.
+// off is why sandboxes are off for the account (Status.ManagedOff): while the
+// organization has turned them off it renders no OpenShell gateway
+// configuration and installs no driver, so checking them would send the user
+// to an administrator step that cannot help; the row says the same reason as
+// the others instead (GAP-2023). Any other reason leaves the driver checks as
+// they are: a profile's denial changes nothing the administrator rendered.
+func (a *App) managedDriverRow(m *sandboxapi.ManagedStatus, off sandboxapi.ManagedOffKind, rendered *openshell.RenderedPaths) *openshell.Check {
+	c := managedDriverCheck(m)
+	if off == sandboxapi.ManagedOffOrganization {
+		if c == nil {
+			c = &openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Detail: "managed by your organization"}
+		}
+		c.Status, c.Fix = openshell.StatusSkip, nil
+		c.Detail += "; not needed: " + sandboxapi.OrganizationOffReason
+		return c
+	}
+	if c = a.withAdminVMDriver(c, m); c != nil {
+		c = a.withRenderedVMDriver(c, m, rendered)
+	}
+	return c
+}
+
 // managedAdminVMDriver finds the administrator's MicroVM driver with the
 // check `enterprise verify` runs (openshell.AdminVMDriver); a seam for tests.
 var managedAdminVMDriver = func(goos string) (found string, refused []string) {

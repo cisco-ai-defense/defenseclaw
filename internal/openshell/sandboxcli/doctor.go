@@ -252,8 +252,7 @@ func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver)
 			// A user on a managed computer reads the organization's policy
 			// from the daemon, never from a configuration they cannot read.
 			rep.Checks = append(rep.Checks, a.managedPolicyCheck(ctx, st.managed, st.offKind), managedRuntimeCheck(st.managed, st.offKind))
-			if c := a.withAdminVMDriver(managedDriverCheck(st.managed), st.managed); c != nil {
-				c = a.withRenderedVMDriver(c, st.managed, d.Rendered)
+			if c := a.managedDriverRow(st.managed, st.offKind, d.Rendered); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if c := otherGatewaysCheck(st.managed); c != nil {
