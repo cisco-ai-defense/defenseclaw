@@ -95,7 +95,13 @@ func skillFolderSignature(root string) (string, bool) {
 				return errSkillTooLarge
 			}
 		}
-		info, err := entry.Info()
+		// The entry's own record, not entry.Info(): on Windows that is the
+		// parent folder's listing, which NTFS brings up to date lazily (a
+		// subfolder keeps the write time it had before its last file was
+		// added until the folder is next opened), so an unchanged folder
+		// looked changed on the next scan and a changed one could look
+		// unchanged. Elsewhere entry.Info() is this same lstat.
+		info, err := os.Lstat(path)
 		if err != nil {
 			return err
 		}
