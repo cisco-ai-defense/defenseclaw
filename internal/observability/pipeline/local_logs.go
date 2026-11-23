@@ -293,7 +293,23 @@ func (pipeline *LocalLogPipeline) Process(
 	metadata router.Metadata,
 	builder router.RecordBuilder,
 ) (LocalLogOutcome, error) {
-	return pipeline.process(ctx, metadata, builder, false, "", true)
+	return pipeline.process(ctx, metadata, builder, false, "", true, nil)
+}
+
+// ProcessChecked validates the already-built optional work before attempting
+// the local append. The same immutable projections are returned after the
+// append; validation never causes a second projection or destination enqueue.
+// Dropped records have no append and retain the ordinary lazy outcome.
+func (pipeline *LocalLogPipeline) ProcessChecked(
+	ctx context.Context,
+	metadata router.Metadata,
+	builder router.RecordBuilder,
+	check func(LocalLogOutcome) bool,
+) (LocalLogOutcome, error) {
+	if check == nil {
+		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+	}
+	return pipeline.process(ctx, metadata, builder, false, "", true, check)
 }
 
 // ProcessLocalOnly applies the same collection, mandatory-floor, generated
@@ -305,7 +321,7 @@ func (pipeline *LocalLogPipeline) ProcessLocalOnly(
 	metadata router.Metadata,
 	builder router.RecordBuilder,
 ) (LocalLogOutcome, error) {
-	return pipeline.process(ctx, metadata, builder, true, "", false)
+	return pipeline.process(ctx, metadata, builder, true, "", false, nil)
 }
 
 // ProcessImported applies the ordinary collection, construction, local
@@ -325,7 +341,7 @@ func (pipeline *LocalLogPipeline) ProcessImported(
 		(suppressAll && originDestination != "") {
 		return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
 	}
-	return pipeline.process(ctx, metadata, builder, suppressAll, originDestination, false)
+	return pipeline.process(ctx, metadata, builder, suppressAll, originDestination, false, nil)
 }
 
 // ProcessManagedLogFallback projects a locally produced canonical log only to
@@ -412,6 +428,7 @@ func (pipeline *LocalLogPipeline) process(
 	localOnly bool,
 	originDestination string,
 	exportOnWriteFailure bool,
+	checkOptional func(LocalLogOutcome) bool,
 ) (LocalLogOutcome, error) {
 	skipLocal := observability.SkipLocalWrite(ctx)
 	if skipLocal && (localOnly || originDestination != "") {
@@ -422,11 +439,19 @@ func (pipeline *LocalLogPipeline) process(
 		return outcome, err
 	}
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
+	if checkOptional != nil {
+		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
+		if !checkOptional(outcome) {
+			return LocalLogOutcome{}, &Error{code: ErrorInvalidInput}
+		}
+	}
 	if skipLocal {
 		// The store holds this spooled occurrence already, or cannot say
 		// (observability.WithSkipLocalWrite): hand back its remote work only.
 		outcome.localPersisted = true
-		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, "")
+		if checkOptional == nil {
+			pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, "")
+		}
 		return outcome, nil
 	}
 	if err := pipeline.appender.AppendContext(ctx, prepared.record.Clone(), prepared.projection); err != nil {
@@ -445,14 +470,18 @@ func (pipeline *LocalLogPipeline) process(
 		// remote projections of this gateway's own record with the error, so
 		// the caller can export them and the decision and the outage stay
 		// visible remotely (GAP-1536). Imported records stay SQLite-first.
-		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
+		if checkOptional == nil {
+			pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
+		}
 		return outcome, writeErr
 	}
 	outcome.localPersisted = true
 	if localOnly {
 		return outcome, nil
 	}
-	pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
+	if checkOptional == nil {
+		pipeline.projectOptional(&outcome, prepared.record, prepared.optional, sinkPolicy, originDestination)
+	}
 	return outcome, nil
 }
 

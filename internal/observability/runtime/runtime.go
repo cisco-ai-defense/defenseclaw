@@ -477,9 +477,16 @@ func (runtime *Runtime) emitWithLeaseControls(
 		(suppressAll && originDestination != "") || (localOnly && originDestination != "") {
 		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
 	}
+	guardedManifest := managedManifestDigestBound(ctx)
+	if guardedManifest && (localOnly || inbound || originDestination != "" || suppressAll) {
+		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+	}
 	graph := lease.Graph()
 	component, ok := lease.Component(LocalLogComponentName)
 	if graph == nil || !ok {
+		return pipeline.LocalLogOutcome{}, &Error{code: ErrorComponentUnavailable}
+	}
+	if !managedManifestGenerationMatches(ctx, graph.Generation()) {
 		return pipeline.LocalLogOutcome{}, &Error{code: ErrorComponentUnavailable}
 	}
 	local, ok := component.(*localLogComponent)
@@ -511,7 +518,18 @@ func (runtime *Runtime) emitWithLeaseControls(
 			ctx, metadata, originDestination, suppressAll, processBuilder,
 		)
 	default:
-		outcome, processErr = local.Process(ctx, metadata, processBuilder)
+		if guardedManifest {
+			mismatch := false
+			outcome, processErr = local.ProcessChecked(ctx, metadata, processBuilder, func(candidate pipeline.LocalLogOutcome) bool {
+				mismatch = !managedManifestProjectionMatches(ctx, candidate)
+				return !mismatch
+			})
+			if mismatch {
+				return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+			}
+		} else {
+			outcome, processErr = local.Process(ctx, metadata, processBuilder)
+		}
 	}
 	if processErr != nil {
 		// A failed SQLite write (disk full) still hands back the remote
@@ -520,6 +538,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 		// (GAP-1536). Imported records stay SQLite-first, and so does a
 		// record whose producer writes it again (RemoteExportAfterLocalWrite).
 		if len(outcome.OptionalWork()) > 0 {
+			if !managedManifestProjectionMatches(ctx, outcome) {
+				return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+			}
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
@@ -541,6 +562,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 		if processErr != nil {
 			return outcome, processErr
 		}
+	}
+	if !managedManifestProjectionMatches(ctx, outcome) {
+		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
 	}
 	if !outcome.LocalPersisted() && !outcome.ManagedOnly() {
 		return outcome, nil

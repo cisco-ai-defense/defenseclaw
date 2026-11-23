@@ -3682,6 +3682,11 @@
         "include_network_domains": {
           "type": "boolean"
         },
+        "include_skill_content_hashes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Read skill-folder files to compute content fingerprints and skill facts. Set false to keep skill discovery without reading or hashing skill-folder contents or attaching skill facts."
+        },
         "include_user_email": {
           "type": "boolean",
           "default": false,
@@ -3691,6 +3696,11 @@
           "type": "boolean",
           "default": false,
           "description": "Opt in to attaching the end-user directory principal (UPN) and the session's Kerberos principal to every identity-carrying record: hook decisions, guardrail evaluations, tool activity, agent, model, tool and guardrail spans, and inventory records. Off by default: like the email address, the principal identifies a person across systems."
+        },
+        "include_skill_manifests": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to sending the text of each skill's SKILL.md with the managed skill inventory, once per file version, with destination redaction applied. Off by default: it is file content from the endpoint."
         },
         "trusted_ad_child_domains": {
           "type": "array",
