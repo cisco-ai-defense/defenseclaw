@@ -32,7 +32,13 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// mcpHelperModes holds the helper modes a platform test file adds.
+var mcpHelperModes = map[string]func() int{}
+
 func mcpHelper(mode string) int {
+	if f := mcpHelperModes[mode]; f != nil {
+		return f()
+	}
 	switch mode {
 	case "exit":
 		fmt.Fprintln(os.Stderr, "helper: failing on purpose")

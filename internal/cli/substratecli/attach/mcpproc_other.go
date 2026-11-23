@@ -2,20 +2,24 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !unix
+//go:build !unix && !windows
 
 package attach
 
 import "os/exec"
 
-func prepareMCPCmd(*exec.Cmd) {}
+// mcpProc is a started command; this platform has no process tree to end.
+type mcpProc struct{ cmd *exec.Cmd }
 
-// terminateMCP and killMCP both end the process: Windows has no SIGTERM for
-// a console-less child.
-func terminateMCP(cmd *exec.Cmd) { killMCP(cmd) }
-
-func killMCP(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
+func startMCP(cmd *exec.Cmd) (*mcpProc, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
+	return &mcpProc{cmd: cmd}, nil
 }
+
+func (p *mcpProc) terminate() { p.kill() }
+
+func (p *mcpProc) kill() { _ = p.cmd.Process.Kill() }
+
+func (p *mcpProc) release() {}

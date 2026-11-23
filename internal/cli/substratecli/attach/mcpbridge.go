@@ -129,7 +129,7 @@ type MCPServe struct {
 }
 
 type mcpChild struct {
-	cmd    *exec.Cmd
+	proc   *mcpProc
 	in     chan []byte
 	done   chan struct{} // closed once the child and its readers are gone
 	killed atomic.Bool
@@ -234,7 +234,6 @@ func (s *mcpSession) open() {
 	s.stopCurrent()
 	argv := s.o.Spec.Argv
 	cmd := exec.Command(argv[0], argv[1:]...)
-	prepareMCPCmd(cmd)
 	inR, inW, err1 := os.Pipe()
 	outR, outW, err2 := os.Pipe()
 	errR, errW, err3 := os.Pipe()
@@ -249,7 +248,7 @@ func (s *mcpSession) open() {
 		return
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, errW
-	err := cmd.Start()
+	proc, err := startMCP(cmd)
 	// The child holds its ends now; ours of those must close either way, or
 	// the pipes never report the end.
 	_ = inR.Close()
@@ -263,7 +262,7 @@ func (s *mcpSession) open() {
 		s.sendError("mcp_command_failed")
 		return
 	}
-	c := &mcpChild{cmd: cmd, in: make(chan []byte, mcpStdinQueue), done: make(chan struct{})}
+	c := &mcpChild{proc: proc, in: make(chan []byte, mcpStdinQueue), done: make(chan struct{})}
 	s.mu.Lock()
 	s.cur = c
 	s.mu.Unlock()
@@ -280,6 +279,9 @@ func (s *mcpSession) open() {
 	go s.pumpStdin(c, inW)
 	go func() {
 		werr := cmd.Wait()
+		// Windows: end what the command left running (its job), so the
+		// pipes close and the record goes only with the whole tree.
+		proc.release()
 		drained := make(chan struct{})
 		go func() { readers.Wait(); close(drained) }()
 		select {
@@ -329,17 +331,17 @@ func (s *mcpSession) stopCurrent() {
 	}
 }
 
-// kill ends c: SIGTERM, then SIGKILL after the grace (Windows: Kill), and
-// waits until it and its readers are gone.
+// kill ends c: SIGTERM, then SIGKILL after the grace (Windows: the job at
+// once), and waits until it and its readers are gone.
 func (s *mcpSession) kill(c *mcpChild) {
 	c.killed.Store(true)
-	terminateMCP(c.cmd)
+	c.proc.terminate()
 	select {
 	case <-c.done:
 		return
 	case <-time.After(s.o.KillGrace):
 	}
-	killMCP(c.cmd)
+	c.proc.kill()
 	<-c.done
 }
 
