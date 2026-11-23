@@ -82,10 +82,23 @@ func mayHoldHostScript(source string) bool {
 		return false
 	}
 	lower := strings.ToLower(source)
-	for _, word := range []string{"powershell", "pwsh", "cmd", "iex", "invoke-expression", "{"} {
+	for _, word := range []string{"powershell", "pwsh", "cmd", "iex", "invoke-expression", "{", "start-process", "saps", "--%"} {
 		if strings.Contains(lower, word) {
 			return true
 		}
+	}
+	// The start alias of Start-Process, as a word (powerShellChildArgvCall).
+	for index := strings.Index(lower, "start"); index >= 0; {
+		end := index + len("start")
+		if (index == 0 || strings.ContainsRune(" \t;|&(", rune(lower[index-1]))) &&
+			end < len(lower) && (lower[end] == ' ' || lower[end] == '\t') {
+			return true
+		}
+		next := strings.Index(lower[end:], "start")
+		if next < 0 {
+			break
+		}
+		index = end + next
 	}
 	return false
 }
@@ -1553,6 +1566,11 @@ func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 {
+		if script != nil && onlyStopParsingDiagnostics(script) {
+			// A --% remainder is the one part psparse leaves unread: the
+			// argv it hands the program is read all the same.
+			return powerShellChildArgvTexts(script, nil, caps)
+		}
 		return nil, psparseBoundCaps(script)
 	}
 	var out []nestedText
@@ -1603,7 +1621,7 @@ func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 		}
 		out = append(out, nestedText{text: strings.TrimSpace(nested.Text), dialect: dialect})
 	}
-	return out, caps
+	return powerShellChildArgvTexts(script, out, caps)
 }
 
 // powerShellInertCommands are commands that change nothing a later statement

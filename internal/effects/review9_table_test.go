@@ -13,7 +13,10 @@ import "testing"
 var psr9cases = []rv7case{
 	// off-table cmd shapes: psparse is NotStatic (ps_cmd_argv) -> never fully known
 	{"psr9-K01 cmd: a word before /c", raPS, "", `cmd foo /c del C:\Users\u\.ssh\authorized_keys`, rdyn},
-	{"psr9-K02 cmd: unknown option before /c", raPS, "", `cmd /t:0a /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	// /t:0a is a cmd startup switch (psparse.CmdStartupSwitch, the one cmd
+	// switch set: rel-1-0-10:GAP-1708): the payload is read; /t:0g is not one.
+	{"psr9-K02 cmd: the /t:0a switch before /c", raPS, "", `cmd /t:0a /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"psr9-K02b cmd: unknown option before /c", raPS, "", `cmd /t:0g /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
 	{"psr9-K03 cmd: padded /c", raPS, "", `cmd '/c ' del C:\Users\u\.ssh\authorized_keys`, rwAK},
 	{"psr9-K05 cmd: /r", raPS, "", `cmd /r del C:\Users\u\.ssh\authorized_keys`, rwAK},
 	{"psr9-K06 cmd: /k then /c", raPS, "", `cmd /k /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
