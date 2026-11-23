@@ -44,6 +44,13 @@ func gap0923Hook(api *APIServer, ctx context.Context, command, id string) int {
 // 14.9, 4.8 and 5.5 MB): the walk made once a reading, one parser per
 // grammar reused, each cd text read once and each segment asked once a
 // hook whether it names a relative operand.
+//
+// The bounds are for a plain build. The race detector instruments every
+// allocation and about doubles TotalAlloc a hook (and-chain 20: 30.3 MB, bound
+// 15.5; function cd make: 7.7 MB, bound 6.2; FOLD-2 gateway -race, GAP-1059).
+// Under -race the hooks still run, so the detector covers the placement
+// walk, and the byte figure is logged, but it is not asserted
+// (hookAnswerRaceBuild). A plain build keeps every bound.
 func TestGAP0923GuestHookAllocations(t *testing.T) {
 	pack := "default"
 	installToolCallCorpusProfileConnector(t, "claudecode", pack)
@@ -97,7 +104,7 @@ func TestGAP0923GuestHookAllocations(t *testing.T) {
 		perHook := (after.TotalAlloc - before.TotalAlloc) / hooks
 		objects := (after.Mallocs - before.Mallocs) / hooks
 		t.Logf("GAP0923ALLOC %s: %d bytes %d objects a hook", shape.name, perHook, objects)
-		if perHook > shape.bound {
+		if perHook > shape.bound && !hookAnswerRaceBuild {
 			t.Errorf("%s: a sandbox actor hook allocated %.2f MB, over %.2f MB (substrate-1 GAP-0923)",
 				shape.name, float64(perHook)/1e6, float64(shape.bound)/1e6)
 		}
