@@ -139,8 +139,16 @@ func (a *APIServer) serveSubstrateRelayCert(st *substrateState, w http.ResponseW
 		}
 		if got.Retry {
 			// The relay asked again with the same proof: the reply to its
-			// renewal was lost (GAP-0958).
+			// renewal was lost (GAP-0958). One retry is that; a second
+			// and later ones inside the same grace are not (GAP-0970):
+			// still issued, but HIGH.
 			extra["retry"] = true
+			if got.Retries > relayCertRetriesInfo {
+				extra["retries"] = got.Retries
+				a.substrateRelayCertAudit(st, r, "HIGH", "relay serving certificate renewal retried again for "+actor.Atespace+"/"+actor.Name+": the same previous certificate was proved more than once; a lost reply explains one retry (it is issued)",
+					"substrate.relay.cert_retry_repeated", row, extra)
+				break
+			}
 		}
 		a.substrateRelayCertAudit(st, r, "INFO", "relay serving certificate issued for "+actor.Atespace+"/"+actor.Name,
 			"substrate.relay.cert", row, extra)
@@ -185,6 +193,10 @@ func (a *APIServer) serveSubstrateRelayCert(st *substrateState, w http.ResponseW
 	writeSubstrateJSON(w, http.StatusOK, relay.CertResponse{Cert: string(cert)})
 }
 
+// relayCertRetriesInfo is how many retries of one renewal inside a grace
+// write an INFO row (GAP-0970); later ones write HIGH.
+const relayCertRetriesInfo = 1
+
 // relayCertCADropped reports whether cur is the actor's live certificate
 // and an emergency rotation dropped the CA that signed it (GAP-0929).
 func (st *substrateState) relayCertCADropped(ctx context.Context, atespace, uid string, cur *x509.Certificate) bool {
@@ -217,6 +229,13 @@ func (st *substrateState) relayCertLive(ctx context.Context, reg registry.Regist
 	case err != nil:
 		if refuse {
 			return fmt.Errorf("relay certificate record: %w", err)
+		}
+		// flag: the CA's word is enough, and the row says nothing could
+		// be checked (GAP-0971).
+		if st.audit != nil {
+			st.audit(ctx, "WARN", "attach to "+reg.Atespace+"/"+reg.Name+" takes a relay certificate without checking it is the actor's live one: the leader's record of live relay certificates is unavailable (substrate.relay_cert_reissue flag)",
+				map[string]any{"event": "substrate.relay.cert_record_unavailable", "atespace": reg.Atespace, "actor": reg.Name, "actor_uid": reg.UID,
+					"serial": serial, "error": err.Error(), "mode": "flag"})
 		}
 		return nil
 	case ok && !live.Cleared && live.Serial == serial:

@@ -53,6 +53,11 @@ type RelayCert struct {
 	// answer, and attach takes Prev meanwhile. Recover's mark has none.
 	Prev      string    `json:"prev,omitempty"`
 	PrevUntil time.Time `json:"prev_until,omitzero"`
+	// Retries counts the renewals that proved Prev inside this grace
+	// (GAP-0970). A lost reply asks once more; more than that is not a
+	// lost reply. It starts over with each renewal and when the relay
+	// presents the live serial.
+	Retries int `json:"retries,omitempty"`
 }
 
 // relayCertClearedFor is how long recover's mark lasts: every certificate
@@ -92,6 +97,9 @@ type RelayCertClaimed struct {
 	Set   bool      `json:"set"`
 	Prev  RelayCert `json:"prev,omitzero"`
 	Retry bool      `json:"retry,omitempty"`
+	// Retries is how many retries this grace has seen, this one included
+	// (GAP-0970).
+	Retries int `json:"retries,omitempty"`
 }
 
 // RelayCerts is the leader's record of live relay certificates.
@@ -168,7 +176,7 @@ func (s *FileStore) ClaimRelayCert(_ context.Context, c RelayCertClaim) (RelayCe
 	if live {
 		out.Prev = old
 	}
-	if c.Cert.Cleared || c.Cert.Prev != "" {
+	if c.Cert.Cleared || c.Cert.Prev != "" || c.Cert.Retries != 0 {
 		return out, errors.New("registry: a relay certificate claim names only the serial, the expiry and the CA")
 	}
 	rec := c.Cert
@@ -182,7 +190,8 @@ func (s *FileStore) ClaimRelayCert(_ context.Context, c RelayCertClaim) (RelayCe
 		// The same renewal again: its reply was lost. The grace does not
 		// grow with it.
 		rec.Prev, rec.PrevUntil = old.Prev, old.PrevUntil
-		out.Retry = true
+		rec.Retries = old.Retries + 1
+		out.Retry, out.Retries = true, rec.Retries
 	case live && (c.Expect != "" || !old.Cleared):
 		return out, nil
 	}
@@ -214,7 +223,7 @@ func (s *FileStore) relayCertSeen(key, serial string) (RelayCertClaimed, error) 
 	if !ok || old.Cleared || old.Prev == "" || old.Serial != serial {
 		return RelayCertClaimed{}, nil
 	}
-	old.Prev, old.PrevUntil = "", time.Time{}
+	old.Prev, old.PrevUntil, old.Retries = "", time.Time{}, 0
 	b, err := json.Marshal(relayCertFile{Key: key, RelayCert: old})
 	if err != nil {
 		return RelayCertClaimed{}, err
