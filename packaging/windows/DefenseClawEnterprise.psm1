@@ -1832,7 +1832,13 @@ namespace $nativeNamespace
             const uint GENERIC_WRITE = 0x40000000;
             const uint GENERIC_ALL = 0x10000000;
             const uint FILE_WRITE_RIGHTS = 0x000D0156;
-            if ((access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_RIGHTS)) != 0)
+            // MAXIMUM_ALLOWED takes every right the DACL or an enabled
+            // privilege grants, and ACCESS_SYSTEM_SECURITY also writes the
+            // SACL (GAP-2014).
+            const uint MAXIMUM_ALLOWED = 0x02000000;
+            const uint ACCESS_SYSTEM_SECURITY = 0x01000000;
+            if ((access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_RIGHTS |
+                    MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY)) != 0)
                 throw new ArgumentException("a backup read must not ask for write access", "access");
             IntPtr handle = CreateFileW(
                 path, access, share, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
