@@ -60,6 +60,9 @@ func (s *ContinuousDiscoveryService) resetSkillFacts() {
 // skillFacts returns the facts of the skill folder at path, computed once
 // per skill scan. One scan reads at most maxSkillScanBytes across all users.
 func (s *ContinuousDiscoveryService) skillFacts(path string) *AISkillFacts {
+	if s.opts.DisableSkillContentHashes {
+		return nil
+	}
 	s.skillFactsMu.Lock()
 	defer s.skillFactsMu.Unlock()
 	if facts, seen := s.skillFactsSeen[path]; seen {

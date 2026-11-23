@@ -141,6 +141,7 @@ type AIDiscoveryOptions struct {
 	DisabledSignatureIDs        []string
 	IncludeShellHistory         bool
 	IncludePackageManifests     bool
+	DisableSkillContentHashes   bool
 	IncludeEnvVarNames          bool
 	IncludeNetworkDomains       bool
 	LookupModelProvenanceOnline bool
@@ -879,6 +880,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		DisabledSignatureIDs:        append([]string{}, ad.DisabledSignatureIDs...),
 		IncludeShellHistory:         ad.IncludeShellHistory,
 		IncludePackageManifests:     ad.IncludePackageManifests,
+		DisableSkillContentHashes:   !ad.EffectiveIncludeSkillContentHashes(),
 		IncludeEnvVarNames:          ad.IncludeEnvVarNames,
 		IncludeNetworkDomains:       ad.IncludeNetworkDomains,
 		LookupModelProvenanceOnline: ad.LookupModelProvenanceOnline,

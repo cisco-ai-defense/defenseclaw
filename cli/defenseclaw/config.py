@@ -5090,6 +5090,9 @@ class AIDiscoveryConfig:
     include_package_manifests: bool = True
     include_env_var_names: bool = True
     include_network_domains: bool = True
+    # False keeps skill discovery without reading skill-folder contents for facts.
+    # Mirrors internal/config.AIDiscoveryConfig.IncludeSkillContentHashes.
+    include_skill_content_hashes: bool = True
     # Off by default, like the other opt-ins below it: the address identifies a
     # person rather than an account on one endpoint, and it leaves the endpoint
     # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
@@ -9608,6 +9611,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
+        include_skill_content_hashes=_coerce_bool(raw.get("include_skill_content_hashes", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
         include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
         trusted_ad_child_domains=[str(v) for v in (raw.get("trusted_ad_child_domains", []) or [])],

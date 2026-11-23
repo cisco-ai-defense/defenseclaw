@@ -110,6 +110,7 @@ func DetectEnvironment() Environment {
 func DefaultConfig() *Config {
 	dataDir := DefaultDataPath()
 	clawMode := ClawOpenClaw
+	includeSkillContentHashes := true
 	return &Config{
 		DataDir:       dataDir,
 		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
@@ -182,6 +183,7 @@ func DefaultConfig() *Config {
 			IncludePackageManifests:   true,
 			IncludeEnvVarNames:        true,
 			IncludeNetworkDomains:     true,
+			IncludeSkillContentHashes: &includeSkillContentHashes,
 			MaxFilesPerScan:           1000,
 			MaxFileBytes:              512 * 1024,
 			StoreRawLocalPaths:        false,

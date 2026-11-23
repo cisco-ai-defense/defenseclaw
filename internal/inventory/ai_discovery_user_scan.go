@@ -81,6 +81,8 @@ type UserScanOptions struct {
 	// service account cannot read a home on Linux or macOS, so the per-user
 	// scan is the only reader that can (GAP-0961).
 	IncludeUserEmail bool `json:"include_user_email,omitempty"`
+	// A negative option preserves the existing worker behavior when omitted.
+	DisableSkillContentHashes bool `json:"disable_skill_content_hashes,omitempty"`
 }
 
 // UserScanOptionsFromConfig keeps the privacy settings of ai_discovery and
@@ -98,6 +100,8 @@ func UserScanOptionsFromConfig(cfg *config.Config) UserScanOptions {
 		StoreRawLocalPaths:      ad.StoreRawLocalPaths,
 		IDEInventory:            ad.EffectiveIDEInventory(),
 		IncludeUserEmail:        ad.IncludeUserEmail,
+
+		DisableSkillContentHashes: !ad.EffectiveIncludeSkillContentHashes(),
 	}
 }
 
@@ -256,6 +260,8 @@ func scanUserHomeWithSystemBinaryDirs(ctx context.Context, home, account string,
 			HomeDirs:         []string{home},
 			IDEInventory:     opts.IDEInventory,
 			IncludeUserEmail: opts.IncludeUserEmail,
+
+			DisableSkillContentHashes: opts.DisableSkillContentHashes,
 		}),
 		catalog:            catalog,
 		userHomeScan:       true,
@@ -678,6 +684,9 @@ func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, 
 	for i, ev := range sig.Evidence {
 		ev.PathHash = namespace(ev.PathHash)
 		ev.WorkspaceHash = namespace(ev.WorkspaceHash)
+		if s.opts.DisableSkillContentHashes {
+			ev.Skill = nil // The spool may contain an observation made before the setting changed.
+		}
 		if !s.opts.StoreRawLocalPaths {
 			ev.RawPath = ""
 		}

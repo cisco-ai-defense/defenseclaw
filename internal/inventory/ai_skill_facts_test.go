@@ -11,12 +11,15 @@
 package inventory
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func writeSkillFiles(t *testing.T, root string, files map[string]string) {
@@ -243,6 +246,59 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	if got := svc.skillFacts(filepath.Join(home, ".agents", "skills", "pdf")); got.ContentStatus != SkillContentTooLarge {
 		t.Fatalf("over the scan budget: %+v", got)
 	}
+}
+
+func TestSkillContentHashOptOutPreservesDiscovery(t *testing.T) {
+	home := t.TempDir()
+	skill := filepath.Join(home, ".agents", "skills", "pdf")
+	writeSkillFiles(t, skill, map[string]string{"SKILL.md": "Read a PDF.\n"})
+	catalog := []AISignature{{ID: "codex", Vendor: "OpenAI", Category: SignalSupportedConnector, SupportedConnector: "codex", SkillPaths: []string{"~/.agents/skills"}}}
+	cfg := config.DefaultConfig()
+	includeHashes := false
+	cfg.AIDiscovery.IncludeSkillContentHashes = &includeHashes
+	opts := AIDiscoveryOptionsFromConfig(cfg)
+	opts.HomeDir, opts.HomeDirs, opts.DataDir = home, []string{home}, filepath.Join(home, "data")
+	svc := NewContinuousDiscoveryServiceWithOptions(opts, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
+	if facts := svc.skillFacts(skill); facts != nil || svc.skillBytesRead != 0 || svc.skillFactsSeen != nil {
+		t.Fatalf("disabled skill hashing attempted a read: facts %+v, bytes %d", facts, svc.skillBytesRead)
+	}
+
+	assertSkillWithoutFacts := func(signals []AISignal) {
+		t.Helper()
+		for _, signal := range signals {
+			for _, ev := range signal.Evidence {
+				if ev.Type == "skill_entry" && ev.Basename == "pdf" {
+					if ev.Skill != nil {
+						t.Fatalf("disabled skill hashing returned facts: %+v", ev.Skill)
+					}
+					return
+				}
+			}
+		}
+		t.Fatal("disabled hashing hid the discovered skill")
+	}
+	assertSkillWithoutFacts(svc.detectSkills())
+
+	encoded, err := json.Marshal(UserScanOptionsFromConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var worker UserScanOptions
+	if err := json.Unmarshal(encoded, &worker); err != nil || !worker.DisableSkillContentHashes {
+		t.Fatalf("worker opt-out did not survive transport: %v", err)
+	}
+	assertSkillWithoutFacts(ScanUserHome(t.Context(), home, "test-user", 1000, worker, catalog).Signals)
+	if !SandboxScanOptionsFromConfig(cfg).DisableSkillContentHashes {
+		t.Fatal("sandbox scanner did not inherit the opt-out")
+	}
+
+	// Records from the previous scan can outlive a setting change.
+	old := AISignal{Evidence: []AIEvidence{{Type: "skill_entry", Basename: "pdf", Skill: &AISkillFacts{
+		ContentHash: mustHashSkill(t, skill), ContentStatus: SkillContentOK,
+	}}}}
+	assertSkillWithoutFacts([]AISignal{svc.attributeUserScanSignal(old, "1000", "test-user")})
+	assertSkillWithoutFacts([]AISignal{svc.attributeSandboxSignal(old, "sandbox-id", "sandbox-name")})
 }
 
 func TestValidateSkillFactsRejectsForgedFields(t *testing.T) {
