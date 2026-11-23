@@ -603,28 +603,32 @@ func guestCallRunsUnreadCommand(command, home string) bool {
 func guestNodeRunsUnreadCommand(root syntax.Node, home string) bool {
 	found := false
 	syntax.Walk(root, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if found || !ok || len(call.Args) == 0 {
-			return !found
-		}
-		for index, word := range call.Args {
-			program, static := hookpaths.StaticWord(word, home)
-			if !static || cmdRedefiningCommands[program] || program == "mapfile" || program == "readarray" {
-				found = true
-				break
-			}
-			// builtin, command and exec run the word after their options.
-			if (program != "builtin" && program != "command" && program != "exec") || index == len(call.Args)-1 {
-				break
-			}
-			if next, known := hookpaths.StaticWord(call.Args[index+1], home); known && strings.HasPrefix(next, "-") {
-				found = true // an option word: read it as unread rather than parse every wrapper option
-				break
-			}
+		if call, ok := node.(*syntax.CallExpr); ok && !found {
+			found = guestCallUnread(call, home)
 		}
 		return !found
 	})
 	return found
+}
+
+// guestCallUnread reports one simple command the statement split cannot read
+// (guestCallRunsUnreadCommand), not counting the commands nested in its
+// words.
+func guestCallUnread(call *syntax.CallExpr, home string) bool {
+	for index, word := range call.Args {
+		program, static := hookpaths.StaticWord(word, home)
+		if !static || cmdRedefiningCommands[program] || program == "mapfile" || program == "readarray" {
+			return true
+		}
+		// builtin, command and exec run the word after their options.
+		if (program != "builtin" && program != "command" && program != "exec") || index == len(call.Args)-1 {
+			return false
+		}
+		if next, known := hookpaths.StaticWord(call.Args[index+1], home); known && strings.HasPrefix(next, "-") {
+			return true // an option word: read it as unread rather than parse every wrapper option
+		}
+	}
+	return false
 }
 
 // guestShellReading is one statement of a call, by its source text, and a
@@ -1222,7 +1226,46 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 			}
 		}
 	}
-	unread := len(bodies) != 0 && guestNodeRunsUnreadCommand(file, home)
+	// unread holds where each command the split cannot read starts
+	// (guestCallUnread). A function may be called another way only by one
+	// that may run after its declaration: after it in the text, in a loop
+	// that goes on past it, or in a function body. $CMD before g() { echo m
+	// > config.yaml; }; g; cd ~/.defenseclaw && ls cannot call g, and
+	// counting it ran the body at the end of the script, a strict block
+	// where the laptop and both rels allow (substrate-1 GAP-0989).
+	var unread []int
+	if len(bodies) != 0 {
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok && guestCallUnread(call, home) {
+				unread = append(unread, int(call.Pos().Offset()))
+			}
+			return true
+		})
+	}
+	mayRunFrom := func(pos, from int) bool {
+		if pos >= from {
+			return true
+		}
+		for _, loop := range loops {
+			if loop.start <= pos && pos < loop.end && loop.end > from {
+				return true
+			}
+		}
+		for _, body := range bodies {
+			if body.start <= pos && pos < body.end {
+				return true
+			}
+		}
+		return false
+	}
+	// open marks a function that may be called another way than where the
+	// text calls it: an unread command that may run after its declaration,
+	// or a word of its name that is neither a call nor the declaration.
+	open := make([]bool, len(bodies))
+	for at, body := range bodies {
+		open[at] = guestWordCount(command, body.name) != 1+len(sites[body.name]) ||
+			slices.ContainsFunc(unread, func(pos int) bool { return mayRunFrom(pos, body.start) })
+	}
 	runs := map[int]int{}
 	var place func(pos, depth int) int
 	place = func(pos, depth int) int {
@@ -1239,7 +1282,7 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 			from, ok := runs[at]
 			if !ok {
 				from = len(command)
-				if !unread && depth < 8 && guestWordCount(command, body.name) == 1+len(sites[body.name]) {
+				if !open[at] && depth < 8 {
 					from = body.start
 					for _, site := range sites[body.name] {
 						if site >= body.start && site < body.end {
@@ -1270,7 +1313,7 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 			from, ok := firsts[at]
 			if !ok {
 				from = body.start
-				if !unread && depth < 8 && len(sites[body.name]) != 0 && guestWordCount(command, body.name) == 1+len(sites[body.name]) {
+				if len(unread) == 0 && !open[at] && depth < 8 && len(sites[body.name]) != 0 {
 					from = len(command)
 					for _, site := range sites[body.name] {
 						if site >= body.start && site < body.end {

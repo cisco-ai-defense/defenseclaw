@@ -83,7 +83,9 @@ func TestGAP0883GuestReadsEachStatementWhereItRuns(t *testing.T) {
 // where the laptop and both rels allow (substrate-1 GAP-0989, RV-SEC10C rows
 // Y04, Z14, Y08, Y10, Z16). The attack rows keep the laptop's block: the
 // write after a builtin cd, a CDPATH spelled CD""PATH, a function called
-// after the cd.
+// after the cd. A command the split cannot read before a function's
+// declaration cannot call it: $CMD; g() { echo m > config.yaml; }; g; cd
+// ~/.defenseclaw && ls ran the body at the end of the script (Y23).
 func TestGAP0989GuestKnowsTheFolderWhereTheMoveRuns(t *testing.T) {
 	gap0377Check(t, []gap0377Row{
 		{name: "Y04 git -C builtin later dc", command: "git -C src status; echo m > config.yaml; builtin cd ~/.defenseclaw && ls", benign: true},
@@ -100,6 +102,14 @@ func TestGAP0989GuestKnowsTheFolderWhereTheMoveRuns(t *testing.T) {
 		{name: "Z18 fn cd ssh write twice", command: "f() { cd ~/.ssh; }; echo k >> authorized_keys; f; echo k >> authorized_keys"},
 		{name: "W01 CDPATH home ssh", command: "cd /tmp; export CDPATH=$HOME; cd .ssh; echo k >> authorized_keys"},
 		{name: "W02 fn builtin cd dc", command: "f() { builtin cd ~/.defenseclaw; }; f; echo m > config.yaml"},
+		// An unread command before a function's declaration cannot call it
+		// (RV-SEC10C Y23); one after it, or one that moved the shell before the
+		// call, still counts.
+		{name: "Y23 CMD fn write later dc", command: "$CMD; g() { echo m > config.yaml; }; g; cd ~/.defenseclaw && ls", benign: true},
+		{name: "W03 CMD fn builtin cd ssh", command: "$CMD; f() { echo k >> authorized_keys; }; builtin cd .ssh; f"},
+		{name: "W04 fn CD var after decl", command: "$CMD; CD=cd; f() { echo k >> authorized_keys; }; $CD .ssh; f; cd ~/.ssh"},
+		{name: "W05 CD var before decl", command: "CD=cd; $CD .ssh; f() { echo k >> authorized_keys; }; f; cd ~/.ssh"},
+		{name: "W06 CMD fn cd ssh called", command: "$CMD; f() { cd ~/.ssh; }; f; echo k >> authorized_keys"},
 	})
 }
 
