@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -50,5 +51,40 @@ func TestGAP1792RsyncDestinationRootIsNotAnAuthorizedKeysWrite(t *testing.T) {
 	findings := dispatchTrustedAction(t.Context(), request)
 	if finding := findingWithID(findings, "persistence.ssh_authorized_keys_command"); finding != nil {
 		t.Fatalf("a copy into an ordinary directory raised the SSH rule: %+v", finding)
+	}
+}
+
+// The absolute-redirect exception still follows a pre-existing link into
+// the protected keys file, even when a copied-link scope is unplaced.
+func TestGAP1792AbsoluteRedirectAliasToKeysStillBlocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell scope")
+	}
+	home := filepath.Join(t.TempDir(), "home")
+	cwd := filepath.Join(home, "project")
+	dest := filepath.Join(t.TempDir(), "trial")
+	for _, dir := range []string{cwd, dest, filepath.Join(home, ".ssh")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("synthetic\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("ordinary", filepath.Join(cwd, "source-link")); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(keys, alias); err != nil {
+		t.Fatal(err)
+	}
+	command := `cd ` + cwd + ` && rsync -a --files-from=/tmp/synthetic-list ./ ` + dest + `/ && echo $(cd /tmp && pwd) && grep marker > ` + alias
+	input := actionfacts.Input{Tool: "Bash", Command: command, ActiveHome: home, CWD: cwd, DialectHint: actionfacts.DialectPOSIX}
+	request := shadowLiveRequest(command)
+	request.Connector, request.Input, request.LegacyText = "claudecode", input, command
+	request.targetMemo = hookpaths.NewTargetMemo()
+	if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+		t.Fatal("the existing link into authorized_keys lost its block")
 	}
 }

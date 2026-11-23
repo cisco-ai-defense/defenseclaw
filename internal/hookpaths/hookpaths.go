@@ -6090,7 +6090,7 @@ func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
 type RedirectOccurrence struct {
 	Path     string
 	Safe     bool
-	Absolute bool // the redirect word is a static absolute path
+	Absolute bool // the redirect word begins with a static literal root
 	// NoInnerCommand proves that this redirect's own statement evaluates no
 	// nested command before opening the file. Earlier statements are separate.
 	NoInnerCommand bool
@@ -6123,11 +6123,12 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	}
 	// Only rsync can make the anchored absolute copy scope below. Keep the
 	// extra redirect walk off every other hook call.
-	if strings.Contains(command, "rsync") {
+	if len(result) > 0 && strings.Contains(command, "rsync") {
 		// Record absolute redirect words even when a pipeline makes the linear
 		// before-link proof unavailable. Only the static occurrence gets the
-		// narrow absolute-scope proof; unknown words keep their own hold.
+		// narrow absolute-scope proof; expanded words keep their own hold.
 		absolute, seen := map[string]bool{}, map[string]bool{}
+		descriptorOut := false
 		env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 		syntax.Walk(file, func(node syntax.Node) bool {
 			redirect, ok := node.(*syntax.Redirect)
@@ -6137,6 +6138,7 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			switch redirect.Op {
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 			case syntax.DplOut:
+				descriptorOut = true
 				return true
 			default:
 				return true
@@ -6150,14 +6152,16 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			}
 			path := OperandPath(word, cwd)
 			if !seen[path] {
-				absolute[path] = filepath.IsAbs(word)
+				absolute[path] = filepath.IsAbs(word) && rootLiteralWord(redirect.Word)
 			}
 			seen[path] = true
-			absolute[path] = absolute[path] && filepath.IsAbs(word)
+			absolute[path] = absolute[path] && filepath.IsAbs(word) && rootLiteralWord(redirect.Word)
 			return true
 		})
-		for i := range result {
-			result[i].Absolute = seen[result[i].Path] && absolute[result[i].Path]
+		if !descriptorOut {
+			for i := range result {
+				result[i].Absolute = seen[result[i].Path] && absolute[result[i].Path]
+			}
 		}
 	}
 	statements, linear := linearShellStatements(file)

@@ -61,6 +61,18 @@ func TestGAP1792AbsoluteRedirectOutsideUnplacedCopyScope(t *testing.T) {
 			t.Fatal("a relative redirect inherited the absolute proof")
 		}
 	}
+	variable := SafeShellRedirectOccurrencesWithFacts(command+" && grep marker > $HOME/report", cwd, home, nil)
+	for _, redirect := range variable {
+		if redirect.Path == filepath.Join(home, "report") && redirect.Absolute {
+			t.Fatal("a home-expanded redirect inherited the literal-root proof")
+		}
+	}
+	descriptor := SafeShellRedirectOccurrencesWithFacts(command+" && cat 1>&"+outside, cwd, home, nil)
+	for _, redirect := range descriptor {
+		if redirect.Path == outside && redirect.Absolute {
+			t.Fatal("a descriptor redirect left an ambiguous absolute proof")
+		}
+	}
 	hidden := CommandLinksWithFacts("Bash", command+"; . ./unknown-script", cwd, home, nil)
 	if hidden.AbsoluteRedirectOutsideCDScopes(outside, nil) {
 		t.Fatal("an unobserved directory change lost its global hold")
