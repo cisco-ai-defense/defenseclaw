@@ -7158,9 +7158,44 @@ func TestZeptoClaw_Route_SkipsEntriesWithNoAPIKey(t *testing.T) {
 	}
 }
 
+// zeptoClawSetupRefusedOnWindows is the Windows branch of the ZeptoClaw setup
+// tests (rel-1-0-10:GAP-1529). The proxy connector needs the guardrail proxy,
+// which DefenseClaw does not host on native Windows, so there the contract is
+// that Setup refuses with the platform error and leaves the vendor config and
+// the data dir untouched. It reports true on Windows (the caller returns).
+func zeptoClawSetupRefusedOnWindows(t *testing.T) bool {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "zeptoclaw-config.json")
+	original := `{"providers":{"openrouter":{"api_key":"sk-or-test","api_base":"https://openrouter.ai/api/v1"}}}`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ZeptoClawConfigPathOverride = configPath
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	err := NewZeptoClawConnector().Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "requires the guardrail proxy") {
+		t.Fatalf("ZeptoClaw Setup on Windows = %v, want the platform refusal", err)
+	}
+	if got, rerr := os.ReadFile(configPath); rerr != nil || string(got) != original {
+		t.Fatalf("a refused ZeptoClaw Setup changed the vendor config: %v %q", rerr, got)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() != "zeptoclaw-config.json" {
+			t.Fatalf("a refused ZeptoClaw Setup left %q in the data dir", e.Name())
+		}
+	}
+	return true
+}
+
 func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	// On every sidecar boot, Setup runs. If it overwrites the backup each
 	// time, the second boot captures the already-patched api_base (the
@@ -7253,8 +7288,8 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	// After Setup(), the connector must retain the user's provider table
 	// in memory so Route() can look up upstreams. Otherwise we'd have to
@@ -9586,8 +9621,8 @@ func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *test
 }
 
 func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 
@@ -9663,8 +9698,8 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_PreservesExistingHooks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
@@ -9767,8 +9802,8 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	// Regression test: before the fix, Setup wrote config["hooks"] as
 	// {before_tool: <string path>, ...}, which ZeptoClaw rejected with
@@ -11143,8 +11178,8 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_EmptyProviders_Fails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
