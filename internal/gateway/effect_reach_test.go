@@ -262,7 +262,7 @@ func TestClassifyEffectsKnownBesideReached(t *testing.T) {
 	}
 	f := effectShadowFindings(res, effectRulesOn)
 	wantProof := decide.Proof{Kind: decide.KindRead, Target: decide.TargetCredential,
-		Certainty: decide.CertKnown, Set: decide.CredentialSet(".aws/credentials"), Source: "effects"}
+		Certainty: decide.CertKnown, Set: decide.CredentialSet(".aws/credentials"), Flow: decide.FlowShown, Source: "effects"}
 	if len(f) != 1 || f[0].Proof != wantProof || f[0].RuleID != decide.RuleFor(wantProof) {
 		t.Fatalf("credential read findings = %+v, want its Decide row proof %+v", f, wantProof)
 	}
