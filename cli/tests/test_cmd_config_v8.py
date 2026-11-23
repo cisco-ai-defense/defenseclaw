@@ -392,6 +392,14 @@ def test_config_reference_includes_ai_discovery_inventory_scope() -> None:
     assert "enabled: false" in result.output
 
 
+def test_config_reference_includes_skill_content_hashes_opt_out() -> None:
+    schema = Path(__file__).resolve().parents[2] / "schemas/config/v8/defenseclaw-config.schema.json"
+    with patch.object(cmd_config, "config_v8_schema", return_value=schema.read_text(encoding="utf-8")):
+        result = CliRunner().invoke(cmd_config.config_reference, ["ai_discovery"])
+    assert result.exit_code == 0, result.output
+    assert "include_skill_content_hashes: true" in result.output
+
+
 def test_generic_redaction_profile_refusal_names_unknown_and_defined(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

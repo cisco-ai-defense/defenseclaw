@@ -133,6 +133,8 @@ NEWER_CONFIG_KEYS = (
     ("openshell.admin.unattended_asks", (1, 0, 10)),
     ("openshell.admin.url_rules", (1, 0, 10)),
     ("substrate", (1, 0, 10)),
+    ("ai_discovery.include_skill_content_hashes", (1, 0, 11)),
+    ("ai_discovery.include_skill_manifests", (1, 0, 11)),
 )
 # More keys added after 1.0.9, in the same path language: a "*" segment is
 # one entry of a map of named entries (a connector, a profile). 1.0.9
