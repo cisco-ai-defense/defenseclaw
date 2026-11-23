@@ -51,6 +51,8 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **Protected state on busy Windows machines (1.0.10 and earlier):** a busy Windows machine could let a write through a hard link into DefenseClaw's protected state. A folder read that the system delayed, on the way to the link or the write target, was taken as a network share that did not answer, so the link was not found. Such a write is now refused.
 - **A Secure Client endpoint with no AI Defense endpoint set keeps its endpoint inventory local.** During enrollment, or after a reload that cleared the endpoint, the connector, MCP, skill, plugin and agent inventory records of a Secure Client endpoint (with user ids, and SKILL.md text when `ai_discovery.include_skill_manifests` is on) also went to the operator's own log destinations. They now go only to the local audit log and to AI Defense. Affects 1.0.8 to 1.0.10.
 
+- **Codex machine requirements on managed Linux and macOS:** when someone changes DefenseClaw's part of `/etc/codex/requirements.toml` (a managed value, a hook, or a line added before or after DefenseClaw's blocks), the hook guardian now puts the published file back within seconds, as it does for the Claude Code drop-in. `ensure` and `repair` put back the file DefenseClaw published and fail when they cannot; before, `repair` reported success, left the changed file in place and recorded it as trusted, so the original file then failed `verify`. To keep your own edit of the file, run `reconcile`.
+
 ### Fixed
 
 #### Windows managed install, upgrade and uninstall
