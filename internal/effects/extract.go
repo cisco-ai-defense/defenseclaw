@@ -237,9 +237,15 @@ type walker struct {
 	// command prints; redirOut the 1-based indices of its stdout redirects.
 	stageIn, stageOut stageData
 	literalOut        string
-	redirOut          []int
-	work              int // remaining work budget; 0 -> stop and emit a limit unknown (R3-1)
-	overBudget        bool
+	// printsOut: the current command prints the bytes it reads on its
+	// stdout (stagePrints); hidden counts the enclosing stages whose output
+	// does not reach the call's own stdout (piped on, redirected, captured in
+	// a substitution), so no read under them is shown (GAP-1846).
+	printsOut  bool
+	hidden     int
+	redirOut   []int
+	work       int // remaining work budget; 0 -> stop and emit a limit unknown (R3-1)
+	overBudget bool
 	// pathDialect is the dialect of the frontend currently walking the text,
 	// used only to decide how a leading / is placed on Windows (review 6 #1). It
 	// is DialectNone when the top-level dialect was only guessed, so a guessed
@@ -477,8 +483,20 @@ func (w *walker) walkScript(s *Script, depth int) {
 			w.dead++
 		}
 		w.enterStmt(st)
-		for _, c := range st.Cmds {
+		for i, c := range st.Cmds {
+			// A stage piped on or redirected shows none of its reads, nor do
+			// the bodies it runs (sh -c); the last stage on the call's own
+			// stdout shows what it prints (GAP-1846).
+			hide := c.Pipeline && !c.PipeLast || i+1 < len(st.Cmds) && st.Cmds[i+1].PipeIn || stdoutRedirected(c.Redirs)
+			if hide {
+				w.hidden++
+			}
 			w.commandStage(c, s.Dialect, depth, st.Cond || c.Cond)
+			if hide {
+				w.hidden--
+			} else if w.hidden == 0 {
+				w.markShown(w.stageOut.content)
+			}
 		}
 		w.leaveStmt()
 		if dead {
@@ -490,6 +508,38 @@ func (w *walker) walkScript(s *Script, depth int) {
 			}
 		}
 	}
+}
+
+// walkCaptured walks a command substitution body: its output is the value
+// of a word, not the call's output, so none of its reads is shown (GAP-1846).
+func (w *walker) walkCaptured(sub *Script, depth int) {
+	w.hidden++
+	defer func() { w.hidden-- }()
+	w.walkScript(sub, depth)
+}
+
+// markShown marks the reads a stage prints on the call's own stdout.
+func (w *walker) markShown(reads []int) {
+	for _, idx := range reads {
+		if idx > 0 && idx <= len(w.res.Effects) && w.res.Effects[idx-1].Kind == KindRead {
+			w.res.Effects[idx-1].Shown = true
+		}
+	}
+}
+
+// stagePrints reports a command whose stdout carries the bytes it reads: a
+// reader (cat, head, grep, sed without -i) or a program that prints what it
+// is piped (tee), unless it prints only a summary (wc, a digest, grep -c,
+// diff -q) or edits in place (DET111 GAP-1846). A copy, an upload or an
+// archive prints none of its reads: their bytes go to the destination.
+func stagePrints(p Program, words []Word) bool {
+	if p.Summary || hasRowFlag(words, p, p.SummaryFlags) {
+		return false
+	}
+	if p.InPlace != "" && hasRowFlag(words, p, append([]string{p.InPlace}, p.InPlaceFlags...)) {
+		return false
+	}
+	return p.Prints || p.Pos == PosAllRead && !p.MetadataOnly
 }
 
 // deadStatement reports a statement the frontend found behind a constant
@@ -1032,7 +1082,10 @@ func (w *walker) resolveWords(in []Word) []Word {
 // stageData is what one pipeline stage passes on to the next: the 1-based
 // indices of the reads whose bytes it may print, and a literal it was fed.
 type stageData struct {
-	reads   []int
+	reads []int
+	// content: the reads whose bytes the stage prints on its stdout (a
+	// summary or a redirect drops them; GAP-1846).
+	content []int
 	literal string
 	// exact: the stage printed exactly text (an exact printer, see
 	// exactOutput), so a shell reading the pipe runs that text.
@@ -1049,13 +1102,13 @@ const maxStageSources = 32
 // printed (s7-flow, rel-1-0-10 GAP-0128/GAP-0130). It also links a command
 // substitution's reads to the dynamic data the command sends or writes.
 func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
-	savedIn, savedLit, savedRedir := w.stageIn, w.literalOut, w.redirOut
+	savedIn, savedLit, savedRedir, savedPrints := w.stageIn, w.literalOut, w.redirOut, w.printsOut
 	savedExact, savedText, savedKind := w.exactOK, w.exactText, w.literalKind
 	in := stageData{}
 	if c.PipeIn {
 		in = w.stageOut
 	}
-	w.stageIn, w.literalOut, w.redirOut = in, "", nil
+	w.stageIn, w.literalOut, w.redirOut, w.printsOut = in, "", nil, false
 	w.exactOK, w.exactText, w.literalKind = false, "", ""
 	start, own := len(w.res.Effects), w.cmdNo+1
 	w.command(c, dialect, depth, cond)
@@ -1064,6 +1117,10 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 		out.literal = in.literal
 	}
 	out.reads = appendCapped(out.reads, in.reads...)
+	shows := w.printsOut && !stdoutRedirected(c.Redirs)
+	if shows {
+		out.content = appendCapped(out.content, in.content...)
+	}
 	var nested []int
 	for i := start; i < len(w.res.Effects); i++ {
 		e := &w.res.Effects[i]
@@ -1071,6 +1128,9 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 			continue
 		}
 		out.reads = appendCapped(out.reads, i+1)
+		if shows && e.Origin.Command == own {
+			out.content = appendCapped(out.content, i+1)
+		}
 		if e.Origin.Command != own {
 			nested = appendCapped(nested, i+1)
 		}
@@ -1079,7 +1139,7 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.linkSubstitutionData(start, own, nested)
 	}
 	w.stageOut = out
-	w.stageIn, w.literalOut, w.redirOut = savedIn, savedLit, savedRedir
+	w.stageIn, w.literalOut, w.redirOut, w.printsOut = savedIn, savedLit, savedRedir, savedPrints
 	w.exactOK, w.exactText, w.literalKind = savedExact, savedText, savedKind
 }
 
@@ -1313,7 +1373,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
 			s := w.saveScope()
-			w.walkScript(sub, depth)
+			w.walkCaptured(sub, depth)
 			w.restoreScope(s)
 		}
 		return
@@ -1365,7 +1425,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
 			s := w.saveScope()
-			w.walkScript(sub, depth)
+			w.walkCaptured(sub, depth)
 			w.restoreScope(s)
 		}
 		return
@@ -1593,7 +1653,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
 			s := w.saveScope()
-			w.walkScript(sub, depth)
+			w.walkCaptured(sub, depth)
 			w.restoreScope(s)
 		}
 		return
@@ -1820,6 +1880,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		operandWords = w.joinNewItemName(operandWords)
 	}
 	ops, execCmds, opsUA := w.classifyOperands(operandWords, entry, dialect)
+	w.printsOut = stagePrints(entry, operandWords)
 	if opsUA {
 		unaccounted = true
 	}
@@ -1957,7 +2018,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	nestedStart = len(w.res.Effects)
 	for _, sub := range c.Nested {
 		s := w.saveScope()
-		w.walkScript(sub, depth)
+		w.walkCaptured(sub, depth)
 		w.restoreScope(s)
 	}
 }

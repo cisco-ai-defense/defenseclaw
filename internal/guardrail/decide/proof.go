@@ -209,7 +209,27 @@ type Proof struct {
 	// target (ln -s ~/.ssh/authorized_keys s: an alias of the member the
 	// call can write or read through), not the place the link is put.
 	LinkTo bool
+	// Flow is where a read's content goes in the call (KindRead only): an
+	// own credential read the effects lane proves raises only with a flow
+	// (GAP-1846), and a copy takes the copy cell of its class (GAP-1794).
+	Flow ReadFlow
 }
+
+// ReadFlow is where the content of a read goes in the call (DET111
+// GAP-1846, GAP-1794).
+type ReadFlow uint8
+
+const (
+	// FlowNone: the content stays local: discarded, counted, tested, or
+	// copied beside the file in its own folder.
+	FlowNone ReadFlow = iota
+	// FlowShown: printed on the call's own output (what the agent sees).
+	FlowShown
+	// FlowSent: sent off the host (a network send of the bytes).
+	FlowSent
+	// FlowCopied: copied or moved out of the file's folder.
+	FlowCopied
+)
 
 // IsZero reports a finding with no proof: no kind and no uncertainty mark
 // (a Record or Advise proof with no kind is not zero: its row decides).

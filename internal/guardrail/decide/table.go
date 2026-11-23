@@ -63,6 +63,9 @@ type Row struct {
 	// LinkAt: the row matches only a proof that is not a link to the member
 	// (Proof.LinkTo false): a link placed at the member, or any other kind.
 	LinkAt bool
+	// Flows: the row matches only a proof whose content flow is one of
+	// these (Proof.Flow); empty matches any flow.
+	Flows []ReadFlow
 	// Content: the row applies on the content surface too.
 	Content bool
 	// SecureClient: the row applies under the Secure Client integration.
@@ -119,7 +122,8 @@ func (r *Row) matches(p Proof) bool {
 		(len(r.Reach) == 0 || slices.Contains(r.Reach, p.Reach)) &&
 		(len(r.Sets) == 0 || slices.Contains(r.Sets, p.Set)) &&
 		(len(r.Sources) == 0 || slices.Contains(r.Sources, p.Source)) &&
-		(!r.LinkAt || !p.LinkTo)
+		(!r.LinkAt || !p.LinkTo) &&
+		(len(r.Flows) == 0 || slices.Contains(r.Flows, p.Flow))
 }
 
 // cell is the row's cell for d, reading the tier only when the row's cells
@@ -183,16 +187,21 @@ const (
 	// GAP-1548, GAP-0659), which the row once muted on 15 attack cells.
 	RowEffectLink = "effect-link"
 	// RowEffectRead: a Known read of one's own credential file the effects
-	// lane proves is a shadow record. The 1.0.10 credential rules
-	// (PATH-SSH-KEY, PATH-AWS-*, PATH-DOCKER, ...) judge their own
-	// spellings; the effects reading of a spelling they do not name (grep
-	// after a cd, install of a key, stat) raised 12 benign owner cells
-	// (6 new blocks) and no attack cell of the T17 sweep (GAP-1825,
-	// GAP-1826). A read of another account's credential file keeps its row
-	// (GAP-0888, GAP-0898). The own-home read rows below still grade a
-	// read proof from any other reader.
+	// lane proves, whose content stays local (Proof.Flow FlowNone: counted,
+	// tested, discarded, or copied beside the file), is a shadow record.
+	// Those shapes (grep -c, install of a key to a .bak) raised 12 benign
+	// owner cells (6 new blocks) of the T17 sweep (GAP-1825, GAP-1826). A
+	// read whose content is shown to the agent, sent off the host or
+	// copied out of its folder takes the read row of its class below, the
+	// cell 1.0.10 gives the plain spelling (GAP-1846). A read of another
+	// account's credential file keeps its row (GAP-0888, GAP-0898).
 	RowEffectRead = "effect-read"
-	RowAdvisory   = "advisory"
+	// RowCopyGitCredential: one's own .git-credentials or .netrc copied out
+	// of its folder keeps the rel copy tier: CRITICAL, an alert per-user
+	// default and permissive, a block in strict and in every managed
+	// install (lead ruling 2026-11-16, GAP-1794). Other classes: copy = read.
+	RowCopyGitCredential = "copy-git-credential"
+	RowAdvisory          = "advisory"
 	// RowAskTicketRequest: a Kerberos ticket request (or credentialed
 	// domain service use) asks for a person's confirmation in the default
 	// tier where the agent can ask, and is an alert where it cannot; never a
@@ -303,7 +312,7 @@ var builtin = Table{Rows: []Row{
 	},
 	{
 		ID: RowEffectRead, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential}, Sources: []string{SourceEffects}, LinkAt: true,
-		Content: true, SecureClient: true, Source: "DET111 effects credential read (GAP-1825, GAP-1826)",
+		Flows: []ReadFlow{FlowNone}, Content: true, SecureClient: true, Source: "DET111 effects credential read (GAP-1825, GAP-1826, GAP-1846)",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
 		},
@@ -396,6 +405,19 @@ var builtin = Table{Rows: []Row{
 		Certainty: []Certainty{CertKnown}, Source: "rel-1-0-6:GAP-0675",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Floor: Alert, Levels: true}), uniform(Cell{Floor: Alert, Levels: true}),
+		},
+	},
+	{
+		ID: RowCopyGitCredential, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential},
+		Certainty: []Certainty{CertKnown}, Sets: []string{SetGitCredentials}, Flows: []ReadFlow{FlowCopied}, SecureClient: true,
+		Source: "rel-1-0-10:PATH-GIT-CREDS copy (lead ruling 2026-11-16, GAP-1794)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{
+				TierDefault:    {Levels: true, Severity: SevCritical, Ceiling: CeilingAlert},
+				TierPermissive: {Levels: true, Severity: SevCritical, Ceiling: CeilingAlert},
+				TierStrict:     {Levels: true, Severity: SevCritical},
+			},
+			uniform(Cell{Levels: true, Severity: SevCritical}),
 		},
 	},
 	{

@@ -37,6 +37,12 @@ type Effect struct {
 	// path the link is placed at: the file itself is not changed, it gets a
 	// new name the call may later write or read through.
 	LinkTarget bool `json:"link_target,omitempty"`
+	// Shown marks a read whose bytes reach the call's own output, what the
+	// agent is shown: the last stage that carries them prints them on a
+	// stdout the call neither redirects nor captures in a substitution, and no
+	// program on the way prints only a count, a test or a digest (DET111
+	// GAP-1846: an own credential read raises only when its content flows).
+	Shown bool `json:"shown,omitempty"`
 }
 
 // Target is what an effect acts on.

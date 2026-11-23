@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	osuser "os/user"
+	pathpkg "path"
 	"runtime"
 	"slices"
 	"strings"
@@ -489,7 +490,7 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		} else if mutating {
 			c.known = true
 			c.knownMutation = true
-		} else if proof, ok := knownCredentialReadProof(f); ok {
+		} else if proof, ok := knownCredentialReadProof(result, f); ok {
 			c.known = true
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		}
@@ -903,9 +904,10 @@ func knownProtectedMutationProofs(f *semanticpb.EffectFact, flavor effects.Flavo
 }
 
 // knownCredentialReadProof extracts the one 1.0.10 credential class a Known
-// read names. A Maybe target, unknown role or non-credential file never makes
-// a decision proof.
-func knownCredentialReadProof(f *semanticpb.EffectFact) (decide.Proof, bool) {
+// read names, and where its content goes in the call (effectReadFlow). A
+// Maybe target, unknown role or non-credential file never makes a decision
+// proof.
+func knownCredentialReadProof(result effects.Result, f *semanticpb.EffectFact) (decide.Proof, bool) {
 	if f == nil || f.GetKind() != string(effects.KindRead) ||
 		f.GetTargetState() != "known" || f.GetRoleState() != "known" {
 		return decide.Proof{}, false
@@ -932,7 +934,78 @@ func knownCredentialReadProof(f *semanticpb.EffectFact) (decide.Proof, bool) {
 		return decide.Proof{}, false
 	}
 	return decide.Proof{Kind: decide.KindRead, Target: target, Certainty: decide.CertKnown,
-		Set: set, Source: effectProofSource}, true
+		Set: set, Source: effectProofSource, Flow: effectReadFlow(result, int(f.GetIndex())-1)}, true
+}
+
+// maxEffectFlowHops bounds the copies of copies a read's content is
+// followed through (counted work, never wall clock).
+const maxEffectFlowHops = 8
+
+// effectReadFlow is where the content of read effect i goes in the call
+// (DET111 GAP-1846): shown on the call's output (effects marks it), sent by
+// a network send whose data comes from it, or copied by a write whose data
+// comes from it to another folder (cp, mv, install, a redirect). A copy
+// beside the file (install key key.bak), a discard (> /dev/null) or a
+// summary (grep -c, wc) keeps it local. A copy's own content is followed
+// on: a later send of the copy is a send.
+func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
+	if i < 0 || i >= len(result.Effects) || result.Effects[i].Kind != effects.KindRead {
+		return decide.FlowNone
+	}
+	read := result.Effects[i]
+	if read.Shown {
+		return decide.FlowShown
+	}
+	from := map[int]bool{i + 1: true}
+	flow, hops := decide.FlowNone, 0
+	for j := i + 1; j < len(result.Effects) && hops < maxEffectFlowHops; j++ {
+		e := result.Effects[j]
+		if e.Data == nil || !slices.ContainsFunc(e.Data.Sources, func(s effects.Source) bool {
+			return s.Kind == effects.SourceEffect && from[s.Effect]
+		}) {
+			continue
+		}
+		switch e.Kind {
+		case effects.KindNetworkSend:
+			return decide.FlowSent
+		case effects.KindWrite, effects.KindAppend:
+			// The null device is lowered as no target (> /dev/null).
+			if e.Target.Type == effects.TargetNone || effectDiscardPath(e.Target.Path) || effectDiscardPath(e.Target.Spelling) {
+				continue
+			}
+			hops++
+			from[j+1] = true
+			if e.Target.Type == effects.TargetRemote {
+				return decide.FlowSent
+			}
+			if !effectSameFolder(e.Target, read.Target) {
+				flow = decide.FlowCopied
+			}
+		}
+	}
+	return flow
+}
+
+// effectDiscardPath is the null device: what is written there goes nowhere.
+func effectDiscardPath(p string) bool {
+	switch strings.ToLower(strings.ReplaceAll(p, "\\", "/")) {
+	case "/dev/null", "nul", "//./nul":
+		return true
+	}
+	return false
+}
+
+// effectSameFolder reports two known paths in one folder (an unknown or
+// unplaced destination is never the same folder).
+func effectSameFolder(a, b effects.Target) bool {
+	if a.Path == "" || b.Path == "" {
+		return false
+	}
+	da, db := pathpkg.Dir(strings.ReplaceAll(a.Path, "\\", "/")), pathpkg.Dir(strings.ReplaceAll(b.Path, "\\", "/"))
+	if a.CaseFold || b.CaseFold {
+		return strings.EqualFold(da, db)
+	}
+	return da == db
 }
 
 // effectCredentialMemberTail finds the protected member spelling in a path;
