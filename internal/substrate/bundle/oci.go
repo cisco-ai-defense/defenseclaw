@@ -108,6 +108,18 @@ func ociHostKey(h string) string {
 	return h
 }
 
+// ociRequestHost is the host a pull sends its requests to: docker.io and
+// index.docker.io are not registries (https://docker.io/v2 redirects to the
+// web site), so the form `docker pull` shows goes to registry-1.docker.io,
+// as containerd does (GAP-0967).
+func ociRequestHost(h string) string {
+	switch strings.ToLower(h) {
+	case "docker.io", "index.docker.io":
+		return "registry-1.docker.io"
+	}
+	return h
+}
+
 // NewOCIClient builds the client from substrate.bundles.oci: TLS 1.2+ with
 // the system roots plus caFile, credentials only from credentialsFile (a
 // mounted kubernetes.io/dockerconfigjson Secret).
@@ -231,7 +243,7 @@ func (c *OCIClient) Pull(ctx context.Context, ref string) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	p := &ociPull{c: c, ref: ref, host: host, repo: repo}
+	p := &ociPull{c: c, ref: ref, host: ociRequestHost(host), repo: repo}
 	raw, err := p.get(ctx, "manifests/"+digest, mediaTypeOCIManifest+", "+mediaTypeDockerManifest, ociMaxManifestBytes)
 	if err != nil {
 		return nil, err
@@ -485,12 +497,30 @@ func ociSeen(st OCIStage) string {
 // is pulled again once that changes (GAP-0952): an anchors Secret mounted
 // late or rotated, a launcher atespace added.
 func (s *Store) ociClusterKey() string {
-	h := sha256.New()
-	if a, err := s.Anchors(); err != nil {
-		fmt.Fprintf(h, "error:%s", eb.CodeOf(err))
-	} else {
-		_ = json.NewEncoder(h).Encode(a)
+	a, err := s.Anchors()
+	return s.ociKeyFor(anchorsPart(a, err))
+}
+
+// anchorsPart is the anchors share of the cluster key: the anchors, or the
+// code of why they cannot be read.
+func anchorsPart(a *eb.Anchors, err error) string {
+	if err != nil {
+		return "error:" + string(eb.CodeOf(err))
 	}
+	var b strings.Builder
+	_ = json.NewEncoder(&b).Encode(a)
+	return b.String()
+}
+
+// ociAnchorsRec records, for one Apply, the anchors share of the key of the
+// anchors that Apply itself read (GAP-0965).
+type ociAnchorsRec struct{ part string }
+
+type ociAnchorsRecKey struct{}
+
+func (s *Store) ociKeyFor(anchors string) string {
+	h := sha256.New()
+	h.Write([]byte(anchors))
 	h.Write([]byte{0})
 	managed := slices.Clone((&controller.ConfigResolver{Config: s.managedBase()}).ManagedAtespaces())
 	slices.Sort(managed)
@@ -517,8 +547,8 @@ func (s *Store) SyncOCI(ctx context.Context, c *OCIClient, stages []OCIStage) (r
 	if err != nil {
 		return nil, nil, err
 	}
-	// Taken before any apply: anchors restored during this pass then give
-	// a new key, so a refusal is never stored under the fixed state.
+	// Taken before the pulls. A refusal is stored under it only when the
+	// anchors the apply read give the same key again (GAP-0965).
 	ck := s.ociClusterKey()
 	var todo []OCIStage
 	for _, st := range stages {
@@ -542,7 +572,8 @@ func (s *Store) SyncOCI(ctx context.Context, c *OCIClient, stages []OCIStage) (r
 			pulls = append(pulls, errs[i])
 			continue
 		}
-		rc, aerr := s.Apply(ctx, archives[i], st.Stage, st.Atespaces, SourceOCI)
+		rec := &ociAnchorsRec{}
+		rc, aerr := s.Apply(context.WithValue(ctx, ociAnchorsRecKey{}, rec), archives[i], st.Stage, st.Atespaces, SourceOCI)
 		if rc != nil {
 			rcs = append(rcs, *rc)
 		}
@@ -551,6 +582,16 @@ func (s *Store) SyncOCI(ctx context.Context, c *OCIClient, stages []OCIStage) (r
 		}
 		seen := ociSeen(st)
 		if aerr != nil {
+			// The refusal belongs to the state the apply saw. If that is not
+			// the state the key was taken in (anchors that flapped during
+			// the pull or the apply), leave the stage for the next pass.
+			ck2 := s.ociClusterKey()
+			if rec.part != "" {
+				ck2 = s.ociKeyFor(rec.part)
+			}
+			if ck2 != ck {
+				continue
+			}
 			seen += "@" + ck
 		}
 		if err := s.retry(ctx, func() error { return s.markOCISeen(ctx, st.Stage, seen) }); err != nil {

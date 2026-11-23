@@ -340,6 +340,9 @@ func (s *Store) apply(ctx context.Context, archive []byte, stage string, atespac
 		cur = &Stage{}
 	}
 	anchors, err := s.Anchors()
+	if rec, ok := ctx.Value(ociAnchorsRecKey{}).(*ociAnchorsRec); ok {
+		rec.part = anchorsPart(anchors, err)
+	}
 	if err != nil {
 		return err
 	}

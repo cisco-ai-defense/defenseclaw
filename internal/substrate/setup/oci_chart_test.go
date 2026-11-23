@@ -6,6 +6,7 @@ package setup
 import (
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -105,18 +106,38 @@ func TestChartBundlesOCI(t *testing.T) {
 
 	t.Run("refused values", func(t *testing.T) {
 		const ref = "registry.example.com/p/b@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		for name, c := range map[string]struct{ set, msg string }{
+			"oci without bundle mode": {"bundles.oci.enabled=true,bundles.oci.stages[0].stage=prod,bundles.oci.stages[0].ref=" + ref, "needs bundles.enabled=true"},
+			"oci without a stage":     {"bundles.enabled=true,bundles.oci.enabled=true", "needs bundles.oci.stages"},
+			"a tag ref":               {"bundles.enabled=true,bundles.oci.enabled=true,bundles.oci.stages[0].stage=prod,bundles.oci.stages[0].ref=registry.example.com/p/b:v1", "stages.0.ref"},
+			"login without bundles":   {"bundles.oci.credentialsSecret=x", "need bundles.enabled=true"},
+			"CA from both":            {"bundles.enabled=true,bundles.oci.ca.configMap=a,bundles.oci.ca.secret=b", "not both"},
+			"bad timeout":             {"bundles.enabled=true,bundles.oci.timeout=soon", "bundles.oci.timeout"},
+			"timeout below 5s":        {"bundles.enabled=true,bundles.oci.timeout=1s", "from 5s to 2m"},
+			"timeout above 2m":        {"bundles.enabled=true,bundles.oci.timeout=3m", "from 5s to 2m"},
+			"unknown oci key":         {"bundles.enabled=true,bundles.oci.insecure=true", "insecure"},
+			"auth host with a scheme": {"bundles.enabled=true,bundles.oci.authHosts[0]=http://*.evil", "authHosts"},
+			"auth host edge hyphen":   {"bundles.enabled=true,bundles.oci.authHosts[0]=-a.example.com", "authHosts"},
+			"auth host without a dot": {"bundles.enabled=true,bundles.oci.authHosts[0]=localhost", "authHosts"},
+		} {
+			args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", c.set}
+			out, err := exec.Command(helm, args...).CombinedOutput()
+			if err == nil {
+				t.Errorf("%s: accepted", name)
+			} else if !strings.Contains(string(out), c.msg) {
+				t.Errorf("%s: refused with the wrong message (want %q): %s", name, c.msg, out)
+			}
+		}
 		for name, set := range map[string]string{
-			"oci without bundle mode": "bundles.oci.enabled=true,bundles.oci.stages[0].stage=prod,bundles.oci.stages[0].ref=" + ref,
-			"oci without a stage":     "bundles.enabled=true,bundles.oci.enabled=true",
-			"a tag ref":               "bundles.enabled=true,bundles.oci.enabled=true,bundles.oci.stages[0].stage=prod,bundles.oci.stages[0].ref=registry.example.com/p/b:v1",
-			"login without bundles":   "bundles.oci.credentialsSecret=x",
-			"CA from both":            "bundles.enabled=true,bundles.oci.ca.configMap=a,bundles.oci.ca.secret=b",
-			"bad timeout":             "bundles.enabled=true,bundles.oci.timeout=soon",
-			"unknown oci key":         "bundles.enabled=true,bundles.oci.insecure=true",
+			"timeout 5s":    "bundles.enabled=true,bundles.oci.timeout=5s",
+			"timeout 2m":    "bundles.enabled=true,bundles.oci.timeout=2m",
+			"timeout 1.5m":  "bundles.enabled=true,bundles.oci.timeout=1.5m",
+			"auth host":     "bundles.enabled=true,bundles.oci.authHosts[0]=auth.docker.io",
+			"auth host:443": "bundles.enabled=true,bundles.oci.authHosts[0]=a-b.example.com:8443",
 		} {
 			args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
-			if err := exec.Command(helm, args...).Run(); err == nil {
-				t.Errorf("%s: accepted", name)
+			if out, err := exec.Command(helm, args...).CombinedOutput(); err != nil {
+				t.Errorf("%s: refused: %s", name, out)
 			}
 		}
 	})

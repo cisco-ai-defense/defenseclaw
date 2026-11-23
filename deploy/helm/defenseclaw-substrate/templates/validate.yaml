@@ -45,6 +45,16 @@ stage and at most one CA source, and the mounts need bundle mode. */ -}}
 {{- if and (or $oci.credentialsSecret $oci.ca.configMap $oci.ca.secret) (not .Values.bundles.enabled) -}}
 {{- fail "bundles.oci.credentialsSecret and bundles.oci.ca need bundles.enabled=true" -}}
 {{- end -}}
+{{- if $oci.timeout -}}
+{{- /* The schema allows N[.N]s or N[.N]m; the controller refuses a pull
+timeout outside 5s to 2m, so the chart does too. */ -}}
+{{- $t := toString $oci.timeout -}}
+{{- $n := float64 (regexFind "^[0-9]+(\\.[0-9]+)?" $t) -}}
+{{- $secs := ternary (mulf $n 60.0) $n (hasSuffix "m" $t) -}}
+{{- if or (lt $secs 5.0) (gt $secs 120.0) -}}
+{{- fail (printf "bundles.oci.timeout %q must be a duration from 5s to 2m" $t) -}}
+{{- end -}}
+{{- end -}}
 {{- if and $oci.ca.configMap $oci.ca.secret -}}
 {{- fail "bundles.oci.ca: set configMap or secret, not both" -}}
 {{- end -}}
