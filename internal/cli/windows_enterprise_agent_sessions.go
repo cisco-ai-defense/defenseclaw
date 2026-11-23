@@ -182,13 +182,15 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	firstInstall := !opts.activationStartedAt.IsZero() &&
 		(!opts.installedBeforeRun || windowsEnterpriseResultRecoveredFailedInstall(result)) &&
 		len(result.Errors) == 0
-	activatePending := !opts.activationStartedAt.IsZero() && record.Pending && !opts.noStart &&
+	activatePending := !opts.activationStartedAt.IsZero() && record.Pending && !opts.servicesStayStopped() &&
 		len(result.Errors) == 0 && result.Readiness.Gateway
 	writeRecord := firstInstall || activatePending
 	activatedAt := windowsEnterpriseActivationNow().UTC()
 	if writeRecord {
-		record.Pending = opts.noStart
-		if !opts.noStart {
+		// A deferred-config install is staged like --no-start: the repair
+		// that brings its configuration records the activation (GAP-1749).
+		record.Pending = opts.servicesStayStopped()
+		if !record.Pending {
 			activated = activatedAt
 			record.ActivatedAt = activated.Format(time.RFC3339Nano)
 		}
@@ -225,7 +227,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			}
 		}
 		if len(pending) > 0 {
-			if !opts.noStart && result.Readiness.Gateway {
+			if !opts.servicesStayStopped() && result.Readiness.Gateway {
 				if record.ConnectorActivatedAt == nil {
 					record.ConnectorActivatedAt = map[string]string{}
 				}
@@ -268,7 +270,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				}
 			}
 			switch {
-			case len(enrolled) > 0 && !opts.noStart && result.Readiness.Gateway:
+			case len(enrolled) > 0 && !opts.servicesStayStopped() && result.Readiness.Gateway:
 				if record.EnrollmentActivatedAt == nil {
 					record.EnrollmentActivatedAt = map[string]string{}
 				}

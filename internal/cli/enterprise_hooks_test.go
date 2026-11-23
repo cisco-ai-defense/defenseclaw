@@ -1282,14 +1282,10 @@ func TestEnterpriseHookAuthorizationRejectsSparseOversizedInput(t *testing.T) {
 	}
 }
 
+// rel-1-0-10:GAP-1515: on Windows the custody is the protected DACL the
+// gateway service reads (enterprise_hooks_token_fixture_windows_test.go).
 func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("chmod managed data dir: %v", err)
-	}
+	dir := enterpriseHookTokenTestDataDir(t)
 	token, err := enterpriseHookScopedToken(dir, "codex")
 	if err != nil {
 		t.Fatalf("enterpriseHookScopedToken: %v", err)
@@ -1308,21 +1304,11 @@ func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
 	if strings.TrimSpace(string(data)) != token {
 		t.Fatalf("token file = %q, want generated token", strings.TrimSpace(string(data)))
 	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat scoped token: %v", err)
-	} else if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("scoped token mode = %o, want 600", got)
-	}
+	assertEnterpriseHookSecretCustody(t, dir, path, "hook token")
 }
 
 func TestEnterpriseHookScopedOTLPTokenUsesManagedDataDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise OTLP scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("chmod managed data dir: %v", err)
-	}
+	dir := enterpriseHookTokenTestDataDir(t)
 	token, err := enterpriseHookScopedOTLPToken(dir, "codex")
 	if err != nil {
 		t.Fatalf("enterpriseHookScopedOTLPToken: %v", err)
@@ -1341,11 +1327,7 @@ func TestEnterpriseHookScopedOTLPTokenUsesManagedDataDir(t *testing.T) {
 	if strings.TrimSpace(string(data)) != token {
 		t.Fatalf("token file does not contain the returned token")
 	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat scoped OTLP token: %v", err)
-	} else if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("scoped OTLP token mode = %o, want 600", got)
-	}
+	assertEnterpriseHookSecretCustody(t, dir, path, "OTLP token")
 	if token, err := enterpriseHookScopedOTLPToken(dir, "cursor"); err != nil || token != "" {
 		t.Fatalf("non-OTLP connector token = %q, %v; want empty", token, err)
 	}
