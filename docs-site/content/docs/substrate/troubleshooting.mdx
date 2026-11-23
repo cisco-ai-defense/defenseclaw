@@ -255,7 +255,7 @@ Managed installs and the strict tier refuse a skill they could not check and rai
 
 ### The skill scanner is not running
 
-The gateway logs `substrate: skill scanner is not running` at start, and `defenseclaw substrate doctor` shows the `substrate.skill_scan` row as failed on a managed install or the strict tier (new skills are refused) and as a warning on others (new skills are allowed with an alert). Read the sidecar's log with `kubectl -n NAMESPACE logs deploy/defenseclaw-gateway -c skill-scanner`. Until it runs, new skills follow the fail mode. The doctor row is skipped when scanning is turned off (`substrate.skills.scan.enabled: false`, or `gateway.skillScanner.enabled: false` in the chart).
+The gateway logs `substrate: skill scanner is not running` at start, and `defenseclaw substrate doctor` shows the `substrate.skill_scan` row as failed on a managed install or the strict tier (new skills are refused) and as a warning on others (new skills are allowed with an alert). Read the sidecar's log with `kubectl -n NAMESPACE logs deploy/defenseclaw-gateway -c skill-scanner`. Until it runs, new skills follow the fail mode. The doctor row is skipped when scanning is turned off (`substrate.skills.scan.enabled: false`, or `gateway.skillScanner.enabled: false` in the chart). Which `defenseclaw` commands a standard user can run on a managed computer is in [Managed command availability](/docs/enterprise/managed-commands).
 
 ### Pull says there is no record of the folder
 
