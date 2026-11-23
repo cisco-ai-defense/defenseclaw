@@ -971,8 +971,9 @@ KUBE_ISSUER = "kubernetes"
 def person_issuers(doc: dict[str, Any]) -> list[str]:
     """The distinct trusted person and workload issuers of a Substrate
     cluster, the primary one first (config Config.PersonIssuers): the OIDC
-    issuer; else, on an install that is not managed, the Kubernetes sign-in
-    issuer (GAP-0893); then the workload issuers."""
+    issuer; else the Kubernetes sign-in issuer while that sign-in is on (no
+    OIDC issuer, not managed, identity.kube_sign_in not false: GAP-0893,
+    GAP-0939); then the workload issuers."""
     sub = doc.get("substrate")
     if not isinstance(sub, dict) or not sub.get("enabled"):
         return []
@@ -980,7 +981,8 @@ def person_issuers(doc: dict[str, Any]) -> list[str]:
     oidc = ident.get("oidc") if isinstance(ident.get("oidc"), dict) else {}
     oidc_issuer = str(oidc.get("issuer") or "").strip()
     managed = str(doc.get("deployment_mode") or "").strip().lower() == "managed_enterprise"
-    kube = [KUBE_ISSUER] if not oidc_issuer and not managed else []
+    kube_on = ident.get("kube_sign_in") is not False
+    kube = [KUBE_ISSUER] if not oidc_issuer and not managed and kube_on else []
     out: list[str] = []
     workloads = [w.get("issuer") for w in _list(ident.get("workload_oidc")) if isinstance(w, dict)]
     for iss in [oidc_issuer, *kube, *workloads]:

@@ -211,13 +211,14 @@ would never start.
 */}}
 {{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
 {{/* The gateway's Kubernetes sign-in is on (internal/cli substrateKubeSignIn):
-no substrate.identity.oidc.issuer, not a managed install, and not turned
-off with --no-kube-sign-in in custom gateway args. The flag is a Go bool:
+no substrate.identity.oidc.issuer, not a managed install, not turned off by
+substrate.identity.kube_sign_in false, and not turned off with
+--no-kube-sign-in in custom gateway args. The flag is a Go bool:
 --no-kube-sign-in and --no-kube-sign-in=<true value> turn it off, =false
 keeps it on, and the last one wins, as the gateway parses it. */}}
 {{- define "dc.kubeSignIn" -}}
 {{- $issuer := dig "substrate" "identity" "oidc" "issuer" "" (.Values.config | default dict) -}}
-{{- $off := false -}}
+{{- $off := eq (toString (dig "substrate" "identity" "kube_sign_in" "" (.Values.config | default dict))) "false" -}}
 {{- range (.Values.gateway.args | default list) -}}
 {{- $a := toString . -}}
 {{- if eq $a "--no-kube-sign-in" -}}

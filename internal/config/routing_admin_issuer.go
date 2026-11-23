@@ -19,6 +19,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -43,10 +44,34 @@ func SplitQualifiedUser(entry string) (issuer, subject string, ok bool) {
 // credentials (identity.KubeIssuer; config does not import identity).
 const SubstrateKubeIssuer = "kubernetes"
 
+// kubeSignInOff is the gateway's --no-kube-sign-in flag
+// (TurnOffKubeSignIn). It is process-wide, so a reloaded configuration
+// keeps it.
+var kubeSignInOff atomic.Bool
+
+// TurnOffKubeSignIn records the gateway's --no-kube-sign-in flag: from then
+// on SubstrateKubeSignIn is false for every configuration this process
+// loads, as substrate.identity.kube_sign_in false would make it (GAP-0939).
+func TurnOffKubeSignIn(off bool) { kubeSignInOff.Store(off) }
+
+// SubstrateKubeSignIn reports whether people sign in to the Substrate
+// admin listener with their Kubernetes credentials: no
+// identity.oidc.issuer, an install that is not managed, and neither
+// identity.kube_sign_in false nor the gateway's --no-kube-sign-in.
+func (c *Config) SubstrateKubeSignIn() bool {
+	if c == nil {
+		return false
+	}
+	id := c.Substrate.Identity
+	return strings.TrimSpace(id.OIDC.Issuer) == "" && !managed.IsManagedEnterprise(c.DeploymentMode) &&
+		(id.KubeSignIn == nil || *id.KubeSignIn) && !kubeSignInOff.Load()
+}
+
 // PersonIssuers lists the distinct trusted person and workload issuers of
-// a Substrate cluster, the primary one first: identity.oidc.issuer; else,
-// on an install that is not managed, the Kubernetes sign-in issuer (people
-// sign in with their Kubernetes credentials there, GAP-0893); then the
+// a Substrate cluster, the primary one first: identity.oidc.issuer; else
+// the Kubernetes sign-in issuer while that sign-in is on
+// (SubstrateKubeSignIn: people sign in with their Kubernetes credentials
+// there, GAP-0893; when it is off no one can, GAP-0939); then the
 // identity.workload_oidc issuers. Nil when Substrate is off.
 func (c *Config) PersonIssuers() []string {
 	if c == nil || !c.Substrate.Enabled {
@@ -60,7 +85,7 @@ func (c *Config) PersonIssuers() []string {
 		}
 	}
 	add(s.Identity.OIDC.Issuer)
-	if strings.TrimSpace(s.Identity.OIDC.Issuer) == "" && !managed.IsManagedEnterprise(c.DeploymentMode) {
+	if c.SubstrateKubeSignIn() {
 		add(SubstrateKubeIssuer)
 	}
 	for _, w := range s.Identity.WorkloadOIDC {

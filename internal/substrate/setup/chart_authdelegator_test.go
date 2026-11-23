@@ -88,6 +88,8 @@ func TestChartAuthDelegatorGAP0153(t *testing.T) {
 		"oidc":            {"--set", "config.substrate.identity.oidc.issuer=https://idp.example", "--set", "config.substrate.identity.oidc.client_id=dc"},
 		"managed":         {"--set", "config.deployment_mode=managed_enterprise", "--set", images},
 		"no-kube-sign-in": {"--set", "gateway.args={serve,--substrate,--no-kube-sign-in}"},
+		// The config key the flag mirrors (GAP-0939).
+		"kube_sign_in false": {"--set", "config.substrate.identity.kube_sign_in=false"},
 		// A Go bool flag: =true and =1 turn the sign-in off too (R3a P3).
 		"no-kube-sign-in=true": {"--set-json", `gateway.args=["serve","--substrate","--no-kube-sign-in=true"]`},
 		"no-kube-sign-in=1":    {"--set-json", `gateway.args=["serve","--substrate","--no-kube-sign-in=1"]`},

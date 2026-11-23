@@ -4645,6 +4645,8 @@ class SubstrateIdentityConfig:
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
     # Groups whose members are Substrate administrators (GAP-0191).
     admin_groups: list[str] = field(default_factory=list)
+    # False turns the Kubernetes sign-in off (None = on, GAP-0939).
+    kube_sign_in: bool | None = None
 
 
 @dataclass
@@ -8174,6 +8176,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 for w in ident.get("workload_oidc") or []
             ],
             admin_groups=_string_list(ident.get("admin_groups")),
+            kube_sign_in=_optional_bool(ident.get("kube_sign_in")),
         ),
         services=SubstrateServicesConfig(
             actor=str(services.get("actor", "") or ""),

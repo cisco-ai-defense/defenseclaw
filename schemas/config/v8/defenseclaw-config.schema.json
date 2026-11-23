@@ -7870,6 +7870,10 @@
                 }
               }
             },
+            "kube_sign_in": {
+              "type": "boolean",
+              "default": true
+            },
             "admin_groups": {
               "type": "array",
               "maxItems": 256,

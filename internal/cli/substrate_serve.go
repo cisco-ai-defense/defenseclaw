@@ -202,6 +202,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if !cfg.Substrate.Enabled {
 			return errors.New("serve: substrate.enabled is false in the configuration")
 		}
+		// Before anything reads the issuers (startup checks, routing.admin
+		// warnings and matching): with the flag, no Kubernetes person can
+		// sign in, so kubernetes is not a trusted issuer (GAP-0939).
+		config.TurnOffKubeSignIn(serveFlags.noKubeSignIn)
 		// Managed: policy_dir is the root-owned vendor folder the chart's
 		// init container seeds (substrate-datadir --policies) and mounts
 		// read-only; the gateway account must not write its own policy.
@@ -382,9 +386,11 @@ func (substrateNoPeople) Verify(context.Context, string) (identity.Person, error
 }
 
 // substrateKubeSignIn reports whether people sign in with Kubernetes
-// credentials: no OIDC issuer, not a managed install, not turned off.
+// credentials: no OIDC issuer, not a managed install, not turned off by
+// substrate.identity.kube_sign_in or --no-kube-sign-in (runServe records
+// the flag in config, so the routing.admin issuers agree, GAP-0939).
 func substrateKubeSignIn(c *config.Config) bool {
-	return c.Substrate.Identity.OIDC.Issuer == "" && !managed.IsManagedEnterprise(c.DeploymentMode) && !serveFlags.noKubeSignIn
+	return c.SubstrateKubeSignIn() && !serveFlags.noKubeSignIn
 }
 
 func substrateKubePeople() *identity.KubeTokenVerifier {

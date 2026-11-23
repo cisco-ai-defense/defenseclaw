@@ -209,6 +209,13 @@ type SubstrateIdentityConfig struct {
 	// administrators on the admin listener. The gateway's --admin-groups
 	// flag adds to them.
 	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
+	// KubeSignIn false turns the Kubernetes sign-in off (nil = on). It
+	// applies only with no oidc.issuer on an install that is not managed
+	// (Config.SubstrateKubeSignIn). The gateway's --no-kube-sign-in flag
+	// turns it off too (TurnOffKubeSignIn), so the issuers routing.admin
+	// users entries match against are the ones people can sign in with
+	// (GAP-0939).
+	KubeSignIn *bool `mapstructure:"kube_sign_in" yaml:"kube_sign_in,omitempty"`
 }
 
 // SubstrateOIDCConfig is the people's identity provider (launcher sign-in).
