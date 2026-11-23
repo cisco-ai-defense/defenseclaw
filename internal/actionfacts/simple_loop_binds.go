@@ -275,7 +275,8 @@ func (b simpleBinder) callBinds(call *syntax.CallExpr) bool {
 		})
 	}
 	program, static := simpleStaticWord(call.Args[0], nil)
-	if !static || b.order.shadows(program, call) {
+	// Only printf and read can bind the name; shadows is asked only for them.
+	if !static || (program != "printf" && program != "read") || b.order.shadows(program, call) {
 		return false
 	}
 	switch program {
@@ -432,7 +433,10 @@ func simpleRedirectsHold(redirs []*syntax.Redirect) bool {
 // function can run again after it, meets the function.
 type simpleScriptOrder struct {
 	funcs []*syntax.FuncDecl
-	loops []syntax.Node
+	// byName holds the named functions of funcs by name, in source order:
+	// a call meets only the declarations of its own name.
+	byName map[string][]*syntax.FuncDecl
+	loops  []syntax.Node
 	// ifs is set when the call spells the name IFS anywhere: its words then
 	// split by a delimiter the walk does not know.
 	ifs bool
@@ -478,6 +482,14 @@ func newSimpleScriptOrder(file *syntax.File, straight bool) *simpleScriptOrder {
 		}
 		return true
 	})
+	for _, decl := range order.funcs {
+		if decl.Name != nil {
+			if order.byName == nil {
+				order.byName = make(map[string][]*syntax.FuncDecl)
+			}
+			order.byName[decl.Name.Value] = append(order.byName[decl.Name.Value], decl)
+		}
+	}
 	if straight {
 		order.dead = order.deadSpans(file)
 		order.top = make(map[*syntax.FuncDecl]bool)
@@ -835,7 +847,7 @@ func (order *simpleScriptOrder) deadSpans(file *syntax.File) []simpleSpan {
 			return result
 		}
 		program, result := simpleLiteralStatus(stmt)
-		if result >= 0 && slices.ContainsFunc(order.funcs, func(decl *syntax.FuncDecl) bool { return decl.Name != nil && decl.Name.Value == program }) {
+		if result >= 0 && len(order.byName[program]) != 0 {
 			return -1
 		}
 		return result
@@ -898,10 +910,7 @@ func (order *simpleScriptOrder) shadows(name string, call syntax.Node) bool {
 
 // shadowsAt is shadows for the runs given (runsVia); nil is every run.
 func (order *simpleScriptOrder) shadowsAt(name string, call syntax.Node, runs []int) bool {
-	for _, decl := range order.funcs {
-		if decl.Name == nil || decl.Name.Value != name {
-			continue
-		}
+	for _, decl := range order.byName[name] {
 		if order.straight {
 			if order.top[decl] {
 				if runs == nil {
@@ -940,11 +949,9 @@ func (order *simpleScriptOrder) calledFrom(root, skip syntax.Node) []*syntax.Fun
 			}
 			if name, static := simpleStaticWord(call.Args[0], nil); static && !slices.Contains(names, name) {
 				names = append(names, name)
-				for _, decl := range order.funcs {
-					if decl.Name != nil && decl.Name.Value == name {
-						called = append(called, decl)
-						pending = append(pending, decl.Body)
-					}
+				for _, decl := range order.byName[name] {
+					called = append(called, decl)
+					pending = append(pending, decl.Body)
 				}
 			}
 			return true
