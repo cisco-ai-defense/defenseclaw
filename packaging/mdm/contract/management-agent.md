@@ -121,7 +121,8 @@ receipt's `actor` and `principal`, the bundle `created_by` and
 `secret_refs_missing`, `secret_refs_mismatch`), the identity refresh
 `user_id`, `user_name` and `windows_token_groups_pending`, a bundle's `dir`,
 and the tenant, device group and signing key (`anchors`, `keys`,
-`tenant_id`, `device_group`, `device_groups`, `signer_key_id`). For agent
+`tenant_id`, `device_group`, `device_groups`, `signer_key_id`, and the
+`key_id` of a substrate rollout stage). For agent
 sessions that need a restart, forward the `count` and `state` of
 `sessions_restart_required` and the connector names in
 `enforcement_pending` (4.3). `forward/` holds one closed schema per document
@@ -134,8 +135,8 @@ with only the members that are safe to send off the device:
 | `bundle-status-forward.schema.json` | `bundle status --json` |
 | `bundle-receipt-forward.schema.json` | receipt files (4.9) |
 | `identity-refresh-forward.schema.json` | `enterprise identity refresh --json` (from 1.0.6) |
-| `substrate-status-forward.schema.json` | `substrate status --json` (from 1.0.10): all but the check messages |
-| `substrate-verify-forward.schema.json` | `substrate verify --json` (from 1.0.10): all but the check messages |
+| `substrate-status-forward.schema.json` | `substrate status --json` (from 1.0.10): all but the check messages and `bundles[].key_id` |
+| `substrate-verify-forward.schema.json` | `substrate verify --json` (from 1.0.10): all but the check messages and `bundles[].key_id` |
 
 They list only DefenseClaw ids, bundle and receipt ids, the agent's own
 `delivery_id`, digests, counts, codes, booleans, enums, versions and times.

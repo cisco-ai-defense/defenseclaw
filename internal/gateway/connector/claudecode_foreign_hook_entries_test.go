@@ -22,9 +22,6 @@ import (
 // replace those entries and Teardown must not restore them; the user's own
 // hooks stay.
 func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher")
-	}
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	ClaudeCodeSettingsPathOverride = settingsPath
@@ -64,15 +61,38 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Unix registers the generated hook script. Windows registers the native
+	// launcher (claudeCodeHookInvocation), and there the copied entry that
+	// names the other account's script without the generated missing-script
+	// guard is a drive path, which the edited-script predicate (POSIX
+	// absolute paths, editedDefenseClawHookScript) does not claim: Setup and
+	// Teardown leave it (GAP-1909, open). The test pins that on Windows, so a
+	// product change that claims it fails here and the pin is removed with the
+	// fix. The copies that carry the guard are DefenseClaw's on every OS.
+	registered := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+	plainForeignClaimed := true
+	if runtime.GOOS == "windows" {
+		command, _ := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+		encoded, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registered = strings.Trim(string(encoded), `"`)
+		plainForeignClaimed = false
+	}
 	c := NewClaudeCodeConnector()
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	after := mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) ||
+		(plainForeignClaimed && strings.Contains(after, foreign)) {
 		t.Fatalf("Setup kept the foreign DefenseClaw hook entries: %s", after)
 	}
-	if !strings.Contains(after, own) || !strings.Contains(after, filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))) {
+	if !plainForeignClaimed && !strings.Contains(after, foreign) {
+		t.Fatalf("Setup now replaces the plain drive-path foreign entry on Windows (GAP-1909 fixed?): drop plainForeignClaimed: %s", after)
+	}
+	if !strings.Contains(after, own) || !strings.Contains(after, registered) {
 		t.Fatalf("Setup lost the user's hook or did not register its own: %s", after)
 	}
 	// A copied entry can also arrive after Setup; Teardown must remove it.
@@ -96,8 +116,12 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 		t.Fatalf("Teardown: %v", err)
 	}
 	after = mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) || !strings.Contains(after, own) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) ||
+		(plainForeignClaimed && strings.Contains(after, foreign)) || !strings.Contains(after, own) {
 		t.Fatalf("Teardown settings = %s, want the user's hook only", after)
+	}
+	if !plainForeignClaimed && !strings.Contains(after, foreign) {
+		t.Fatalf("Teardown now removes the plain drive-path foreign entry on Windows (GAP-1909 fixed?): drop plainForeignClaimed: %s", after)
 	}
 
 	for _, command := range []string{

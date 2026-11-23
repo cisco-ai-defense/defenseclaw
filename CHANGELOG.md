@@ -55,6 +55,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 ### Fixed
 
 #### Windows managed install, upgrade and uninstall
+- Windows managed upgrade: an account that is signed out during the upgrade no longer makes Copilot show failed or the administrator's verify return 1603; Copilot waits for the account to sign in.
 - Setup `/uninstall` asks again after waiting for the managed lock instead of failing.
 - Setup renders the recorded Claude policy before it takes the install lock, so a slow policy read no longer stops the install.
 - Standalone Setup `/install` without a config file writes a standalone starting config.
@@ -71,6 +72,9 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - On a managed Windows machine the Hook Guardian no longer keeps about one CPU core busy while idle: a check that finds nothing changed renders the Claude Code machine settings once, not once per earlier hook contract.
 - On a managed Windows machine the hook release protection record is written before a new hook generation is published, so a failed write leaves the previous generation in place instead of one the record does not cover.
 - On a managed Windows machine the guardian service and an administrator running `defenseclaw enterprise hooks reconcile` at the same time no longer overwrite each other's release protection record, so a hook that fails a check keeps its protection.
+- The Windows guardian now takes its state lock unless it knows it runs as a standard user, so a failed account check no longer lets two writers overwrite each other's record.
+- Setup `/uninstall` no longer fails with error 1603 when one account still has an old per-user DefenseClaw folder. The hook teardown now expects the enrollment the guardian published, and it refuses when a guardian record it needs is missing or unreadable.
+- `status --json` lists an account left out because it holds a per-user DefenseClaw install as skipped, not as failed, so fleet scripts that count failed accounts no longer count it.
 - Windows Setup `/install` without `CONFIG=` (configuration delivered later) no longer fails with error 1603: the install finishes and waits for its configuration.
 
 #### Routing, budgets and cost
@@ -99,12 +103,15 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - Native Windows: `setup routing` refuses only the classifier that does not run on Windows, and says why. `config set routing.enabled` says the change applies on reload when the classifier runs in the gateway.
 - Errors name their cause when removing a connector fails, and the gateway start error says why a removed connector's teardown failed.
 - On Windows, a write entry for another account on a folder above a connector's plugin folder now stops only that connector, with the `icacls` command that fixes it, instead of failing the whole gateway start.
+- The Windows plugin folder check reads every folder from the user's profile down to the plugin. It prints `icacls` commands only for folders the user owns. For a folder owned by the Administrators group it says to take ownership or have an administrator remove the entry, instead of telling the user to move the plugin folder.
 - The process start environment is read from `/proc` only on Linux, so a `proc` folder at a Windows drive root is never read as one.
 
 #### Endpoint inventory
 - **Adding or removing a skill no longer changes the ids of the other skills in its folder.** The managed inventory built the id of a skill, plugin or rule from whichever entry of its folder hashed lowest; it now uses the folder itself. Skill, plugin and rule ids change once on upgrade; MCP server ids do not.
 - **The plugin inventory no longer reports Codex's install staging folder as a plugin.** Hidden folders in an agent's plugins folder, such as Codex's `.remote-plugin-install-staging`, are the agent's own working state; discovery, and the Linux sensor helper's read of a home, now leave them out.
 - **On Windows, an unchanged skill folder is no longer read again on the next scan.** The skill cache now checks each entry in the folder directly, because Windows can report an out-of-date time for a subfolder until it is next opened.
+- **A skill or Hermes plugin file that changes size during a scan is still checked.** The folder hash reads each file's own size instead of the size the folder listing reported, so a file that shrank or grew mid-scan is hashed and checked instead of skipped as too large or kept as unchanged.
+- **A skill folder that changes in the same moment it is scanned is read again on the next scan.** The skill cache no longer keeps a folder whose change time matches the scan time, so an edit made right then is not missed.
 
 ### Known limits
 

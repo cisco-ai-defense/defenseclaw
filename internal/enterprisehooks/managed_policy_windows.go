@@ -997,13 +997,7 @@ func validateWindowsClaudeManagedPolicyTeardownState(
 }
 
 func requireWindowsClaudeTeardownAdministrator() error {
-	token := windows.GetCurrentProcessToken()
-	if token.IsElevated() {
-		return nil
-	}
-	user, err := token.GetTokenUser()
-	if err == nil && user != nil && user.User.Sid != nil &&
-		user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+	if privileged, _ := CurrentWindowsTokenAdminFacts().ElevatedOrSystem(); privileged {
 		return nil
 	}
 	return errors.New(

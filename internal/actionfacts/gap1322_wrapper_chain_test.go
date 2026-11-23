@@ -14,7 +14,6 @@ import (
 // walk the inner program as a reading, as it did before the GAP-1182 wrapper
 // child reader looked through the whole chain at once (rel-1-0-10:GAP-1322).
 func TestGAP1322NestedWrapperChainKeepsTheInnerProgramReading(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, row := range []struct{ prefix, wantPrefix string }{
 		{"sudo nohup ", ""},
 		{"sudo env LD_PRELOAD=/tmp/x.so ", "LD_PRELOAD="},

@@ -4428,7 +4428,9 @@ func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
 // bearer so Codex never receives the master API bearer and the credential
 // never appears in an endpoint URL.
 func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
-	skipManagedWindowsCodexHostSetup(t)
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
@@ -4552,7 +4554,9 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 }
 
 func TestCodex_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
-	skipManagedWindowsCodexHostSetup(t)
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
+	}
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -4733,8 +4737,8 @@ hooks = false
 }
 
 func TestCodexManagedSetupRepairsUserHooksFalseWithoutLosingProjectTrust(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("managed Windows Codex uses the machine requirements installer")
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "codex", "config.toml")
@@ -6138,7 +6142,9 @@ func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
 }
 
 func TestCodex_TeardownKeepsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) {
-	skipManagedWindowsCodexHostSetup(t)
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
@@ -12604,15 +12610,44 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	}
 }
 
-// skipManagedWindowsCodexHostSetup skips a test of managed Codex host Setup
-// on Windows: there the managed hooks are machine policy that the
-// administrator-owned requirements installer writes, and host Setup refuses
-// them by design.
-func skipManagedWindowsCodexHostSetup(t *testing.T) {
+// codexManagedSetupRefusedOnWindows is the Windows branch of the managed Codex
+// host Setup tests (rel-1-0-10:GAP-1530). There the managed hooks are machine
+// policy that the administrator-owned requirements installer writes, so host
+// Setup refuses them by design: the contract is the named refusal, the user's
+// config.toml and the data dir untouched, and no registration read back from
+// the user config. It reports true on Windows (the caller returns).
+func codexManagedSetupRefusedOnWindows(t *testing.T) bool {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("managed Windows Codex hooks are machine policy that the requirements installer writes; host Setup refuses them")
+	if runtime.GOOS != "windows" {
+		return false
 	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	const original = "model = \"gpt-5\"\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prior := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = prior })
+	dataDir := filepath.Join(dir, "dc")
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token", ManagedEnterprise: true}
+	conn := NewCodexConnector()
+	err := conn.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "administrator-owned machine requirements installer") {
+		t.Fatalf("managed Codex Setup on Windows = %v, want the machine requirements refusal", err)
+	}
+	if got, readErr := os.ReadFile(configPath); readErr != nil || string(got) != original {
+		t.Fatalf("a refused managed Codex Setup changed the user config: %v %q", readErr, got)
+	}
+	if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused managed Codex Setup created the data dir (err=%v)", statErr)
+	}
+	registered, reason, checkErr := conn.checkOwnedHookContract(opts)
+	if checkErr != nil || registered || !strings.Contains(reason, "not verified from the user config.toml") {
+		t.Fatalf("managed Windows Codex registration check = %v %q %v, want not verified from the user config.toml", registered, reason, checkErr)
+	}
+	return true
 }
 
 func TestClaudeCodeWatchPathsForUnverifiedHomeKeepProjectEntries(t *testing.T) {
