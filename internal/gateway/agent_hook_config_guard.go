@@ -1419,7 +1419,7 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 		}
 		return "", "", ""
 	}
-	whole := actionfacts.Analyze(input)
+	whole := request.guestMemo.analyze(input)
 	if target := sandboxAgentHookConfigWrite(whole, input.ActiveHome); target != "" {
 		return agentHookConfigWriteRuleID, "", target
 	}
