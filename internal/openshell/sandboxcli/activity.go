@@ -67,7 +67,7 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 	if o.Follow {
 		// A feed that stays open says nothing of why sandboxes are off for the
 		// account: say it now, as `sandbox run` does (GAP-2059).
-		if err := a.managedOffError(ctx, api); err != nil {
+		if err := a.managedOffError(ctx, api, true); err != nil {
 			return err
 		}
 	}
@@ -173,7 +173,7 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 // stopping or closing it: a line on stderr says so, and the exit status stays
 // what it was. An error that is not a clean end is left to the caller.
 func (a *App) endOfUnfollowedFeed(ctx context.Context, api API, ended bool) error {
-	if err := a.managedOffError(ctx, api); err != nil {
+	if err := a.managedOffError(ctx, api, false); err != nil {
 		return err
 	}
 	if ended {

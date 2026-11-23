@@ -756,7 +756,7 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, run sandb
 	if st, err = a.readyManaged(ctx, api, st, run, beforeReady); err != nil {
 		return nil, err
 	}
-	st = a.accountStatus(ctx, st)
+	st = a.accountStatus(ctx, st, run.Harness)
 	if !st.Available && st.Managed != nil {
 		// Why sandboxes are off for the account is sandboxapi.Status.ManagedOff,
 		// the order `sandbox status` and `sandbox doctor` read: a reason that

@@ -441,7 +441,15 @@ func offReasonFixture(t *testing.T, tc offCase, goos string) (ta *testApp, want 
 	}
 	forbidden := managedExplainFixture()
 	forbidden.Allowed = false
-	ta.ManagedAccountPolicy = func(context.Context, string) (*sandboxapi.ManagedExplain, error) { return forbidden, nil }
+	// The gateway refuses a view that names no connector: status and activity
+	// ask for the configured primary connector's.
+	ta.Cfg.Guardrail.Connector = "claudecode"
+	ta.ManagedAccountPolicy = func(_ context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+		if harness == "" {
+			return nil, errors.New("403 connector_unknown")
+		}
+		return forbidden, nil
+	}
 	denied := ta.daemon.status
 	m := *denied.Managed
 	m.AccountDenied = true
@@ -520,10 +528,15 @@ func TestActivityRunAndStatusGiveTheSameOffReason(t *testing.T) {
 
 // An account whose sandboxes are off, on a daemon that is healthy and holds
 // the feed open, ends `sandbox activity -f` at once with the reason and exit
-// status 1 as `run` does, where it stayed open and silent (GAP-2059).
+// status 1 as `run` does, where it stayed open and silent (GAP-2059). A reason
+// that is the install's is not one: sandboxes that run have a feed to follow
+// (TestActivityFollowKeepsFollowingWhileOnlyTheInstallReasonShows).
 func TestActivityFollowOnAnOffAccountWithAHealthyDaemonReturnsAtOnce(t *testing.T) {
 	withManagedHost(t)
 	for _, tc := range offReasonCases() {
+		if tc.kind == sandboxapi.ManagedOffUnavailable {
+			continue
+		}
 		for _, output := range []OutputFormat{OutputText, OutputJSON} {
 			t.Run(tc.name+"/"+string(output), func(t *testing.T) {
 				ta, want := offReasonFixture(t, tc, "linux")
