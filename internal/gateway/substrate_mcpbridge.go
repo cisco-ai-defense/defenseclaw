@@ -54,6 +54,13 @@ const (
 // substrateMCPAskPoll is how often a held tools/call checks its ask.
 var substrateMCPAskPoll = time.Second
 
+// substrateMCPJudge is the verdict a bridged tools/call gets: the same one
+// a direct MCP call in the actor gets. A variable so the ask hold can be
+// tested: no bundled rule asks on MCP arguments (they are not read as a
+// shell command, so only regex rules match, and those map to alert unless
+// a profile turns HILT on).
+var substrateMCPJudge = (*APIServer).substrateMCPVerdict
+
 type substrateMCPBridge struct {
 	a      *APIServer
 	st     *substrateState
@@ -200,7 +207,7 @@ func (b *substrateMCPBridge) fromAgent(ctx context.Context, raw []byte) {
 	}
 	req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: tool, Transport: "stdio", Method: method}, Args: args}
 	req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
-	verdict := b.a.substrateMCPVerdict(ctx, b.reg, req)
+	verdict := substrateMCPJudge(b.a, ctx, b.reg, req)
 	switch verdict.Verdict {
 	case "allow":
 		b.write(false, websocket.BinaryMessage, canon)
