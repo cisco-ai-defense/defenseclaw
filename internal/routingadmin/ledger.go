@@ -61,9 +61,13 @@ type Ledger struct {
 	retiredGen int
 	retiredLRU map[string]*keyLRU
 	holdFull   map[string]bool
-	dropped    map[string]int
-	tombs      map[tombKey]tomb
-	tombSeq    uint64
+	// overFull holds the budget ids whose keys at or over the limit were
+	// more than the last read could name (SetOverFull): a key this process
+	// does not hold may be one of them (CapState, GAP-0892).
+	overFull map[string]bool
+	dropped  map[string]int
+	tombs    map[tombKey]tomb
+	tombSeq  uint64
 	// epoch is the process epoch Main rows are stored under (SetEpoch,
 	// Rotate).
 	epoch    string
@@ -892,7 +896,9 @@ func (l *Ledger) forgetLocked(key string) {
 // lost keys to the cap since the last call (once: the evaluator turns it
 // into one warning on the audit row) and whether a new key would find both
 // the live and the retired keys of the budget full (a managed deny budget
-// refuses it, budget_unavailable). One lock for both, on the request path.
+// refuses it, budget_unavailable), as when the last read found more keys
+// at or over the limit than it could name (SetOverFull). One lock for all,
+// on the request path.
 func (l *Ledger) CapState(key string) (evicted, full bool) {
 	if l == nil || !capped(key) {
 		return false, false
@@ -911,7 +917,29 @@ func (l *Ledger) CapState(key string) (evicted, full bool) {
 			full = !live
 		}
 	}
+	if !full && l.overFull[id] {
+		q := l.lru[id]
+		full = q == nil || q.at[key] == nil
+	}
 	return evicted, full
+}
+
+// SetOverFull names the budgets whose over-limit keys the last good read
+// could not all name (nil: none). It is replaced on each good read.
+func (l *Ledger) SetOverFull(ids []string) {
+	if l == nil {
+		return
+	}
+	var m map[string]bool
+	if len(ids) > 0 {
+		m = make(map[string]bool, len(ids))
+		for _, id := range ids {
+			m[id] = true
+		}
+	}
+	l.mu.Lock()
+	l.overFull = m
+	l.mu.Unlock()
 }
 
 // SetHoldFull names the budgets whose retired keys are never dropped: a

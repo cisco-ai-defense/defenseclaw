@@ -55,28 +55,52 @@ func (c *Client) SpendPush(ctx context.Context, epoch string, rows []routingadmi
 // it: the budgets then read as not loaded, never as partial). An older
 // leader answers everything at once: that answer is used as it is.
 func (c *Client) SpendTotals(ctx context.Context, epoch string, since time.Time, keys []string) ([]routingadmin.SeedRow, error) {
+	rows, _, err := c.SpendTotalsOver(ctx, epoch, since, keys, nil)
+	return rows, err
+}
+
+var _ routingadmin.SpendOverRPC = (*Client)(nil)
+
+// SpendTotalsOver is SpendTotals whose by-key read also asks for the keys
+// at or over each budget's limit in over (with the first key chunk), and
+// returns the budget ids with more of them than OverQuery.Max (GAP-0892).
+// An older leader ignores over.
+func (c *Client) SpendTotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []routingadmin.OverQuery) ([]routingadmin.SeedRow, []string, error) {
 	base := SpendTotalsRequest{Epoch: epoch, Since: since.UTC().Format(time.DateOnly), Page: true, ByKey: keys != nil}
+	var wireOver []SpendOver
+	if keys != nil {
+		for _, o := range over {
+			wireOver = append(wireOver, SpendOver{Prefix: o.Prefix, Since: o.Since.UTC().Format(time.DateOnly), Limit: o.Limit, Max: o.Max})
+		}
+	}
 	var rows []routingadmin.SeedRow
+	var full []string
 	pages := 0
 	for start := 0; ; start += maxKeys {
 		in := base
 		if keys != nil {
 			in.Keys, in.KeysOnly = keys[start:min(start+maxKeys, len(keys))], start > 0
+			if start == 0 {
+				in.Over = wireOver
+			}
 		}
 		for {
 			if pages == maxTotalsPages {
-				return nil, errors.New("spendleader: spend answer too large")
+				return nil, nil, errors.New("spendleader: spend answer too large")
 			}
 			pages++
 			var out SpendTotalsAnswer
 			if err := c.call(ctx, MethodSpendTotals, in, &out); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			for _, r := range out.Rows {
 				rows = append(rows, routingadmin.SeedRow{Day: r.Day, Key: r.Key, USD: r.USD})
 			}
+			if in.Over != nil && in.AfterDay == "" {
+				full = out.OverFull
+			}
 			if !out.Paged {
-				return rows, nil
+				return rows, full, nil
 			}
 			if !out.More || len(out.Rows) == 0 {
 				break
@@ -85,7 +109,7 @@ func (c *Client) SpendTotals(ctx context.Context, epoch string, since time.Time,
 			in.AfterDay, in.AfterKey = last.Day, last.Key
 		}
 		if keys == nil || start+maxKeys >= len(keys) {
-			return rows, nil
+			return rows, full, nil
 		}
 	}
 }

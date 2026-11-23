@@ -34,7 +34,8 @@ type Runtime struct {
 
 	mu     sync.Mutex
 	ledger *Ledger
-	ids    []string // budget ids of the newest generation
+	ids    []string     // budget ids of the newest generation
+	over   []OverBudget // its actor and batch budgets that block (OverBudgets)
 	last   *config.Config
 	lastEv *evaluator
 	ctx    context.Context
@@ -353,6 +354,7 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	}
 	rt.last, rt.lastEv = cfg, ev
 	rt.setIDsLocked(policy.BudgetIDs())
+	rt.over = policy.OverBudgets()
 	rt.mu.Unlock()
 	rt.startSync()
 	return ev
@@ -366,7 +368,7 @@ type syncWorker struct{ stop context.CancelFunc }
 // no SQLite read, spend write or fleet request outlives the budgets
 // (rel-1-0-10:GAP-1716). rt.mu is held.
 func (rt *Runtime) setIDsLocked(ids []string) {
-	rt.ids = ids
+	rt.ids, rt.over = ids, nil
 	rt.budgeted.Store(len(ids) > 0)
 	if len(ids) == 0 && rt.syncW != nil {
 		rt.syncW.stop()
@@ -431,6 +433,7 @@ func (rt *Runtime) syncLoop(ctx context.Context, w *syncWorker) {
 func (rt *Runtime) SyncOnce(ctx context.Context) {
 	rt.mu.Lock()
 	ledger, local, fleet, keys, ids, epoch := rt.ledger, rt.local, rt.fleet, rt.keys, append([]string(nil), rt.ids...), rt.epoch
+	overBudgets := rt.over
 	rt.mu.Unlock()
 	if ledger == nil || local == nil {
 		return
@@ -444,8 +447,21 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	// never lower what this device already knows.
 	// The capped keys (actor:, batch:) are read by list: only the ones this
 	// process holds, so launcher-minted keys never make the read too large
-	// (a key new here gets the others' spend at the next sync).
-	localRows, localErr := local.Totals(ctx, epoch, since, ledger.CappedKeys())
+	// (a key new here gets the others' spend at the next sync). A counter
+	// that reads by key (the cluster leader) also names the keys at or over
+	// a blocking budget's limit, so a blocked key this process let go stays
+	// blocked here until the next read (GAP-0892).
+	var localRows []SeedRow
+	var localErr error
+	var overFull []string
+	if or, ok := local.(OverReader); ok && len(overBudgets) > 0 {
+		localRows, overFull, localErr = or.TotalsOver(ctx, epoch, since, ledger.CappedKeys(), overQueries(overBudgets, ledger.KeyCap(), rt.clock()))
+	} else {
+		localRows, localErr = local.Totals(ctx, epoch, since, ledger.CappedKeys())
+	}
+	if localErr == nil {
+		ledger.SetOverFull(overFull)
+	}
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
 			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), rt.clock())
@@ -466,6 +482,27 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 		// Keep why: the store down, the device refused, a budget it lacks.
 		ledger.SyncFailed(fmt.Errorf("%w (%v)", errFleetFallback, err))
 	}
+}
+
+// OverReader is a counter that answers a by-key read with the keys at or
+// over the limits of over too (LeaderCounter), and lists the budgets of
+// over with more such keys than OverQuery.Max.
+type OverReader interface {
+	TotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []OverQuery) ([]SeedRow, []string, error)
+}
+
+// overQueries asks, per blocking budget, for at most keyCap of its keys at
+// or over the limit in the period that contains now.
+func overQueries(budgets []OverBudget, keyCap int, now time.Time) []OverQuery {
+	if keyCap <= 0 {
+		keyCap = DefaultKeyCap
+	}
+	out := make([]OverQuery, 0, len(budgets))
+	for _, b := range budgets {
+		out = append(out, OverQuery{Prefix: b.Prefix, Since: time.Unix(int64(windowStart(b.Period, now))*86400, 0).UTC(),
+			Limit: b.LimitUSD, Max: keyCap})
+	}
+	return out
 }
 
 // maxRows merges two spend answers per (key, day), keeping the larger.

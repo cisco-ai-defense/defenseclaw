@@ -17,6 +17,12 @@ type SpendRPC interface {
 	SpendTotals(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error)
 }
 
+// SpendOverRPC is a SpendRPC whose by-key read also names the keys at or
+// over a budget's limit (spendleader.Client; GAP-0892).
+type SpendOverRPC interface {
+	SpendTotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []OverQuery) ([]SeedRow, []string, error)
+}
+
 // LeaderCounterTimeout bounds one leader call, so a lost leader never holds
 // the sync loop (the transport retries a leader change for 45 s on its own).
 const LeaderCounterTimeout = 4 * time.Second
@@ -30,7 +36,10 @@ type LeaderCounter struct {
 	timeout time.Duration
 }
 
-var _ SpendCounter = (*LeaderCounter)(nil)
+var (
+	_ SpendCounter = (*LeaderCounter)(nil)
+	_ OverReader   = (*LeaderCounter)(nil)
+)
 
 // NewLeaderCounter returns the counter over rpc.
 func NewLeaderCounter(rpc SpendRPC) *LeaderCounter {
@@ -64,4 +73,21 @@ func (c *LeaderCounter) Totals(ctx context.Context, epoch string, since time.Tim
 	ctx, cancel := c.ctx(ctx)
 	defer cancel()
 	return c.rpc.SpendTotals(ctx, epoch, since, keys)
+}
+
+// TotalsOver is Totals that also reads the keys at or over the limits of
+// over and the budgets with more of them than OverQuery.Max. An rpc without
+// it reads as Totals does.
+func (c *LeaderCounter) TotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []OverQuery) ([]SeedRow, []string, error) {
+	if c == nil || c.rpc == nil {
+		return nil, nil, errors.New("budget spend: no leader")
+	}
+	o, ok := c.rpc.(SpendOverRPC)
+	if !ok {
+		rows, err := c.Totals(ctx, epoch, since, keys)
+		return rows, nil, err
+	}
+	ctx, cancel := c.ctx(ctx)
+	defer cancel()
+	return o.SpendTotalsOver(ctx, epoch, since, keys, over)
 }

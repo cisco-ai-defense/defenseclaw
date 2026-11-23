@@ -415,6 +415,30 @@ func (p *Policy) HoldFullIDs() []string {
 	return ids
 }
 
+// OverBudget is a launcher-keyed (actor, batch) budget that blocks or
+// downgrades past its limit: the cluster read asks for its keys at or over
+// the limit, so a replica never forgets a blocked key (GAP-0892).
+type OverBudget struct {
+	Prefix   string // "<scope>:<id>:"
+	Period   string
+	LimitUSD float64
+}
+
+// OverBudgets lists the actor and batch budgets whose action is not warn.
+func (p *Policy) OverBudgets() []OverBudget {
+	if p == nil {
+		return nil
+	}
+	var out []OverBudget
+	for _, b := range p.budgets {
+		if b.action != config.RoutingBudgetOnExceedWarn && b.LimitUSD > 0 &&
+			(b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch) {
+			out = append(out, OverBudget{Prefix: b.Scope + ":" + b.ID + ":", Period: b.Period, LimitUSD: b.LimitUSD})
+		}
+	}
+	return out
+}
+
 func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Verdict) {
 	var strongest *compiledBudget
 	for i := range p.budgets {

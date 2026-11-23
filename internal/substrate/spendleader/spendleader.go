@@ -48,6 +48,8 @@ const (
 	maxTotalsPages = 50
 	maxKeyLen      = 256
 	maxKeys        = 5000
+	// maxOver bounds the budgets of one read's Over.
+	maxOver = 256
 )
 
 var epochRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,64}$`)
@@ -82,6 +84,19 @@ type SpendTotalsRequest struct {
 	// minted keys never make a read too large.
 	ByKey    bool `json:"by_key,omitempty"`
 	KeysOnly bool `json:"keys_only,omitempty"`
+	// Over (with ByKey, not KeysOnly) also asks for the keys at or over each
+	// budget's limit (GAP-0892). An older leader ignores it.
+	Over []SpendOver `json:"over,omitempty"`
+}
+
+// SpendOver asks for at most Max keys starting with Prefix ("actor:<id>:"
+// or "batch:<id>:") whose spend since Since (a UTC date) is at or over
+// Limit.
+type SpendOver struct {
+	Prefix string  `json:"prefix"`
+	Since  string  `json:"since"`
+	Limit  float64 `json:"limit"`
+	Max    int     `json:"max"`
 }
 
 // SpendTotalsAnswer is the sum of the other epochs per (day, key).
@@ -93,6 +108,9 @@ type SpendTotalsAnswer struct {
 	// Paged says the leader answered Page (an older leader answers every
 	// row at once and leaves it unset).
 	Paged bool `json:"paged,omitempty"`
+	// OverFull lists, on the first page of a read with Over, the budget ids
+	// with more than Max keys at or over the limit.
+	OverFull []string `json:"over_full,omitempty"`
 }
 
 // UsagePushRequest is one replica's absolute hourly usage buckets.
@@ -188,13 +206,23 @@ func (s *Service) spendTotals(ctx context.Context, in SpendTotalsRequest) (Spend
 		}
 		return SpendTotalsAnswer{Rows: wireRows(rows)}, nil
 	}
+	over, err := overQueries(in)
+	if err != nil {
+		return SpendTotalsAnswer{}, err
+	}
 	// One (day, key) row per pair, sorted by the store; a page starts after
 	// the cursor, so a push between pages never repeats a row.
 	rows, err := s.Counter.TotalsPage(ctx, in.Epoch, since, routingadmin.TotalsQuery{
 		AfterDay: in.AfterDay, AfterKey: in.AfterKey, Limit: maxSpendRows + 1,
-		ByKey: in.ByKey, KeysOnly: in.KeysOnly, Keys: in.Keys})
+		ByKey: in.ByKey, KeysOnly: in.KeysOnly, Keys: in.Keys, Over: over})
 	if err != nil {
 		return SpendTotalsAnswer{}, err
+	}
+	var full []string
+	if len(over) > 0 && in.AfterDay == "" {
+		if full, err = s.Counter.OverFull(ctx, in.Epoch, over); err != nil {
+			return SpendTotalsAnswer{}, err
+		}
 	}
 	n, size := 0, 0
 	for ; n < len(rows) && n < maxSpendRows; n++ {
@@ -202,7 +230,29 @@ func (s *Service) spendTotals(ctx context.Context, in SpendTotalsRequest) (Spend
 			break
 		}
 	}
-	return SpendTotalsAnswer{Rows: wireRows(rows[:n]), More: n < len(rows), Paged: true}, nil
+	return SpendTotalsAnswer{Rows: wireRows(rows[:n]), More: n < len(rows), Paged: true, OverFull: full}, nil
+}
+
+// overQueries checks a read's Over (only a by-key read, not KeysOnly, has
+// one).
+func overQueries(in SpendTotalsRequest) ([]routingadmin.OverQuery, error) {
+	if len(in.Over) == 0 || !in.ByKey || in.KeysOnly {
+		return nil, nil
+	}
+	if len(in.Over) > maxOver {
+		return nil, bad("too many over budgets")
+	}
+	out := make([]routingadmin.OverQuery, 0, len(in.Over))
+	for _, o := range in.Over {
+		since, err := time.Parse(time.DateOnly, o.Since)
+		if err != nil || len(o.Prefix) > maxKeyLen || !strings.HasSuffix(o.Prefix, ":") ||
+			!(strings.HasPrefix(o.Prefix, "actor:") || strings.HasPrefix(o.Prefix, "batch:")) || len(o.Prefix) < len("actor:x:") ||
+			!(o.Limit > 0) || math.IsInf(o.Limit, 0) || o.Max < 1 || o.Max > maxKeys {
+			return nil, bad("over is a budget prefix, a UTC date, a limit and a max")
+		}
+		out = append(out, routingadmin.OverQuery{Prefix: o.Prefix, Since: since, Limit: o.Limit, Max: o.Max})
+	}
+	return out, nil
 }
 
 // rowBytes is about what one row takes in a JSON body.

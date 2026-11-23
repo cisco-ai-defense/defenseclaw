@@ -146,6 +146,53 @@ type TotalsQuery struct {
 	// KeysOnly keeps only the keys in Keys.
 	ByKey, KeysOnly bool
 	Keys            []string
+	// Over (with ByKey, not KeysOnly) also keeps, per query, the capped keys
+	// at or over a budget's limit in its window, so a replica that let a
+	// blocked key go (evicted and stored) still reads it as blocked until
+	// the next read (GAP-0892).
+	Over []OverQuery
+}
+
+// OverQuery asks for the keys of one budget (Prefix, "<scope>:<id>:") whose
+// spend since Since (the first day of the budget's period) is at or over
+// Limit: at most Max of them (OverFull reports a budget with more).
+type OverQuery struct {
+	Prefix string
+	Since  time.Time
+	Limit  float64
+	Max    int
+}
+
+// overSQL lists the keys of one OverQuery (args: overArgs).
+const overSQL = `SELECT charge_key FROM budget_spend WHERE epoch != ? AND day >= ? AND substr(charge_key, 1, ?) = ?
+	GROUP BY charge_key HAVING SUM(usd) >= ? ORDER BY charge_key LIMIT ?`
+
+func overArgs(epoch string, o OverQuery, limit int) []any {
+	return []any{epoch, o.Since.UTC().Format(time.DateOnly), len(o.Prefix), o.Prefix, o.Limit, limit}
+}
+
+// OverFull lists the budget ids of over with more than Max over-limit keys:
+// the read could not name them all, so a managed deny budget refuses a key
+// this process does not hold (Ledger.SetOverFull).
+func (c *LocalCounter) OverFull(ctx context.Context, epoch string, over []OverQuery) ([]string, error) {
+	if c == nil {
+		return nil, errors.New("budget spend: no counter")
+	}
+	db, err := c.open()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, o := range over {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+overSQL+`)`, overArgs(epoch, o, o.Max+1)...).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n > o.Max {
+			ids = append(ids, budgetIDOfKey(o.Prefix))
+		}
+	}
+	return ids, nil
 }
 
 // TotalsPage is Totals restricted by q, sorted by (day, key) in SQL.
@@ -174,6 +221,10 @@ func (c *LocalCounter) TotalsPage(ctx context.Context, epoch string, since time.
 		if q.KeysOnly {
 			query += " AND " + in
 		} else {
+			for _, o := range q.Over {
+				in += " OR charge_key IN (" + overSQL + ")"
+				args = append(args, overArgs(epoch, o, o.Max)...)
+			}
 			query += ` AND ((substr(charge_key, 1, 6) != 'actor:' AND substr(charge_key, 1, 6) != 'batch:') OR ` + in + `)`
 		}
 	}
