@@ -74,7 +74,10 @@ const (
 // every tier and deployment (RowRecord, RowEffectUnknown,
 // RowEffectContentDecided, RowEffectLink, RowEffectRead): it never moves the live verdict, so the effect
 // join keeps it out of the call's findings, the one place the rule holds
-// for every route.
+// for every route. Every pack table gives the same answer: a tiers.yaml that
+// turns a row's recording in every cell on or off is refused at load
+// (packCellError), so this reading of the built-in table is the one Decide
+// makes on the call's pack table (DET111 T19 review P3-1).
 func ShadowOnly(f Finding) bool {
 	if f.Proof.Source != SourceEffects {
 		return false
