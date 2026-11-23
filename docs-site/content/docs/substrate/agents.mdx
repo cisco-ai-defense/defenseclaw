@@ -88,7 +88,7 @@ A managed refusal comes back before any actor exists, as `403` with the reason `
 | Unattended runs | n/a | n/a | `--task`, `--batch`, from CI |
 | Your project | In place | Live (Linux, Docker) or copy | Copy or git clone only |
 | Undo | No | Undo point, or pull from a copy | Restore points of the agent's folder (`checkpoint`, `undo`), and `pull` |
-| Your local MCP servers | Yes | Imported (Claude Code, Codex) | No. Only MCP servers in the image or reachable over the network |
+| Your local MCP servers | Yes | Imported (Claude Code, Codex) | **Preview.** Offered with `--mcp NAME=COMMAND` while the launcher is attached; the command runs on your computer. Other MCP servers are in the image or reachable over the network |
 | Ports on your machine | Yes | `--host-port`, after approval | No |
 | Process tree, kernel feed | Host feeds | Linux | No. Substrate reports CPU and memory per agent |
 | Interactive terminal | Yes | Yes, over SSH | Yes, through the launcher and the terminal relay in the kit |

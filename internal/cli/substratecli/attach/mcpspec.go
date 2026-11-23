@@ -53,7 +53,6 @@ var MCPMessages = []MCPMessage{
 	{"not_found", "gateway", "NAME is not a valid MCP server name (a-z, 0-9, _ and -, up to 32)."},
 	{"relay_unreachable", "gateway", "The cluster could not reach the agent; it may still be starting. Try again in a moment, or check it with: defenseclaw substrate status"},
 	{"relay_tls_required", "gateway", "This agent's relay accepts TLS only and its image predates that. Rebuild its template (`template build`) and start a new agent."},
-	{"mcp_server_blocked", "gateway", "Your administrator's policy does not allow the MCP server NAME."},
 	{"mcp_busy", "stream", "Another launcher already bridges NAME to this agent."},
 	{"mcp_spec_invalid", "cli", `--mcp needs NAME=COMMAND, for example --mcp files="npx -y @modelcontextprotocol/server-filesystem ." (NAME: a-z, 0-9, _ and -, up to 32; COMMAND: a command line, no shell).`},
 	{"mcp_name_duplicate", "cli", "--mcp NAME is given twice. Give each MCP server its own name."},

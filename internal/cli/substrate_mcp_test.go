@@ -6,6 +6,7 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -86,5 +87,19 @@ func TestSubstrateMCPFlagHelp(t *testing.T) {
 	conn := newSubstrateConnectCmd().Flags().Lookup("mcp")
 	if run == nil || conn == nil || !strings.Contains(run.Usage, "Preview") || run.Usage != conn.Usage {
 		t.Fatalf("--mcp flags: %+v %+v", run, conn)
+	}
+}
+
+// The docs reference rows are written from the one table of codes and lines.
+func TestSubstrateMCPDocsRowsMatchTable(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "substrate", "reference.mdx"))
+	if err != nil {
+		t.Skipf("no docs tree here: %v", err)
+	}
+	doc := string(b)
+	for _, m := range attach.MCPMessages {
+		if !strings.Contains(doc, "| "+m.Line+" | `"+m.Code+"` |") {
+			t.Errorf("reference.mdx has no row for %s: %q", m.Code, m.Line)
+		}
 	}
 }
