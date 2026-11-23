@@ -887,9 +887,7 @@ rules:
     tags: [persistence, execution, reverse-shell, kubernetes, cronjob, bounded-grammar]
   - id: secrets.kubernetes_cluster_wide_enumeration
     tool_call_only: true
-    expression: >-
-      f.tool == 'kubectl' ||
-      f.commands.exists(c, c.argv_complete && c.program == 'kubectl')
+    expression: "f.tool == 'kubectl'"
     pattern: 'a^'
     title: "Enumerate Kubernetes secrets across all namespaces"
     severity: HIGH

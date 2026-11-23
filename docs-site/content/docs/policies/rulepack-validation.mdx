@@ -24,8 +24,8 @@ On a managed computer, `defenseclaw` runs only the commands in [Managed command 
    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
      rules: 283/287 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-     digest: 14ab4722101e9f03704c955b909534e96aeece9d3150656ee03414ac606d2d20
-     files digest: a3a803f32dc0739abc3b2a6ba88db68e76d5948f9c70175efb2c32e3d1152455 (the guardrail.custom_packs pin)
+     digest: 562d698cd3957f3de2df317cdb782cc98d3d367b4dbb391265cdc99563b809ed
+     files digest: a35e7f2d9d28f65cac8ff00cb271275f0f8a75bc0adbd23567bcd7292e288a42 (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -37,7 +37,7 @@ On a managed computer, `defenseclaw` runs only the commands in [Managed command 
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"14ab4722…","enabled_rule_count":283,"files_digest":"a3a803f3…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":287,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"562d698c…","enabled_rule_count":283,"files_digest":"a35e7f2d…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":287,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
 3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`. The reason names the file, or the folder when a whole copy of another pack sits inside this one (for example `default/judge/injection.yaml` names `default`), and says to move it out or remove it:

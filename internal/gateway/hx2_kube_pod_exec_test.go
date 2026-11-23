@@ -120,9 +120,10 @@ func TestGAP1860BearerAPIPathIsKubernetesRequest(t *testing.T) {
 
 // rel-1-0-10:GAP-1861: kubectl attach -i streams stdin into the container as
 // exec -i does and takes the same cells (recorded in strict, inert in default
-// and permissive); a shell kubectl get secrets -A takes the cluster-wide
-// enumeration cell of the structured kubectl tool (an alert, never a block);
-// the Secret read rule title no longer says one named Secret.
+// and permissive); a shell kubectl get secrets -A lists names only and keeps
+// its 1.0.10 cell, allow with no finding in every tier (1.0.10 decides that
+// shape nowhere; only the structured kubectl tool alerts on it, as at
+// 1.0.10); the Secret read rule title no longer says one named Secret.
 func TestGAP1861AttachAndNamesOnlySecretList(t *testing.T) {
 	for _, pair := range [][2]string{
 		{"kubectl attach -i web-0", "kubectl exec -i web-0 -- sh"},
@@ -142,11 +143,10 @@ func TestGAP1861AttachAndNamesOnlySecretList(t *testing.T) {
 			t.Errorf("%s: kubectl attach without stdin gives %v, want no finding", pack, got.Findings)
 		}
 	}
-	for _, command := range []string{"kubectl get secrets -A", "kubectl get secrets --all-namespaces"} {
+	for _, command := range []string{"kubectl get secrets -A", "kubectl get secrets --all-namespaces", "kubectl get secret -A -o name"} {
 		for _, pack := range hx2Packs {
-			got := hx2CodexBash(t, pack, command)
-			if got.Action != "alert" || !slices.Contains(hx2RuleIDs(got), "secrets.kubernetes_cluster_wide_enumeration") {
-				t.Errorf("%s: %q gives %s %v, want alert with the cluster-wide enumeration rule", pack, command, got.Action, got.Findings)
+			if got := hx2CodexBash(t, pack, command); got.Action != "allow" || len(got.Findings) != 0 {
+				t.Errorf("%s: %q gives %s %v, want allow with no finding (the 1.0.10 cell)", pack, command, got.Action, got.Findings)
 			}
 		}
 	}

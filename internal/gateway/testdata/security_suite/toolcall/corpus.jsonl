@@ -691,4 +691,3 @@
 {"id":"gap2445-tar-no-same-owner-then-report","rule_id":"persistence.ssh_authorized_keys_command","command":"tar -xzf pkg.tgz --no-same-owner -C build; echo hi > report.txt","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"gap2445-tar-short-o-then-report","rule_id":"persistence.ssh_authorized_keys_command","command":"tar -xof pkg.tar -C build; echo hi > report.txt","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"gap2445-tar-member-list-then-report","rule_id":"persistence.ssh_authorized_keys_command","command":"tar -xzf pkg.tgz -C build -T list.txt --wildcards; echo hi > report.txt","is_attack":false,"expect_route":"none","no_other_finding":true}
-{"id":"kubernetes-shell-cluster-wide-secret-enumeration","rule_id":"secrets.kubernetes_cluster_wide_enumeration","command":"kubectl get secrets -A","is_attack":true,"expect_route":"semantic","detection_only":true,"no_other_finding":true}

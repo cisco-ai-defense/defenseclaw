@@ -957,9 +957,7 @@ rules:
     tags: [persistence, execution, reverse-shell, kubernetes, cronjob, bounded-grammar]
   - id: secrets.kubernetes_cluster_wide_enumeration
     tool_call_only: true
-    expression: >-
-      f.tool == 'kubectl' ||
-      f.commands.exists(c, c.argv_complete && c.program == 'kubectl')
+    expression: "f.tool == 'kubectl'"
     # Exact ActionFacts owner accepts only a direct, closed kubectl get
     # secret[s] request with an explicit all-namespaces flag. Authorization
     # checks, namespaced reads, dynamic values, and compound commands abstain.
