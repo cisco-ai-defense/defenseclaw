@@ -61,6 +61,7 @@ class _Flag:
     short: str = ""
     default: str = ""
     metavar: str = ""
+    hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -851,7 +852,7 @@ def _click_option(flag: _Flag) -> GatewayOption:
     decls = [f"--{flag.name}"]
     if flag.short:
         decls.append(f"-{flag.short}")
-    kwargs: dict[str, Any] = {"help": flag.help}
+    kwargs: dict[str, Any] = {"help": flag.help, "hidden": flag.hidden}
     if flag.go_type == "bool":
         kwargs.update(is_flag=True, default=False)
     elif flag.go_type in {"stringArray", "stringSlice"}:
