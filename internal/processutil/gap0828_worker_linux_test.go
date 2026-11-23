@@ -46,6 +46,9 @@ func TestGAP0828WorkerHelper(t *testing.T) {
 	processutil.RefuseUserNamespacesForTest(t, syscall.EPERM)
 	w := &scanworker.Worker{Dir: filepath.Join(dir, "scan"), Launcher: filepath.Join(dir, "fake-skill-scanner"), Timeout: 20 * time.Second}
 	if mode == "pod" {
+		// The chart container's mounts (GAP-1031): a read-only root and
+		// its own mount on the scratch folder.
+		processutil.PodMountsForTest(t, filepath.Join(dir, "tmp"))
 		w.Pod = processutil.NewPodRunner(filepath.Join(dir, "tmp"))
 	}
 	job := filepath.Join(w.Dir, scanner.ScanJobsDirName, gap0828Job)

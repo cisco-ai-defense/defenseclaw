@@ -22,21 +22,25 @@ import "os/exec"
 
 // PodRunner is the Linux scanner sidecar's pod-contained mode (GAP-0828).
 // It refuses every command on other platforms.
-type PodRunner struct{}
+type PodRunner struct {
+	// refusal is why this runner refuses; the caller checks it at run time
+	// like the Linux runner's own refusals (GAP-1035).
+	refusal error
+}
 
 // NewPodRunner returns a runner that refuses every command.
-func NewPodRunner(string, ...string) *PodRunner { return &PodRunner{} }
+func NewPodRunner(string, ...string) *PodRunner {
+	return &PodRunner{refusal: &podError{msg: "it runs only on Linux, in the chart's scanner sidecar"}}
+}
 
-func podUnavailable() error { return &podError{msg: "it runs only on Linux"} }
-
-// Check always fails here.
-func (*PodRunner) Check() error { return podUnavailable() }
+// Check fails here.
+func (p *PodRunner) Check() error { return p.refusal }
 
 // Run never runs cmd here.
-func (*PodRunner) Run(*exec.Cmd) error { return podUnavailable() }
+func (p *PodRunner) Run(*exec.Cmd) error { return p.refusal }
 
 // RunJob never runs cmd here.
-func (*PodRunner) RunJob(*exec.Cmd, string) error { return podUnavailable() }
+func (p *PodRunner) RunJob(*exec.Cmd, string) error { return p.refusal }
 
-// Reset always fails here.
-func (*PodRunner) Reset() error { return podUnavailable() }
+// Reset fails here.
+func (p *PodRunner) Reset() error { return p.refusal }
