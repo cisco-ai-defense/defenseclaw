@@ -1463,6 +1463,9 @@ var (
 		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
 		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
 		"publish": true, "keygen": true, "serve": true,
+		// secrets templates (T-SEC S3): every secrets verb but list is a
+		// control (judgeDefenseClawSubstrate); named here for the CLI drift test.
+		"templates": true,
 	}
 )
 

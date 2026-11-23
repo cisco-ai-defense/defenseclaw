@@ -26,7 +26,7 @@ import (
 )
 
 // TestRV4F1OneDecisionWins: while one decision on an ask is in flight (its
-// registration hook is running), a second decision is refused as already
+// registration hook is running; only an always approval runs it, GAP-0484), a second decision is refused as already
 // answered, and the expiry does not overtake it: the answer the caller gets
 // is the answer the store keeps.
 func TestRV4F1OneDecisionWins(t *testing.T) {
@@ -50,7 +50,7 @@ func TestRV4F1OneDecisionWins(t *testing.T) {
 		}
 		done := make(chan res, 1)
 		go func() {
-			got, err := s.Resolve(ctx, ResolveRequest{ID: a.ID, Decision: "approve", CallerID: "alice"})
+			got, err := s.Resolve(ctx, ResolveRequest{ID: a.ID, Decision: "approve", Always: true, CallerID: "alice"})
 			done <- res{got, err}
 		}()
 		<-entered
