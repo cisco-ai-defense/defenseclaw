@@ -848,7 +848,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	}
 	a.importIngressProfile(ctx)
 	// The vault is sealed before a sandbox can capture a secret into it.
-	a.setupSealVault()
+	if err := a.setupSealVault(); err != nil {
+		return err
+	}
 
 	// 8. The daemon picks the change up, the driver included.
 	var driver openshell.ComputeDriver

@@ -82,7 +82,7 @@ func keyAccount(keyID string) string { return "vault-" + keyID }
 // keysFromEnv is the keystore EnvStore selects: ks nil with why when the
 // vault stays a file; err for a value that is not known.
 func keysFromEnv() (ks Keystore, why string, err error) {
-	switch mode := strings.ToLower(strings.TrimSpace(os.Getenv(EnvStore))); mode {
+	switch mode := storeMode(); mode {
 	case "", "auto":
 		return osKeystore()
 	case "keychain":
@@ -101,6 +101,12 @@ func keysFromEnv() (ks Keystore, why string, err error) {
 		return nil, "", fmt.Errorf("%w: %s=%q is not known; use auto (the default), keychain or file", ErrStoreSetting, EnvStore, mode)
 	}
 }
+
+func storeMode() string { return strings.ToLower(strings.TrimSpace(os.Getenv(EnvStore))) }
+
+// Required reports whether EnvStore=keychain asks for a sealed vault: a
+// command that cannot seal it then fails, whatever the reason.
+func Required() bool { return storeMode() == "keychain" }
 
 // required is the keystore EnvStore=keychain asks for: a change that cannot
 // seal the vault with it fails instead of keeping a file.
@@ -161,7 +167,23 @@ func (m macKeychain) Save(keyID string, key []byte) error {
 func (macKeychain) Delete(string) {}
 
 // secretService keeps vault keys in the Secret Service through secret-tool.
-type secretService struct{ t keystore.SecretTool }
+type secretService struct {
+	t keystore.SecretTool
+	// timeout bounds one call (0: keyTimeout).
+	timeout time.Duration
+}
+
+func (s secretService) within(d time.Duration) Keystore {
+	s.timeout = d
+	return s
+}
+
+func (s secretService) limit() time.Duration {
+	if s.timeout > 0 {
+		return s.timeout
+	}
+	return keyTimeout
+}
 
 func (secretService) Name() string { return keystoreName(keystoreSecretService) }
 func (secretService) ID() string   { return keystoreSecretService }
@@ -171,11 +193,11 @@ func (s secretService) attrs(keyID string) []string {
 }
 
 func (s secretService) Load(keyID string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), keyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.limit())
 	defer cancel()
 	raw, found, err := s.t.Lookup(ctx, s.attrs(keyID)...)
 	if err != nil {
-		return nil, ctxError(ctx, err)
+		return nil, s.ctxError(ctx, err)
 	}
 	if !found {
 		// secret-tool answers a locked keyring whose unlock was dismissed
@@ -193,22 +215,22 @@ func (s secretService) Load(keyID string) ([]byte, error) {
 }
 
 func (s secretService) Save(keyID string, key []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), keyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.limit())
 	defer cancel()
 	enc := hexKey(key)
 	defer clear(enc)
-	return ctxError(ctx, s.t.Store(ctx, keyLabel, enc, s.attrs(keyID)...))
+	return s.ctxError(ctx, s.t.Store(ctx, keyLabel, enc, s.attrs(keyID)...))
 }
 
 func (s secretService) Delete(keyID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), keyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.limit())
 	defer cancel()
 	_ = s.t.Clear(ctx, s.attrs(keyID)...)
 }
 
-func ctxError(ctx context.Context, err error) error {
+func (s secretService) ctxError(ctx context.Context, err error) error {
 	if err != nil && ctx.Err() != nil {
-		return fmt.Errorf("the Secret Service did not answer within %s (it may be waiting to be unlocked)", keyTimeout)
+		return fmt.Errorf("the Secret Service did not answer within %s (it may be waiting to be unlocked)", s.limit())
 	}
 	return err
 }

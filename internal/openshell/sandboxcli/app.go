@@ -256,6 +256,9 @@ type App struct {
 	// managed computer: the caller's profile and request-access contact a
 	// refusal names (ManagedError).
 	managedSeen *sandboxapi.ManagedStatus
+	// vaultSealTried: this command tried to seal the vault on its way to a
+	// sandbox (a run that resumes its sandbox connects to it).
+	vaultSealTried bool
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run

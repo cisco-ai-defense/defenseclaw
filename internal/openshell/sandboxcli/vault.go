@@ -48,41 +48,64 @@ func (a *App) vaultNotice(st *vault.Store) {
 	}
 }
 
-// sealVault seals the vault before a sandbox can capture into it: the
+// vaultSealWait bounds each keystore call of the seal on the way to a
+// sandbox (tests shorten it).
+var vaultSealWait = vault.SealWait
+
+// sealVault seals the vault before a sandbox can capture into it (`sandbox
+// run`, `start`, and `connect` when it starts a stopped sandbox): the
 // gateway and the sandbox daemon never read the keystore, so they keep a
-// file vault a file. With a keystore that works now the vault is sealed (an
-// empty one is made) and the command says so; without one it stays a file
-// readable only by you, as `vault list` shows. A storage setting that
-// cannot be honoured fails the command; another error is a warning (a
-// sandbox does not need the vault to start).
+// file vault a file. With a keystore that answers now the vault is sealed
+// (an empty one is made) and the command says so; without one it stays a
+// file readable only by you, as `vault list` shows. Unless
+// DEFENSECLAW_VAULT_STORE=keychain, the keystore gets vault.SealWait per
+// call, so a Secret Service that never answers does not stall every run
+// (vault.Store.Briefly). It runs once per command.
 func (a *App) sealVault() error {
-	st := a.vault()
-	if err := st.Seal(); err != nil {
-		if errors.Is(err, vault.ErrStoreSetting) {
-			return err
-		}
-		a.warn("the sandbox vault was not sealed: " + err.Error())
+	if a.vaultSealTried {
 		return nil
+	}
+	a.vaultSealTried = true
+	st := a.vault().Briefly(vaultSealWait)
+	if err := a.sealFailed(st.Seal()); err != nil {
+		return err
 	}
 	a.vaultNotice(st)
 	return nil
 }
 
+// sealFailed is what a failed seal does to the command: with
+// DEFENSECLAW_VAULT_STORE=keychain any failure (the keystore, the writer
+// lock, the vault directory, a damaged vault) fails it, as does a storage
+// setting that cannot be honoured; another failure is a warning, since a
+// sandbox does not need the vault to start.
+func (a *App) sealFailed(err error) error {
+	if err == nil {
+		return nil
+	}
+	if vault.Required() || errors.Is(err, vault.ErrStoreSetting) {
+		return fmt.Errorf("the sandbox vault was not sealed: %w", err)
+	}
+	a.warn("the sandbox vault was not sealed: " + err.Error())
+	return nil
+}
+
 // setupSealVault is sealVault for `sandbox setup`, which also says how the
-// vault is kept when it stays a file.
-func (a *App) setupSealVault() {
+// vault is kept when it stays a file. It fails setup as sealVault fails a
+// run. Setup waits for the keystore as a vault change does.
+func (a *App) setupSealVault() error {
 	st := a.vault()
 	if err := st.Seal(); err != nil {
-		a.warn("the sandbox vault was not sealed: " + err.Error())
-		return
+		return a.sealFailed(err)
 	}
 	if n := st.Notice(); n != "" {
 		a.note(n)
-		return
+		return nil
 	}
 	if s, err := st.Storage(); err == nil && s.Mode == "file" && s.Note != "" {
 		a.note("the sandbox vault is a file readable only by you, not encrypted: " + s.Note)
 	}
+	return nil
 }
 
 // vaultStorageLine prints how the vault is kept.
