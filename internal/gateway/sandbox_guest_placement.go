@@ -1261,6 +1261,44 @@ type guestCDReading struct {
 	operand        string
 }
 
+// guestOtherProgramText reports, without a parse, a command text whose cd
+// reading (guestCDReading) is the zero one: it starts with a word of plain
+// name bytes (letters, digits, _ . / -) ended by a blank, a ; & or | or the
+// end of the text, and that word is none of cd, pushd, popd, builtin or
+// command. Such a word is static as it is (hookpaths.StaticWord) and is no
+// assignment, so the text parses as a call of that program, as no simple
+// call at all (a keyword, a pipeline) or not at all, and none of these
+// changes or moves the folder. A guest call of thousands of commands parsed
+// each command text again only to learn that, some 2 MB a hook on an 8 KB
+// call (substrate-1 GAP-1028).
+func guestOtherProgramText(text string) bool {
+	end := 0
+	for end < len(text) && guestPlainProgramByte(text[end]) {
+		end++
+	}
+	if end == 0 {
+		return false
+	}
+	if end < len(text) {
+		switch text[end] {
+		case ' ', '\t', '\n', ';', '&', '|':
+		default:
+			return false
+		}
+	}
+	switch text[:end] {
+	case "cd", "pushd", "popd", "builtin", "command":
+		return false
+	}
+	return true
+}
+
+// guestPlainProgramByte reports a byte of a plain program word
+// (guestOtherProgramText).
+func guestPlainProgramByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '/' || c == '-'
+}
+
 // guestCDMemo reads each command text of one placement once
 // (guestCDReading): an 8 KB call repeats a few texts hundreds of times ($C;
 // f0() { :; }; $C; f1() { :; }; ...), and parsing each again for the
@@ -1278,6 +1316,9 @@ func newGuestCDMemo(home string) *guestCDMemo {
 }
 
 func (memo *guestCDMemo) reading(text string) guestCDReading {
+	if guestOtherProgramText(text) {
+		return guestCDReading{}
+	}
 	if reading, ok := memo.texts[text]; ok {
 		return reading
 	}
