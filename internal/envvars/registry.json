@@ -4540,6 +4540,66 @@
       "since": "0.3.0"
     },
     {
+      "name": "DEFENSECLAW_RG",
+      "category": "test_fixture",
+      "purpose": "Path of the ripgrep 14.1.0 binary the live ripgrep tests of the action-fact resolver run against, instead of rg on PATH.",
+      "default": "unset (rg on PATH)",
+      "accepted_values": [
+        "absolute path to ripgrep 14.1.0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0679_gap0682_test.go",
+          "description": "g0679LiveRG picks the rg binary the live ripgrep checks run"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_RG_FUZZ_SEED",
+      "category": "test_fixture",
+      "purpose": "Seed of the random ripgrep glob and type-add shapes in the live glob fuzz tests; unset uses a fixed seed.",
+      "default": "unset (fixed seed)",
+      "accepted_values": [
+        "unsigned integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0683_test.go",
+          "description": "The glob fuzz tests read the seed to replay or widen a run"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_RG_REQUIRED",
+      "category": "test_fixture",
+      "purpose": "Makes the live ripgrep tests fail instead of skip when no ripgrep 14.1.0 is available (the local gates set it).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0679_gap0682_test.go",
+          "description": "g0679LiveRG fails the test instead of skipping when there is no matching rg"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_RUN_ID",
       "category": "telemetry",
       "purpose": "Correlation ID stamped on every event for cross-sink joins. Auto-generated per gateway boot if unset; explicit value is useful for E2E test runs.",

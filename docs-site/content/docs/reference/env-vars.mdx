@@ -370,7 +370,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 170 test-only variables">
+<Accordion title="Show the 173 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -474,6 +474,9 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_PROPERTY_FULL`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Set to 1 to run the full sweep of the gateway's passthrough and proxy property tests; unset, they run a deterministic pairwise-covering sample.<br/>**Read by:** `internal/gateway/property_sample_test.go` |
 | `DEFENSECLAW_REAL_FS_TESTS`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Turns on the Go tests that mount a real, size-limited tmpfs (testenv.RealSmallFilesystem) so a full audit store is a real ENOSPC from the kernel; they also need passwordless sudo for mount and umount, and are skipped otherwise.<br/>**Read by:** `internal/testenv/fullfs_linux.go`, `internal/testenv/fullfs_other.go` |
 | `DEFENSECLAW_REQUIRE_PARTITION_MANIFESTS`<br/>Default: `unset` (partition metadata optional in the external regression)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Requires partition metadata when the external strict normalization-manifest regression is enabled.<br/>**Read by:** `benchmarks/internal/benchmark/manifest_external_test.go` |
+| `DEFENSECLAW_RG`<br/>Default: `unset` (rg on PATH)<br/>Values: `absolute path to ripgrep 14.1.0`, `unset`<br/>Managed host: `ignore` | Path of the ripgrep 14.1.0 binary the live ripgrep tests of the action-fact resolver run against, instead of rg on PATH.<br/>**Read by:** `internal/actionfacts/gap0679_gap0682_test.go` |
+| `DEFENSECLAW_RG_FUZZ_SEED`<br/>Default: `unset` (fixed seed)<br/>Values: `unsigned integer`, `unset`<br/>Managed host: `ignore` | Seed of the random ripgrep glob and type-add shapes in the live glob fuzz tests; unset uses a fixed seed.<br/>**Read by:** `internal/actionfacts/gap0683_test.go` |
+| `DEFENSECLAW_RG_REQUIRED`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Makes the live ripgrep tests fail instead of skip when no ripgrep 14.1.0 is available (the local gates set it).<br/>**Read by:** `internal/actionfacts/gap0679_gap0682_test.go` |
 | `DEFENSECLAW_SANDBOX_RENDER_DIR`<br/>Default: `unset`<br/>Values: `absolute-path`, `unset`<br/>Managed host: `ignore` | Names a directory TestSandboxArtifactsGolden writes each harness's rendered sandbox overlay under (&lt;dir>/&lt;connector>/&lt;in-image path>), so a manifest drift can be reviewed by diffing the trees two revisions render.<br/>**Read by:** `internal/gateway/connector/sandbox_artifacts_test.go` |
 | `DEFENSECLAW_SENSOR_HELPER_TEST_PROCESS`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Turns the sensor-helper test binary into the helper itself when a version test re-runs it to check --version and the flag handling of main().<br/>**Read by:** `cmd/defenseclaw-sensor-helper/version_test.go` |
 | `DEFENSECLAW_SHIM_CAPTURE`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | Carries the output path used by the isolated PATH-shim argv fidelity fixture.<br/>**Read by:** `internal/gateway/connector/connector_test.go` |
