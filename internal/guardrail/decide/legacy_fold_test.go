@@ -29,6 +29,10 @@ func TestFoldsIntoLegacy(t *testing.T) {
 		return Proof{Kind: KindWrite, Target: target, Certainty: CertKnown}
 	}
 	legacy := func(id string, sev Severity) Finding { return Finding{RuleID: id, Severity: sev} }
+	knownProtected := func(p Proof) Finding {
+		p.Source = SourceEffects
+		return Finding{RuleID: RuleFor(p), Severity: SevHigh, Proof: p}
+	}
 	stateLegacy := Finding{RuleID: "tamper.detector_state_write", Severity: SevLow,
 		Proof: Proof{Kind: KindWrite, Target: TargetState, Certainty: CertKnown, Source: "gateway:TAMPER.DETECTOR_STATE_WRITE"}}
 	cases := []struct {
@@ -60,6 +64,14 @@ func TestFoldsIntoLegacy(t *testing.T) {
 			[]Finding{legacy("PATH-NPMRC", SevMedium)}, false},
 		// another effect finding is not a 1.0.10 rule naming the set
 		{"effect beside an effect", effect(knownWrite(TargetState)), []Finding{{RuleID: "tamper.detector_state_write", Proof: Proof{Source: SourceEffects}}}, false},
+		// a Known protected write finding carries the plain spelling's rule on
+		// its set (RuleFor): the effect finding beside it folds into it; it never
+		// folds into itself or another Known write (GAP-1243, GAP-1308)
+		{"effect beside a known hook config write", effect(knownWrite(TargetHookConfig)), []Finding{knownProtected(knownWrite(TargetHookConfig))}, true},
+		{"effect beside a known state write", effect(knownWrite(TargetState)), []Finding{knownProtected(knownWrite(TargetState))}, true},
+		{"known hook config write never folds itself", knownProtected(knownWrite(TargetHookConfig)), []Finding{knownProtected(knownWrite(TargetHookConfig))}, false},
+		{"known state write beside its legacy finding folds", knownProtected(knownWrite(TargetState)), []Finding{stateLegacy}, true},
+		{"keys write beside a known hook config write stands", effect(knownWrite(TargetAuthorizedKeys)), []Finding{knownProtected(knownWrite(TargetHookConfig))}, false},
 	}
 	for _, c := range cases {
 		if got := FoldsIntoLegacy(c.f, c.call); got != c.want {

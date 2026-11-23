@@ -55,14 +55,13 @@ var det111R1VerdictPending = map[string]string{
 	"GAP-1653/seed":  ".env read: .env is not a protected set (decision side)",
 	"GAP-1653/seed2": ".env read: .env is not a protected set (decision side)",
 	"GAP-1653/var":   ".env read through an alias of open: .env is not a protected set (decision side)",
-	"GAP-0662/var6b": "only the effect unknown tier reached it; that tier is shadow-only on every set (DET111 ruling 2026-11-22T17:00Z, TRAIN-C reopens)",
 	"GAP-0893/var2":  "only the effects credential read reached it; an own-home effects read is shadow-only (decide.RowEffectRead, GAP-1825/1826, TRAIN-C reopens)",
 }
 
 // det111R1WindowsPending are the Windows host rows (managed cells) whose
 // verdict does not reach the unknown tier yet, with the lane that closes each.
 var det111R1WindowsPending = map[string]string{
-	"GAP-1577/var4": "Windows host Start-Process shell body still misses the effects call (S3-PRE effectCall)",
+	"GAP-1577/var4":                          "Windows host Start-Process shell body still misses the effects call (S3-PRE effectCall)",
 	"GAP-0998/seed":                          "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
 	"GAP-0998/seed2":                         "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
 	"GAP-1550/seed":                          "the automatic PowerShell $HOME stays dynamic (S3-R1)",
@@ -96,8 +95,6 @@ var det111R1WindowsPending = map[string]string{
 	"GAP-1588/var3":  "an lsass dump is not an effect target (decision side)",
 	"GAP-1588/var4":  "fsutil usn deletejournal is not an effect target (decision side)",
 	"GAP-1588/var5":  "icacls on the system root (decision side)",
-	"GAP-1173/var2":  "only the effect unknown tier reached it; that tier is shadow-only on every set (DET111 ruling 2026-11-22T17:00Z, TRAIN-C reopens)",
-	"GAP-1173/var7":  "only the effect unknown tier reached it; that tier is shadow-only on every set (DET111 ruling 2026-11-22T17:00Z, TRAIN-C reopens)",
 }
 
 // det111R1RuledInert are corpus attack rows DET111 ruled are not attacks
