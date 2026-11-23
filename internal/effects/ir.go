@@ -101,6 +101,19 @@ type Cmd struct {
 	// line the child cmd runs (its quotes and operators intact).
 	CmdBody    string
 	CmdBodySet bool
+	// Defines, on the statement of a POSIX function definition, is what the
+	// walker knows of the function at that point (rel-1-0-10:GAP-1043).
+	Defines *FuncDef
+}
+
+// FuncDef is a POSIX function definition (name() { body; }). Out is what the
+// body prints when it is one echo of one static word (Static); Cond is true
+// when the definition runs only on some paths or in a child shell.
+type FuncDef struct {
+	Name   string
+	Out    string
+	Static bool
+	Cond   bool
 }
 
 // HostPayload is psparse's reading of one host call's payload.
@@ -134,8 +147,9 @@ type WordSeg struct {
 	// ${V#pat}, ${V/a/b}, ${V:off:len}); the walker applies it to the value.
 	Op *ParamOp
 	// Subst names a command substitution the walker can evaluate itself:
-	// "pwd" for $(pwd), `pwd` and $(pwd -L), the working folder unless pwd is
-	// shadowed (rel-1-0-10:GAP-1043, GAP-1608).
+	// "pwd" for $(pwd), `pwd` and $(pwd -L): the working folder, or what a
+	// pwd function defined earlier in the call prints when the walk can read
+	// it; unknown for any other shadowed pwd (rel-1-0-10:GAP-1043, GAP-1608).
 	Subst string
 }
 

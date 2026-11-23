@@ -298,7 +298,12 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 			nw := &posixWalker{out: sub}
 			nw.stmt(cmd.Body, true, false)
 			sub.Funcs = nil // a nested function definition does not shadow outside
-			w.add(&Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
+			def := &FuncDef{Cond: cond || pipeIn || w.pipeDepth > 0 || w.bg > 0}
+			if cmd.Name != nil {
+				def.Name = cmd.Name.Value
+			}
+			def.Out, def.Static = staticEchoBody(cmd.Body)
+			w.add(&Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true, Defines: def}}, Cond: true})
 		}
 	case *syntax.DeclClause:
 		w.declClause(st, cmd, cond, pipeIn)
@@ -886,6 +891,40 @@ func pwdSubst(cs *syntax.CmdSubst) bool {
 		return false
 	}
 	return len(call.Args) == 1 || call.Args[1].Lit() == "-L"
+}
+
+// staticEchoBody is the output of a function body that is one echo of one
+// static word ({ echo /tmp; } or ( echo /tmp )), with the trailing newline a
+// command substitution drops: an unquoted literal with no escape, expansion,
+// glob, brace, leading ~ (tilde expansion) or leading - (an echo option), so
+// every echo prints it as spelled (rel-1-0-10:GAP-1043).
+func staticEchoBody(body *syntax.Stmt) (string, bool) {
+	if body == nil || body.Negated || body.Background || len(body.Redirs) > 0 {
+		return "", false
+	}
+	var stmts []*syntax.Stmt
+	switch b := body.Cmd.(type) {
+	case *syntax.Block:
+		stmts = b.Stmts
+	case *syntax.Subshell:
+		stmts = b.Stmts
+	}
+	if len(stmts) != 1 {
+		return "", false
+	}
+	st := stmts[0]
+	if st.Negated || st.Background || st.Coprocess || len(st.Redirs) > 0 {
+		return "", false
+	}
+	call, ok := st.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) != 2 || call.Args[0].Lit() != "echo" {
+		return "", false
+	}
+	out, ok := staticWordText(call.Args[1])
+	if !ok || out == "" || out[0] == '-' || out[0] == '~' || looksGlob(out) {
+		return "", false
+	}
+	return out, true
 }
 
 // literalTail is the literal text after the last part of word that is not a

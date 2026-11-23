@@ -154,6 +154,9 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 			accountHomes = append(accountHomes, home)
 		}
 	}
+	if opts.Flavor == effects.FlavorPOSIX {
+		accountHomes = append(accountHomes, effectMountedAccountHomes(result, request.Input.ActiveHome, opts.Login, accountHomes)...)
+	}
 	facts := effectrules.Project(result, effectrules.Env{
 		Home:         request.Input.ActiveHome,
 		Flavor:       opts.Flavor,
