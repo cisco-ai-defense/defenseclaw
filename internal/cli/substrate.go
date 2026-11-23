@@ -331,6 +331,7 @@ func init() {
 		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),
 		newSubstrateDoctorCmd(), newSubstrateVerifyCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),
+		newSubstrateScanWorkerCmd(),
 	)
 	rootCmd.AddCommand(substrateCmd)
 }

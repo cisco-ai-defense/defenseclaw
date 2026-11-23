@@ -38,6 +38,19 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{/* The skill scanner sidecar's image (gateway.skillScanner.image). */}}
+{{- define "dc.scannerImage" -}}
+{{- $img := .Values.gateway.skillScanner.image -}}
+{{- if $img.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $img.digest) -}}
+{{- fail "gateway.skillScanner.image.digest must be sha256:<64 hex>" -}}
+{{- end -}}
+{{ $img.repository }}@{{ $img.digest }}
+{{- else -}}
+{{ $img.repository }}:{{ $img.tag | default .Chart.AppVersion }}
+{{- end -}}
+{{- end -}}
+
 {{/* The pod-identity SPIFFE ID of a component's ServiceAccount. */}}
 {{- define "dc.spiffe" -}}spiffe://cluster.local/ns/{{ .ctx.Release.Namespace }}/sa/defenseclaw-{{ .component }}{{- end -}}
 

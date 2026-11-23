@@ -20,12 +20,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
@@ -140,8 +142,22 @@ func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer
 type runtimeSkillScanner struct{ rt *attest.RuntimeScanner }
 
 func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
-	return runtimeSkillScanner{rt: attest.NewRuntimeScanner(cfg)}
+	rt := attest.NewRuntimeScanner(cfg)
+	// GAP-0477: the gateway image has no Python, so skill-scanner runs in the
+	// chart's scanner sidecar. Its shared folder exists only when the chart
+	// renders the sidecar; without it the scan is unavailable as in rel and
+	// the fail mode decides.
+	if fi, err := os.Stat(substrateScanDir); err == nil && fi.IsDir() {
+		if rs, err := scanner.NewRemoteSkillScanner(cfg.Scanners.SkillScanner, 0); err == nil {
+			rs.Dir = substrateScanDir
+			rt.Skill = rs
+		}
+	}
+	return runtimeSkillScanner{rt: rt}
 }
+
+// substrateScanDir is the scanner sidecar's shared folder (a var for tests).
+var substrateScanDir = scanner.DefaultScanDir
 
 // ScanSkillFolder implements gateway.SubstrateSkillScanner.
 func (s runtimeSkillScanner) ScanSkillFolder(ctx context.Context, name, dir string, files []gateway.SubstrateAttachedFile) (bool, string, error) {

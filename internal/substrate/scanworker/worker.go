@@ -1,0 +1,241 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// Package scanworker is the Agent Substrate scanner sidecar
+// (`defenseclaw-gateway substrate scan-worker`, GAP-0477). It runs in its own
+// container of the gateway pod, with no Secret mounts, no service-account
+// token and no listener but a 0600 unix socket in the shared emptyDir. It
+// runs skill-scanner and the plugin scanner from the release's scanner
+// runtime on job folders the gateway wrote, and answers the ScanResult; the
+// gateway decides with its own policy.
+package scanworker
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
+)
+
+// RuntimeLauncher is the scanner runtime launcher in the scanner image (the
+// managed Linux package layout, which the image copies from the release).
+const RuntimeLauncher = "/opt/defenseclaw/bin/defenseclaw-scanners"
+
+const (
+	defaultSlots = 2
+	defaultQueue = 32
+	maxRequest   = 1 << 20
+	maxJobFiles  = 4096
+)
+
+// ScanFunc runs one scan of dir; a seam for tests.
+type ScanFunc func(ctx context.Context, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error)
+
+// Worker serves POST /v1/scan and GET /v1/health on Dir/scan.sock.
+type Worker struct {
+	Dir     string
+	Timeout time.Duration
+	Slots   int
+	Queue   int
+	Scan    ScanFunc
+	// Version reports the scanner runtime's version ("" and an error when
+	// it cannot run).
+	Version func(ctx context.Context) (string, error)
+
+	admit chan struct{}
+	run   chan struct{}
+}
+
+func (w *Worker) init() {
+	slots, queue := w.Slots, w.Queue
+	if slots <= 0 {
+		slots = defaultSlots
+	}
+	if queue <= 0 {
+		queue = defaultQueue
+	}
+	if w.Timeout <= 0 {
+		w.Timeout = 20 * time.Second
+	}
+	w.admit = make(chan struct{}, slots+queue)
+	w.run = make(chan struct{}, slots)
+	if w.Scan == nil {
+		w.Scan = RuntimeScan
+	}
+}
+
+// Handler is the worker's HTTP API.
+func (w *Worker) Handler() http.Handler {
+	w.init()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/scan", w.serveScan)
+	mux.HandleFunc("GET /v1/health", w.serveHealth)
+	return mux
+}
+
+// Serve listens on Dir/scan.sock (0600) until ctx ends.
+func (w *Worker) Serve(ctx context.Context) error {
+	if err := os.MkdirAll(filepath.Join(w.Dir, scanner.ScanJobsDirName), 0o700); err != nil {
+		return err
+	}
+	sock := filepath.Join(w.Dir, scanner.ScanSocketName)
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		ln.Close()
+		return err
+	}
+	srv := &http.Server{Handler: w.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() { <-ctx.Done(); _ = srv.Close() }()
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func answer(rw http.ResponseWriter, status int, a scanner.RemoteScanAnswer) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(status)
+	_ = json.NewEncoder(rw).Encode(a)
+}
+
+func (w *Worker) serveHealth(rw http.ResponseWriter, r *http.Request) {
+	h := scanner.RemoteHealth{}
+	if w.Version != nil {
+		v, err := w.Version(r.Context())
+		h.Version, h.Ready = v, err == nil
+		if err != nil {
+			h.Error = err.Error()
+		}
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(rw).Encode(h)
+}
+
+func (w *Worker) serveScan(rw http.ResponseWriter, r *http.Request) {
+	var req scanner.RemoteScanRequest
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxRequest))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		answer(rw, http.StatusBadRequest, scanner.RemoteScanAnswer{Code: "refused", Error: "bad request: " + err.Error()})
+		return
+	}
+	if !scanner.ScanJobIDRE.MatchString(req.Job) {
+		answer(rw, http.StatusBadRequest, scanner.RemoteScanAnswer{Code: "refused", Error: "bad job id"})
+		return
+	}
+	if req.Kind != scanner.RemoteKindSkill && req.Kind != scanner.RemoteKindPlugin {
+		answer(rw, http.StatusBadRequest, scanner.RemoteScanAnswer{Code: "refused", Error: "bad kind"})
+		return
+	}
+	dir := filepath.Join(w.Dir, scanner.ScanJobsDirName, req.Job)
+	// The job is the gateway's; the worker deletes it whatever the outcome.
+	defer os.RemoveAll(dir)
+	if err := checkJob(dir); err != nil {
+		answer(rw, http.StatusBadRequest, scanner.RemoteScanAnswer{Code: "refused", Error: err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), w.Timeout)
+	defer cancel()
+	// A full queue waits inside the timeout; it never turns into an allow.
+	if !acquire(ctx, w.admit) {
+		answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Code: "timeout", Error: "the scan waited past its timeout for a worker slot"})
+		return
+	}
+	defer func() { <-w.admit }()
+	if !acquire(ctx, w.run) {
+		answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Code: "timeout", Error: "the scan waited past its timeout for a worker slot"})
+		return
+	}
+	defer func() { <-w.run }()
+	res, err := w.Scan(ctx, req.Kind, dir, req.Settings)
+	switch {
+	case err == nil && res != nil:
+		answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Result: res})
+	case ctx.Err() != nil:
+		answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Code: "timeout", Error: "the scan did not finish in time"})
+	case err != nil && scanner.Unavailable(err):
+		answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Code: "unavailable", Error: err.Error()})
+	default:
+		msg := "the scanner returned no result"
+		if err != nil {
+			msg = err.Error()
+		}
+		answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Result: res, Code: "failed", Error: msg})
+	}
+}
+
+func acquire(ctx context.Context, sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// checkJob refuses a job that is not a real folder of folders and regular
+// files: a link in a job could point the scanner at a file of the sidecar.
+func checkJob(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("no such job")
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("the job is not a folder")
+	}
+	n := 0
+	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if n++; n > maxJobFiles {
+			return fmt.Errorf("the job has more than %d entries", maxJobFiles)
+		}
+		if !d.IsDir() && !d.Type().IsRegular() {
+			return fmt.Errorf("the job has a link or a special file: %s", filepath.Base(p))
+		}
+		return nil
+	})
+}
+
+// RuntimeScan runs the release's scanner runtime: skill-scanner with the
+// gateway's static settings, or the plugin scanner.
+func RuntimeScan(ctx context.Context, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
+	if kind == scanner.RemoteKindPlugin {
+		return (&scanner.PluginScanner{BinaryPath: RuntimeLauncher}).Scan(ctx, dir)
+	}
+	cfg := config.SkillScannerConfig{Binary: RuntimeLauncher, Policy: st.Policy, Lenient: st.Lenient,
+		UseBehavioral: st.UseBehavioral, UseTrigger: st.UseTrigger}
+	if st.Policy == config.SkillScannerPolicyCustom {
+		f, err := os.CreateTemp("", "dc-scan-policy-*.yaml")
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.Write(st.CustomPolicy); err != nil {
+			f.Close()
+			return nil, err
+		}
+		f.Close()
+		sum := sha256.Sum256(st.CustomPolicy)
+		cfg.PolicyFile = config.AssetFileRef{Path: f.Name(), Digest: "sha256:" + hex.EncodeToString(sum[:])}
+	}
+	return (&scanner.SkillScanner{Config: cfg}).Scan(ctx, dir)
+}

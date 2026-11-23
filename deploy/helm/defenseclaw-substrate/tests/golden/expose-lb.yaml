@@ -1493,6 +1493,36 @@ spec:
         - name: admin-tls
           mountPath: /etc/defenseclaw/admin-tls
           readOnly: true
+        # Scan jobs for the skill scanner sidecar (GAP-0477).
+        - name: skill-scan
+          mountPath: /run/defenseclaw-scan
+      # The skill scanner sidecar (GAP-0477): no Secret mounts and no
+      # service-account token (the pod mounts none by default and this
+      # container lists only its two folders), no port.
+      - name: skill-scanner
+        image: ghcr.io/cisco-ai-defense/defenseclaw-scanner:1.0.11
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate
+        - scan-worker
+        - --dir=/run/defenseclaw-scan
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: skill-scan
+          mountPath: /run/defenseclaw-scan
+        - name: skill-scan-tmp
+          mountPath: /tmp
       volumes:
       - name: config
         configMap:
@@ -1590,6 +1620,13 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
+      - name: skill-scan
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
+      - name: skill-scan-tmp
+        emptyDir:
+          sizeLimit: 512Mi
       - name: admin-tls
         secret:
           secretName: defenseclaw-admin-external-tls
