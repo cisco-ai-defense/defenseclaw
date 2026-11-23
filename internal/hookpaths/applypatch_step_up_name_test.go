@@ -30,9 +30,7 @@ func TestApplyPatchClientTargetsListTheRawSpellingOfAStepUpName(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(other, filepath.Join(project, "lnk")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, other, filepath.Join(project, "lnk"))
 	patch := func(name string) []byte {
 		return []byte(`{"command":"apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: ` + name + `\n+x\n*** End Patch\nEOF\n"}`)
 	}

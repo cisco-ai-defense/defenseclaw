@@ -58,7 +58,7 @@
       "title": "Secret read followed by external egress",
       "severity": "CRITICAL",
       "domain": "data-egress",
-      "can_block": false,
+      "can_block": true,
       "event_window": 8,
       "time_window_seconds": 1800,
       "requires": [
@@ -66,7 +66,7 @@
         "matching identity when known",
         "artifact unchanged"
       ],
-      "note": "Alert-only"
+      "note": "Can block only with the strict rule pack, when both steps are proven and name one file; alert in the default and permissive packs"
     },
     {
       "id": "chain.workload_identity_then_lateral_execution",

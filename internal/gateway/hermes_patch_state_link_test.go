@@ -57,7 +57,10 @@ func TestHermesWritesThroughALinkToDefenseClawStateAreBlocked(t *testing.T) {
 				if err := json.Unmarshal([]byte(got), &resp); err != nil {
 					t.Fatalf("verdict %q: %v", got, err)
 				}
-				blocked := resp["action"] == "block" && strings.Contains(got, rule)
+				// A proven state write is a HIGH alert on the default pack (GAP-0747
+				// owner tiering 2026-11-15T15:20Z).
+				action, _ := resp["action"].(string)
+				blocked := gap0747StateVerdict(action, got, false) == "block" && strings.Contains(got, rule)
 				if blocked != link.block || !link.block && resp["action"] != "allow" {
 					t.Fatalf("action %v, want block by %s = %t: %.800s", resp["action"], rule, link.block, got)
 				}

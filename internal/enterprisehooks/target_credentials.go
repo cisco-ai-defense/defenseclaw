@@ -35,6 +35,7 @@ func RunAsTarget(target TargetCredentials, fn func() error) error {
 // WindowsTargetLogonAnyWithS4U, finding no token to act as the user: no
 // session, and Windows refused an S4U logon too, as it does for a Microsoft
 // Entra ID account ("No credentials are available in the security
-// package"). RemoveEnrolledUserAssetInSession succeeds once the user signs in
-// (GAP-0414).
+// package"). A quarantine whose source removal fails so keeps the asset
+// blocked, and the gateway's quarantine retry removes it once the user signs
+// in (GAP-0414).
 var ErrEnrolledUserSignedOut = errors.New("the user is signed out and Windows gave no S4U logon for the account")

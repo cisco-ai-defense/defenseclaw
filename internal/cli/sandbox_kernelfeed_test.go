@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
 )
@@ -205,7 +206,7 @@ func TestSandboxKernelFeedRefusals(t *testing.T) {
 	t.Setenv(managed.DeploymentModeEnv, "managed_enterprise")
 	// Managed computers run sandboxes; only this per-user installer is not
 	// theirs (GAP-0017).
-	if _, err := runKernelFeed(t, "install"); err == nil || commandExitCode(err) != 3 || !strings.Contains(err.Error(), "managed") ||
+	if _, err := runKernelFeed(t, "install"); err == nil || cliusage.ExitCode(err) != 3 || !strings.Contains(err.Error(), "managed") ||
 		strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), "installer") {
 		t.Fatalf("install on a managed host: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestSandboxKernelFeedRefusals(t *testing.T) {
 	}
 	t.Setenv(managed.DeploymentModeEnv, "")
 	sandboxKernelFeedGOOS = "darwin"
-	if _, err := runKernelFeed(t, "status", "-o", "text"); err == nil || commandExitCode(err) != 3 || !strings.Contains(err.Error(), "Linux only") {
+	if _, err := runKernelFeed(t, "status", "-o", "text"); err == nil || cliusage.ExitCode(err) != 3 || !strings.Contains(err.Error(), "Linux only") {
 		t.Fatalf("status on a Mac: %v", err)
 	}
 	if len(*calls) != 0 {

@@ -55,24 +55,94 @@ def test_bootstrap_and_makefile_pin_the_same_golangci_lint() -> None:
     assert 'PATH="$(GOBIN):$(PATH)" golangci-lint' not in makefile
 
 
+def _recipe(makefile: str, target: str) -> str:
+    start = makefile.index(f"\n{target}: ") + 1
+    end = makefile.find("\n\n", start)
+    return makefile[start:end]
+
+
 def test_go_lint_runs_vet_then_golangci_lint() -> None:
+    # make go-lint is go-vet (gofmt and go vet), then golangci-lint. CI runs
+    # the two halves as sibling jobs behind the Go Lint check.
     makefile = MAKEFILE.read_text(encoding="utf-8")
-    recipe = makefile[makefile.index("\ngo-lint: ") : makefile.index("\ngo-lint-analyzers:")]
-    assert recipe.index("go vet ./...") < recipe.index("$(MAKE) --no-print-directory go-lint-analyzers")
+    lint = _recipe(makefile, "go-lint")
+    assert lint.splitlines() == ["go-lint: go-vet", "\t@$(MAKE) --no-print-directory go-lint-analyzers"]
+    vet = _recipe(makefile, "go-vet")
+    assert vet.startswith("go-vet: sync-openclaw-extension\n")
+    assert vet.index("gofmt -l") < vet.index("go vet ./...")
+    assert "go-lint-analyzers" not in vet
+
+
+def test_go_lint_vets_the_openshell_integration_tag() -> None:
+    # The live Claude Code run-config test sits behind the openshell_integration
+    # build tag, so a plain `go vet ./...` never compiles it (GAP-0280).
+    vet = _recipe(MAKEFILE.read_text(encoding="utf-8"), "go-vet")
+    tagged = "go vet -tags openshell_integration ./internal/openshell/image/"
+    assert vet.index("go vet ./...") < vet.index(tagged)
 
 
 def test_ci_go_lint_has_the_history_for_changed_lines() -> None:
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
-    job = ci["jobs"]["go-lint"]
-    assert job["timeout-minutes"] == 15
+    job = ci["jobs"]["go-lint-analyzers"]
+    assert job["timeout-minutes"] == 20
     steps = job["steps"]
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == "${{ github.event_name == 'pull_request' && 2 || 0 }}"
     assert checkout["with"]["persist-credentials"] is False
-    lint = next(step for step in steps if step.get("run") == "make go-lint")
+    # golangci-lint type-checks the tree make go-lint syncs first.
+    assert any(step.get("run") == "make plugin sync-openclaw-extension" for step in steps)
+    lint = next(step for step in steps if step.get("name") == "Go lint (golangci-lint on changed lines)")
+    # The Makefile's own recipe with its pinned golangci-lint (installed into
+    # the restored cache directory).
+    assert 'make go-lint-analyzers GOLANGCI_LINT="$bin"' in lint["run"]
     assert lint["env"] == {
-        "GOLANGCI_LINT_BASE": "${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}"
+        "GOLANGCI_LINT_BASE": "${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}",
+        "GOLANGCI_DIR": "${{ steps.golangci.outputs.dir }}",
+        "GOLANGCI_VERSION": "${{ steps.golangci.outputs.version }}",
     }
+
+
+def test_ci_go_lint_is_go_vet_and_golangci_lint_behind_one_check() -> None:
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    jobs = ci["jobs"]
+    vet = jobs["go-vet"]
+    assert [step.get("run") for step in vet["steps"] if step.get("run")] == [
+        "make plugin",
+        "make amp-plugin-typecheck",
+        "make go-vet",
+    ]
+    for job_id in ("go-vet", "go-lint-analyzers"):
+        assert jobs[job_id]["if"] == "${{ !cancelled() && needs.changes.outputs.go != 'false' }}", job_id
+    aggregate = jobs["go-lint"]
+    assert aggregate["name"] == "Go Lint"
+    assert aggregate["if"] == "${{ always() }}"
+    assert aggregate["needs"] == ["changes", "go-vet", "go-lint-analyzers"]
+    assert "steps" in aggregate and len(aggregate["steps"]) == 1
+    run = aggregate["steps"][0]["run"]
+    # Skips pass only when the classifier skipped Go; otherwise both must pass.
+    assert '[ "$GO_SUITE" = false ] && [ "$VET_RESULT" = skipped ] && [ "$ANALYZERS_RESULT" = skipped ]' in run
+    assert 'test "$VET_RESULT" = success' in run and 'test "$ANALYZERS_RESULT" = success' in run
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None, reason="runs the aggregate step with bash")
+@pytest.mark.parametrize(
+    ("results", "go_suite", "passes"),
+    [
+        (("success", "success"), "true", True),
+        (("skipped", "skipped"), "false", True),
+        (("skipped", "skipped"), "true", False),
+        (("success", "failure"), "true", False),
+        (("failure", "success"), "true", False),
+        (("success", "skipped"), "false", False),
+        (("cancelled", "success"), "true", False),
+    ],
+)
+def test_ci_go_lint_aggregate_verdicts(results: tuple[str, str], go_suite: str, passes: bool) -> None:
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    run = ci["jobs"]["go-lint"]["steps"][0]["run"]
+    env = {**os.environ, "GO_SUITE": go_suite, "VET_RESULT": results[0], "ANALYZERS_RESULT": results[1]}
+    proc = subprocess.run(["bash", "-c", run], env=env, capture_output=True, text=True, timeout=30, check=False)
+    assert (proc.returncode == 0) is passes, proc.stdout + proc.stderr
 
 
 needs_make = pytest.mark.skipif(

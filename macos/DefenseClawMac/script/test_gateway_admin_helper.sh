@@ -37,3 +37,11 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc -parse-as-library -swift-ve
   -o "$TEST_DIRECTORY/gateway-admin-helper-tests"
 
 "$TEST_DIRECTORY/gateway-admin-helper-tests" "$TEST_DIRECTORY"
+
+# The real-root cases (root's own fchown) run only in CI with passwordless
+# sudo (GitHub macOS runners); a developer run never asks for sudo.
+if [[ "${CI:-}" == "true" ]] && sudo -n true 2>/dev/null; then
+  sudo -n "$TEST_DIRECTORY/gateway-admin-helper-tests" "$TEST_DIRECTORY" --real-root
+else
+  echo "Gateway administrator helper: real-root cases skipped (they run in CI with passwordless sudo)"
+fi

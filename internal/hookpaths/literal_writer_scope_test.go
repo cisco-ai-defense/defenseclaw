@@ -28,9 +28,7 @@ func TestR104CalledFunctionLiteralWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(cwd, "alias")
-	if err := os.Symlink(protected, alias); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, alias)
 	t.Setenv("HOME", home)
 	called := []string{
 		`f() { python3 -c 'open("alias","a").write("marker")'; }; f`,

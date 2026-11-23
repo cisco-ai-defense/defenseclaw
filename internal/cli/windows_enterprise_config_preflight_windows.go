@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -135,7 +136,7 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 	}
 	// The administrator's config may sit anywhere, so credential references
 	// resolve from the deployment's secrets directory, as in the service.
-	if err := validateStandaloneGatewayConfig(configPath, layout.DataDir, layout.SecretsDir); err != nil {
+	if err := validateStandaloneGatewayConfigWith(configPath, layout.DataDir, layout.SecretsDir, true); err != nil {
 		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
 	}
 	// The generic compiler accepts settings that the installed service rejects
@@ -222,6 +223,12 @@ func windowsEnterpriseStandaloneRulePacksTrusted(runtime *config.Config) error {
 			continue
 		}
 		seen[strings.ToLower(dir)] = true
+		// The packs this release ships are written, with their access list,
+		// by the lifecycle after this check (#1445); a changed folder is
+		// what it puts back.
+		if runtime.WindowsShippedRulePackName(dir) != "" {
+			continue
+		}
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -253,7 +260,7 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 	grant := managed.RulePackServiceReadGrant(os.Getenv(managed.WindowsServiceAccountEnv))
 	// The packs the product ships are the same on every computer and public.
 	var shipped string
-	if layout, err := windowsManagedLayout.standalone(); err == nil {
+	if layout, err := hookcli.WindowsManagedLayout.Standalone(); err == nil {
 		shipped = strings.ToLower(filepath.Clean(layout.InstallRoot))
 	}
 	dirs := cfg.ReferencedRulePackDirs()
@@ -268,6 +275,9 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 		if lower := strings.ToLower(filepath.Clean(dir)); shipped != "" && (lower == shipped || strings.HasPrefix(lower, shipped+`\`)) {
 			continue
 		}
+		if cfg.WindowsShippedRulePackName(dir) != "" {
+			continue
+		}
 		if _, err := os.Lstat(dir); err != nil {
 			continue
 		}
@@ -278,7 +288,7 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 		labels := make([]string, 0, len(readers))
 		removals := make([]string, 0, len(readers))
 		for _, sid := range readers {
-			labels = append(labels, windowsPrincipalLabel(sid))
+			labels = append(labels, hookcli.WindowsPrincipalLabel(sid))
 			removals = append(removals, `"*`+sid+`"`)
 		}
 		problems = append(problems, fmt.Sprintf(
@@ -316,7 +326,7 @@ func addWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result
 // transaction an interrupted run left: its recovery restores the deployment
 // as it was before, config and rule packs included. Tests replace it.
 var windowsEnterpriseStandaloneTransactionPending = func() bool {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.MetadataPath) == "" {
 		return false
 	}
@@ -351,7 +361,7 @@ var windowsEnterpriseStandaloneRecoveryPending = func(opts *windowsEnterpriseLif
 // trusted roots, which name the production scope and the lifecycle folder.
 // Tests replace it.
 var windowsEnterpriseStandaloneRecoveryRoots = func() (winpath.EnterpriseRoots, error) {
-	return windowsManagedLayout.roots(managed.ProfileStandalone)
+	return hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 }
 
 // The service names install-enterprise.ps1 takes when the CLI passes none
@@ -467,6 +477,13 @@ func windowsEnterpriseStandaloneRepairRulePackPreflight(suppliedConfig string) e
 	if !runtime.Guardrail.Enabled {
 		return nil
 	}
+	// The repair writes the shipped packs of this release again before the
+	// gateway restarts (#1445).
+	_, cleanup, err := useBinaryShippedRulePacks(runtime)
+	if err != nil {
+		return fmt.Errorf("cannot check the guardrail rule packs this release ships: %v (nothing was changed)", err)
+	}
+	defer cleanup()
 	if err := windowsEnterpriseStandaloneRulePackBuild(runtime); err != nil {
 		return fmt.Errorf("the gateway cannot load the guardrail rule packs that the installed config %s selects, so a repair would restart it into a failed start: %v. The running gateway keeps its last good policy. Put the pack back as its digest pin names it, or apply a config with the new digest with %s from an elevated PowerShell prompt (%s), then run the repair again (nothing was changed)", layout.ConfigPath, err,
 			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config path>"), managed.WindowsSetupSource)

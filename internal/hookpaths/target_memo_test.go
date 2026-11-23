@@ -307,7 +307,10 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 	}
 	// Review r3 mutation MC: the header is built from the reduced call, so
 	// the padding's own write targets (past the 64 KiB analysis bound, so
-	// no path fact lists them) are not described.
+	// no path fact lists them) are not described. The call is also past the
+	// reading budget of shellparse (parsed nodes), which no reader parses:
+	// its map is the reduced reading of BudgetStateReading, the state listed
+	// and the truncated marker (TestClientHeaderOfAnOverBudgetCall...).
 	var writes []string
 	for i := range 30000 {
 		writes = append(writes, fmt.Sprintf("echo x > ordinary/f%d.txt", i))

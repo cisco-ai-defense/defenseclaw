@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
@@ -183,27 +184,6 @@ func findAcceptedLocalPIILoc(original, normalized string, pattern *regexp.Regexp
 	return nil, "", false, false
 }
 
-func findAcceptedLocalSecretMatch(
-	original, normalized string,
-	detector localSecretDetector,
-) (match string, wasNormalized, ok bool) {
-	if detector.pattern == nil {
-		return "", false, false
-	}
-	accept := func(match string) bool {
-		return acceptedLocalSecretMatch(detector.kind, match)
-	}
-	if loc := firstAcceptedRegexMatch(detector.pattern, original, accept); loc != nil {
-		return original[loc[0]:loc[1]], false, true
-	}
-	if normalized != original {
-		if loc := firstAcceptedRegexMatch(detector.pattern, normalized, accept); loc != nil {
-			return normalized[loc[0]:loc[1]], true, true
-		}
-	}
-	return "", false, false
-}
-
 func findAcceptedRuleLoc(original, normalized, ruleID string, pattern *regexp.Regexp) (loc []int, source string, wasNormalized, ok bool) {
 	acceptOriginal := func(match string, start, end int) bool {
 		return acceptedRuleMatchAt(ruleID, original, match, start, end)
@@ -232,19 +212,56 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 // never take the first-match shortcut.
 func ruleMatchValidator(ruleID string) func(text, match string, start, end int) bool {
 	switch ruleID {
-	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":
+	case passwordAssignRuleID:
+		return func(text, match string, start, _ int) bool { return acceptedPasswordAssignment(text, match, start) }
+	case bareBearerRuleID:
+		return func(text, match string, start, _ int) bool { return acceptedBareBearer(text, match, start) }
+	case "ENT-BULK-SSN":
 		return func(text, match string, start, end int) bool {
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
 		}
-	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
+	case "ENT-BULK-SSN-NOHYPHEN":
+		// The pattern carries its label (rel-1-0-10 GAP-0171: nine bare digits
+		// are table cells, ids and timestamp fractions; 346 strict benign DTap
+		// tool-output hits had none). The match ends with the nine digits.
 		return func(text, match string, start, _ int) bool {
-			return validPaymentCardCandidate(match) && !decimalFractionAt(text, start)
+			digits := decimalDigits(match)
+			if len(digits) < 9 {
+				return false
+			}
+			digitStart := start + strings.LastIndexAny(match, "0123456789") - 8
+			return validUSSSN(digits[len(digits)-9:]) && !ssnNonRecordContext(text, digitStart)
+		}
+	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
+		return func(text, match string, start, end int) bool {
+			return validPaymentCardCandidateAt(text, match, start, end)
+		}
+	case "PII-CARD-LABELED":
+		// Label-bound (privacy-high-assurance): no Luhn or scheme check by
+		// design, but the digits must not come from a UUID or other token.
+		return func(text, _ string, start, end int) bool {
+			return paymentcard.LabeledRunAt(text, start, end)
 		}
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
-	case "ENT-EMAIL-BULK":
+	case "ENT-EMAIL-BULK", "PII-EMAIL-FIELD":
+		// The labeled forms (PII-EMAIL-FIELD, and ENT-EMAIL-BULK in
+		// privacy-high-assurance) skip git's own identity key: git config
+		// --list prints user.email=..., setup rather than a record field.
 		return func(text, match string, start, end int) bool {
-			return credibleEmailContext(text, match, start, end)
+			return !gitUserEmailKeyAt(text, start) && credibleEmailContext(text, match, start, end)
+		}
+	case "PII-EMAIL-LIST":
+		// One address is ENT-EMAIL-BULK (LOW): a vendor no-reply address in
+		// an agent's own instructions must not block (substrate-1:GAP-0149).
+		// Five or more distinct addresses together (a CSV, a list, mailto
+		// links) is a bulk disclosure (substrate-1:GAP-0159).
+		// Only per-address checks apply: the count already keeps a single
+		// vendor address out, and the whole-text phrases of
+		// credibleEmailContext ("ssh", "bcc to") must not hide a bulk dump.
+		// The bounded window check runs before anything else.
+		return func(text, _ string, start, end int) bool {
+			return emailListMember(text, start, end) && emailListAt(text, start)
 		}
 	case "ENT-PHONE-E164":
 		return func(text, match string, start, _ int) bool {
@@ -273,6 +290,18 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 		}
 	case "exec.remote_ip_download_execute_same_artifact":
 		return func(_, match string, _, _ int) bool { return acceptedPublicIPv4Download(match) }
+	}
+	if ruleID == secretAssignmentRuleID {
+		return func(text, match string, start, _ int) bool {
+			// The call text is JSON: an escaped newline, return or tab is the two
+			// characters backslash and n, r or t, and the word boundary the
+			// pattern found sits between them and the key. The letter is the
+			// escape, not the first letter of the key.
+			if start > 0 && text[start-1] == '\\' && strings.IndexByte("nrt", match[0]) >= 0 {
+				match = match[1:]
+			}
+			return acceptedSecretAssignment(match)
+		}
 	}
 	if strings.HasPrefix(ruleID, "SEC-") {
 		return func(_, match string, _, _ int) bool { return acceptedCredentialMatch(ruleID, match) }
@@ -487,6 +516,69 @@ func credibleEmailContext(text, match string, start, end int) bool {
 	return true
 }
 
+const (
+	// emailListMinDistinct distinct addresses make a bulk email list.
+	emailListMinDistinct = 5
+	// emailListWindow bounds, in bytes from the first address, where the
+	// other addresses of one list must be.
+	emailListWindow = 4096
+	// emailListMaxScan bounds the addresses read per candidate, so a large
+	// log that repeats one address costs a bounded scan per match.
+	emailListMaxScan = 16
+)
+
+var emailAddressPattern = lazyregexp.New(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
+
+// gitIdentityLinePattern is the text from the start of a line up to the
+// first address of a commit identity: git log and show headers, commit
+// trailers and git shortlog -e rows. A git log of a busy repository lists
+// many authors; that is project history, not a disclosure of addresses.
+// Only the first address after the label is the identity, so a label line
+// cannot carry a list (no '@' may sit between the label and the address).
+var gitIdentityLinePattern = lazyregexp.New(`(?i)^(?:[\s>*-]*(?:author|commit|committer|co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|reported-by|suggested-by|helped-by)\s*:|\s*\d+\t)[^@\n]*$`)
+
+// emailListAt reports emailListMinDistinct or more distinct list members in
+// the window that starts at the address at start.
+func emailListAt(text string, start int) bool {
+	end := min(len(text), start+emailListWindow)
+	seen := make(map[string]struct{}, emailListMinDistinct)
+	for _, loc := range emailAddressPattern.Regexp().FindAllStringIndex(text[start:end], emailListMaxScan) {
+		s, e := start+loc[0], start+loc[1]
+		if !emailListMember(text, s, e) {
+			continue
+		}
+		seen[strings.ToLower(text[s:e])] = struct{}{}
+		if len(seen) >= emailListMinDistinct {
+			return true
+		}
+	}
+	return false
+}
+
+// gitUserEmailKeyAt reports a labeled-field match that is git's user.email
+// key (git config --list, .gitconfig).
+func gitUserEmailKeyAt(text string, start int) bool {
+	return start >= 5 && strings.EqualFold(text[start-5:start], "user.")
+}
+
+// emailListMember applies the per-address checks of credibleEmailContext
+// that do not read the whole text, plus the commit-identity exclusion.
+func emailListMember(text string, start, end int) bool {
+	if start < 0 || end > len(text) || start >= end {
+		return false
+	}
+	address := strings.ToLower(text[start:end])
+	if strings.HasSuffix(address, ".compute.amazonaws.com") || emailDomainLooksLikeNumericHost(address) ||
+		emailIsPathSegment(text, start, end) {
+		return false
+	}
+	if strings.HasPrefix(strings.TrimLeft(text[end:], "\"'`"), ":") {
+		return false
+	}
+	lineStart := strings.LastIndexByte(text[:start], '\n') + 1
+	return !gitIdentityLinePattern.MatchString(text[lineStart:start])
+}
+
 // gitUserEmailPlaceholder reports a documentation-domain address given as
 // git's user.email, as git's own "Author identity unknown" hint prints it
 // (git config --global user.email "you@example.com"): setup text, not a
@@ -690,15 +782,21 @@ func emailDomainLooksLikeNumericHost(email string) bool {
 }
 
 // acceptedLocalPIIMatch applies the same structural checks to the legacy local
-// PII regex lane. Custom patterns that do not produce an SSN- or PAN-shaped
-// candidate retain their historical behavior.
+// PII regex lane. A match made only of digits and separators whose digits
+// carry a card-scheme prefix and length is judged by the shared payment card
+// rules (the built-in local card regexes always produce that shape). Any
+// other operator pattern (a labeled match, an IMEI, an account number)
+// keeps its historical behavior: a 13-19 digit candidate must pass Luhn.
 func acceptedLocalPIIMatch(match string) bool {
 	digits := decimalDigits(match)
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return validUSSSN(match)
 	}
 	if len(digits) >= 13 && len(digits) <= 19 {
-		return validPaymentCardCandidate(match)
+		if localPANShaped(match, digits) {
+			return validPaymentCardCandidate(match)
+		}
+		return paymentcard.Luhn(digits) && !knownPublicTestPAN(digits)
 	}
 	return true
 }
@@ -711,18 +809,28 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return credibleSSNContext(text, start, end)
 	}
-	if len(digits) >= 13 && len(digits) <= 19 && decimalFractionAt(text, start) {
-		return false
+	if len(digits) >= 13 && len(digits) <= 19 {
+		if localPANShaped(match, digits) {
+			return !paymentcard.Embedded(text, start, end)
+		}
+		// Historical rule for operator patterns: not the fraction of a
+		// float (GAP-2062).
+		return start < 2 || text[start-1] != '.' || text[start-2] < '0' || text[start-2] > '9'
 	}
 	return true
 }
 
-// decimalFractionAt reports a match that starts right after the decimal
-// point of a number ("9.371449635398431"): the digits of a float, not a card
-// number. Claude Code's ~/.claude.json holds such floats (GAP-2062).
-func decimalFractionAt(text string, start int) bool {
-	return start >= 2 && start <= len(text) && text[start-1] == '.' &&
-		text[start-2] >= '0' && text[start-2] <= '9'
+// localPANShaped reports a local-lane match that is a bare number (digits
+// and separators only) whose digits have a payment-card scheme prefix and
+// length.
+func localPANShaped(match, digits string) bool {
+	for i := 0; i < len(match); i++ {
+		c := match[i]
+		if (c < '0' || c > '9') && c != ' ' && c != '\t' && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return paymentcard.Scheme(digits) != ""
 }
 
 func credibleSSNContext(text string, start, end int) bool {
@@ -738,23 +846,10 @@ func credibleSSNContext(text string, start, end int) bool {
 	if hasDelimitedSSNColumnHeader(text, start) {
 		return true
 	}
-	windowStart := start - 80
-	if windowStart < 0 {
-		windowStart = 0
+	if ssnNonRecordContext(text, start) {
+		return false
 	}
-	prefix := strings.ToLower(text[windowStart:start])
-	for _, nonRecordContext := range []string{
-		"ssn_hash", "ssn-hash", "ssn hash", "hashed ssn",
-		"ssn_digest", "ssn-digest", "ssn digest",
-		"example ssn", "ssn example", "ssn_example", "sample ssn", "ssn sample",
-		"placeholder ssn", "ssn placeholder", "ssn schema", "ssn format",
-		"ssn regex", "ssn pattern",
-	} {
-		if index := strings.LastIndex(prefix, nonRecordContext); index >= 0 &&
-			ssnImmediateLabelTail(prefix[index+len(nonRecordContext):]) {
-			return false
-		}
-	}
+	prefix := strings.ToLower(text[max(0, start-80):start])
 	for _, label := range []string{
 		"ssn", "social security", "taxpayer id", "taxpayer identification",
 	} {
@@ -766,6 +861,26 @@ func credibleSSNContext(text string, start, end int) bool {
 }
 
 const maxDelimitedSSNContextBytes = 64 * 1024
+
+// ssnNonRecordContext reports a hash, example, placeholder or schema label
+// just before an SSN candidate: the value describes the field, it is not a
+// record.
+func ssnNonRecordContext(text string, start int) bool {
+	prefix := strings.ToLower(text[max(0, start-80):start])
+	for _, nonRecordContext := range []string{
+		"ssn_hash", "ssn-hash", "ssn hash", "hashed ssn",
+		"ssn_digest", "ssn-digest", "ssn digest",
+		"example ssn", "ssn example", "ssn_example", "sample ssn", "ssn sample",
+		"placeholder ssn", "ssn placeholder", "ssn schema", "ssn format",
+		"ssn regex", "ssn pattern",
+	} {
+		if index := strings.LastIndex(prefix, nonRecordContext); index >= 0 &&
+			ssnImmediateLabelTail(prefix[index+len(nonRecordContext):]) {
+			return true
+		}
+	}
+	return false
+}
 
 func hasDelimitedSSNColumnHeader(text string, candidateStart int) bool {
 	if candidateStart <= 0 || candidateStart > len(text) {
@@ -1069,30 +1184,6 @@ func nextDelimitedDataLine(remainder string) (string, bool) {
 	return remainder, remainder != ""
 }
 
-func acceptedLocalSecretMatch(kind localSecretDetectorKind, match string) bool {
-	candidate := assignmentValue(match)
-	if kind == localSecretDetectorBearer {
-		lower := strings.ToLower(match)
-		if bearer := strings.Index(lower, "bearer"); bearer >= 0 {
-			candidate = strings.TrimSpace(match[bearer+len("bearer"):])
-		}
-	}
-	if candidate == "" {
-		return true
-	}
-	// An explicit password assignment is itself the signal. Weak defaults such
-	// as changeme123 and examplepass are often the credentials operators most
-	// need surfaced, not documentation placeholders to suppress.
-	if kind == localSecretDetectorPassword {
-		return true
-	}
-	if obviousCredentialPlaceholder(candidate) {
-		return false
-	}
-	return kind != localSecretDetectorBearer ||
-		credentialEntropy(compactCredential(candidate)) >= 2.5
-}
-
 func normalizedPIIEvidenceKey(evidence string) string {
 	evidence = strings.TrimSpace(strings.TrimPrefix(evidence, "[normalized] "))
 	digits := decimalDigits(evidence)
@@ -1116,7 +1207,10 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	// A URI with user-info has already proved a credential-bearing structure.
 	// Never hide weak/default passwords based on their spelling.
 	if ruleID == "SEC-CONNSTR" {
-		return true
+		// A password that is one reference to a variable (${DB_PASSWORD},
+		// $DB_PASS, <password>) is a template slot, not a password: nothing is
+		// exposed. A reference in front of literal characters is a password.
+		return !secretAssignmentWholeReference.MatchString(strings.TrimSpace(candidate))
 	}
 	if knownPublicCredentialExample(ruleID, candidate) {
 		return false
@@ -1166,6 +1260,8 @@ func credentialCandidate(ruleID, match string) string {
 		return strings.TrimPrefix(trimmed, "github_pat_")
 	case "SEC-GITLAB":
 		return strings.TrimPrefix(trimmed, "glpat-")
+	case "SEC-HF-TOKEN":
+		return strings.TrimPrefix(trimmed, "hf_")
 	case "SEC-GOOGLE":
 		return strings.TrimPrefix(trimmed, "AIza")
 	case "SEC-SLACK-TOKEN":
@@ -1186,7 +1282,7 @@ func credentialCandidate(ruleID, match string) string {
 				return authority[colon+1:]
 			}
 		}
-	case "SEC-BEARER":
+	case "SEC-BEARER", bareBearerRuleID:
 		if bearer := strings.LastIndex(lower, "bearer"); bearer >= 0 {
 			return strings.TrimSpace(trimmed[bearer+len("bearer"):])
 		}
@@ -1219,6 +1315,15 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	canonical = strings.Join(strings.FieldsFunc(canonical, func(char rune) bool {
 		return char == '_'
 	}), "_")
+	if namedCredentialPlaceholder(canonical) {
+		return true
+	}
+	return sequenceCredentialPlaceholder(normalized)
+}
+
+// namedCredentialPlaceholder reports a canonical value (lower case, - . / as
+// _) that is a stand-in word a document puts where a credential goes.
+func namedCredentialPlaceholder(canonical string) bool {
 	switch canonical {
 	case "example", "example_token", "example_secret", "exampleexample",
 		"placeholder", "placeholder_token", "placeholder_secret", "placeholderplaceholder",
@@ -1228,7 +1333,14 @@ func obviousCredentialPlaceholder(candidate string) bool {
 		"not_a_real_token", "not_a_real_secret", "fake_token", "fake_secret":
 		return true
 	}
+	return false
+}
 
+// sequenceCredentialPlaceholder reports a lower-case value that is a run of
+// the alphabet or the digits (12345678, abcdefgh) or one short unit repeated:
+// a stand-in for a token. As a password it is a weak one
+// (readPasswordAssignment, rel-1-0-10:GAP-1266).
+func sequenceCredentialPlaceholder(normalized string) bool {
 	compact := compactCredential(normalized)
 	if len(compact) < 8 {
 		return false
@@ -1247,15 +1359,82 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	return repeatedShortCredentialUnit(compact)
 }
 
+// awsDocumentedSecretKey is the example secret access key of the AWS documentation.
+const awsDocumentedSecretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
 func knownPublicCredentialExample(ruleID, candidate string) bool {
 	switch ruleID {
 	case "SEC-AWS-KEY":
 		return strings.EqualFold(candidate, "IOSFODNN7EXAMPLE")
 	case "SEC-AWS-SECRET":
-		return candidate == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+		// Only the pair AWS documents. The raw text carries it exactly. Shell
+		// normalization drops its slashes and may run the escaped newlines
+		// after it into the value, so there the slash-free documented value
+		// followed by nothing but that debris is the same pair; anything
+		// else after it is part of another secret.
+		if candidate == awsDocumentedSecretKey {
+			return true
+		}
+		rest, ok := strings.CutPrefix(strings.ReplaceAll(candidate, "/", ""), strings.ReplaceAll(awsDocumentedSecretKey, "/", ""))
+		return ok && awsExampleDebris(rest)
 	default:
 		return false
 	}
+}
+
+// awsExampleDebris reports what the documented AWS value may be followed by
+// when it is still only the documented value: the letters n, r and t of the
+// escaped newlines, return and tab after it, a rule line under it (one
+// character repeated: = or +), and the first word of the next line. Nothing
+// else is meaningful: no digit, no mix of symbols, no letters that are not a
+// word. The match class of the rule is letters, digits, + and =.
+func awsExampleDebris(rest string) bool {
+	const maxRule = 100 // a rule line under a documentation line
+	var alnum []string
+	rules := 0
+	for i := 0; i < len(rest); {
+		j := i
+		if c := rest[i]; c == '+' || c == '=' {
+			for j < len(rest) && rest[j] == c {
+				j++
+			}
+			rules++
+			if j-i > maxRule || rules > 2 {
+				return false
+			}
+		} else {
+			for j < len(rest) && rest[j] != '+' && rest[j] != '=' {
+				j++
+			}
+			alnum = append(alnum, rest[i:j])
+		}
+		i = j
+	}
+	for k, run := range alnum {
+		if k < len(alnum)-1 {
+			if len(run) > 8 || strings.Trim(run, "nrt") != "" {
+				return false
+			}
+			continue
+		}
+		// The last run is escape letters, then at most one word.
+		for cut := 0; cut <= len(run) && cut <= 8; cut++ {
+			if strings.Trim(run[:cut], "nrt") != "" {
+				break
+			}
+			if word := run[cut:]; word == "" || awsExampleNextLineWord(word) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// awsExampleNextLineWord reports a single word of letters of one case shape
+// with the vowels and consonants of a word: the head of the next line.
+func awsExampleNextLineWord(word string) bool {
+	return len(word) <= 16 && secretAssignmentWordShaped(word, 3) && countLetters(word) == len(word)
 }
 
 func compactCredential(value string) string {
@@ -1309,24 +1488,19 @@ func validUSSSN(value string) bool {
 	return area > 0 && area != 666 && area < 900 && group > 0 && serial > 0
 }
 
+// validPaymentCardCandidate reports whether value alone is a payment card
+// number under the shared paymentcard rules (Luhn, a real scheme prefix and
+// length, a card layout). The six canonical public test PANs that fill
+// provider documentation are not treated as cards.
 func validPaymentCardCandidate(value string) bool {
-	digits := decimalDigits(value)
-	if len(digits) < 13 || len(digits) > 19 || knownPublicTestPAN(digits) {
-		return false
-	}
-	sum := 0
-	parity := len(digits) % 2
-	for index, char := range digits {
-		digit := int(char - '0')
-		if index%2 == parity {
-			digit *= 2
-			if digit > 9 {
-				digit -= 9
-			}
-		}
-		sum += digit
-	}
-	return sum%10 == 0
+	return paymentcard.Valid(value) && !knownPublicTestPAN(paymentcard.Digits(value))
+}
+
+// validPaymentCardCandidateAt adds the token-boundary check: a digit run glued
+// to a longer token (UUID, hash, trace id, decimal, versioned id) is not a
+// card (substrate-1:GAP-0132).
+func validPaymentCardCandidateAt(text, match string, start, end int) bool {
+	return validPaymentCardCandidate(match) && !paymentcard.Embedded(text, start, end)
 }
 
 func knownPublicTestPAN(digits string) bool {

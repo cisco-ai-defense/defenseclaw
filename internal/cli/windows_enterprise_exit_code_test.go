@@ -21,6 +21,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -73,7 +74,7 @@ func TestWindowsEnterpriseLifecycleReportsTheFatalInstallExitCode(t *testing.T) 
 			}
 			// Deployment systems read the code, so it has to survive the trip
 			// out through cobra.
-			if got := commandExitCode(err); got != test.want {
+			if got := cliusage.ExitCode(err); got != test.want {
 				t.Fatalf("exit code = %d, want %d", got, test.want)
 			}
 		})

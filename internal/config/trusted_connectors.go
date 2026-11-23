@@ -172,6 +172,7 @@ func ValidateTrustedConnectors(identity EnterpriseIdentityConfig) error {
 // ConnectorsConfig is the top-level connectors block.
 type ConnectorsConfig struct {
 	AgentGateway AgentGatewayConnectorConfig `mapstructure:"agent_gateway" yaml:"agent_gateway,omitempty"`
+	OpenClaw     OpenClawConnectorConfig     `mapstructure:"openclaw"      yaml:"openclaw,omitempty"`
 }
 
 // AgentGatewayConnectorConfig is connectors.agent_gateway (issue #1394): a

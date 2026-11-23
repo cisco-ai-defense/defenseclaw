@@ -84,6 +84,46 @@ func HookPolicyWatchPathsForConnector(conn Connector, opts SetupOpts) []string {
 	return uniqueNonEmptyStrings(paths)
 }
 
+// HermesAllowlistFileName is the Hermes shell-hook allowlist, beside the
+// Hermes config.yaml; it holds each hook command DefenseClaw approved.
+const HermesAllowlistFileName = "shell-hooks-allowlist.json"
+
+// ManagedAccountHookCompanionPaths returns the files a managed install of
+// conn writes in the bound account's home, beside
+// HookPolicyWatchPathsForConnector, that name DefenseClaw's hook: the Hermes
+// command allowlist next to each Hermes config, the Kiro defenseclaw agent,
+// and the Copilot VS Code Local hook file and plugin hook document the
+// enterprise Copilot policy renders (enterprisepolicy
+// CopilotVSCodeLocalHookFilePath and CopilotPluginHooksPath). The guardian
+// does not watch them, but an older release's guardian repairs each only in
+// the exact form it renders, so the hook-image retire scan reads them too
+// (rel-1-0-10 GAP-0880: retire ended ok while a signed-out account's Copilot
+// Local hook file and Hermes allowlist still named a launch folder, and the
+// 1.0.9 guardian failed both connectors at that account's sign-in). Call it
+// with the account's home bound (WithUserHomeDir).
+func ManagedAccountHookCompanionPaths(conn Connector, opts SetupOpts) []string {
+	if conn == nil || !OwnsManagedHookRuntime(conn) {
+		return nil
+	}
+	var paths []string
+	switch conn.Name() {
+	case "hermes":
+		for _, config := range HookConfigPathsForConnector(conn, opts) {
+			paths = append(paths, filepath.Join(filepath.Dir(config), HermesAllowlistFileName))
+		}
+	case "kiro":
+		paths = append(paths, kiroManagedAgentPath())
+	case "copilot":
+		if home := userHomeDir(); home != "" {
+			copilotDir := filepath.Join(home, ".copilot")
+			paths = append(paths,
+				filepath.Join(copilotDir, "hooks", orphanCopilotVSCodeHookFile),
+				filepath.Join(copilotDir, "installed-plugins", orphanCopilotPluginMarket, orphanCopilotPluginName, "hooks", "hooks.json"))
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
 // ownedHookCommandNeedles returns escaping-invariant marker string(s) that the
 // connector writes into its agent config, used for a raw-bytes substring match
 // against the live config file. See ownedHookCommandNeedlesFor for the
@@ -934,4 +974,36 @@ func hookCommandMatches(command, needle string) bool {
 		return connectorName != "" && command == hookInvocationCommandFor("windows", connectorName, "")
 	}
 	return command == needle || command == shellWord(needle)
+}
+
+// PatchedFilesNameOwnHook reports whether one of the agent files conn patches
+// names this own hook command of this install (ownedHookCommandNeedles), so a boot
+// cleanup of an unguarded connector never removes the hooks of another
+// DefenseClaw data directory on the account (rel-1-0-10:GAP-0275). On
+// Windows the per-user commands name the per-account launcher, not a data
+// directory, so every DefenseClaw entry there belongs to this account.
+func PatchedFilesNameOwnHook(opts SetupOpts, conn Connector) bool {
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	needles := ownedHookCommandNeedles(opts, conn)
+	if len(needles) == 0 {
+		return false
+	}
+	provider, ok := conn.(AgentPathProvider)
+	if !ok {
+		return false
+	}
+	for _, path := range provider.AgentPaths(opts).PatchedFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, needle := range needles {
+			if needle != "" && bytes.Contains(data, []byte(needle)) {
+				return true
+			}
+		}
+	}
+	return false
 }

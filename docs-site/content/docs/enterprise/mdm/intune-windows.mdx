@@ -10,7 +10,7 @@ keywords:
   - PowerShell 7 dependency
 ---
 
-<Callout title="Validation">A test tenant delivered the rule-pack app, the base Win32 app and the uninstall to an enrolled Windows device in the PR #1304 end-to-end pass. The kit's reference rule-pack scripts have not run in a tenant yet.</Callout>
+<Callout title="Status">Intune delivers the rule-pack app, the base Win32 app and the uninstall to an enrolled Windows device. The kit's reference rule-pack scripts are Preview.</Callout>
 
 You upload a base Win32 app, `Install-DefenseClawIntune.intunewin`, that
 `New-DefenseClawIntunePackage.ps1` builds from
@@ -296,7 +296,7 @@ A first install can return `0` with `coverage_complete: false`. Setup cannot ref
 
 Until an administrator runs that fix, every Remediations cycle repeats: `Remediate-Detect.ps1` fails, `Remediate-Fix.ps1` runs `enterprise windows ensure`, which stops with `1603` before it changes anything (and writes one more `managed_vendor_folder_not_protected` alert row), and the device stays reported as not healthy. The cycle follows the schedule you set; nothing retries faster. A file owned by a standard account is the exception: the same `ensure` moves it aside and the next cycle passes.
 
-Both scripts print one short line, because Intune keeps 2,048 characters of output. The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`. Remediations cannot install, upgrade or change the config; the Win32 app does those. Nor can they put back a missing scanner runtime (one an antivirus quarantined from `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`, say): `Remediate-Fix.ps1` exits `1603`, reports `scanner_runtime_unavailable` and names Setup `/repair`. Deploy `DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` from the Win32 app content, as a second Win32 app or a platform script that runs as SYSTEM.
+Both scripts print one short line, because Intune keeps 2,048 characters of output. The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`. Remediations cannot install, upgrade or change the config; the Win32 app does those. `Remediate-Fix.ps1` runs `ensure` without a config, so a device whose last Setup `/ensure CONFIG=` was refused or rolled back (`config_rejected`) stays non-compliant until the config package (the Win32 app with `CONFIG=`) runs again. Nor can they put back a missing scanner runtime (one an antivirus quarantined from `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`, say): `Remediate-Fix.ps1` exits `1603`, reports `scanner_runtime_unavailable` and names Setup `/repair`. Deploy `DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` from the Win32 app content, as a second Win32 app or a platform script that runs as SYSTEM.
 
 A missing hook executable is a protection failure for Claude Code, Codex, Cursor and Copilot even while their machine policy files stay installed. If antivirus quarantines `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, stop affected agent use and repair the installation; the hook guardian checks for the file every 5 seconds and Setup `/ensure` and `/repair` can restore it from their payload. From an elevated prompt, require `enterprise windows verify --profile standalone --json` to pass before resuming agent use. Exclude `C:\Program Files\Cisco\DefenseClaw\bin` from quarantine in your EDR policy to prevent recurrence.
 
@@ -443,4 +443,4 @@ To see the current state on a device, from an elevated PowerShell:
 | Intune reports `1618` and retries | Another lifecycle run held the lock. Intune retries three times, five minutes apart. |
 | Uninstall reports `1618` with `uninstall_in_use` | A program kept running from `C:\Program Files\Cisco\DefenseClaw\bin`, or (for the `-Purge` app) kept a file in `C:\ProgramData\Cisco\DefenseClaw` open, through every Setup run. Nothing was changed, unless the message says only the data folder is left: then DefenseClaw is removed and the next run deletes that folder. The message names each program, its process id, account and parent, and the file it has open. Intune retries; if the program stays, close it or sign the account out. |
 | The app installs again every day | The detection rule does not match what Setup installed: check the key path, the 64-bit setting and the version. |
-| Graph still shows Installed after uninstall | The app install report lagged device detection by more than 15 minutes in the live test. Check local Intune detection or `enterprise windows status`. |
+| Graph still shows Installed after uninstall | The app install report can lag device detection by more than 15 minutes. Check local Intune detection or `enterprise windows status`. |

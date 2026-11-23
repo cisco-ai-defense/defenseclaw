@@ -341,7 +341,7 @@ func TestSetupConnectorsIsolatedSkipsAnActiveConnectorWhoseAgentExecutableIsGone
 			peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 			transaction, err := s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{gone, peer},
-				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+				"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 			)
 			if !tc.skipped {
 				if err == nil || !strings.Contains(err.Error(), "connector claudecode refresh failed") {
@@ -429,7 +429,7 @@ func TestPendingAbsentConnectorRetainedHookIsDenied(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		transaction, err := s.setupConnectorsIsolatedTransaction(context.Background(),
-			[]connector.Connector{absent, peer}, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+			[]connector.Connector{absent, peer}, "tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache())
 		done <- result{transaction, err}
 	}()
 	released := false

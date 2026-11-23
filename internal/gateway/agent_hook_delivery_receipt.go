@@ -91,31 +91,20 @@ func (d *hookDeliveryReceipt) offer(w http.ResponseWriter, answer func()) string
 	if err := controller.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return ""
 	}
-	// Start the read before writing the proposal. The watchdog can commit its
-	// own answer at any point during evaluation or response delivery.
-	receiptReady := make(chan string, 1)
-	go func() {
-		line, err := bufio.NewReader(io.LimitReader(d.reader, int64(len(hookexec.HookDeliveryReceiptBlock)))).ReadString('\n')
-		if err != nil {
-			line = ""
-		}
-		receiptReady <- line
-	}()
-	var line string
-	received := false
-	select {
-	case line = <-receiptReady:
-		received = true
-		if line == hookexec.HookDeliveryReceiptLate || line == hookexec.HookDeliveryReceiptOpen {
-			return line
-		}
-	default:
-	}
+	// The proposal is flushed before the receipt is read. The per-user hook
+	// asks with Expect: 100-continue, and from Go 1.27 net/http locks the
+	// request body when it writes the response header of such a request. A
+	// read already waiting on the body holds that lock until the hook writes
+	// its receipt, which the hook does only after it read this proposal, so
+	// the flush waited out the hook's answer budget and the call failed open
+	// (rel-1-0-10 GAP-0088). A late or open line the hook's watchdog wrote
+	// meanwhile is read after the flush and decides the result as before.
 	w.Header().Set(hookexec.HookDeliveryRequiredHeader, "1")
 	answer()
 	flushErr := controller.Flush()
-	if !received {
-		line = <-receiptReady
+	line, err := bufio.NewReader(io.LimitReader(d.reader, int64(len(hookexec.HookDeliveryReceiptBlock)))).ReadString('\n')
+	if err != nil {
+		line = ""
 	}
 	if flushErr != nil && line != hookexec.HookDeliveryReceiptLate && line != hookexec.HookDeliveryReceiptOpen {
 		return ""

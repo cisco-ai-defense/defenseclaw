@@ -41,7 +41,7 @@ func TestEnrolledPerUserRowReportsOnlyExplicitlyBelowFloorSurface(t *testing.T) 
 			admission := admitSurfaces("devin", connector.UnverifiedVersionsReport, []connector.AgentSurface{{
 				Surface: connector.HostSurfaceDesktop, Host: "devin-desktop", EngineVersion: tc.version,
 			}})
-			got := unixRejectedSurfaces(account, "devin", false, true, admission)
+			got := unixRejectedSurfaces(account, "devin", false, true, admission, "")
 			if !tc.wantReport {
 				if len(got) != 0 {
 					t.Fatalf("unknown surface beside enrolled CLI was reported as unprotected: %+v", got)

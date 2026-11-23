@@ -560,6 +560,26 @@ def test_windows_upgrade_lane_checks_a_stored_credential_survives() -> None:
     assert upgrade.index("01-setup-ensure-upgrade") < upgrade.index("Test-UpgradeSecretKept")
 
 
+def test_windows_lane_expects_config_rejected_until_a_config_is_applied_again() -> None:
+    """rel-1-0-10 GAP-1027/GAP-1038: a refused Setup /ensure CONFIG= stays
+    reported (verify 1603, config_rejected) after /repair without a config,
+    until a Setup /ensure CONFIG= applies a config again."""
+    lane = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    steps = [
+        "'02-foreign-os-refused'",
+        "'02-repair-after-refusal'",
+        "'03-verify-config-rejected'",
+        "'02-ensure-after-refusal'",
+        "'03-verify'",
+    ]
+    at = [lane.index(step) for step in steps]
+    assert at == sorted(at), "the lane must verify config_rejected after /repair, then ensure CONFIG= before the clean verify"
+    rejected = lane[at[2]:at[3]]
+    assert "$run.ExitCode -ne 1603" in rejected and "'config_rejected'" in rejected and "cause config_refused" in rejected
+    assert "Get-FileHash -LiteralPath $foreignConfig" in lane[at[1]:at[3]]
+    assert "\"CONFIG=$config\"" in lane[at[3]:at[4]]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
 def test_unit_check_fails_on_diagnostics_outside_the_allow_list(tmp_path: Path) -> None:
     """The lane's unit check fails on a directive the systemd 239 allow list does not name."""

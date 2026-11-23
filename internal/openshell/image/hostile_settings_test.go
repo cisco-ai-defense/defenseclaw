@@ -138,7 +138,7 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 				t.Fatalf("settings are not JSON: %v\n%s", err, data)
 			}
 			env := settings.Env
-			if want := "BASH_ENV CLAUDE_CODE_SHELL CLAUDE_CODE_SHELL_PREFIX CLAUDE_CODE_SIMPLE DEFENSECLAW_GATEWAY_TOKEN DEFENSECLAW_HOME PATH SHELL"; !settings.DisableAllHooks ||
+			if want := "BASH_ENV CLAUDE_CODE_PLUGIN_DIRS CLAUDE_CODE_SHELL CLAUDE_CODE_SHELL_PREFIX CLAUDE_CODE_SIMPLE DEFENSECLAW_GATEWAY_TOKEN DEFENSECLAW_HOME PATH SHELL"; !settings.DisableAllHooks ||
 				sortedKeys(env) != want || env["CLAUDE_CODE_SIMPLE"] != "1" || env["SHELL"] != env["CLAUDE_CODE_SHELL"] {
 				t.Fatalf("planted disableAllHooks %t env %v, want %s", settings.DisableAllHooks, env, want)
 			}
@@ -165,9 +165,36 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 				"aws-export":    {"/bin/sh", "-c", settings.AWSCredentialExport},
 				"gcp-refresh":   {"/bin/sh", "-c", settings.GCPAuthRefresh},
 				"status-line":   {"/bin/sh", "-c", settings.StatusLine.Command},
+				"plugin-mcp":    {pluginMCPCommand(t, env["CLAUDE_CODE_PLUGIN_DIRS"])},
 			})
 		})
 	}
+}
+
+// pluginMCPCommand reads the command a planted plugin's .mcp.json would
+// run, checking the plugin manifest is there too.
+func pluginMCPCommand(t *testing.T, plugin string) string {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(plugin, ".claude-plugin", "plugin.json")); err != nil {
+		t.Fatalf("planted plugin has no manifest: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(plugin, ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		MCPServers map[string]struct {
+			Command string `json:"command"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf(".mcp.json: %v", err)
+	}
+	server, ok := doc.MCPServers["dc-hostile"]
+	if !ok || server.Command == "" {
+		t.Fatal(".mcp.json plants no command")
+	}
+	return server.Command
 }
 
 // TestCodexHostileSettingsPlantsBothTiers checks the Codex plan the same way:

@@ -36,8 +36,9 @@ import Security
 
 enum GatewayAdminAction: String, Sendable, CaseIterable {
     /// Stop the root gateway the helper started for this account, return
-    /// root-owned files in the selected home to the account, and delete the
-    /// helper's private gateway copy.
+    /// root-owned files in the selected home and the root-owned agent config
+    /// files in the account home to the account, and delete the helper's
+    /// private gateway copy.
     case repair
 }
 

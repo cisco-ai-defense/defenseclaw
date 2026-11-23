@@ -17,9 +17,11 @@
 package tactics
 
 import (
+	"bytes"
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -463,6 +465,68 @@ func RunsProgram(cmdline string, programs ...string) bool {
 		}
 	}
 	return lexer.truncated && names(cmdline)
+}
+
+// MayNameProgram reports whether cmdline may hold the name of one of
+// programs as RunsProgram reads it: with every quote, backslash and newline
+// byte removed and lowercased, the text holds the name. Every program name
+// RunsProgram can find is part of one word of cmdline (or of a script nested
+// in one), and a word is pieces of cmdline that only quotes, escaping
+// backslashes and escaped newlines separate, so a text that fails this
+// check runs none of programs. A name of other bytes than lowercase ASCII
+// letters, digits and . _ + - is not checked (the answer is true). The
+// check is one copy of the text: reading every line of a large
+// here-document as commands to find none of programs cost about 47 MiB for
+// a 1 MiB body (invokesApplyPatch in hookpaths, rel-1-0-10:GAP-0299).
+func MayNameProgram(cmdline string, programs ...string) bool {
+	if len(programs) == 0 {
+		return false
+	}
+	for _, program := range programs {
+		if !plainProgramName(program) {
+			return true
+		}
+	}
+	// The bytes are removed one by one, so the bytes around a quote join
+	// into the character they make in the word. ASCII letters are lowered
+	// on the way; any other character is lowered by strings.ToLower, as
+	// programName lowers it (a few non-ASCII letters lower to ASCII ones).
+	folded := make([]byte, 0, len(cmdline))
+	ascii := true
+	for i := 0; i < len(cmdline); i++ {
+		switch c := cmdline[i]; {
+		case c == '\'' || c == '"' || c == '\\' || c == '\n':
+		case 'A' <= c && c <= 'Z':
+			folded = append(folded, c+'a'-'A')
+		default:
+			ascii = ascii && c < utf8.RuneSelf
+			folded = append(folded, c)
+		}
+	}
+	if !ascii {
+		folded = []byte(strings.ToLower(string(folded)))
+	}
+	for _, program := range programs {
+		if bytes.Contains(folded, []byte(program)) {
+			return true
+		}
+	}
+	return false
+}
+
+// plainProgramName reports a non-empty program name of lowercase ASCII
+// letters, digits and . _ + - only.
+func plainProgramName(program string) bool {
+	if program == "" {
+		return false
+	}
+	for i := 0; i < len(program); i++ {
+		c := program[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && strings.IndexByte("._+-", c) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // programName is a program's lowercased basename without ".exe".

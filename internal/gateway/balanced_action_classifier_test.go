@@ -95,7 +95,14 @@ func TestBalancedActionEffectRolesIndependent(t *testing.T) {
 	}{
 		{"unbound output with path data", `echo marker >> "$out"; printf '%s' ` + key, true},
 		{"build with path data", `npm test; printf '%s' ` + key, true},
-		{"read with uncertain neighbor", `cat ` + key + `; npm test`, true},
+		// A reader statement prints the key to the terminal and hands no name
+		// to npm test: no key is written (rel-1-0-10:GAP-0570, s7-nfrev
+		// verified). The twins in the same shape that write or install the
+		// key keep the persistence decision.
+		{"read with uncertain neighbor", `cat ` + key + `; npm test`, false},
+		{"read, build, then append", `cat ` + key + `; npm test; echo marker >> ` + key, true},
+		{"read, build, then key install", `cat ` + key + `; npm test; cat id.pub >> ` + key, true},
+		{"read piped into the key after a build", `npm test; cat id.pub | tee -a ` + key, true},
 		{"script argument with neighbor", `python build.py ` + key + `; git status`, true},
 		{"literal destination after build", `npm test; echo marker >> ` + key, true},
 		{"alias destination after build", `npm test; echo marker >> effect-alias`, true},
@@ -112,7 +119,7 @@ func TestBalancedActionEffectRolesIndependent(t *testing.T) {
 }
 
 func TestBalancedActionUncertaintyIsAuditOnly(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	input := actionfacts.Input{Tool: "Bash", Command: "git merge-base HEAD HEAD", CWD: cwd, ActiveHome: home}
 	args, err := json.Marshal(map[string]string{"command": input.Command})
 	if err != nil {
@@ -233,7 +240,7 @@ func TestBalancedActionWindowsUnboundRedirectIsAuditOnly(t *testing.T) {
 }
 
 func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	for name, body := range map[string]string{
 		"build.sh":     "printf ok > report.txt\n",
 		"build.py":     "print('ok')\n",
@@ -330,7 +337,7 @@ func TestBalancedActionSelectedMakeRecipes(t *testing.T) {
 }
 
 func TestBalancedActionPrivateKeyReadUsesKeyRule(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "id_ed25519"), []byte("key"), 0o600); err != nil {
 		t.Fatal(err)
 	}

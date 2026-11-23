@@ -1,0 +1,111 @@
+---
+title: Delivery and fleet management
+description: How DefenseClaw, its config, its policy and the agent kit reach an Agent Substrate cluster without MDM, how updates roll out, how drift is caught, and how a fleet of clusters and agents is managed.
+keywords:
+  - Agent Substrate Helm
+  - DefenseClaw GitOps
+  - policy rollout Kubernetes
+  - fleet management agents
+---
+
+{/* Commands checked against sub/a6 77468de3d5 and the chart README (sub/a8). */}
+
+On laptops, an MDM (Intune, Jamf) delivers DefenseClaw, its config and its policy, and keeps them in place. Kubernetes has no MDM. Its equivalents are a package manager (Helm), a source of truth in git (GitOps with Argo CD or Flux), and Kubernetes access control. DefenseClaw uses those, and keeps the trust model it already has: **signed artifacts, verified by DefenseClaw itself.**
+
+## What gets delivered
+
+| Item | Laptop (MDM) | Cluster |
+|---|---|---|
+| DefenseClaw | Signed package (pkg, msi, rpm, deb) | Signed container image (one binary for gateway, leader, controller and callout) |
+| How it's installed | MDM pushes the package | Signed Helm chart from an OCI registry |
+| Config (`config.yaml`) | MDM profile or file | Helm values (`config:`), rendered into one ConfigMap that every component reads |
+| Policy (rule packs, admission, profiles, sandbox packs) | Signed policy delivered by the MDM | Helm values and profiles, applied by Helm or GitOps; the same policy files and rules |
+| Trust anchors (who may sign policy) | Installed by MDM | Set at install, held in a Secret only platform admins can change |
+| Keys (model providers, AI Defense, LLM judge) | Protected credential on each laptop | Kubernetes Secrets, or Substrate's credential provider (Vault, cloud secret managers) |
+| What runs in the agent | Hooks written into each agent's config | The DefenseClaw kit, built into the agent template with `template build`, as signed per-connector kit images pinned by digest |
+
+## Install
+
+<Tabs items={['Helm', 'GitOps']}>
+
+<Tab value="Helm">
+
+```bash
+helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate \
+  --version 1.0.10 -n defenseclaw-system -f defenseclaw-values.yaml
+defenseclaw substrate setup
+```
+
+`setup` writes the `SubstrateInstall` overlay: it registers the egress callout, and sets the route timeouts that long model streams need. When your Substrate version supports it, it also opts the callout in to reading bodies. It refuses when another callout is registered.
+
+Check the signatures before installing, the same way as release downloads:
+
+```bash
+cosign verify ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10 ...
+```
+
+</Tab>
+
+<Tab value="GitOps">
+
+Commit the chart reference and `defenseclaw-values.yaml` to the repo Argo CD or Flux watches. Changes go through review like any other cluster change. DefenseClaw needs nothing beyond what the chart installs. Run `defenseclaw substrate setup` once, and again after a Substrate upgrade.
+
+`setup` writes the `SubstrateInstall` file but has no GitOps mode yet (no `--overlay-only` or `--no-chart`): apply the callout overlay from that file with `ate-setup deploy`, and let Argo CD or Flux own the chart. The overlay is Substrate's object, so it survives `helm uninstall` and every sync of the chart.
+
+With Argo CD, install Argo CD into the `argocd` namespace: the ClusterRoleBindings of the upstream `install.yaml` name that namespace, so an Argo CD installed anywhere else has no cluster rights until you change the namespace of their subjects.
+
+</Tab>
+
+</Tabs>
+
+## Rolling out policy
+
+Policy lives in the chart values (`config:`) and in the profiles. Change them the way you change any cluster setting: `helm upgrade`, or a commit that Argo CD or Flux applies.
+
+- **The change is checked first.** `helm upgrade` checks the new config and refuses one that does not load.
+- **Running agents.** The controller rewrites their allow lists within about 5 seconds, without a restart. Suspended agents get the new policy before they resume. [When a config change takes effect](/docs/substrate/reference#when-a-config-change-takes-effect) lists every setting, and the few that wait for a pod restart.
+- **Rollback.** `helm rollback`, or revert the commit. Nothing on a laptop needs to change.
+- **Trust anchors.** Who may sign policy for the cluster is set at install and held in a Secret only platform admins can change. Staged, signed rollouts per atespace are for administrators and are described in the management documentation, not here.
+
+## Upgrades
+
+- **DefenseClaw.** `helm upgrade` checks the new config, refuses to skip a minor version, and rolls the gateway under its disruption budget, so hooks keep being answered. The leader migrates its store at start, after a backup. `helm rollback` to a release with an older store schema is refused, and the message names the backup.
+- **The agent kit.** Each gateway accepts the kit from its own release and the one before. An older kit gets a refusal with a `migrate` hint (`defenseclaw substrate migrate <name>` moves an actor to a rebuilt template). The fleet view lists templates with an older kit. Rebuild them with `template build`, ideally in the CI pipeline that builds your agent images.
+- **The actor allowlist (1.0.10).** 1.0.10 checks the template's environment, entrypoint and volume mounts against an allowlist (see [Keeping it in place](#keeping-it-in-place)). A template built by an older release that fails it is named once in an audit alert (`sandbox.template_allowlist`) and in `doctor` (`substrate.template_allowlist`). Its new actors are refused with the reason. Its running actors keep running and keep their network; the re-check only adds a warning row. This applies only to templates built before 1.0.10: a template built by 1.0.10 passed the allowlist at build, so one that fails it was edited since, and its running actors are refused too. The next release refuses running actors too, so fix those templates now: remove the variable or command, `template publish` again, and recreate the actors. Templates built by 1.0.10 also run the relay as root and the agent as its own user; an older template is named once in an audit warning (`sandbox.relay_unseparated`) and in `doctor` (`substrate.relay_separation`): rebuild it with `template build`. A Substrate actor's container gets `AUDIT_WRITE`, `KILL` and `NET_BIND_SERVICE` by default, so `template publish` gives such a template's container `security_context.capabilities` `add: [SETUID, SETGID]` and `drop: [AUDIT_WRITE, NET_BIND_SERVICE]`: the relay gets exactly `SETUID`, `SETGID` and `KILL`, keeps only those, and starts everything else with none. Admission refuses a 1.0.10 template that lacks them or adds any other, and an older template that adds any. Publish 1.0.10 templates with `template publish`, not by hand.
+- **Agent Substrate.** Each DefenseClaw release names the Substrate versions it supports (`>=1.0.0 <1.1.0` for 1.0.10). `verify` warns on any other. Upgrade Substrate with the upstream runbook, then run `setup` and `verify`.
+- **Worker pools.** A new worker image (the Substrate upgrade's worker step) or a node drain replaces every worker. Substrate marks the old worker draining and leaves its actors alone, and an actor still running there when the old worker stops (after its 30-minute termination grace) crashes and loses its unsaved work. The DefenseClaw controller suspends the actors it manages off a draining worker and resumes them on another one, within a pass or two; a `--task` run goes on where it was, and an attached session reconnects. While the roll runs, `verify` warns `worker_drain` with the count of actors still on draining workers. Suspend any actor DefenseClaw does not manage yourself (`kubectl ate suspend actor NAME -a ATESPACE`) before the old workers stop, and wait for `worker_drain` to pass before you finish the upgrade.
+
+## Keeping it in place
+
+On laptops, tamper protection keeps users from removing DefenseClaw. In a cluster the threats differ, and so does the protection:
+
+| What could happen | What stops it |
+|---|---|
+| Someone edits DefenseClaw's config or Deployments | Kubernetes access control. Only platform admins can write `defenseclaw-system`. Changes made outside the chart show as drift in the fleet view |
+| Someone loosens an agent's allow list with `kubectl ate update egress-policy` | The controller sees the change, puts DefenseClaw's list back, and records who made it and what they changed. After three reverts in ten minutes the controller marks the actor `policy_conflict`, raises one alert and keeps the actor on deny-only (the DefenseClaw rule alone) until an admin resets it: a later change is replaced with deny-only again, so a foreign policy never stays in force. It never adds access |
+| Someone starts an agent in a team atespace without DefenseClaw | Substrate access policy lets only DefenseClaw create agents there |
+| Someone builds a template without the kit | Its agents get no network, and the template is reported |
+| An agent tries to change its own hooks | The hook config is root-owned in the image. The agent runs as an ordinary user |
+| A base image or a template sets an environment variable that makes git, a shell or an interpreter load code (`LD_PRELOAD`, `NODE_OPTIONS`, `BASH_ENV`, `SHELLOPTS`, `PERLLIB`, `GIT_DIR`, git's `GIT_CONFIG_COUNT` and the like), or replaces the relay entrypoint | The environment is an allowlist: the kit's own variables (with the kit's value where it fixes one) and ordinary base-image settings (`PATH`, `LANG`, `LC_*`, `TERM`, `TZ`, `NODE_ENV`, version pins such as `NODE_VERSION`, toolchain homes such as `JAVA_HOME`). `template build` stops with `env_not_permitted` and names any other variable; unset it in the base image or your Dockerfile. Admission checks the image environment again, and the template's own `env`, `command` and `args` too: a variable off the allowlist, a command other than the image entrypoint or extra arguments are refused, naming the field. `template publish --env` refuses the same variables, and a template that sets a variable twice is refused. `EDITOR`, `PAGER`, `SHELL` and `GIT_EDITOR` are not on the allowlist. `HOME` is the kit's (`/sandbox`). `PATH` may be anything: DefenseClaw's hooks are named by absolute path, and what the relay starts runs as the agent. `template build` also refuses a `~/.gitconfig`, `~/.config/git/config` or `~/.npmrc` in the image that runs a program (`core.fsmonitor`, `core.hooksPath`, a filter, an `!` alias, `include.path`, npm's `script-shell` or `node-options`), naming the key. Shell start files such as `~/.bashrc` are code by nature and are trusted like the base image's own programs |
+| A template mounts a volume over DefenseClaw's files (a durable folder at `/usr/local/lib/defenseclaw/hooks` or `/etc/defenseclaw` hides the hooks) | Volume mounts are an allowlist: the kit's `system_info` volume at `/run/ate`, and data volumes at or below the image `WORKDIR` (`/work` in kit images). Admission refuses any other mount, and any mount at, above or below the kit library, `/etc/defenseclaw`, `/run/ate`, a hook or settings file the build checked, or a guarded home folder, naming the field (`volume_mounts[N]`), and also a mount in a system folder (`/usr`, `/etc`, `/bin`, `/lib`, `/run` ...) and a volume name given twice. `template build` refuses a symlink in the image that leads into a folder it attests. The relay also reads its own mount table at start, so a symlink in an image volume cannot move a mount onto those paths either: a mount at, above or below any file the build attested (the kit, every connector's managed settings, the hook registration) or a guarded home folder refuses the agent with a HIGH audit row, and so does a mount table it cannot read |
+| Someone creates an atespace like `eng-evil` that matches a team pattern | Only Substrate global owners create atespaces, and patterns match only atespaces DefenseClaw created or you list |
+
+## Uninstall
+
+`helm uninstall` first removes every egress policy DefenseClaw wrote, so agents fall back to deny-all, and the credential provider grant. It fails while any remain, and prints the snapshot purge steps. Then run `defenseclaw substrate setup --remove` to take the callout out of the overlay. **Nothing is left open.** The store volume is kept unless you delete it. Delete the agents, or give them allow lists of your own. On a cluster where people sign in with Kubernetes credentials, the uninstall also removes the gateway's `system:auth-delegator` ClusterRoleBinding and names it in its log.
+
+## Fleet management
+
+A fleet here is **clusters, then atespaces (teams), then agents, then the people who start them.** Each cluster has one DefenseClaw install that reports for all of its agents.
+
+**What each install reports**
+- **Health:** gateway replicas ready, which replica is the leader, controller lag (agent created to allow list written), callout answering and whether it reads bodies, the Substrate version.
+- **Policy:** the policy generation per atespace, and allow lists changed outside DefenseClaw (drift and conflicts).
+- **Inventory:** templates with their agent, version, kit version and scan result; agents running and suspended; who started each.
+- **Activity:** checks, blocks and asks per team and per agent; sites refused; unattested templates; spend; batches.
+
+**How to read it**
+- The output of `defenseclaw substrate status --cluster --json` and `defenseclaw substrate verify --json` follows the same machine-readable contract as the [managed-laptop commands](/docs/enterprise/managed-commands). A management agent, a GitOps pipeline or a script can read health the same way for clusters and laptops.
+- The OpenTelemetry stream carries all of it, so the Grafana dashboards, Splunk or any OTLP backend show the fleet next to your laptops. Every record carries `k8s.cluster.name`.
+
+**Many clusters.** Install DefenseClaw once per cluster, with the same values and trust anchors, and a unique actor-token issuer per cluster. One dashboard covers all of them.

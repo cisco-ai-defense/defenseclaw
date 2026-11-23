@@ -219,6 +219,10 @@ class Event:
     # audit_events.enforced: True when the gateway really blocked the call
     # (None on rows that predate the column).
     enforced: bool | None = None
+    # The semantic event id of a hook row (connector-hook or hook_decision):
+    # it pairs the two rows of one hook decision (S8 R4, #1384). Empty on
+    # other rows and when a query does not read it.
+    semantic_event_id: str = ""
 
 
 @dataclass
@@ -244,3 +248,7 @@ class Counts:
     alerts: int | None = 0
     total_scans: int = 0
     blocked_egress_calls: int = 0
+    # Tool calls the gateway could read only in part (ACTION-PARSE-FAILURE
+    # records: a shell syntax error, a shell body it could not resolve).
+    # None: not counted in time (see Store.get_counts).
+    unread_calls: int | None = 0

@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -612,7 +613,7 @@ func addEnterpriseHookPersonalClaudeUnblocks(jobs map[int]*enterpriseHookWorkerJ
 // DefenseClaw's VS Code Local hook file and Copilot plugin, recognized by
 // the administrator's hook binary.
 func enterpriseHookCopilotVSCodeRemoval() (*enterpriseHookWorkerCopilotVSCode, error) {
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return nil, err
 	}

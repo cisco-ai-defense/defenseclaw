@@ -288,7 +288,7 @@ func windowsLaunchListMatches(list, names []string) bool {
 
 func windowsLaunchCoverageWarning(result *enterprisestatus.Result, code, message string) {
 	result.AddWarning(code, message)
-	result.CoverageComplete, result.SecurityComplete = false, false
+	result.MarkCoverageIncomplete(code)
 	if result.Action == "verify" {
 		result.AddError(code, message)
 	}

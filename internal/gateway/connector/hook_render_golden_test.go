@@ -211,6 +211,12 @@ func snapshotHookDir(t *testing.T, dir string) map[string]hostHookGoldenFile {
 // TestHostHookScriptBytesGolden proves that the host hook writers keep
 // producing byte-identical scripts, helpers and sidecars.
 func TestHostHookScriptBytesGolden(t *testing.T) {
+	// The per-user config and install-home records follow the config file of
+	// the account that runs the test; a temporary home with no DefenseClaw
+	// config keeps them out, so the golden does not depend on that account.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	t.Setenv("DEFENSECLAW_HOME", "")
 	got := map[string]map[string]hostHookGoldenFile{}
 	for _, tc := range hostHookGoldenCases() {
 		dir := t.TempDir()

@@ -176,7 +176,7 @@ func TestSetupConnectorsIsolated_AmpLatePublicationFailureRestoresPreviouslyActi
 	got, err := s.setupConnectorsIsolated(
 		context.Background(),
 		[]connector.Connector{failed},
-		"tok", "127.0.0.1:4000", "127.0.0.1:18971", "master",
+		"tok", "127.0.0.1:4000", "127.0.0.1:18971",
 		guardrail.NewRulePackCache(),
 	)
 	if err == nil {
@@ -222,7 +222,7 @@ func TestSetupConnectorsIsolated_AmpLatePublicationFailureRemovesFreshRegistrati
 	got, err := s.setupConnectorsIsolated(
 		context.Background(),
 		[]connector.Connector{failed},
-		"tok", "127.0.0.1:4000", "127.0.0.1:18971", "master",
+		"tok", "127.0.0.1:4000", "127.0.0.1:18971",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {

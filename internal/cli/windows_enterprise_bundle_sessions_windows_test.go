@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -31,7 +32,7 @@ func TestWindowsBundleSessionsCountOnlyEnabledConnectors(t *testing.T) {
 		[]byte(`{"activated_at":"`+activated.Format(time.RFC3339Nano)+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		t.Fatal(err)
 	}

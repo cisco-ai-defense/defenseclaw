@@ -26,9 +26,7 @@ func TestGAP0426NestedPlacedCopyScope(t *testing.T) {
 	if err := os.MkdirAll(nested, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("..", "elsewhere"), filepath.Join(nested, "link")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join("..", "elsewhere"), filepath.Join(nested, "link"))
 	command := `cd ~ && f=project/backup; echo $(cp -a project/src $f)`
 	links := commandLinks(command, project, home, nil, false, false)
 	if !links.cdScopes || links.globalOpaque || len(links.placedCopyDestinations) == 0 {

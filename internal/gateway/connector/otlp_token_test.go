@@ -162,7 +162,15 @@ func TestCodexLifecycle_CrossProcessSetupTeardownTransaction(t *testing.T) {
 		barrier := filepath.Join(dir, "lifecycle-start")
 		teardownReady := filepath.Join(dir, "teardown-ready")
 		setupReady := filepath.Join(dir, "setup-ready")
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		// Two bounds: the helpers' start (a new test process and its
+		// TestMain, the runner's cost) and the two lifecycles after the
+		// barrier (the product). One 20 s bound over both killed a helper
+		// that was still in its lifecycle when the hosted Windows runner was
+		// slow to start the processes (exit status 1, no output).
+		startCtx, cancelStart := context.WithTimeout(context.Background(), codexLifecycleHelperStartBound)
+		ctx, killHelpers := context.WithCancel(context.Background())
+		cancel := func() { cancelStart(); killHelpers() }
+		began := time.Now()
 		teardown, teardownOutput := codexLifecycleHelperCommand(
 			ctx, "teardown", dir, configPath, barrier, teardownReady,
 		)
@@ -178,13 +186,13 @@ func TestCodexLifecycle_CrossProcessSetupTeardownTransaction(t *testing.T) {
 			cancel()
 			t.Fatalf("iteration %d start Setup helper: %v", iteration, err)
 		}
-		if err := waitForCodexLifecycleFile(ctx, teardownReady); err != nil {
+		if err := waitForCodexLifecycleFile(startCtx, teardownReady); err != nil {
 			_ = teardown.Process.Kill()
 			_ = setup.Process.Kill()
 			cancel()
 			t.Fatalf("iteration %d Teardown readiness: %v", iteration, err)
 		}
-		if err := waitForCodexLifecycleFile(ctx, setupReady); err != nil {
+		if err := waitForCodexLifecycleFile(startCtx, setupReady); err != nil {
 			_ = teardown.Process.Kill()
 			_ = setup.Process.Kill()
 			cancel()
@@ -196,6 +204,9 @@ func TestCodexLifecycle_CrossProcessSetupTeardownTransaction(t *testing.T) {
 			cancel()
 			t.Fatalf("iteration %d release lifecycle barrier: %v", iteration, err)
 		}
+		ready := time.Since(began)
+		released := time.Now()
+		lifecycleDeadline := time.AfterFunc(codexLifecycleBound, killHelpers)
 
 		type processResult struct {
 			name string
@@ -207,14 +218,19 @@ func TestCodexLifecycle_CrossProcessSetupTeardownTransaction(t *testing.T) {
 		for range 2 {
 			result := <-results
 			if result.err != nil {
+				killed := ctx.Err() != nil
+				lifecycleDeadline.Stop()
 				cancel()
 				t.Fatalf(
-					"iteration %d %s helper: %v\nteardown output:\n%s\nsetup output:\n%s",
-					iteration, result.name, result.err, teardownOutput.String(), setupOutput.String(),
+					"iteration %d %s helper: %v (helpers ready after %v, %v after the barrier, killed at the %v lifecycle bound: %v)\nteardown output:\n%s\nsetup output:\n%s",
+					iteration, result.name, result.err, ready, time.Since(released), codexLifecycleBound, killed,
+					teardownOutput.String(), setupOutput.String(),
 				)
 			}
 		}
+		lifecycleDeadline.Stop()
 		cancel()
+		t.Logf("iteration %d: helpers ready after %v, both lifecycles done %v after the barrier", iteration, ready, time.Since(released))
 
 		managed, err := codexConfigHasManagedOTLPEndpoint(configPath, opts)
 		if err != nil {
@@ -242,6 +258,27 @@ func TestCodexLifecycle_CrossProcessSetupTeardownTransaction(t *testing.T) {
 			t.Fatalf("iteration %d left an orphaned scoped token after restored config", iteration)
 		}
 	}
+}
+
+// codexLifecycleHelperStartBound bounds the start of the two helper
+// processes (until both say ready); codexLifecycleBound bounds both
+// lifecycles from the barrier to the helpers' exit, and
+// codexLifecycleHelperBound one helper's lifecycle, a little less so that a
+// slow helper reports its own error before the test kills it.
+const codexLifecycleHelperStartBound = 60 * time.Second
+
+var codexLifecycleBound, codexLifecycleHelperBound = codexLifecycleBounds()
+
+// codexLifecycleBounds only turn a hang into a failure; which lifecycle wins
+// does not depend on them. A pair of lifecycles takes under 3 s on a hosted
+// Windows runner, but the runner has stalled to 11-13 s a pair and past 20 s
+// (GAP-1607: run 43222066854 and the 8e58b26846 checks shard), so Windows gets
+// 60 s.
+func codexLifecycleBounds() (lifecycles, helper time.Duration) {
+	if runtime.GOOS == "windows" {
+		return 60 * time.Second, 50 * time.Second
+	}
+	return 20 * time.Second, 15 * time.Second
 }
 
 func codexLifecycleHelperCommand(
@@ -292,11 +329,15 @@ func TestCodexLifecycleCrossProcessHelper(t *testing.T) {
 	if err := os.WriteFile(ready, []byte("ready\n"), 0o600); err != nil {
 		t.Fatalf("publish helper readiness: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := waitForCodexLifecycleFile(ctx, barrier); err != nil {
+	// The wait for the barrier includes the other helper's start; the
+	// lifecycle gets its own codexLifecycleHelperBound from the barrier on.
+	barrierCtx, cancelBarrier := context.WithTimeout(context.Background(), codexLifecycleHelperStartBound)
+	defer cancelBarrier()
+	if err := waitForCodexLifecycleFile(barrierCtx, barrier); err != nil {
 		t.Fatalf("wait for lifecycle barrier: %v", err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexLifecycleHelperBound)
+	defer cancel()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token"}
 	connector := NewCodexConnector()
 	var err error

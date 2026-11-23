@@ -102,7 +102,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-test-scripts macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-vet go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-opencode-plugins skill-check check-managed-paths check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
@@ -470,8 +470,9 @@ dev-pycli: pycli
 # Protobuf regeneration
 # ---------------------------------------------------------------------------
 # `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
-# Client) contract, the private semantic guardrail facts and the vendored
-# Tetragon API (third_party/tetragon).
+# Client) contract, the private semantic guardrail facts, the vendored
+# Tetragon API (third_party/tetragon) and the vendored Agent Substrate control
+# API (third_party/substrate).
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
@@ -492,6 +493,18 @@ TETRAGON_PROTOS := tetragon/bpf.proto tetragon/capabilities.proto tetragon/event
 TETRAGON_PROTO_M := $(foreach p,$(TETRAGON_PROTOS),M$(p)=$(TETRAGON_PROTO_PKG))
 TETRAGON_PROTO_STUBS := $(addprefix third_party/tetragon/api/v1/,$(TETRAGON_PROTOS:.proto=.pb.go)) \
 	third_party/tetragon/api/v1/tetragon/sensors_grpc.pb.go
+# The Agent Substrate control API (agent-substrate/substrate v1.0.0,
+# Apache-2.0), vendored unmodified under third_party/substrate for the
+# Substrate controller. The upstream go_package is remapped so no
+# go.ate.dev/substrate module is imported; see third_party/substrate/README.md.
+SUBSTRATE_PROTO := api/ateapi/v1/ateapi.proto
+SUBSTRATE_PROTO_M := M$(SUBSTRATE_PROTO)=github.com/defenseclaw/defenseclaw/third_party/substrate/api/ateapi/v1;ateapi
+# The stubs are generated from a copy without upstream's custom options
+# (extensions 50000 collide with the OpenShell SDK's optionsv1, GAP-0014);
+# third_party/substrate/strip-options.awk documents the patch.
+SUBSTRATE_PROTO_STAGE := $(PROTO_TOOLS_DIR)/substrate-proto
+SUBSTRATE_PROTO_STUBS := third_party/substrate/api/ateapi/v1/ateapi.pb.go \
+	third_party/substrate/api/ateapi/v1/ateapi_grpc.pb.go
 
 proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
@@ -511,6 +524,13 @@ proto: proto-tools
 		--go_out=. --go_opt=paths=source_relative $(addprefix --go_opt=,$(TETRAGON_PROTO_M)) \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative $(addprefix --go-grpc_opt=,$(TETRAGON_PROTO_M)) \
 		$(TETRAGON_PROTOS)
+	@rm -rf $(SUBSTRATE_PROTO_STAGE) && mkdir -p $(dir $(SUBSTRATE_PROTO_STAGE)/$(SUBSTRATE_PROTO))
+	@awk -f third_party/substrate/strip-options.awk third_party/substrate/$(SUBSTRATE_PROTO) \
+		> $(SUBSTRATE_PROTO_STAGE)/$(SUBSTRATE_PROTO)
+	@cd $(SUBSTRATE_PROTO_STAGE) && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=$(CURDIR)/third_party/substrate --go_opt=paths=source_relative --go_opt='$(SUBSTRATE_PROTO_M)' \
+		--go-grpc_out=$(CURDIR)/third_party/substrate --go-grpc_opt=paths=source_relative --go-grpc_opt='$(SUBSTRATE_PROTO_M)' \
+		$(SUBSTRATE_PROTO)
 	@echo "Regenerated committed Go protobuf stubs"
 
 proto-check: proto
@@ -518,12 +538,12 @@ proto-check: proto
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
 		internal/guardrail/semanticpb/facts.pb.go \
-		$(TETRAGON_PROTO_STUBS) >/dev/null
+		$(TETRAGON_PROTO_STUBS) $(SUBSTRATE_PROTO_STUBS) >/dev/null
 	@git diff --exit-code -- \
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
 		internal/guardrail/semanticpb/facts.pb.go \
-		$(TETRAGON_PROTO_STUBS)
+		$(TETRAGON_PROTO_STUBS) $(SUBSTRATE_PROTO_STUBS)
 
 gateway: _checkout-write-preflight sync-openclaw-extension
 	go build $(GO_BUILD_FLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
@@ -655,6 +675,7 @@ start: gateway
 plugin: _checkout-write-preflight
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cp schemas/inspect-tool-request-limits.json $(PLUGIN_DIR)/src/inspect-tool-request-limits.json
 	cd $(PLUGIN_DIR) && NODE_ENV=development npm ci --include=dev && npm run build
 	@echo ""
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
@@ -1079,28 +1100,44 @@ macos-app-build: macos-app-license-check
 	    build
 
 macos-app-test-scripts:
-	macos/DefenseClawMac/script/test_connector_onboarding.sh
-	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
-	macos/DefenseClawMac/script/test_ai_discovery_models.sh
+	python3 scripts/sync-macos-command-registry.py --check
+	macos/DefenseClawMac/script/test_ai_discovery_actions.sh
+	macos/DefenseClawMac/script/test_ai_model_discovery.sh
 	macos/DefenseClawMac/script/test_ai_runtime_models.sh
-	macos/DefenseClawMac/script/test_sandbox_models.sh
-	macos/DefenseClawMac/script/test_panel_registry.sh
-	macos/DefenseClawMac/script/test_numeric_safety.sh
-	macos/DefenseClawMac/script/test_output_safety.sh
-	macos/DefenseClawMac/script/test_secret_file_safety.sh
+	macos/DefenseClawMac/script/test_alert_queue_projection.sh
 	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
-	macos/DefenseClawMac/script/test_update_checker_verification.sh
-	macos/DefenseClawMac/script/test_installation_context.sh
-	macos/DefenseClawMac/script/test_local_model_discovery.sh
-	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
-	macos/DefenseClawMac/script/test_cowork_status.sh
-	macos/DefenseClawMac/script/test_gateway_auto_start.sh
-	macos/DefenseClawMac/script/test_gateway_administrator.sh
-	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
 	macos/DefenseClawMac/script/test_canonical_event_history.sh
+	macos/DefenseClawMac/script/test_catalog_action_safety.sh
+	macos/DefenseClawMac/script/test_cli_cancellation.sh
+	macos/DefenseClawMac/script/test_config_editor_contracts.sh
 	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
+	macos/DefenseClawMac/script/test_connector_onboarding.sh
+	macos/DefenseClawMac/script/test_cowork_status.sh
+	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
+	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
+	macos/DefenseClawMac/script/test_gateway_administrator.sh
+	macos/DefenseClawMac/script/test_gateway_auto_start.sh
 	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
-	macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+	macos/DefenseClawMac/script/test_installation_context.sh
+	macos/DefenseClawMac/script/test_inventory_capability_warnings.sh
+	macos/DefenseClawMac/script/test_local_model_discovery.sh
+	macos/DefenseClawMac/script/test_main_window_lifecycle.sh
+	macos/DefenseClawMac/script/test_numeric_safety.sh
+	macos/DefenseClawMac/script/test_operator_asset_lists.sh
+	macos/DefenseClawMac/script/test_output_safety.sh
+	macos/DefenseClawMac/script/test_overview_read_only_guidance.sh
+	macos/DefenseClawMac/script/test_panel_registry.sh
+	macos/DefenseClawMac/script/test_policy_models.sh
+	macos/DefenseClawMac/script/test_redaction_commands.sh
+	macos/DefenseClawMac/script/test_resource_boundaries.sh
+	macos/DefenseClawMac/script/test_runtime_contract_surfaces.sh
+	macos/DefenseClawMac/script/test_sandbox_inspection.sh
+	macos/DefenseClawMac/script/test_sandbox_models.sh
+	macos/DefenseClawMac/script/test_secret_file_safety.sh
+	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
+	macos/DefenseClawMac/script/test_structured_detail_parser.sh
+	macos/DefenseClawMac/script/test_toolbar_help.sh
+	macos/DefenseClawMac/script/test_update_checker_verification.sh
 
 macos-app-test: macos-app-test-scripts
 	$(MAKE) macos-app-build
@@ -1153,11 +1190,21 @@ CONNECTOR_MATRIX_RUN := Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|S
 # wait on the scripts they spawn, so without -race they are most of the run,
 # and balanced on those times one part ran more than twice as long as the
 # others (GAP-0834). The default, all, runs everything in one go test.
+# gateway-0 .. gateway-M-1 run that part of the matrix tests of
+# internal/gateway (M = CONNECTOR_MATRIX_GATEWAY_PARTS): about 600 s of
+# tests that left the packages part at 950 s of its 1,200 s job (PR #1456).
+# They run only the test files go list builds here, and go_test_report.py
+# fails the part when a selected test reported no result.
 CONNECTOR_MATRIX_PART ?= all
 CONNECTOR_MATRIX_CONNECTOR_PARTS ?= 4
+CONNECTOR_MATRIX_GATEWAY_PARTS ?= 4
 
 connector-matrix-test: go-connector-matrix-test $(if $(filter all packages,$(CONNECTOR_MATRIX_PART)),py-connector-matrix-test)
 
+# The gateway parts pipe go test into go_test_report.py; pipefail keeps
+# go test's status (dash, the /bin/sh of Ubuntu, has no pipefail).
+go-connector-matrix-test: SHELL := bash
+go-connector-matrix-test: .SHELLFLAGS := -o pipefail -c
 go-connector-matrix-test: sync-openclaw-extension
 ifeq ($(CONNECTOR_MATRIX_PART),all)
 	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
@@ -1171,14 +1218,20 @@ else ifeq ($(CONNECTOR_MATRIX_PART),packages)
 	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
 		./internal/cli \
 		./internal/config \
-		./internal/gateway \
 		./test/e2e \
 		-run '$(CONNECTOR_MATRIX_RUN)'
+else ifneq ($(filter gateway-%,$(CONNECTOR_MATRIX_PART)),)
+	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway --built-files \
+		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux-connector-matrix.json \
+		--shard-count $(CONNECTOR_MATRIX_GATEWAY_PARTS) --shard-index $(patsubst gateway-%,%,$(CONNECTOR_MATRIX_PART)))" && \
+		go test -json -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway -run "$$run" 2>&1 | \
+		$(HOST_PYTHON) scripts/go_test_report.py --annotate "connector matrix $(CONNECTOR_MATRIX_PART) failed" --expect-run "$$run"
 else
-	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector \
+	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector --built-files \
 		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux-connector-matrix.json \
 		--shard-count $(CONNECTOR_MATRIX_CONNECTOR_PARTS) --shard-index $(CONNECTOR_MATRIX_PART))" && \
-		go test -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run"
+		go test -json -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run" 2>&1 | \
+		$(HOST_PYTHON) scripts/go_test_report.py --annotate "connector matrix part $(CONNECTOR_MATRIX_PART) failed" --expect-run "$$run"
 endif
 
 py-connector-matrix-test: pycli
@@ -1196,6 +1249,7 @@ py-connector-matrix-test: pycli
 
 ts-test:
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cp schemas/inspect-tool-request-limits.json $(PLUGIN_DIR)/src/inspect-tool-request-limits.json
 	cd $(PLUGIN_DIR) && \
 		if [ ! -x node_modules/.bin/vitest ]; then \
 			NODE_ENV=development npm ci --include=dev; \
@@ -1285,6 +1339,7 @@ check-provider-coverage: sync-openclaw-extension
 	@go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
 	@echo "==> provider coverage (TS)"
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cp schemas/inspect-tool-request-limits.json $(PLUGIN_DIR)/src/inspect-tool-request-limits.json
 	cd $(PLUGIN_DIR) && \
 		if [ ! -x node_modules/.bin/vitest ]; then \
 			NODE_ENV=development npm ci --include=dev; \
@@ -1366,9 +1421,18 @@ assemble-parity:
 	@scripts/check-assemble-parity.sh
 
 py-lint: pycli
+	@# Two runs, not one with both paths: ruff 0.15 given both roots stops honouring
+	@# .gitignore for the _bundle-data copy under cli/defenseclaw/_data (pycli stages it),
+	@# and reports 2 findings in the copied splunk exporter (GAP-1259).
 	$(RUFF) check cli/defenseclaw/
+	$(RUFF) check cli/tests/
 
-go-lint: sync-openclaw-extension
+go-lint: go-vet
+	@$(MAKE) --no-print-directory go-lint-analyzers
+
+# gofmt and go vet, the first half of go-lint. CI runs it as its own job
+# (Go Lint (go vet)) beside go-lint-analyzers, behind the Go Lint check.
+go-vet: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast
 	@# on it before running the heavier analyzers.
 	@unformatted=$$(gofmt -l $$(git ls-files '*.go') 2>/dev/null); \
@@ -1379,12 +1443,15 @@ go-lint: sync-openclaw-extension
 		exit 1; \
 	fi
 	go vet ./...
-	@$(MAKE) --no-print-directory go-lint-analyzers
+	@# The live Claude Code run-config test is behind a build tag, so
+	@# `go vet ./...` does not compile it; vet it here so it cannot rot (GAP-0280).
+	go vet -tags openshell_integration ./internal/openshell/image/
 
 # golangci-lint $(GOLANGCI_LINT_VERSION) on the lines changed since the merge
 # base with $(GOLANGCI_LINT_BASE). A missing linter fails the gate. The one
 # documented skip is a Go toolchain newer than the pinned golangci-lint
-# supports: `go vet ./...` (run by go-lint first) is then the Go lint.
+# supports: `go vet ./...` (make go-vet, which go-lint runs first) is then
+# the Go lint.
 go-lint-analyzers:
 	@base='$(GOLANGCI_LINT_BASE)'; flags=""; \
 	if [ -n "$$base" ]; then \
@@ -1399,7 +1466,7 @@ go-lint-analyzers:
 	$(GOLANGCI_LINT) run $$flags >"$$tmp" 2>&1 || status=$$?; \
 	cat "$$tmp"; \
 	if [ $$status -ne 0 ] && grep -qE "used to build golangci-lint is lower than the targeted Go version|package requires newer Go version" "$$tmp"; then \
-		echo "golangci-lint $(GOLANGCI_LINT_VERSION) does not support this Go toolchain yet; 'go vet ./...' above is the Go lint for this run."; \
+		echo "golangci-lint $(GOLANGCI_LINT_VERSION) does not support this Go toolchain yet; 'go vet ./...' (make go-vet) is the Go lint for this run."; \
 		status=0; \
 	fi; \
 	rm -f "$$tmp"; \
@@ -1448,6 +1515,7 @@ _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm
+	@mkdir -p cli/defenseclaw/_data/pricing
 	@mkdir -p cli/defenseclaw/_data/config/v8
 	@rm -rf cli/defenseclaw/_data/telemetry/v8
 	@mkdir -p cli/defenseclaw/_data/telemetry/v8
@@ -1474,6 +1542,8 @@ _bundle-data: _checkout-write-preflight
 	@# Textual TUI model picker via importlib.resources. Tracked source lives
 	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
 	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
+	@# Reviewed default price table; only the CLI writers read it (init, setup tokenomics, upgrade).
+	cp bundles/pricing/default-pricing.json cli/defenseclaw/_data/pricing/
 	@# v8 config contracts are canonical under schemas/. The wheel receives
 	@# exact build-staging copies so importlib.resources works after install.
 	cp schemas/config/v8/defenseclaw-config.schema.json cli/defenseclaw/_data/config/v8/

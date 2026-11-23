@@ -23,6 +23,15 @@
       "note": "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment."
     },
     {
+      "command": "defenseclaw routing status",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "routing status",
+      "note": "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; `routing rules list` shows the routing rules (all of them to an administrator, none to a standard account). Every routing command that changes the config, and `routing test`, is set in the administrator config and answers with the key that owns it (exit 3); the other routing commands are not offered here; an administrator dry-runs a rule with `routing test --as-user` on a workstation that has the per-user install."
+    },
+    {
       "command": "defenseclaw sandbox ...",
       "managed_linux": "Offered",
       "managed_macos": "Offered",
@@ -30,6 +39,24 @@
       "per_user": "Linux, macOS",
       "per_user_path": "sandbox",
       "note": "OpenShell sandboxes run on Linux and macOS only."
+    },
+    {
+      "command": "defenseclaw substrate ...",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "substrate",
+      "note": "Runs your coding agents in your organization's Agent Substrate cluster, for the account that signed in to it. It talks only to that cluster, so it needs no managed install, daemon or sandbox on this computer."
+    },
+    {
+      "command": "defenseclaw substrate setup",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "substrate setup",
+      "note": "Cluster administrator tools: setup, bundle, template and verify. They read and write the files named on the command line and, for `bundle`, use the administrator's own sign-in, so they need no managed install. The Linux and macOS launcher does not offer them; an administrator runs them with `defenseclaw-gateway` or on their own computer."
     },
     {
       "command": "defenseclaw guardrail profile explain",
@@ -183,6 +210,24 @@
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "audit export",
       "note": "The managed audit log is administrator-only."
+    },
+    {
+      "command": "defenseclaw audit compact",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Administrators only",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "audit compact",
+      "note": "Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service."
+    },
+    {
+      "command": "defenseclaw audit rejected",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Administrators only",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "audit rejected",
+      "note": "The records the schema gate refused are part of the managed audit store, which is administrator-only."
     }
   ]
 }

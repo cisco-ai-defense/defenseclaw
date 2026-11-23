@@ -216,6 +216,10 @@ enum MCPScanner {
             ]
         case "copilot":
             return [(p(".copilot", "mcp-config.json"), .dotMCPJSON)]
+        case "kiro":
+            // Kiro MCP registrations are discovery-only; fallback catalogs
+            // remain read only and never offer writes to this file.
+            return [(p(".kiro", "settings", "mcp.json"), .dotMCPJSON)]
         case "openclaw":
             return [(p(".openclaw", "openclaw.json"), .settingsJSON([["mcp", "servers"], ["mcpServers"]]))]
         case "antigravity":

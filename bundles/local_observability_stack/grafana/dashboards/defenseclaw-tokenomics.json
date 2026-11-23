@@ -1,0 +1,1681 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "links": [
+    {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "description": "Filter by connector. Sourced from defenseclaw_model_cost_USD_total{connector}.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_model_cost_USD_total, connector)",
+        "query": {
+          "query": "label_values(defenseclaw_model_cost_USD_total, connector)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "model",
+        "label": "Model",
+        "description": "Matched price-table entry (or other). The requested and routed model names are in the per-call tables below.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_model_cost_USD_total, model)",
+        "query": {
+          "query": "label_values(defenseclaw_model_cost_USD_total, model)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "profile",
+        "label": "Profile",
+        "description": "Guardrail profile the call ran under.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_model_cost_USD_total, profile)",
+        "query": {
+          "query": "label_values(defenseclaw_model_cost_USD_total, profile)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "route_decision",
+        "label": "Route Decision",
+        "description": "Router decision for the call.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_model_cost_USD_total, route_decision)",
+        "query": {
+          "query": "label_values(defenseclaw_model_cost_USD_total, route_decision)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "user",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows every Loki panel on this board to records that carry that user. Prometheus metric panels have no per-user label and stay fleet-wide.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Spend and tokens",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Cost in range (USD)",
+      "description": "Sum of defenseclaw.model.cost over the range. Calls whose cost is unknown add nothing, so this is a floor; see the absent-cost share beside it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) or (last_over_time(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) * 0)) and defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range) or (last_over_time(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "noValue": "No data in range",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Tokens in range",
+      "description": "Disjoint token counts (uncached input, cache read, cache creation, output without reasoning, reasoning) summed over the range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Cache-read share of prompt tokens",
+      "description": "cache_read / (input + cache_read + cache_creation). Higher means more of the prompt was served from the provider cache.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"} offset $__range)) / sum(((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"} offset $__range))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No data in range",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Reasoning share of output tokens",
+      "description": "reasoning / (output + reasoning). Output is counted without reasoning tokens, so the two are disjoint.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"} offset $__range)) / sum(((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"} offset $__range))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No data in range",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Calls with absent cost (share)",
+      "description": "Share of model.usage records with cost.basis none: no price entry matched or usage was missing. From logs, so it follows the Connector and User boxes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "(sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_cost_basis=\"none\" [$__range])) or vector(0)) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") [$__range]))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No data in range",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Usage records dropped",
+      "description": "defenseclaw.tokenomics.dropped: usage records discarded because the bounded queue was full. Anything above zero means the cost and token counters undercount.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(((increase(defenseclaw_tokenomics_dropped_total[$__range]) or (last_over_time(defenseclaw_tokenomics_dropped_total[$__range]) * 0)) and defenseclaw_tokenomics_dropped_total offset $__range) or (last_over_time(defenseclaw_tokenomics_dropped_total[$__range]) unless defenseclaw_tokenomics_dropped_total offset $__range))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Cost over time (USD per interval)",
+      "description": "Increase of defenseclaw.model.cost per rate interval, all selected series together.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "cost"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "spanNulls": false
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Tokens by kind",
+      "description": "Increase of defenseclaw.model.tokens per rate interval by kind. Kinds are disjoint, so the stack is the real total.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (kind) (increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Cost breakdown",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Cost by model",
+      "description": "Cost by matched price-table entry. other means the model is not in the price table.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (model) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Cost by route decision",
+      "description": "Cost by the router decision for the call.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (route_decision) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{route_decision}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Cost by connector",
+      "description": "Cost by the agent connector that made the call.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (connector) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{connector}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Cost by guardrail profile",
+      "description": "Cost by the guardrail profile in force for the call.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (profile) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{profile}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "barchart",
+      "title": "Cost by call role (range)",
+      "description": "Agent calls, guardrail judge calls and any other call role over the range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (call_role) (((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) or (last_over_time(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) * 0)) and defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range) or (last_over_time(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range))",
+          "refId": "A",
+          "legendFormat": "{{call_role}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "showValue": "auto"
+      }
+    },
+    {
+      "id": 16,
+      "type": "barchart",
+      "title": "Tokens by model (range)",
+      "description": "All token kinds by matched price-table entry over the range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (model) (((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range))",
+          "refId": "A",
+          "legendFormat": "{{model}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "showValue": "auto"
+      }
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Token efficiency",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Cache-read share of prompt tokens over time",
+      "description": "cache_read / (input + cache_read + cache_creation) per rate interval.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"}[$__rate_interval])) / sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "cache-read share"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "spanNulls": false
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Reasoning share of output tokens over time",
+      "description": "reasoning / (output + reasoning) per rate interval.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 39,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"}[$__rate_interval])) / sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "reasoning share"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "spanNulls": false
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Per call (logs)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Calls with absent cost over time (share)",
+      "description": "model.usage records with cost.basis none divided by all model.usage records, per interval.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "(sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_cost_basis=\"none\" [$__auto])) or vector(0)) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") [$__auto]))",
+          "refId": "A",
+          "legendFormat": "absent-cost share"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "spanNulls": false
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "table",
+      "title": "Models with absent cost",
+      "description": "Routed (selected) model of calls with cost.basis none: the models to add to observability.pricing.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(20, sum by (model) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_cost_basis=\"none\" | label_format model=\"{{if .body_defenseclaw_model_selected}}{{.body_defenseclaw_model_selected}}{{else}}unreported{{end}}\" [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "model": "Model",
+              "Value": "Calls"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Calls",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "type": "table",
+      "title": "Routed vs requested model",
+      "description": "What the agent asked for (gen_ai.request.model) against what the router sent the call to (defenseclaw.model.selected), with call count and known cost. From model.usage logs.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (requested, selected, provider, decision) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | label_format requested=\"{{if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", selected=\"{{if .body_defenseclaw_model_selected}}{{.body_defenseclaw_model_selected}}{{else}}unreported{{end}}\", provider=\"{{if .body_gen_ai_provider_name}}{{.body_gen_ai_provider_name}}{{else}}unreported{{end}}\", decision=\"{{if .body_defenseclaw_route_decision}}{{.body_defenseclaw_route_decision}}{{else}}unreported{{end}}\" [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (requested, selected, provider, decision) (sum_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_cost_usd!=\"\" | label_format requested=\"{{if .body_gen_ai_request_model}}{{.body_gen_ai_request_model}}{{else}}unreported{{end}}\", selected=\"{{if .body_defenseclaw_model_selected}}{{.body_defenseclaw_model_selected}}{{else}}unreported{{end}}\", provider=\"{{if .body_gen_ai_provider_name}}{{.body_gen_ai_provider_name}}{{else}}unreported{{end}}\", decision=\"{{if .body_defenseclaw_route_decision}}{{.body_defenseclaw_route_decision}}{{else}}unreported{{end}}\" | unwrap body_defenseclaw_cost_usd | __error__=\"\" [$__range])))",
+          "refId": "B",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "requested": "Requested model",
+              "selected": "Routed to",
+              "provider": "Provider",
+              "decision": "Route decision",
+              "Value #A": "Calls",
+              "Value #B": "Known cost (USD)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Known cost (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Calls",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 24,
+      "type": "table",
+      "title": "Top users by cost",
+      "description": "Known cost and calls per user from model.usage logs. Users exist only in logs, never as metric labels; the User box narrows this table.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 65,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(20, sum by (user) (sum_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_cost_usd!=\"\" | label_format user=\"{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}}{{else if .body_user_id}}{{.body_user_id}}{{else}}unreported{{end}}\" | unwrap body_defenseclaw_cost_usd | __error__=\"\" [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(20, sum by (user) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | label_format user=\"{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}}{{else if .body_user_id}}{{.body_user_id}}{{else}}unreported{{end}}\" [$__range])))",
+          "refId": "B",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "user": "User",
+              "Value #A": "Known cost (USD)",
+              "Value #B": "Calls"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Known cost (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Known cost (USD)",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "type": "row",
+      "title": "Provider, connector and unknown cost",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 74,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Cost by provider",
+      "description": "Cost by the provider the call was sent to (the selected provider after routing).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 75,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (provider) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "barchart",
+      "title": "Tokens by connector (range)",
+      "description": "All token kinds by the agent connector that made the call, over the range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 75,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (connector) (((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range))",
+          "refId": "A",
+          "legendFormat": "{{connector}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "showValue": "auto"
+      }
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Calls with unknown cost (count)",
+      "description": "Number of model.usage records with cost.basis none in the range: no price entry matched or the provider reported no usage. Unknown cost is never counted as zero.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 83,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "(sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_cost_basis=\"none\" [$__range])) or vector(0))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data in range",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 32,
+      "type": "text",
+      "title": "Own usage and all usage",
+      "description": "Who sees what.",
+      "gridPos": {
+        "x": 6,
+        "y": 83,
+        "w": 18,
+        "h": 5
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**All usage.** Metrics carry no user or group, by design, so every panel on this dashboard shows the whole gateway to whoever can open Grafana. The table Top users by cost reads `model.usage` logs and is an administrator view.\n\n**Own usage.** A person sees only their own usage from the gateway: `GET /usage` (own rows only on a managed host), the own-status answer on managed Windows, and `defenseclaw setup tokenomics --status`. Group rollups are administrator-only and never leave the endpoint."
+      }
+    },
+    {
+      "id": 25,
+      "type": "row",
+      "title": "Pipeline health",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 89,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Dropped usage records",
+      "description": "Increase of defenseclaw.tokenomics.dropped per rate interval.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 90,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_tokenomics_dropped_total[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "dropped"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "spanNulls": false
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Partial usage records (share)",
+      "description": "Share of model.usage records flagged defenseclaw.usage.partial, for example a stream cut before the final usage frame. From logs.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 90,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "(sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_usage_partial=\"true\" [$__range])) or vector(0)) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") [$__range]))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No data in range",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    }
+  ],
+  "preload": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "defenseclaw",
+    "observability",
+    "tokenomics",
+    "cost"
+  ],
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Tokenomics",
+  "description": "Model cost and tokens: cost over time and by model, route, connector and profile, tokens by kind, cache-read and reasoning shares, calls with absent cost, routed against requested model, top users by cost and dropped usage records. Metrics carry no user label; per-user and per-call panels read model.usage logs.",
+  "uid": "defenseclaw-tokenomics",
+  "version": 1,
+  "weekStart": ""
+}

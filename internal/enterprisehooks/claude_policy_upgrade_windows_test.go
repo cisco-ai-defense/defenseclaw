@@ -18,6 +18,7 @@ import (
 )
 
 func TestStandaloneClaudeEnsureUpgradesAuthenticatedActiveDirectPolicy(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	setStandaloneProfileForTest(t, true)
 	opts := windowsManagedInstallOptions(fixture)
@@ -46,7 +47,7 @@ func TestStandaloneClaudeEnsureUpgradesAuthenticatedActiveDirectPolicy(t *testin
 				t.Fatal(renderErr)
 			}
 			if bytes.Equal(candidate, current) {
-				previous, err = renderWindowsClaudeRecordedPolicy(record, contract, lock, true)
+				previous, err = renderWindowsClaudeRecordedPolicy(record, contract, lock, windowsClaudeFormDirect)
 				if err != nil {
 					t.Fatal(err)
 				}

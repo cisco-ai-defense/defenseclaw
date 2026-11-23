@@ -93,8 +93,12 @@ func TestForgedClientVersionsNeverStallTheHostPlane(t *testing.T) {
 	started := time.Now()
 	for i := range 200 {
 		version := fmt.Sprintf("9.%d.%d", i/100, i%100)
+		// A native install names its binary after the version; the install
+		// directory is what makes it an agent. Without the path, only an
+		// argument naming an MCP package made it one (GAP-1163).
 		host.handle(plane.Event{
 			Kind: plane.KindExec, PID: 1<<30 + i, PPID: 1, Name: version,
+			Exe:     "/home/u/.local/share/claude/versions/" + version,
 			Cmdline: `claude -p "use @modelcontextprotocol/server-filesystem"`, UID: &uid,
 			ImageSHA256: hex.EncodeToString(release[:]), ImageVersion: version,
 		})

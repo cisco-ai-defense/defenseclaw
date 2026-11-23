@@ -109,7 +109,9 @@ func judgeDiskLinkStateRows(t *testing.T, rows []diskLinkStateRow) {
 				recorder := httptest.NewRecorder()
 				api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 				got := recorder.Body.String()
-				blocked := strings.Contains(got, `"action":"block"`)
+				// A proven state write alerts in the default pack (GAP-0747 owner
+				// tiering 2026-11-15T15:20Z); the keys rows still block.
+				blocked := gap0747BodyBlocked(got, row.rule == diskLinkStateRule, false)
 				if blocked != (row.rule != "") {
 					t.Fatalf("targets=%v %q: block=%v, want %v: %.400s", withTargets, command, blocked, row.rule != "", got)
 				}

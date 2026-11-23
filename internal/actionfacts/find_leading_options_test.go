@@ -100,7 +100,17 @@ func TestR105GAP2122FindHandsEntriesToWriter(t *testing.T) {
 		{`find ~/.defenseclaw/hooks -type f -exec cp /dev/null {} \;`, true},
 		{"find ~/.defenseclaw/hooks -type f -exec ls -l {} +", false},
 		{"find ~/.defenseclaw/hooks -type f -exec sha256sum {} +", false},
-		{"find ~/.defenseclaw/hooks -exec chmod 700 {} +", false},
+		// rel-1-0-10:GAP-0501: a mode, owner or time change of the found entries is a
+		// change of them, as a direct chmod of the state is.
+		{"find ~/.defenseclaw/hooks -exec chmod 700 {} +", true},
+		{"find ~/.defenseclaw/hooks -exec touch {} +", true},
+		{"find ~/.defenseclaw/hooks -exec rg token {} +", false},
+		{"find ~/.defenseclaw/hooks -exec rg --pre ./x token {} +", true},
+		{"find ~/.defenseclaw/hooks -exec file {} +", false},
+		{"find ~/.defenseclaw/hooks -exec file -C -m {} +", true},
+		{"find ~/.defenseclaw/hooks -exec less {} +", false},
+		{"find ~/.defenseclaw/hooks -exec less -o /tmp/log {} +", true},
+		{"find ~/.defenseclaw/hooks -exec sort --out {} {} +", true},
 		// pod check8: readers and copy-outs read the found entries.
 		{`find ~/.defenseclaw/hooks -type f -exec jq . {} \;`, false},
 		{`find ~/.defenseclaw/hooks -type f -exec awk 'END{print NR}' {} +`, false},

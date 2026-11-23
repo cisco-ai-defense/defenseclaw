@@ -256,14 +256,23 @@ func runSidecarStatusJSON(w io.Writer) error {
 	doc := gatewayStatusDocument{Endpoint: addr}
 	var failure error
 	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
-	if problem := foreignGatewayListener(cfg); problem != "" {
+	outOfReachPID, outOfReach := gatewayOutOfReach(cfg)
+	problem := ""
+	if !outOfReach {
+		problem = foreignGatewayListener(cfg)
+	}
+	if problem != "" {
 		doc.Error = problem
 		doc.Hint = foreignGatewayListenerFix(cfg)
 		failure = foreignGatewayStatusError(problem)
+	} else if clientErr != nil && outOfReach {
+		failure = gatewayOutOfReachDocument(&doc, outOfReachPID)
 	} else if clientErr != nil {
 		doc.Error = clientErr.Error()
 		failure = clientErr
-	} else if snap, err := fetchSidecarHealth(client, addr); err != nil {
+	} else if snap, err := fetchSidecarHealth(client, addr); err != nil && outOfReach {
+		failure = gatewayOutOfReachDocument(&doc, outOfReachPID)
+	} else if err != nil {
 		doc.Error = err.Error()
 		doc.Hint = sidecarNotRunningHint(cfg)
 		failure = errors.New("sidecar unreachable")
@@ -460,9 +469,16 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		return runSidecarStatusJSON(os.Stdout)
 	}
 	addr := sidecarHealthURL(cfg)
+	// GAP-1212: this account's gateway that this shell cannot open (elevated
+	// in another logon session) is reported as running, never as foreign.
+	outOfReachPID, outOfReach := gatewayOutOfReach(cfg)
 	// /health is public: any process on the port answers it. Never present
 	// another home's or account's gateway as this one.
-	if problem := foreignGatewayListener(cfg); problem != "" {
+	problem := ""
+	if !outOfReach {
+		problem = foreignGatewayListener(cfg)
+	}
+	if problem != "" {
 		fmt.Println()
 		Warn(foreignGatewayStatusLabel(problem))
 		printGatewayKV("Endpoint", addr)
@@ -473,10 +489,16 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 
 	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
 	if clientErr != nil {
+		if outOfReach {
+			return printGatewayOutOfReachStatus(addr, outOfReachPID)
+		}
 		return fmt.Errorf("sidecar status: %w", clientErr)
 	}
 	snap, err := fetchSidecarHealth(client, addr)
 	if err != nil {
+		if outOfReach {
+			return printGatewayOutOfReachStatus(addr, outOfReachPID)
+		}
 		if problem := foreignGatewayListener(cfg); problem != "" {
 			fmt.Println()
 			Warn(foreignGatewayStatusLabel(problem))
@@ -515,6 +537,9 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayStatusBanner()
 	printGatewayKV("Started", snap.StartedAt.Format(time.RFC3339))
 	printGatewayKV("Uptime", formatDuration(uptime))
+	if outOfReach {
+		Warn(fmt.Sprintf("It runs elevated or in another Windows logon session (PID %d). %s", outOfReachPID, gatewayOutOfReachFix("stop or restart")))
+	}
 	for _, problem := range cfg.CustomRulePackErrors() {
 		Warn("Config error: " + problem.Error())
 		if config.IsStalePinError(problem) {

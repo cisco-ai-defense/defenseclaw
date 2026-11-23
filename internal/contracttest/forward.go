@@ -34,6 +34,8 @@ var forwardOf = map[string]string{
 	"bundle-status.schema.json":    "bundle-status-forward.schema.json",
 	"bundle-receipt.schema.json":   "bundle-receipt-forward.schema.json",
 	"identity-refresh.schema.json": "identity-refresh-forward.schema.json",
+	"substrate-status.schema.json": "substrate-status-forward.schema.json",
+	"substrate-verify.schema.json": "substrate-verify-forward.schema.json",
 }
 
 // KeepOnDevice are the member names a forward schema drops on purpose: they
@@ -53,7 +55,7 @@ var KeepOnDevice = []string{
 	"name", "secret_refs_missing", "secret_refs_mismatch",
 	// Local detail: services, machine policy, observability destinations,
 	// the audit store, scanners, API port holders, paths.
-	"services", "machine_policy", "destinations", "audit_store", "scanners", "api_port_holders",
+	"services", "machine_policy", "destinations", "audit_store", "scanners", "api_port_holders", "routing",
 	"log_path", "dir", "path", "package_path",
 	// Account ids: identity refresh failures[].user_id and the accounts of
 	// windows_token_groups_pending.

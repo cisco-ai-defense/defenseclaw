@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -176,7 +177,7 @@ func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) 
 // ensure or a no-op ensure and the next Repair over a hand edit was refused
 // (GAP-0854).
 func windowsStandaloneLifecycleLockPath() (string, error) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", fmt.Errorf("resolve the lifecycle lock folder: %w", err)
 	}
@@ -357,7 +358,7 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 	if err != nil {
 		return false
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -456,7 +457,7 @@ func windowsEnterpriseHotConfigApply(
 	if config.NeedsMigrationV9(next) {
 		return unavailable("the staged config needs a config_version migration")
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
@@ -658,6 +659,11 @@ func windowsEnterpriseHotConfigApply(
 		}
 		var targetsErr, gatewayErr, guardianErr error
 		targetsRepublished := false
+		// lostHooksErr: the targets are published again, but the hooks of the
+		// targets the candidate dropped are not proven back. It is kept apart
+		// from targetsErr: closing hooks cannot reach those targets, and the
+		// gateway proof still runs (rel-1-0-10 GAP-1646).
+		var lostHooksErr error
 		// The previously enrolled targets the candidate's targets no longer
 		// enroll: the guardian may already have removed their hooks, and
 		// republishing targets.yaml does not prove the hooks are back.
@@ -691,7 +697,7 @@ func windowsEnterpriseHotConfigApply(
 					// candidate dropped has its verified hook again, or waits
 					// for its own Windows session (GAP-0905).
 					if err := windowsEnterpriseHotConfigTargetHooksProven(restoreCtx, layout, lost, windowsEnterpriseHotConfigRestartTimeout); err != nil {
-						targetsErr = fmt.Errorf("the previous targets were published again, but the hooks of the previously enrolled targets were not proven back: %w", err)
+						lostHooksErr = fmt.Errorf("the previous targets were published again, but the hooks of the previously enrolled targets were not proven back: %w", err)
 					}
 				}
 			}
@@ -746,7 +752,28 @@ func windowsEnterpriseHotConfigApply(
 				}
 			}
 		}
+		plainChange := !bundleChange && !payloadlessRollback
+		if lostHooksErr != nil && !plainChange {
+			// A signed bundle has no transaction after it: the undo is the
+			// end state, so a dropped target without its hook again fails it
+			// as before (GAP-0905).
+			targetsErr = lostHooksErr
+		}
 		if restoreErr == nil && targetsErr == nil && gatewayErr == nil && guardianErr == nil {
+			if lostHooksErr != nil {
+				// A plain config change goes on to the upgrade transaction,
+				// which installs the same change and drops these targets
+				// again: proving their hooks back only to remove them was
+				// what failed a connector removal (kiro) with
+				// targets_restore_failed, stopped the gateway and forced
+				// every other hook closed, a closure that never reaches the
+				// dropped targets. The previous config is back and its
+				// policy is proven live; the transaction's result decides
+				// (rel-1-0-10 GAP-1646, as GAP-0933 for the fail mode).
+				result.AddWarning("dropped_target_hooks_unproven", "the change could not be applied in the running gateway, and the hooks of the previously enrolled targets it drops were not proven back for the previous config ("+
+					windowsEnterpriseBoundedDiagnostic(lostHooksErr.Error())+"); these targets have no DefenseClaw hook until the upgrade transaction applies the change, which drops them: "+
+					windowsEnterpriseBoundedDiagnostic(strings.Join(windowsHotConfigTargetLabels(lost), ", ")))
+			}
 			if !holding {
 				return
 			}
@@ -773,7 +800,7 @@ func windowsEnterpriseHotConfigApply(
 			if holdErr != nil {
 				closure = "the hooks could not be held closed (" + windowsEnterpriseBoundedDiagnostic(holdErr.Error()) + ")"
 			}
-			if !bundleChange && !payloadlessRollback {
+			if plainChange {
 				// A plain config change goes on to the upgrade transaction,
 				// which installs it and restarts the guardian, so an error
 				// here said "the previous config is back" over a 1603 while
@@ -1542,6 +1569,14 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 	}
 	if err := json.Unmarshal(out, &report); err != nil {
 		if runErr != nil {
+			// Its own refusal is on stderr; "exit status 1" alone named no
+			// cause (rel-1-0-10 GAP-1646).
+			var exitErr *exec.ExitError
+			if errors.As(runErr, &exitErr) {
+				if detail := strings.TrimSpace(string(exitErr.Stderr)); detail != "" {
+					return targets, fmt.Errorf("enterprise hooks readiness: %w: %s", runErr, windowsEnterpriseBoundedDiagnostic(detail))
+				}
+			}
 			return targets, fmt.Errorf("enterprise hooks readiness: %w", runErr)
 		}
 		return targets, fmt.Errorf("read the enterprise hooks readiness report: %w", err)
@@ -1572,12 +1607,23 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 // before its report (the authorization directory resolved to a path that
 // does not exist), so no hook proof could pass (GAP-1418).
 func windowsEnterpriseHotConfigReadinessCommand(ctx context.Context, installedGateway string, layout managed.StandaloneLayout) *exec.Cmd {
+	command := exec.CommandContext(ctx, installedGateway, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseGuardianRecordPins(layout, managed.StandaloneWindowsGatewaySvc))
+	return command
+}
+
+// windowsEnterpriseGuardianRecordPins are the service pins plus the two the
+// guardian's protected records need: its authorization directory and the
+// gateway service name. A process that reads or writes those records as the
+// services do (readiness, hook-image retire's Codex requirements reconcile
+// and runtime selector step) carries all seven; without the authorization
+// directory the Codex requirements layout refused with "must be an exact
+// absolute protected path" (rel-1-0-10 GAP-0856, GAP-1418).
+func windowsEnterpriseGuardianRecordPins(layout managed.StandaloneLayout, gatewayService string) map[string]string {
 	pins := windowsEnterpriseServicePins(layout)
 	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
-	pins[gwconnector.WindowsGatewayServiceNameEnv] = managed.StandaloneWindowsGatewaySvc
-	command := exec.CommandContext(ctx, installedGateway, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
-	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), pins)
-	return command
+	pins[gwconnector.WindowsGatewayServiceNameEnv] = gatewayService
+	return pins
 }
 
 // windowsHotConfigUnprovenTargets returns each of targets whose readiness row is
@@ -1786,7 +1832,7 @@ type windowsEnterpriseFreshRewrite struct {
 // trusted again, a transaction is pending (its recovery restores its own
 // preimage), or the lock is busy (the transaction then refuses the file).
 func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrite windowsEnterpriseFreshRewrite) (windowsEnterpriseReplacedFile, error) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return windowsEnterpriseReplacedFile{}, nil
 	}
@@ -1881,7 +1927,7 @@ func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (windo
 			sddl: windowsConfigFileSDDL(service.String()), approved: next,
 		})
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return windowsEnterpriseReplacedFile{}, nil
 	}

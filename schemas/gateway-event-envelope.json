@@ -26,7 +26,7 @@
 
     "provider":  { "type": ["string", "null"] },
     "model":     { "type": ["string", "null"] },
-    "direction": { "type": ["string", "null"], "enum": ["prompt", "completion", "tool_call", null] },
+    "direction": { "type": ["string", "null"], "enum": ["prompt", "completion", "tool_call", "tool_result", null] },
 
     "agent_id":            { "type": ["string", "null"] },
     "agent_name":          { "type": ["string", "null"] },

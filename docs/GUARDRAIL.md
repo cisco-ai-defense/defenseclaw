@@ -57,6 +57,15 @@ The repository ships two separate policy layers:
 They are not interchangeable. The focused engineering contract is
 [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md).
 
+## Command reading budget
+
+Every shell reader of a hook call works inside one input budget (bytes, tokens,
+chain operators, tree nodes and depth), checked before any of them runs. A call
+past it is opaque to the readers: it takes the evaluation limit with the reason
+`parse_budget_exceeded` (alert outside strict, block in strict) and keeps the
+raw-text state-write block. See [`PARSELIMITS.md`](PARSELIMITS.md) for the
+values, the measured cost curve and the tests.
+
 ## Verification
 
 Behavior changes should be proven by the owning unit tests, the security corpus

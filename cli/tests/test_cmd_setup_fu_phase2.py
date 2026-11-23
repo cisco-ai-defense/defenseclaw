@@ -4213,7 +4213,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True), \
                 patch(
                     "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
-                    side_effect=lambda targets, gc: self.assertTrue(add_mock.called) or set(),
+                    side_effect=lambda targets, gc, **_kw: self.assertTrue(add_mock.called) or set(),
                 ):
             res = _invoke(["-c", "hermes", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
@@ -4264,7 +4264,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         gc.judge.enabled = True
         gc.judge.hook_connectors = ["*"]
 
-        def choose_codex(targets, gc_arg):
+        def choose_codex(targets, gc_arg, **_kw):
             self.assertEqual(targets, ["codex"])
             cmd_setup._merge_batch_judge_selection(gc_arg, targets, {"codex"})
             return {"codex"}
@@ -4375,7 +4375,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(gc.detection_strategy_completion, "regex_judge")
 
 
-    def test_batch_setup_reconciles_active_connectors_to_selected_set(self):
+    def test_batch_setup_keeps_unnamed_connectors_and_their_judge_gate_gap1095(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
         gc.judge.enabled = True
@@ -4387,12 +4387,13 @@ class TestGatewayOfflineStaging(_BaseSetup):
                 self.app,
             )
         self.assertEqual(res.exit_code, 0, msg=res.output)
-        self.assertEqual(sorted(gc.connectors), ["hermes"])
-        self.assertEqual(gc.connector, "hermes")
-        self.assertEqual(self.app.cfg.claw.mode, "hermes")
-        self.assertEqual(gc.judge.hook_connectors, ["hermes"])
+        # GAP-1095: -c names what to add or update; Codex stays with its judge coverage.
+        self.assertEqual(sorted(gc.connectors), ["codex", "hermes"])
+        self.assertEqual(gc.connector, "codex")
+        self.assertEqual(gc.judge.hook_connectors, ["codex", "hermes"])
+        self.assertIn("Left as they were (1): codex", res.output)
 
-    def test_batch_setup_does_not_seed_unselected_legacy_single_connector(self):
+    def test_batch_setup_keeps_the_legacy_single_connector_gap1095(self):
         gc = self.app.cfg.guardrail
         gc.connector = "codex"
         self.app.cfg.claw.mode = "codex"
@@ -4401,9 +4402,9 @@ class TestGatewayOfflineStaging(_BaseSetup):
         with _stub_side_effects():
             res = _invoke(["-c", "hermes", "--yes", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
-        self.assertEqual(sorted(gc.connectors), ["hermes"])
-        self.assertNotIn("codex", gc.connectors)
-        self.assertEqual(gc.connector, "hermes")
+        # A single-connector install is a roster of one: -c hermes adds to it.
+        self.assertEqual(sorted(gc.connectors), ["codex", "hermes"])
+        self.assertEqual(gc.connector, "codex")
 
     def test_empty_batch_judge_selection_skips_model_and_uses_regex_only(self):
         gc = self.app.cfg.guardrail
@@ -4442,7 +4443,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(gc.judge.hook_connectors, [])
 
     def test_batch_judge_selection_can_configure_model(self):
-        def choose_hermes(targets, gc_arg):
+        def choose_hermes(targets, gc_arg, **_kw):
             cmd_setup._merge_batch_judge_selection(gc_arg, targets, {"hermes"})
             return {"hermes"}
 
@@ -4508,6 +4509,12 @@ class TestSetupModeHelp(unittest.TestCase):
 # J3 — per-direction detection-strategy flags (opt-in, off by default)
 # ---------------------------------------------------------------------------
 class TestJ3PerDirectionStrategy(_BaseSetup):
+    def setUp(self):
+        super().setUp()
+        # `setup guardrail --connector codex` refuses a connector that is not set up
+        # (the loader's unsaved OpenClaw default is not a roster), so give it one.
+        self._seed_map("codex")
+
     def test_help_exposes_per_direction_flags(self):
         out = CliRunner().invoke(setup_group, ["guardrail", "--help"], catch_exceptions=False).output
         for opt in ("--detection-strategy-prompt", "--detection-strategy-completion", "--detection-strategy-tool-call"):
@@ -4525,7 +4532,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
 
-    def test_judge_strategy_flag_enables_judge_with_all_hook_coverage(self):
+    def test_judge_strategy_flag_enables_judge_for_the_named_connector_only_gap1113(self):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
@@ -4539,7 +4546,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
-        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["codex"])
 
     def test_scoped_mode_update_preserves_empty_judge_gate(self):
         self._seed_map("antigravity", "hermes", "opencode")
@@ -4588,7 +4595,43 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_only")
-        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["codex"])
+
+    def test_judge_strategy_flag_leaves_other_connectors_out_of_the_gate_gap1113(self):
+        # GAP-1113: `setup guardrail --connector claudecode --detection-strategy judge_first`
+        # opened the judge for nine other connectors and left Claude Code out.
+        gc = self.app.cfg.guardrail
+        gc.connectors = {
+            name: PerConnectorGuardrailConfig(mode="action") for name in ("claudecode", "codex", "cursor", "hermes")
+        }
+        gc.connector = "claudecode"
+        gc.judge.enabled = False
+        gc.judge.hook_connectors = ["*"]  # the config default while the judge is off
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "claudecode", "--no-restart", "--mode", "action",
+                    "--detection-strategy", "judge_first",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, ["claudecode"])
+
+        # A second connector joins the gate; the first stays.
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action",
+                    "--detection-strategy", "judge_first",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.judge.hook_connectors, ["claudecode", "codex"])
 
     def test_summary_shows_the_judge_llm_in_use(self):
         # GAP-2056: the summary printed the empty legacy guardrail.judge.model

@@ -1,0 +1,309 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+)
+
+// useTestRecoveryMutex gives the test its own recovery mutex name, so a
+// recovery running on the CI host is never touched.
+func useTestRecoveryMutex(t *testing.T) {
+	t.Helper()
+	previous := standaloneUninstallRecoveryMutex
+	t.Cleanup(func() { standaloneUninstallRecoveryMutex = previous })
+	standaloneUninstallRecoveryMutex = fmt.Sprintf(`Global\Cisco-DefenseClaw-Test-Uninstall-Recovery-%d-%d`, os.Getpid(), time.Now().UnixNano())
+}
+
+// holdTestRecoveryMutex holds the recovery mutex on its own OS thread, as a
+// running recovery does, until the returned release runs.
+func holdTestRecoveryMutex(t *testing.T) (release func()) {
+	t.Helper()
+	held, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		name, err := windows.UTF16PtrFromString(standaloneUninstallRecoveryMutex)
+		if err != nil {
+			held <- err
+			return
+		}
+		// Owned by Administrators, as the recovery creates it, whatever the
+		// default owner of the test token is.
+		descriptor, err := windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)")
+		if err != nil {
+			held <- err
+			return
+		}
+		attrs := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+		handle, err := windows.CreateMutex(attrs, true, name)
+		if err != nil {
+			held <- err
+			return
+		}
+		held <- nil
+		<-done
+		_ = windows.ReleaseMutex(handle)
+		_ = windows.CloseHandle(handle)
+	}()
+	if err := <-held; err != nil {
+		t.Fatalf("hold the recovery mutex: %v", err)
+	}
+	released := false
+	release = func() {
+		if !released {
+			released = true
+			close(done)
+		}
+	}
+	t.Cleanup(release)
+	return release
+}
+
+// rel-1-0-6:GAP-1080: the armed recovery holds its mutex from the moment its
+// Setup exits until the replay ends, and lets go after it.
+func TestStandaloneUninstallRecoveryHoldsItsMutexThroughTheReplay(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("a Global mutex needs an elevated administrator token")
+	}
+	useTestRecoveryMutex(t)
+	oldOpen, oldNeeded, oldReplay := setupRecoveryOpenParent, setupRecoveryNeeded, setupRecoveryReplay
+	t.Cleanup(func() {
+		setupRecoveryOpenParent, setupRecoveryNeeded, setupRecoveryReplay = oldOpen, oldNeeded, oldReplay
+	})
+	setupRecoveryOpenParent = func(int) (standaloneSetupParent, error) {
+		return &fakeStandaloneSetupParent{wait: func() error {
+			// From READY on: a rerun issued while the Setup that armed the
+			// recovery still runs sees the recovery too (the 1.0.10 T1
+			// review). It asks from another thread, as a rerun does.
+			answer := make(chan error, 1)
+			go func() { answer <- awaitStandaloneUninstallRecovery(0) }()
+			if err := <-answer; !errors.Is(err, errStandaloneSetupMutexHeld) {
+				t.Errorf("a rerun between READY and the exit of the Setup did not see the recovery: %v", err)
+			}
+			return nil
+		}}, nil
+	}
+	setupRecoveryNeeded = func() (bool, error) { return true, nil }
+	replayed := false
+	setupRecoveryReplay = func() error {
+		replayed = true
+		// Another Setup asks from another thread, as a rerun does.
+		answer := make(chan error, 1)
+		go func() { answer <- awaitStandaloneUninstallRecovery(0) }()
+		if err := <-answer; !errors.Is(err, errStandaloneSetupMutexHeld) {
+			t.Errorf("a rerun during the replay did not see the recovery running: %v", err)
+		}
+		return nil
+	}
+	var output bytes.Buffer
+	if code := runEnterpriseSetup([]string{"--internal-recover-after-parent", "4321"}, &output, &output); code != 0 || !replayed {
+		t.Fatalf("recovery exit=%d replayed=%v: %s", code, replayed, output.String())
+	}
+	if err := awaitStandaloneUninstallRecovery(0); err != nil {
+		t.Fatalf("the recovery did not let go of its mutex after the replay: %v", err)
+	}
+}
+
+// A rerun waits for the running recovery and goes on once it ends.
+func TestStandaloneRerunWaitsForTheArmedRecoveryToFinish(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("a Global mutex needs an elevated administrator token")
+	}
+	useTestRecoveryMutex(t)
+	release := holdTestRecoveryMutex(t)
+	time.AfterFunc(300*time.Millisecond, release)
+	started := time.Now()
+	opts := enterpriseSetupOptions{Action: "uninstall", Standalone: true, LifecycleTimeout: 30 * time.Minute, Started: started}
+	if err := waitForStandaloneUninstallRecovery(opts, io.Discard); err != nil {
+		t.Fatalf("the rerun did not go on after the recovery ended: %v", err)
+	}
+	if waited := time.Since(started); waited < 250*time.Millisecond {
+		t.Fatalf("the rerun went on after %s, while the recovery still ran", waited)
+	}
+}
+
+// A rerun whose wait ends with the recovery still running is the retryable
+// 1618 lifecycle_busy before anything is staged or changed: it never arms a
+// second recovery or starts the lifecycle child.
+func TestStandaloneUninstallRerunDuringTheArmedRecoveryIsBusy(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the standalone Setup requires an elevated administrator token")
+	}
+	useTestRecoveryMutex(t)
+	previousFlavor, previousPayload, previousArm, previousLimit :=
+		enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader, enterpriseSetupArmUninstallRecovery, enterpriseSetupRecoveryWaitLimit
+	t.Cleanup(func() {
+		enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader, enterpriseSetupArmUninstallRecovery, enterpriseSetupRecoveryWaitLimit =
+			previousFlavor, previousPayload, previousArm, previousLimit
+	})
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+	armed := false
+	enterpriseSetupArmUninstallRecovery = func() error {
+		armed = true
+		return errors.New("test: the uninstall went past the recovery wait")
+	}
+	enterpriseSetupRecoveryWaitLimit = 300 * time.Millisecond
+	holdTestRecoveryMutex(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/uninstall", "JSON=1"}, &stdout, &stderr)
+	var result struct {
+		ExitCode int `json:"exit_code"`
+		Errors   []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || armed ||
+		code != enterpriseBusyExitCode || result.ExitCode != code || len(result.Errors) != 1 ||
+		result.Errors[0].Code != "lifecycle_busy" || !strings.Contains(result.Errors[0].Message, "earlier Setup /uninstall") {
+		t.Fatalf("rerun during the recovery: code=%d armed=%v stdout=%q stderr=%q parse=%v", code, armed, stdout.String(), stderr.String(), err)
+	}
+}
+
+// A Global\ mutex another account created first, and holds, stalled every
+// standalone Setup that waits for it (the 1.0.10 T1 review): Setup now goes on
+// without a mutex that SYSTEM or Administrators do not own. The test owns
+// the mutex as its own user, which is neither.
+func TestStandaloneSetupMutexIgnoresAMutexAnotherOwnerHolds(t *testing.T) {
+	token := windows.GetCurrentProcessToken()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("runs as SYSTEM: a mutex it owns is trusted")
+	}
+	name := fmt.Sprintf(`Global\Cisco-DefenseClaw-Test-Squat-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	held, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		descriptor, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "D:(A;;GA;;;WD)")
+		if err != nil {
+			held <- err
+			return
+		}
+		attrs := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+		pointer, err := windows.UTF16PtrFromString(name)
+		if err != nil {
+			held <- err
+			return
+		}
+		handle, err := windows.CreateMutex(attrs, true, pointer)
+		if err != nil {
+			held <- err
+			return
+		}
+		held <- nil
+		<-done
+		_ = windows.ReleaseMutex(handle)
+		_ = windows.CloseHandle(handle)
+	}()
+	if err := <-held; err != nil {
+		t.Fatalf("hold the squatted mutex: %v", err)
+	}
+	defer close(done)
+	started := time.Now()
+	release, err := holdStandaloneSetupMutex(name, "test squat", 5*time.Second)
+	if !errors.Is(err, errStandaloneSetupMutexIgnored) || release == nil {
+		t.Fatalf("a mutex another owner holds: err=%v after %s, want it ignored", err, time.Since(started))
+	}
+	release()
+	if took := time.Since(started); took > 2*time.Second {
+		t.Fatalf("Setup waited %s for a mutex another owner holds", took)
+	}
+}
+
+// A held mutex that Administrators own is still waited for.
+func TestStandaloneSetupMutexWaitsForAMutexAdministratorsOwn(t *testing.T) {
+	name := fmt.Sprintf(`Global\Cisco-DefenseClaw-Test-Trusted-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	held, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		release, err := holdStandaloneSetupMutex(name, "test trusted", 0)
+		held <- err
+		if err != nil {
+			return
+		}
+		<-done
+		release()
+	}()
+	if err := <-held; err != nil {
+		t.Skipf("cannot create an Administrators-owned mutex here (not elevated?): %v", err)
+	}
+	defer close(done)
+	if _, err := holdStandaloneSetupMutex(name, "test trusted", 300*time.Millisecond); !errors.Is(err, errStandaloneSetupMutexHeld) {
+		t.Fatalf("held trusted mutex: err=%v, want errStandaloneSetupMutexHeld", err)
+	}
+}
+
+// holdTestEventSquat holds a Global event under name, as an account squatting
+// a Setup mutex name with another object type would.
+func holdTestEventSquat(t *testing.T, name string) {
+	t.Helper()
+	pointer, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateEvent(nil, 1, 0, pointer)
+	if err != nil {
+		t.Fatalf("create the squatting event: %v", err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+}
+
+// An event under the recovery mutex name made CreateMutex fail with
+// ERROR_INVALID_HANDLE, and every standalone Setup that changes the
+// deployment failed with it (the 1.0.10 T1 review M1b). The wait now goes on
+// without the mutex and says so on stdout, never on stderr.
+func TestStandaloneRerunGoesOnWhenAnotherObjectSquatsTheRecoveryName(t *testing.T) {
+	useTestRecoveryMutex(t)
+	holdTestEventSquat(t, standaloneUninstallRecoveryMutex)
+	var notice bytes.Buffer
+	opts := enterpriseSetupOptions{Action: "uninstall", Standalone: true, LifecycleTimeout: 30 * time.Minute, Started: time.Now()}
+	if err := waitForStandaloneUninstallRecovery(opts, &notice); err != nil {
+		t.Fatalf("a squatted recovery name failed the rerun: %v", err)
+	}
+	if !strings.Contains(notice.String(), "ignores the host-wide standalone uninstall recovery mutex") {
+		t.Fatalf("notice = %q, want the ignored-mutex warning", notice.String())
+	}
+}
+
+// The ensure mutex name squatted by another object: ensure goes on without
+// it, and reports that it does not hold it, so the ensure stage sweep that
+// needs the proof that no ensure runs is skipped.
+func TestStandaloneEnsureGoesOnWithoutASquattedMutexAndHoldsNothing(t *testing.T) {
+	previous := standaloneSetupEnsureMutex
+	t.Cleanup(func() { standaloneSetupEnsureMutex = previous })
+	standaloneSetupEnsureMutex = fmt.Sprintf(`Global\Cisco-DefenseClaw-Test-Ensure-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	holdTestEventSquat(t, standaloneSetupEnsureMutex)
+	var notice bytes.Buffer
+	release, held, err := acquireStandaloneSetupEnsure(&notice)
+	if err != nil || held || release == nil {
+		t.Fatalf("squatted ensure mutex: held=%v err=%v, want a run that holds nothing", held, err)
+	}
+	release()
+	if !strings.Contains(notice.String(), "ignores the host-wide standalone ensure mutex") {
+		t.Fatalf("notice = %q, want the ignored-mutex warning", notice.String())
+	}
+}

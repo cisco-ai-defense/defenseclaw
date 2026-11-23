@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 func TestRuntimeAPIAddressNamesTheBoundListener(t *testing.T) {
@@ -32,15 +33,21 @@ func TestRuntimeAPIAddressNamesTheBoundListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	var record struct {
-		PID  int
-		Host string
-		Port int
+		PID           int
+		Host          string
+		Port          int
+		StartIdentity string `json:"start_identity"`
 	}
 	if err := json.Unmarshal(body, &record); err != nil {
 		t.Fatal(err)
 	}
 	if record.PID != os.Getpid() || record.Host != "127.0.0.1" || record.Port != listener.Addr().(*net.TCPAddr).Port {
 		t.Fatalf("runtime listener=%+v, actual=%s", record, listener.Addr())
+	}
+	// rel-1-0-10:GAP-1164: the record carries this process's start identity,
+	// which tells it from a later process that got its PID.
+	if record.StartIdentity == "" || record.StartIdentity != daemon.SelfStartIdentity() {
+		t.Fatalf("runtime record start identity %q, this process %q", record.StartIdentity, daemon.SelfStartIdentity())
 	}
 	if info, err := os.Stat(path); err != nil || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("descriptor custody=%v %v", info, err)

@@ -28,7 +28,6 @@ from unittest.mock import MagicMock, patch
 # RootModel on its package, so the next LiteLLM import in the same worker
 # raised KeyError: pydantic.root_model (Windows shard 7, rel/1.0.6).
 import litellm  # noqa: F401
-
 from defenseclaw.config import BedrockKeyConfig, LLMConfig, SkillScannerConfig
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner import skill as skill_mod

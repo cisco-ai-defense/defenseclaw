@@ -31,7 +31,7 @@ defenseclaw setup copilot  # first setup defaults to observe
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default. `--workspace` writes them into one repository instead and pins the workspace for the whole install. Setup refuses it once another connector is configured. To scope every connector to a repository, run `defenseclaw setup guardrail --workspace /path/to/repo`.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/connectors/switching-connectors#the-questions-setup-asks)). On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default. `--workspace` writes them into one repository instead and pins the workspace for the whole install. Setup refuses it once another connector is configured. To scope every connector to a repository, run `defenseclaw setup guardrail --workspace /path/to/repo`.
 
 Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
@@ -60,7 +60,7 @@ A managed install before 1.0.4 may have left `enabledPlugins["defenseclaw@defens
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`. Run its printed gateway-restart step before expecting exports. |
 | `--workspace / --workspace-dir` | unset | Opt into repo-local `.github/hooks`. |
 
-The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message and add/replace options ([quick-alias reference](/docs/guardrail/aliases)). For scanner, detection-strategy and judge settings use [full guardrail setup](/docs/guardrail). Example with the judge:
+The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message and add/replace options ([quick-alias reference](/docs/connectors/aliases)). For scanner, detection-strategy and judge settings use [full guardrail setup](/docs/guardrail). Example with the judge:
 
 ```bash
 export DEFENSECLAW_LLM_KEY='replace-with-your-key'
@@ -211,11 +211,11 @@ Not covered yet:
 | --- | --- |
 | Tier | Managed. Hooks are in `/etc/github-copilot/policy.d/50-defenseclaw.json`, and managed settings admit only managed hooks, so a user `disableAllHooks` and user or repository hooks change nothing. Hooks fail closed with a per-sandbox token. The image pre-extracts the pinned CLI into a root-owned package cache, so a newer package planted in the home cannot replace it. |
 | Skip permissions | On by default (`open` and `balanced` packs): `--yolo`. `--safe` or `strict` keeps prompts and drops `--yolo`, `--allow-all` and `--allow-all-tools`. A safe headless run (`--prompt`) still adds `--allow-all-tools`, because Copilot's non-interactive mode requires it. |
-| Sign-in | Bring-your-own-provider mode. `--llm auto` shares `ANTHROPIC_API_KEY` for the Anthropic Messages API (pick a model with `-- --model <model>`). `--llm bedrock`, and `auto` without it, shares `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic endpoint (default Claude Haiku 4.5). That endpoint refuses OpenAI models such as `openai.gpt-5.6-luna` with HTTP 400. Both run Copilot in offline mode, which skips GitHub sign-in, telemetry, web tools, the GitHub MCP server and updates. Copilot's own models through `COPILOT_GITHUB_TOKEN` have no `--llm` choice and were not tested live. |
+| Sign-in | Bring-your-own-provider mode. `--llm auto` shares `ANTHROPIC_API_KEY` for the Anthropic Messages API (pick a model with `-- --model <model>`). `--llm bedrock`, and `auto` without it, shares `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic endpoint (default Claude Haiku 4.5). That endpoint refuses OpenAI models such as `openai.gpt-5.6-luna` with HTTP 400. Both run Copilot in offline mode, which skips GitHub sign-in, telemetry, web tools, the GitHub MCP server and updates. Copilot's own models through `COPILOT_GITHUB_TOKEN` have no `--llm` choice and are Preview. |
 | MCP servers | DefenseClaw brings your MCP servers into Claude Code and Codex sandboxes only. |
 | Ctrl-Z | Copilot suspends itself by signalling its process group, which the sandbox refuses. DefenseClaw resumes Copilot at once. Copilot shows `✗ Error: kill EPERM` and keeps working, and the terminal title says Ctrl-Z cannot suspend a harness in an OpenShell sandbox. |
 | Hook latency | The sandbox refuses `pidfd_open`, so in the interactive TUI Copilot CLI 1.0.88 learns a hook exited only at the 30-second timeout. A small root-owned preload library answers the call for the pinned executable only, so hooks take milliseconds ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)). |
-| Image | Copilot CLI 1.0.88, replacing the base image's 1.0.16, which no contract covers. Verified end to end against a mock model, also with hostile settings and planted packages. In a live run a blocked call got the gateway's verdict, the egress proxy blocked an exfiltration destination, and a connection around the proxy was refused. |
+| Image | Copilot CLI 1.0.88, replacing the base image's 1.0.16, which no contract covers. Hostile settings and planted packages do not take effect. A blocked call gets the gateway's verdict, the egress proxy blocks an exfiltration destination, and a connection around the proxy is refused. |
 
 ## Limits
 

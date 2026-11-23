@@ -72,7 +72,7 @@ func TestExtraKeyProtectedTargetsByClass(t *testing.T) {
 		for _, managed := range []bool{false, true} {
 			for _, pack := range []string{"", "strict", "permissive"} {
 				direct := map[string]any{"file_path": tc.file, "content": "x"}
-				if _, got := postFileToolCell(t, tc.home, tc.cwd, "Write", direct, managed, pack); !strings.HasPrefix(got, fileToolBlockPrefix) || !strings.Contains(got, tc.rule) {
+				if _, got := postFileToolCell(t, tc.home, tc.cwd, "Write", direct, managed, pack); !extraKeyVerdictNamesRule(got, tc.rule, pack) {
 					t.Errorf("%s direct managed=%t pack=%q: %.200s, want a %s block", tc.name, managed, pack, got, tc.rule)
 				}
 				for _, sh := range shapes {
@@ -81,7 +81,7 @@ func TestExtraKeyProtectedTargetsByClass(t *testing.T) {
 						input[key] = value
 					}
 					_, got := postFileToolCell(t, tc.home, tc.cwd, "Write", input, managed, pack)
-					blocked := strings.HasPrefix(got, fileToolBlockPrefix) && strings.Contains(got, tc.rule)
+					blocked := extraKeyVerdictNamesRule(got, tc.rule, pack)
 					switch want := tc.self || sh.place; {
 					case want && !blocked:
 						t.Errorf("%s %s managed=%t pack=%q: %.200s, want a %s block", tc.name, sh.name, managed, pack, got, tc.rule)
@@ -99,4 +99,14 @@ func TestExtraKeyProtectedTargetsByClass(t *testing.T) {
 			}
 		}
 	}
+}
+
+// extraKeyVerdictNamesRule is the verdict of a protected write: a block that
+// names rule, except that a proven DefenseClaw state write is a HIGH alert
+// outside the strict pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+func extraKeyVerdictNamesRule(got, rule, pack string) bool {
+	if rule == gap0747StateRule && pack != "strict" {
+		return strings.HasPrefix(got, `{"action":"alert"`) && strings.Contains(got, rule)
+	}
+	return strings.HasPrefix(got, fileToolBlockPrefix) && strings.Contains(got, rule)
 }

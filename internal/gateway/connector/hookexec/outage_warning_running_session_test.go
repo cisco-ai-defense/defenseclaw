@@ -12,8 +12,9 @@ import (
 )
 
 // GAP-1352: in a session that was running when the gateway stopped, the
-// first outage event (a Codex prompt, a Claude Code PostToolUse or Stop)
-// cannot show a systemMessage. It took the once-per-session marker anyway,
+// first outage event (a Codex PostToolUse or Stop, a Claude Code PostToolUse
+// or Stop) cannot show a systemMessage. A Codex prompt shows it since
+// rel-1-0-10 GAP-1168. It took the once-per-session marker anyway,
 // so the session never saw a warning. Only an event that shows the warning
 // takes the marker: exactly one warning, whichever event comes first.
 func TestNativeOutageWarningWaitsForAnEventThatShowsIt(t *testing.T) {
@@ -21,7 +22,8 @@ func TestNativeOutageWarningWaitsForAnEventThatShowsIt(t *testing.T) {
 		connector string
 		events    []string
 	}{
-		{"codex", []string{"UserPromptSubmit", "Stop", "PreToolUse", "PreToolUse"}},
+		{"codex", []string{"Stop", "PostToolUse", "PreToolUse", "PreToolUse"}},
+		{"codex", []string{"Stop", "UserPromptSubmit", "PreToolUse"}},
 		{"claudecode", []string{"PostToolUse", "Stop", "UserPromptSubmit", "PreToolUse"}},
 		{"claudecode", []string{"PostToolUse", "PreToolUse", "PreToolUse"}},
 	} {

@@ -65,12 +65,12 @@ def test_gap0690_python_writer_refuses_rejected_config_without_changing_file(tmp
     config_file = _installed_config(tmp_path, {"operatorNote": "note"})
     original = config_file.read_bytes()
     with pytest.raises(ValueError, match="schema rejects"):
-        patch_openclaw_config(str(config_file), "", 0, "", "")
+        patch_openclaw_config(str(config_file), "", 0, "")
     assert config_file.read_bytes() == original
 
 
 def test_gap0690_accepted_plugin_config_twin_keeps_waiting_state(tmp_path: Path) -> None:
-    config_file = _installed_config(tmp_path, {"mode": "observe", "agent": {"id": "alice"}})
+    config_file = _installed_config(tmp_path, {"sidecarPort": 18970, "agent": {"id": "alice"}})
     assert openclaw_plugin_config_issue(str(config_file), str(tmp_path)) is None
     result = _doctor_result(config_file)
     assert result.failed == 0

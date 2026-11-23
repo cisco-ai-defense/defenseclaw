@@ -224,6 +224,9 @@ func superviseTracked(target string, argv []string, budget time.Duration) int {
 	// A session of its own: only the command's descendants can be in it or
 	// in its groups.
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// The supervisor and the command it starts run nicer than the gateway
+	// (lowerScannerPriority, GAP-0251).
+	lowerScannerPriority()
 	if err := child.Start(); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
 		return done(true, containExitNotStarted)

@@ -1,0 +1,1 @@
+{"id":"chatcmpl-1","object":"chat.completion","model":"gpt-5-2025-08-07","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":80,"total_tokens":200,"prompt_tokens_details":{"cached_tokens":64},"completion_tokens_details":{"reasoning_tokens":30}}}

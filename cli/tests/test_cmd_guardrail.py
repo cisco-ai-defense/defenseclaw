@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import click
+import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -672,6 +673,7 @@ class DisableCommandTests(unittest.TestCase):
         app.cfg.save.assert_not_called()
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class EnableCommandTests(unittest.TestCase):
     def test_enable_already_enabled(self):
         runner = CliRunner()
@@ -2098,7 +2100,7 @@ class HILTCommandTests(unittest.TestCase):
                 # `policy activate` does not copy a preset's hilt section.
                 self.assertEqual(args[:2], ["policy", "activate"], msg=line)
         self.assertFalse(gc.effective_hilt("claudecode").enabled)
-        flag_doc = page.parents[1] / "guardrail/index.mdx"
+        flag_doc = page.parents[1] / "reference/setup-guardrail.mdx"
         self.assertIn("Without --connector it changes only the global guardrail.hilt", flag_doc.read_text())
 
 
@@ -2306,6 +2308,7 @@ class CommandRegistrationTests(unittest.TestCase):
         # gateway may reach (guardrail.allow_private_upstreams). profile
         # lists and explains the identity-based guardrail profiles. rule and
         # suppress edit guardrail.rules (enable/disable/severity, suppressions).
+        # cascade explains the effective guardrail cascade (guardrail.cascade).
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -2318,6 +2321,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "hilt",
                 "block-message",
                 "block-at",
+                "cascade",
                 "alert-at",
                 "allow-private-upstream",
                 "judge",
@@ -2328,6 +2332,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "rule",
                 "suppress",
                 "use-pack",
+                "secret-flow",
                 "validate-pack",
             },
         )

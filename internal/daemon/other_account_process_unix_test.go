@@ -36,16 +36,21 @@ func TestProcessExistsForAnotherAccountsProcess(t *testing.T) {
 	}
 }
 
-// A live process this account cannot signal keeps its PID record even when
-// its identity does not verify: it is not stale evidence this account may
-// discard.
+// A live process this account cannot signal keeps its PID record when its
+// executable does not verify but its kernel start identity does: it may be
+// the gateway an administrator started for this home, and that is not stale
+// evidence this account may discard.
 func TestIsRunningKeepsRecordOfAnotherAccountsProcess(t *testing.T) {
 	if os.Geteuid() == 0 || processSignalable(1) {
 		t.Skip("needs a live process of another account (PID 1 is this account's here)")
 	}
+	identity, err := processStartIdentity(1)
+	if err != nil || identity == "" {
+		t.Skipf("start identity of PID 1 unavailable: identity=%q err=%v", identity, err)
+	}
 	t.Setenv(EnvDaemon, "")
 	d := New(t.TempDir())
-	if err := d.writePIDInfo(1, "/not/the/recorded/gateway", "0.000001"); err != nil {
+	if err := d.writePIDInfo(1, "/not/the/recorded/gateway", identity); err != nil {
 		t.Fatal(err)
 	}
 	if running, pid := d.IsRunning(); running || pid != 0 {
@@ -53,6 +58,30 @@ func TestIsRunningKeepsRecordOfAnotherAccountsProcess(t *testing.T) {
 	}
 	if _, err := os.Stat(d.pidFile); err != nil {
 		t.Fatalf("the record of a live process of another account was removed: %v", err)
+	}
+}
+
+// A record whose start identity differs from the readable identity of the
+// live process of another account names a reused PID: the record is stale
+// and is removed, so status and stop are not pinned to that program
+// (CodeRabbit on #1427).
+func TestIsRunningRemovesRecordOfAPIDAnotherAccountReused(t *testing.T) {
+	if os.Geteuid() == 0 || processSignalable(1) {
+		t.Skip("needs a live process of another account (PID 1 is this account's here)")
+	}
+	if identity, err := processStartIdentity(1); err != nil || identity == "" || identity == "0.000001" {
+		t.Skipf("start identity of PID 1 unavailable: identity=%q err=%v", identity, err)
+	}
+	t.Setenv(EnvDaemon, "")
+	d := New(t.TempDir())
+	if err := d.writePIDInfo(1, "/not/the/recorded/gateway", "0.000001"); err != nil {
+		t.Fatal(err)
+	}
+	if running, pid := d.IsRunning(); running || pid != 0 {
+		t.Fatalf("IsRunning = (%v, %d), want a reused PID reported as not running", running, pid)
+	}
+	if _, err := os.Stat(d.pidFile); !os.IsNotExist(err) {
+		t.Fatalf("the record of a reused PID was kept: %v", err)
 	}
 }
 

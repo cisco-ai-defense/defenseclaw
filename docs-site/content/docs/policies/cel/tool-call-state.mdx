@@ -32,7 +32,7 @@ This is the contract for experimental stateful tool-call protection.
 It does not make every connector stateful, change existing policy defaults, or
 turn an observe-only connector into an enforcement surface. A connector stays
 at the most conservative level in the matrix until its hook identity, outcome,
-and native-host behavior pass automated and live tests.
+and native-host behavior are supported.
 </Callout>
 
 DefenseClaw uses this path to stop supported unsafe tool calls at a connector's
@@ -139,8 +139,9 @@ respecting wall-clock and event-count windows.
 
 The 26 ordered chains are a fixed compiled catalog; CEL/YAML rule authoring
 does not define new sequences. Custom CEL rules remain single-action matchers.
-Twenty-two chains are alert-only. Four can contribute enforcement-safe proof:
-reverse-shell payload persistence, AD CS certificate-to-PFX authentication,
+Twenty-one chains are alert-only. Five can contribute enforcement-safe proof:
+secret read followed by an upload of the same artifact (the default and
+permissive packs alert; the strict pack blocks), reverse-shell payload persistence, AD CS certificate-to-PFX authentication,
 S4U ticket-to-Kerberos credential extraction, and same-table sensitive SQLite
 read followed by an unbounded delete. The SQLite chain additionally requires
 the explicit database-destruction protection pack. Connector capability,
@@ -153,6 +154,19 @@ Coincidental steps may produce detection telemetry, but only enforcement-safe
 facts can contribute to a synchronous block. A later risky proposal may be
 blocked using already committed predecessors; the blocked proposal is never
 recorded as successful.
+
+The hook audit row of the call that completes a chain names the match in its
+`extra` fields, one value per matched chain in the order of `chain_match_ids`:
+`chain_match_scope` (`session`, or `root` for the root scope, which is the
+actor on Agent Substrate), `chain_match_partition` and `chain_match_sequence`
+(the first 16 hex digits of the partition key digest and the step's place in
+it), `chain_match_steps` (the chain's step count), `chain_match_artifact` (the
+first 16 hex digits of the resource identity both steps joined on, or `-`),
+and `chain_match_span_ms` against `chain_match_horizon_s` (the time from the
+joined earlier step to this one, against the chain's window). On Agent
+Substrate the span is running time, so time spent suspended is left out. A
+replayed call repeats the decision without these fields, and they never
+change a verdict.
 
 ## Connector outcome and identity matrix
 

@@ -54,8 +54,12 @@ func TestToolCallAnsweredWhileTheAuditWriteFailedGetsItsRowFromTheFailureLog(t *
 				t.Fatalf("log = %q, want one line naming toolu_gap", raw)
 			}
 
-			if joined := joinByToolID(t, f.api.store)["toolu_gap"]; len(joined) != 0 {
-				t.Fatalf("rows before the report = %v, want none", joined)
+			// Before the report the call has its decision record only: the
+			// fail-mode verdict the gateway answered (#1384). The report row
+			// carries the same correlation event, so the call stays one
+			// record after the report (S8 R4 review P3-2).
+			if joined := joinByToolID(t, f.api.store)["toolu_gap"]; len(joined) != 1 || joined[0] != tc.want {
+				t.Fatalf("rows before the report = %v, want the one %s decision", joined, tc.want)
 			}
 			if err := reportHookFailureCallsIn(filepath.Dir(logPath), f.api.logger, time.Now()); err != nil {
 				t.Fatal(err)

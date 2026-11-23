@@ -18,7 +18,7 @@ registrations**. It reads what the operating system already knows about the
 account that is running the agent, and it says how far each fact can be
 trusted.
 
-This page is the reference for what is read, where, and how much to trust it. Active Directory is the certified identity stack; the Okta and Entra parts were last verified live in October 2026.
+This page is the reference for what is read, where, and how much to trust it. Active Directory is the certified identity stack; the Okta and Entra parts are Preview.
 For the supported identity types and the checks, see
 [Identity and authentication](/docs/enterprise/identity-and-authentication).
 
@@ -444,8 +444,8 @@ machine.
 | Your setup | What DefenseClaw reports |
 | --- | --- |
 | Okta provisions users into AD, and the machine is AD-joined (SSSD, winbind, Windows domain or an AD-bound Mac) | The AD account: directory `active_directory`, the AD UPN, groups and domain |
-| The host reads the Okta LDAP Interface through SSSD (`id_provider = ldap`) or `nss_ldap` | The LDAP account: its uid, name and Okta groups, verified, also on a per-user install. Directory `ldap` through `nss_ldap`, and through SSSD on standalone enterprise. No domain unless SSSD uses fully qualified names. No UPN unless SSSD maps the Okta login to it. Tested live on RHEL 9; see [Okta on Linux](/docs/enterprise/identity-okta) |
-| Mac with Platform SSO or Okta Device Access and Okta Verify | An account registered with Platform SSO: directory `okta`, source `macos_platform_sso`, its login UPN (standalone enterprise only). Not tested live |
+| The host reads the Okta LDAP Interface through SSSD (`id_provider = ldap`) or `nss_ldap` | The LDAP account: its uid, name and Okta groups, verified, also on a per-user install. Directory `ldap` through `nss_ldap`, and through SSSD on standalone enterprise. No domain unless SSSD uses fully qualified names. No UPN unless SSSD maps the Okta login to it. See [Okta on Linux](/docs/enterprise/identity-okta) |
+| Mac with Platform SSO or Okta Device Access and Okta Verify | An account registered with Platform SSO: directory `okta`, source `macos_platform_sso`, its login UPN (standalone enterprise only). Preview |
 | Linux with an Okta agent that creates local accounts | The local account, directory `local`. No Okta NSS module is recognized |
 | Entra-joined or hybrid-joined Windows | Directory `entra_id`, source `windows_identity_store`, the UPN as principal and the tenant ID. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists, and only with the standalone enterprise profile ([below](#entra-groups-on-windows)) |
 | Mac with Platform SSO and Company Portal | An account registered with Platform SSO: directory `entra_id`, source `macos_platform_sso`, the UPN as principal and its domain (standalone enterprise only). No Entra groups: Platform SSO gives the Mac none ([Entra groups on Linux and macOS](#entra-groups-on-linux-and-macos)) |
@@ -459,8 +459,8 @@ machine.
 An Entra-joined computer puts an Entra group's SID into a user's sign-in
 token only when one of the built-in local groups lists that group:
 Administrators, Users, Guests, Power Users, Remote Desktop Users or Remote
-Management Users. A Windows 11 Enterprise 24H2 live check with 21 different
-Entra group SIDs in the built-in Users group showed all 21 in the signed-in
+Management Users. On Windows 11 Enterprise 24H2, 21 different
+Entra group SIDs in the built-in Users group all appear in the signed-in
 user's token. Do not rely on a 20-group ceiling to limit access; verify the
 actual token on the devices and accounts you deploy.
 Membership in any other Entra group never reaches the computer, so a `groups`
@@ -499,13 +499,13 @@ membership on one computer and check the token; see
   Platform SSO `AdditionalGroups` or `AdministratorGroups` settings, which
   create empty local groups. A local group has to carry the membership.
 
-The steps, measured delays and caveats of each are in
+The steps, delays and caveats of each are in
 [Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
 
-### Entra ID fields, as seen live
+### Entra ID fields
 
-These are the attributes per-user installs reported for one Entra ID user,
-`alice@contoso.onmicrosoft.com`, on a live tenant.
+These are the attributes per-user installs report for an Entra ID user such as
+`alice@contoso.onmicrosoft.com`.
 
 | Attribute | Entra-joined Windows 11 | Ubuntu 22.04 with the `aad` module |
 | --- | --- | --- |
@@ -563,12 +563,12 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   facts but do not read the ticket cache, so the records of those connectors
   carry no `defenseclaw.session.kerberos_principal`. Hooks that go through the
   DefenseClaw hook runner read it.
-- **Okta through the Okta LDAP Interface and Entra ID were tested live; the
+- **Okta through the Okta LDAP Interface and Entra ID read live directory data; the
   other cloud paths are parsed from OS state.** The Okta Device Access and
-  bound-Mac readers, and Platform SSO with Okta, are covered by tests against
-  recorded OS output, not against a live tenant.
+  bound-Mac readers, and Platform SSO with Okta, are Preview: they read
+  recorded OS output, not a live tenant.
 
-What was exercised end to end on real hosts: local accounts on all three OSes; AD over Kerberos with SSSD on RHEL 9 and Ubuntu 24.04, per-user and managed; AD UPN and groups on a domain-joined Windows per-user install; and group-based profiles on a managed Windows computer with local groups. The Okta and Entra ID results are in [Okta on Linux](/docs/enterprise/identity-okta) and [Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id), each with its test date.
+Local accounts work on all three OSes. AD over Kerberos with SSSD works on RHEL 9 and Ubuntu 24.04, per-user and managed. AD UPN and groups work on a domain-joined Windows per-user install, and group-based profiles work on a managed Windows computer with local groups. The Okta and Entra ID setups are in [Okta on Linux](/docs/enterprise/identity-okta) and [Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
 
 ## What a record carries
 

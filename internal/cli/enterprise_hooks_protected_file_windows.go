@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
@@ -179,7 +180,7 @@ func repairEnterpriseHookManifestACL(path string) error {
 	// scope-gated refusals in front of this repair are inert in a process
 	// that carries no standalone scope (Setup's own, a copied binary), so the
 	// repair reads the file's own descriptor first (GAP-1048).
-	if _, standalone := managedHostWindowsStandalone(); standalone {
+	if _, standalone := hookcli.ManagedHostWindowsStandalone(); standalone {
 		// Under the standalone scope the assessment also reads a descriptor
 		// that hides itself from this caller with backup privileges, and
 		// turns anything it cannot judge into a refusal.

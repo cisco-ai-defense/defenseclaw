@@ -12,13 +12,22 @@ keywords:
 
 Claude Cowork is the agent mode of Claude Desktop. Its agent loop runs on your computer, as you, with the Claude Code engine that Claude Desktop bundles. That engine runs Claude Code hooks, so DefenseClaw inspects Cowork through the same hooks it uses for the [Claude Code connector](/docs/connectors/claudecode). Cowork is a surface of that connector, not a connector of its own.
 
-<Callout title="Status in 1.0.8" type="warn">
-Measured in the 1.0.8 tests on managed macOS and Windows with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock: Cowork's hook calls reached the DefenseClaw gateway with surface `cowork`, and an administrator deny rule blocked `mcp__workspace__bash`. A read of a `.env` file was not blocked, in action mode too: its contents reached the model, which chose not to repeat the key (DefenseClaw did not withhold it), and on macOS DefenseClaw recorded the secret after the read. To prevent such a read, deny the path at `PreToolUse`: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results). On managed macOS, the `allowManagedHooksOnly` lock kept an organization plugin's hooks out, and a stopped gateway blocked Cowork prompts. On Linux the managed drop-in and per-user setup were verified, but Cowork itself was not run. The hook route itself was first measured on macOS with Claude Desktop 4.4212.0, using test hooks. Where a statement was not covered by those tests, this page says so.
+<Callout title="What this page covers" type="info">
+DefenseClaw inspects Cowork on managed macOS and Windows with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock. Cowork's hook calls reach the DefenseClaw gateway with surface `cowork`, and an administrator deny rule blocks `mcp__workspace__bash`. A read of a `.env` file is not blocked, in action mode too: its contents reach the model, and on macOS DefenseClaw records the secret after the read. To prevent such a read, deny the path at `PreToolUse`: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results). On managed macOS, the `allowManagedHooksOnly` lock keeps an organization plugin's hooks out, and a stopped gateway blocks Cowork prompts.
+</Callout>
+
+<Callout title="Preview" type="info">
+These parts of Cowork support are Preview: they are available but may change.
+
+- Cowork on Linux. Claude Desktop for Linux is a beta, and Cowork on Linux is not certified. The managed drop-in and per-user setup work on Linux.
+- Blocking a Cowork prompt on a policy decision.
+- The confirm (ask) card on Windows and in permission modes other than Cowork's default.
+- The `managed_hooks_only` lock for Cowork plugin hooks on Windows.
 </Callout>
 
 ## How Cowork runs
 
-What the measurement on a real Cowork computer showed (macOS, Apple silicon, Claude Desktop 4.4212.0, engine 2.1.309):
+How Cowork runs (macOS, Apple silicon, Claude Desktop 4.4212.0, engine 2.1.309):
 
 | Question | Answer |
 | --- | --- |
@@ -27,11 +36,11 @@ What the measurement on a real Cowork computer showed (macOS, Apple silicon, Cla
 | Where the file tools run | `Read`, `Write`, `Edit`, `Glob` and `Grep` run on your computer. A hook built into Cowork keeps them to the connected folders (a read of `/etc/hosts` was refused). |
 | Where the shell runs | `mcp__workspace__bash` runs in the Cowork Linux VM, also when the computer runs Windows. Each Cowork session is its own Linux user in that VM. |
 | Where web fetch runs | `mcp__workspace__web_fetch` runs on Anthropic's side, not in the VM and not on your computer. |
-| Whether a deny holds | A `PreToolUse` deny from a test hook was honored for a VM shell command and for a computer-side file write. Neither ran. |
+| Whether a deny holds | A `PreToolUse` deny is honored for a VM shell command and for a computer-side file write: neither runs. |
 | What the VM can reach | Nothing on your computer. A direct connection to the computer's address and to `127.0.0.1` failed. Outbound traffic goes through Anthropic's proxy, which enforces an allowlist. |
 | Where Cowork reads hooks | Not from `~/.claude/settings.json`. It reads Claude Code machine policy (managed settings) and the plugins of your Claude account. |
 
-This table was measured on macOS. The 1.0.8 tests also ran Cowork on managed Windows. On Linux, Cowork was not run: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified.
+This table describes Cowork on macOS and Windows. Cowork on Linux is Preview: Claude Desktop for Linux is a beta.
 
 ## Choose a route
 
@@ -49,12 +58,12 @@ Cowork runs ten hook events. DefenseClaw registers all ten for the plugin route.
 
 | Event | What DefenseClaw sees | Effect |
 | --- | --- | --- |
-| `UserPromptSubmit` | The prompt | Recorded. On a managed computer a stopped gateway blocks the prompt (fail closed, `enterprise_managed_gateway_not_running`), measured on macOS. The 1.0.8 tests did not cover a policy block of a prompt |
-| `PreToolUse`, `PermissionRequest` | Each tool call with its arguments, before it runs | Can block. In the 1.0.8 tests on managed macOS and Windows, an administrator deny rule blocked `mcp__workspace__bash` |
-| `PostToolUse`, `PostToolUseFailure` | The tool result or the error | Recorded, with secrets redacted. The result has already reached the model, so these cannot block it or take it back |
+| `UserPromptSubmit` | The prompt | Recorded. On a managed computer a stopped gateway blocks the prompt (fail closed, `enterprise_managed_gateway_not_running`). Blocking a prompt on a policy decision is Preview |
+| `PreToolUse`, `PermissionRequest` | Each tool call with its arguments, before it runs | Can block. An administrator deny rule blocks `mcp__workspace__bash` |
+| `PostToolUse`, `PostToolUseFailure` | The tool result or the error | Recorded, with secrets redacted. The result has already reached the model, so these cannot take it back. In strict and managed strict, a tool-result injection finding on `PostToolUse` answers `decision: block` with a reason, which the model receives with the result; on the default pack, managed alerts and managed strict blocks |
 | `SubagentStart`, `SubagentStop` | Sub-agent lineage. Tool calls of a sub-agent carry an `agent_id` | Recorded |
 | `SessionStart`, `Stop`, `SessionEnd` | Session boundaries and the Cowork session id | Recorded |
-| A tool call with a confirm (ask) verdict, from [human approval](/docs/hitl) | An administrator rule at or above the HILT minimum severity and below the block threshold, in action mode | Cowork shows its own permission card ("Claude wants to use bash" in the test) with the command and **Deny** and **Allow once**, and the task waits. Allow once runs the command, and Deny stops the task. The card does not name DefenseClaw or show the rule or the reason: the reason is only in the audit. The audit has the `PreToolUse` confirm and a `PermissionRequest` alert, and does not record who approved or denied. Measured once on managed macOS in the 1.0.8 tests (Claude Desktop 4.16336.0), in Cowork's default permission setting. Not measured on Windows or in other permission modes |
+| A tool call with a confirm (ask) verdict, from [human approval](/docs/hitl) | An administrator rule at or above the HILT minimum severity and below the block threshold, in action mode | Cowork shows its own permission card ("Claude wants to use bash" in the test) with the command and **Deny** and **Allow once**, and the task waits. Allow once runs the command, and Deny stops the task. The card does not name DefenseClaw or show the rule or the reason: the reason is only in the audit. The audit has the `PreToolUse` confirm and a `PermissionRequest` alert, and does not record who approved or denied. The card is shown in Cowork's default permission setting. Windows and other permission modes are Preview |
 
 Whether a policy hit blocks depends on the Claude Code connector's mode. In observe mode DefenseClaw records what it would block and lets the call run. In action mode a policy hit is blocked. A first `defenseclaw setup claude-code` starts in observe mode: turn blocking on with `defenseclaw setup claude-code --mode action`.
 
@@ -65,7 +74,7 @@ Shell commands get the same analysis, rule packs and judge as Claude Code `Bash`
 
 ## Cowork tools
 
-DefenseClaw maps a closed list of Cowork tool names, measured on engines 2.1.309 and 2.1.317. A tool that is not on the list, including any other `mcp__workspace__*` tool, takes the generic MCP tool path. It is inspected and never allowed without inspection. A tool counts as Cowork's own only when the hook payload says the engine hosts its server (`source` is `sdk`). A server that a user adds under the same name keeps its MCP identity and MCP policy.
+DefenseClaw maps a closed list of Cowork tool names, for engines 2.1.309 and 2.1.317. A tool that is not on the list, including any other `mcp__workspace__*` tool, takes the generic MCP tool path. It is inspected and never allowed without inspection. A tool counts as Cowork's own only when the hook payload says the engine hosts its server (`source` is `sdk`). A server that a user adds under the same name keeps its MCP identity and MCP policy.
 
 | Tool | Runs | DefenseClaw treatment | Input keys |
 | --- | --- | --- | --- |
@@ -73,12 +82,12 @@ DefenseClaw maps a closed list of Cowork tool names, measured on engines 2.1.309
 | `mcp__workspace__bash` | Cowork VM | Judged as `Bash`. The POSIX shell rules apply on every host OS, because the shell is Linux | `command`. Captured on 2.1.309 |
 | `mcp__workspace__web_fetch` | Anthropic's side | Judged as `WebFetch`: URL and egress rules | `url`. Captured on 2.1.309 |
 | `Agent` | Your computer | Sub-agent lineage through `SubagentStart` and `SubagentStop` | As Claude Code |
-| `mcp__Claude_Browser__navigate` | Claude Desktop's browser | URL facts as `WebFetch` when the input is `url` with an optional `tabId`. Any other input shape keeps the generic path | Not available in the tested 3P build; inspected by the generic MCP tool path if present |
-| `mcp__Claude_Browser__javascript_tool` | Browser tab | Secret rules on the script. CodeGuard JavaScript rules alert and never block | Not available in the tested 3P build; inspected by the generic MCP tool path if present |
-| `mcp__Claude_Browser__form_input` | Browser tab | Secret rules on the typed value, so a live token typed into a page is treated like a token in a prompt. Email and phone numbers are not checked | Not available in the tested 3P build; inspected by the generic MCP tool path if present |
-| Other `mcp__Claude_Browser__*` tools | Browser tab | Generic MCP path, audited with class `browser` | Not read. Not available in the tested 3P build |
+| `mcp__Claude_Browser__navigate` | Claude Desktop's browser | URL facts as `WebFetch` when the input is `url` with an optional `tabId`. Any other input shape keeps the generic path | Not offered in third-party (Amazon Bedrock) mode; inspected by the generic MCP tool path if present |
+| `mcp__Claude_Browser__javascript_tool` | Browser tab | Secret rules on the script. CodeGuard JavaScript rules alert and never block | Not offered in third-party (Amazon Bedrock) mode; inspected by the generic MCP tool path if present |
+| `mcp__Claude_Browser__form_input` | Browser tab | Secret rules on the typed value, so a live token typed into a page is treated like a token in a prompt. Email and phone numbers are not checked | Not offered in third-party (Amazon Bedrock) mode; inspected by the generic MCP tool path if present |
+| Other `mcp__Claude_Browser__*` tools | Browser tab | Generic MCP path, audited with class `browser` | Not read. Not offered in third-party (Amazon Bedrock) mode |
 | `mcp__cowork__save_skill` | Claude Desktop | The skill asset policy: a denied or disabled skill name refuses the save | `name`, `description`, `content`, captured on 2.1.317. DefenseClaw reads `name` (or `skill_name`, `title`) |
-| `mcp__plugins__suggest_plugin_install` | Claude Desktop | The plugin asset policy | Reads `plugin_name`, `plugin_id`, `plugin` or `name`. Not captured: Cowork did not call it in the 1.0.8 tests |
+| `mcp__plugins__suggest_plugin_install` | Claude Desktop | The plugin asset policy | Reads `plugin_name`, `plugin_id`, `plugin` or `name`. The input shape is not confirmed: any other shape keeps the generic path |
 | `mcp__plugins__search_plugins`, `search_connectors` and other `mcp__plugins__*` tools | Claude Desktop | Class `plugin_admission`. Generic MCP path: rules, AI Defense and the judge apply. A search names no plugin, so the plugin asset policy does not apply | `keywords`, `trigger`, `userIntent`, captured on 2.1.317 |
 | `mcp__scheduled-tasks__create_scheduled_task`, `update_scheduled_task` | Claude Desktop | Class `persistence`. Generic MCP path: rules, AI Defense and the judge apply | Not read |
 | `mcp__cowork__allow_cowork_file_delete` | Claude Desktop | Class `destructive`. Generic MCP path | Not read |
@@ -88,7 +97,7 @@ DefenseClaw maps a closed list of Cowork tool names, measured on engines 2.1.309
 | Other tools of the `cowork`, `scheduled-tasks`, `session_info` and `skills` servers | Claude Desktop | Class `desktop`. Generic MCP path | Not read |
 | `mcp__<connector id>__*` | Your connectors | The existing MCP tool rules | As MCP |
 
-Asked for a plugin in the 1.0.8 tests, Claude called `search_plugins` and `search_connectors`, not `suggest_plugin_install`. Claude Desktop 4.16336.0 in third-party (Amazon Bedrock) mode does not offer the `mcp__Claude_Browser__*` tools to Cowork: a tool search for them found nothing.
+When asked for a plugin, Claude calls `search_plugins` and `search_connectors`, not `suggest_plugin_install`. Claude Desktop 4.16336.0 in third-party (Amazon Bedrock) mode does not offer the `mcp__Claude_Browser__*` tools to Cowork.
 
 For the tools on the generic path, the audit row carries the class as `cowork_tool_class`. Nothing in this group blocks by default, because creating a scheduled task or approving a delete is ordinary Cowork work. An administrator can block any of them by name with the tool block list in the asset policy (`asset_policy.tool`).
 
@@ -118,7 +127,7 @@ DefenseClaw cannot add a plugin to your Claude account. `defenseclaw setup cowor
    | Windows | Paste the path into the File name box |
    | Linux | Press Ctrl+L and paste the path |
 
-4. Wait until Claude finishes checking the plugin. That took about 2 minutes in the measurement. Then start a Cowork task.
+4. Wait until Claude finishes checking the plugin. That takes about 2 minutes. Then start a Cowork task.
 
 5. Setup, still waiting, prints `Cowork is protected` with the time of the first Cowork event, and the Claude Code mode. If you pressed Ctrl+C or used `--no-wait`, check with `defenseclaw status`.
 
@@ -169,7 +178,7 @@ In Claude Desktop, open **Customize > Plugins**, then the **...** menu on Defens
 
 Remove the plugin before you uninstall DefenseClaw. A plugin built with DefenseClaw 1.0.9 lets Cowork calls continue after a completed per-user `uninstall --all` or `reset`. The printed step is the reminder you can count on: `defenseclaw uninstall` (also with `--dry-run`) and `defenseclaw reset` print "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins." whenever `setup cowork` built a plugin.
 
-The plugin also sends a one-time notice into the chat after an uninstall, but that is best effort. Claude Desktop shows no banner, and the notice goes to the model, which may not repeat it to you. In testing the model relayed it once, and once flagged it as not coming from you. A plugin built with 1.0.8 still blocks calls after the data folder is removed; remove it in Claude or rebuild and upload the 1.0.9 plugin before uninstalling. While DefenseClaw is installed, a missing hook still blocks the call.
+The plugin also sends a one-time notice into the chat after an uninstall, but that is best effort. Claude Desktop shows no banner, and the notice goes to the model, which may not repeat it to you. A plugin built with 1.0.8 still blocks calls after the data folder is removed; remove it in Claude or rebuild and upload the 1.0.9 plugin before uninstalling. While DefenseClaw is installed, a missing hook still blocks the call.
 
 How each command treats the plugin:
 
@@ -183,7 +192,7 @@ All three leave the plugin in your Claude account. Only you can remove it.
 
 ## Managed computers
 
-On a managed standalone install, DefenseClaw's Claude Code machine policy drop-in covers Cowork, because Cowork's host loop reads Claude Code machine policy. In a measurement on macOS, test hooks in `/Library/Application Support/ClaudeCode/managed-settings.json` and in a `managed-settings.d/90-*.json` drop-in (the layout DefenseClaw writes as `90-defenseclaw.json`) fired in Cowork turns, and a managed deny was honored. A managed deny wins before plugin hooks.
+On a managed standalone install, DefenseClaw's Claude Code machine policy drop-in covers Cowork, because Cowork's host loop reads Claude Code machine policy. Hooks in `/Library/Application Support/ClaudeCode/managed-settings.json` and in a `managed-settings.d/90-*.json` drop-in (the layout DefenseClaw writes as `90-defenseclaw.json`) fire in Cowork turns on macOS, and a managed deny is honored. A managed deny wins before plugin hooks.
 
 | OS | Drop-in |
 | --- | --- |
@@ -195,7 +204,7 @@ On a managed standalone install, DefenseClaw's Claude Code machine policy drop-i
 
 ### Configured versus covered
 
-`status` and `verify` print a `cowork` line and a `cowork` JSON member. In 1.0.8 the member is `configured`, not `covered`, because DefenseClaw can check its own side but not what Cowork runs.
+`status` and `verify` print a `cowork` line and a `cowork` JSON member. In 1.0.10 the member is `configured`, not `covered`, because DefenseClaw can check its own side but not what Cowork runs.
 
 ![The cowork lines of defenseclaw-gateway enterprise windows verify on a managed Windows computer: cowork is configured, managed_hooks_only is preserve, the account's last Cowork call, and the Claude Desktop data folders with their engine builds](/images/cowork/managed-verify-windows.png)
 
@@ -210,7 +219,7 @@ On a managed standalone install, DefenseClaw's Claude Code machine policy drop-i
 | `accounts_truncated` | More than 64 accounts have Cowork rows, so the list is cut |
 | `claude_desktop` | For each included account: its Claude Desktop data folders (`1p`, `3p`), the newest engine build in each and its trust (`trusted`, `untrusted`, `unsigned`, `not_found`), with the counts of each. An account whose folders were not checked has a `reason` (on Windows, for example, no signed-in session during an MDM run). Read from disk; only root or an elevated administrator sees it |
 
-Account names stay on the computer and are not in the data that is forwarded. The TUI shows only the gateway's machine-wide Cowork count on the Claude Code connector. In the 1.0.8 tests on managed macOS and Windows, Cowork's hook calls reached the gateway with surface `cowork` under the drop-in, and an administrator deny rule blocked `mcp__workspace__bash`.
+Account names stay on the computer and are not in the data that is forwarded. The TUI shows only the gateway's machine-wide Cowork count on the Claude Code connector.
 
 ### allowManagedHooksOnly
 
@@ -218,8 +227,8 @@ Account names stay on the computer and are not in the data that is forwarded. Th
 
 | Value | What it does |
 | --- | --- |
-| `enforce` (default) | Writes `allowManagedHooksOnly: true` in the drop-in. Anthropic documents that Claude Code then runs only the hooks in managed settings, in Cowork as in the terminal. Hooks in Cowork plugins do not run: plugins your users upload, marketplace plugins and organization plugins. The skills, commands and MCP servers of those plugins are not affected. Measured on managed macOS: an organization plugin's hooks did not run, DefenseClaw's did |
-| `preserve` | Leaves the lock out. Customers' own plugin hooks run too, and a plugin hook can change a tool call's input after DefenseClaw inspected it. The [foreign-hook guard](/docs/enterprise/foreign-hook-guard) is on, and it does not read Cowork plugins. Measured on managed macOS: the organization plugin's hooks ran, and so did DefenseClaw's |
+| `enforce` (default) | Writes `allowManagedHooksOnly: true` in the drop-in. Anthropic documents that Claude Code then runs only the hooks in managed settings, in Cowork as in the terminal. Hooks in Cowork plugins do not run: plugins your users upload, marketplace plugins and organization plugins. The skills, commands and MCP servers of those plugins are not affected. An organization plugin's hooks do not run; DefenseClaw's do |
+| `preserve` | Leaves the lock out. Customers' own plugin hooks run too, and a plugin hook can change a tool call's input after DefenseClaw inspected it. The [foreign-hook guard](/docs/enterprise/foreign-hook-guard) is on, and it does not read Cowork plugins. The organization plugin's hooks run, and so do DefenseClaw's |
 
 To let your users' Cowork plugin hooks run, set `preserve` for Claude Code only, then apply the config (`ensure` on Linux and macOS, Setup `/ensure` on Windows):
 
@@ -231,9 +240,9 @@ enterprise:
         managed_hooks_only: preserve
 ```
 
-These results are from managed macOS with Claude Desktop 4.16336.0 in third-party (Amazon Bedrock) mode, using an organization plugin with a test hook. Windows has not been measured yet. Claude Desktop 4.16336.0 installs an organization plugin only when its `.claude-plugin/plugin.json` sets `"installationPreference": "required"`; without it the plugin is only listed as available, and its hooks never run under either value.
+This applies to managed macOS with Claude Desktop 4.16336.0 in third-party (Amazon Bedrock) mode. On Windows it is Preview. Claude Desktop 4.16336.0 installs an organization plugin only when its `.claude-plugin/plugin.json` sets `"installationPreference": "required"`; without it the plugin is only listed as available, and its hooks never run under either value.
 
-The 1.0.8 tests did not cover whether `enforce` leaves Cowork's own built-in folder-scoping hook (the one that refused the read of `/etc/hosts`) in place. Do not rely on the lock to change Cowork's own confinement.
+Do not rely on the lock to change Cowork's own confinement, such as its built-in folder-scoping hook (the one that refuses the read of `/etc/hosts`).
 
 ### The engine build
 
@@ -276,24 +285,51 @@ On a per-user install the TUI Overview shows the same state in its Configuration
 
 The user's identity comes from the operating system, never from Cowork's environment.
 
+## VM sensor
+
+The hook route sees a tool call before it runs. It does not show what happens inside the Cowork VM after the command starts. For that, DefenseClaw ships a separate sensor that Claude Desktop installs in the VM. It is available on managed standalone macOS and Windows only. It watches processes, files, network connections and DNS in the VM, and it only observes: it blocks nothing. It sends its events to your own OTLP collector, not to the computer's DefenseClaw gateway, and it does not need the Claude Code connector. The packages in the 1.0.10 release are unsigned, and Claude Desktop installs only signed packages from a vendor that Anthropic lists, so it does not install them. See [Cowork VM sensor](/docs/connectors/cowork-vm-sensor).
+
+## See it in Claude Desktop
+
+<Callout title="Preview" type="info">
+Preview: the Cowork VM sensor is available but may change. Claude Desktop needs Anthropic vendor registration before it installs the sensor.
+</Callout>
+
+<Video
+  src="cowork-claude-desktop"
+  aspect="16/9"
+  caption="Claude Desktop in Bedrock mode runs Cowork on a managed Mac. DefenseClaw allows a harmless command and blocks a command that matches an administrator deny rule, and each decision appears in Grafana. Claude Desktop needs Anthropic vendor registration before it installs the sensor. The last part shows the sensor package on a stand-in Linux VM."
+/>
+
+A managed Mac runs Claude Desktop in Bedrock mode. A harmless shell command runs. A shell command that matches an administrator deny rule is blocked before it runs, and Claude tells the user which rule blocked it.
+
+![Claude Desktop in Cowork. The user asked to run a shell command containing dc-deny-test. Claude answers that the organization's DefenseClaw policy blocked it under rule CMD-ADMIN-DENY-DC-TEST.](/images/cowork/cowork-desktop-deny-block.png)
+
+Every hook decision reaches your observability stack. In Grafana Explore on Loki, `hook_decision` events for surface `cowork` list the allowed and the blocked command, with the rule that matched.
+
+![Grafana Explore on Loki lists hook_decision events for surface cowork and the user: action allow, or action block with rule CMD-ADMIN-DENY-DC-TEST.](/images/cowork/cowork-desktop-grafana-hook-decisions.png)
+
+Claude Desktop does not install the sensor for a vendor it does not list. See [Cowork VM sensor](/docs/connectors/cowork-vm-sensor).
+
 ## Limits
 
 | Limit | Detail |
 | --- | --- |
 | Web fetch runs on Anthropic's side | Host egress controls on your computer do not see it. DefenseClaw sees the URL in the hook, before the call, and can block it by URL rule |
 | The VM shell goes through Anthropic's proxy | Outbound traffic from the VM leaves through Anthropic's proxy and its allowlist. DefenseClaw's host egress controls do not apply to it |
-| DefenseClaw's hook sees tool calls, not what a command did | What a shell command ran inside the VM is not visible from the hook |
+| DefenseClaw's hook sees tool calls, not what a command did | What a shell command ran inside the VM is not visible from the hook. The [VM sensor](/docs/connectors/cowork-vm-sensor) watches the VM on managed macOS and Windows |
 | The Cowork surface is caller-reported | The hook marks a call as Cowork when `CLAUDE_CODE_IS_COWORK=1` is set and the agent is the Desktop engine. Any local process can send that marker. It is used for attribution, never for identity, so "protected" and "last Cowork event" are evidence and not proof |
-| Unmeasured input shapes | The 1.0.8 tests captured the input of `save_skill`, `search_plugins` and `search_connectors`. They did not capture `suggest_plugin_install`, which Cowork did not call, or `form_input`, `javascript_tool` and `navigate`, which the tested third-party build does not offer, or the format of `CLAUDE_CODE_WORKSPACE_HOST_PATHS`. A call with a shape DefenseClaw does not read keeps the generic MCP path |
+| Unconfirmed input shapes | DefenseClaw reads the input of `save_skill`, `search_plugins` and `search_connectors`. It does not read `suggest_plugin_install`, `form_input`, `javascript_tool` or `navigate` (the last three are not offered in third-party mode), or the format of `CLAUDE_CODE_WORKSPACE_HOST_PATHS`. A call with a shape DefenseClaw does not read keeps the generic MCP path |
 | Cowork plugins are not inventoried | [AI Discovery](/docs/ai-discovery) lists the names of the plugins enabled in Cowork (`cowork_plugins`, read from `local-agent-mode-sessions/<account>/<org>/rpm/manifest.json`). Those plugins are not in the Claude Code skill and plugin inventory, and the watcher and the scanners do not read them, so DefenseClaw does not scan their skills, commands or MCP servers |
-| Unmeasured folders | Some Claude Desktop folders on Windows and Linux, such as the VM bundle and the Linux `~/.config/Claude-3p` folder, are not measured yet. [AI Discovery](/docs/ai-discovery) lists them |
+| Folders not read | Some Claude Desktop folders on Windows and Linux, such as the VM bundle and the Linux `~/.config/Claude-3p` folder, are not read yet. [AI Discovery](/docs/ai-discovery) lists them |
 | Detection gaps | No built-in rule flags JavaScript that exfiltrates data, such as `fetch(url + document.cookie)` in `javascript_tool`, or a download-and-execute instruction in a scheduled task prompt |
 | Secrets in tool results | A secret in a file Cowork reads, such as a key in a `.env` file, is detected and recorded after the read, not prevented, in action mode too. The model is told the rule, never the value. To prevent the read, block it at `PreToolUse` with a path rule: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results) |
-| Gateway outage | The hook follows the Claude Code connector's fail mode. On a managed computer that is closed by default: on managed macOS, with the gateway service stopped, Cowork blocked the prompt with `enterprise_managed_gateway_not_running`. See [Fail modes](/docs/reference/fail-modes) |
+| Gateway outage | The hook follows the Claude Code connector's fail mode. On a managed computer that is closed by default: with the gateway service stopped, Cowork blocks the prompt with `enterprise_managed_gateway_not_running`. See [Fail modes](/docs/reference/fail-modes) |
 | Notices | Claude Desktop 4.16336.0 did not show DefenseClaw's hook warnings or notices in its window, reply, tool details or a banner on macOS or Windows. After an uninstall the 1.0.9 per-user plugin sends a one-time removal notice to the model only, which may not repeat it. The printed uninstall step is the guaranteed reminder: remove the plugin using it. See DefenseClaw's state with `defenseclaw status` or `defenseclaw doctor` (the gateway and the Cowork row), in the TUI, and in the audit log: `~/.defenseclaw/logs/hook-failures.jsonl`. Outage behavior is in the [capability matrix](/docs/connectors/capability-matrix#gateway-outage) |
 
 ## See also
 
 - [Claude Code connector](/docs/connectors/claudecode)
 - [Machine policy](/docs/enterprise/machine-policy), for the drop-in files and `managed_hooks_only`
+- [Cowork VM sensor](/docs/connectors/cowork-vm-sensor), the detection-only sensor inside the Cowork VM
 - [AI Discovery](/docs/ai-discovery)

@@ -42,6 +42,16 @@
     Every lifecycle result is saved under -ResultsRoot and checked with
     scripts/check_enterprise_lifecycle_result.py.
 
+    After the prelude (the preflight, then step 1 or the upgrade), the steps
+    run in four groups, in this order: drift (the no-op /ensure and the
+    runtime-folder drift), refusal (the refused foreign-OS config, /repair,
+    the verify that still reports it, the /ensure that clears it and a clean
+    verify), operate (status, detect.ps1, the installed CLI's ensure and
+    /uninstall) and reinstall (step 6; not in the upgrade lane). -Groups runs
+    a contiguous run of them after its own prelude, so CI runs one lane as
+    parallel jobs on fresh runners that together run every step once
+    (cli/tests/test_ci_workflow_efficiency.py checks the split).
+
     Standalone enrollment admits a (user, connector) row only when it finds
     the connector's CLI in that user's profile, and the runner has neither
     Claude Code nor Codex. The lane therefore stages the npm package
@@ -66,6 +76,10 @@
     verified against its signed checksums.txt (the upgrade lane).
 .PARAMETER PreviousVersion
     The product version of -UpgradeFrom.
+.PARAMETER Groups
+    The step groups to run after the prelude, a contiguous run of drift,
+    refusal, operate, reinstall in that order (default: every group of the
+    lane). reinstall needs operate, whose /uninstall it starts from.
 #>
 [CmdletBinding()]
 param(
@@ -74,7 +88,8 @@ param(
     [string]$ResultsRoot = '',
     [string]$Python = 'python',
     [string]$UpgradeFrom = '',
-    [string]$PreviousVersion = ''
+    [string]$PreviousVersion = '',
+    [ValidateSet('drift', 'refusal', 'operate', 'reinstall')][string[]]$Groups = @()
 )
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
@@ -126,6 +141,10 @@ function Step([string]$Title) {
     $script:StepNumber++
     Write-Host ''
     Write-Host ('== {0:D2} {1}' -f $script:StepNumber, $Title)
+}
+
+function Test-StepGroup([string]$Name) {
+    return $script:Groups -ccontains $Name
 }
 
 function Test-Elevated {
@@ -465,6 +484,21 @@ if ($UpgradeFrom) {
     if ($PreviousVersion -match '^v?0\.') { throw "-PreviousVersion ${PreviousVersion}: no 0.x release ships a standalone enterprise Setup; upgrade from 1.x" }
     $UpgradeFrom = (Resolve-Path -LiteralPath $UpgradeFrom).Path
 }
+# Each group starts from the deployment the prelude leaves, so a contiguous
+# run of the lane's groups keeps the order every step was written for.
+[string[]]$laneGroups = @('drift', 'refusal', 'operate')
+if (-not $UpgradeFrom) { $laneGroups += 'reinstall' }
+if ($Groups.Count -eq 0) { $Groups = $laneGroups }
+$positions = @($Groups | ForEach-Object { [Array]::IndexOf($laneGroups, [string]$_) })
+if ($positions -contains -1) { throw "-Groups $($Groups -join ','): this lane runs only $($laneGroups -join ', ')" }
+for ($i = 1; $i -lt $positions.Count; $i++) {
+    if ($positions[$i] -ne $positions[$i - 1] + 1) {
+        throw "-Groups $($Groups -join ','): pass a contiguous run of $($laneGroups -join ', '), in that order"
+    }
+}
+if (($Groups -ccontains 'reinstall') -and -not ($Groups -ccontains 'operate')) {
+    throw '-Groups reinstall needs operate: the second install starts from its /uninstall'
+}
 if (-not $ResultsRoot) {
     $ResultsRoot = Join-Path ([IO.Path]::GetTempPath()) ("defenseclaw-install-lane-" + [guid]::NewGuid().ToString('N'))
 }
@@ -596,171 +630,202 @@ try {
     if ((Get-MarkerValue 'TrustMode') -ne 'hash_pinned') { Fail "the HKLM marker trust mode is '$(Get-MarkerValue 'TrustMode')', want 'hash_pinned'" }
     if (-not (Test-Path -LiteralPath $arpKey)) { Fail 'the Add/Remove Programs entry is missing' }
 
-    # The same command line an MDM re-applies must not count as drift.
-    Step 'Setup /ensure again with the same CONFIG= (must be a no-op)'
-    $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
+    if (Test-StepGroup 'drift') {
+        # The same command line an MDM re-applies must not count as drift.
+        Step 'Setup /ensure again with the same CONFIG= (must be a no-op)'
+        $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
 
-    # Runtime-folder drift. Setup and the guardian put back a trusted-only drift
-    # (an extra entry that grants no write) in place. A folder another account
-    # can write is never given a trusted access list back in place on
-    # standalone (g582, GAP-0651; live in Setup since GAP-1048): ensure refuses
-    # before it changes anything and names the account and the icacls fix,
-    # and the same ensure converges once that fix is applied.
-    $runtimeDirectory = Join-Path $stateRoot 'runtime'
-    $usersSid = 'S-1-5-32-545'
-    $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
-    function Get-RuntimeUsersAces([switch]$WriteOnly) {
-        foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
-            $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-            if ($sid -eq $usersSid -and $ace.AccessControlType -eq 'Allow' -and
-                (-not $WriteOnly -or (([int]$ace.FileSystemRights -band $writeMask) -ne 0))) {
-                $ace
+        # Runtime-folder drift. Setup and the guardian put back a trusted-only drift
+        # (an extra entry that grants no write) in place. A folder another account
+        # can write is never given a trusted access list back in place on
+        # standalone (g582, GAP-0651; live in Setup since GAP-1048): ensure refuses
+        # before it changes anything and names the account and the icacls fix,
+        # and the same ensure converges once that fix is applied.
+        $runtimeDirectory = Join-Path $stateRoot 'runtime'
+        $usersSid = 'S-1-5-32-545'
+        $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
+        function Get-RuntimeUsersAces([switch]$WriteOnly) {
+            foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
+                $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+                if ($sid -eq $usersSid -and $ace.AccessControlType -eq 'Allow' -and
+                    (-not $WriteOnly -or (([int]$ace.FileSystemRights -band $writeMask) -ne 0))) {
+                    $ace
+                }
             }
         }
-    }
 
-    # Bounded evidence for the Setup/guardian race on this drift (GAP-0573):
-    # the folder's access list, when the last lifecycle result was written and
-    # the guardian's repair lines after it.
-    function Write-RuntimeRepairEvidence([string]$When) {
-        try {
-            Write-Host "  runtime folder evidence ($When, $([DateTime]::UtcNow.ToString('o'))):"
-            & icacls.exe $runtimeDirectory 2>&1 | Select-Object -First 16 | ForEach-Object { Write-Host "    $_" }
-            $lastResult = Join-Path $env:SystemRoot 'Logs\DefenseClaw\last-result.json'
-            if (Test-Path -LiteralPath $lastResult) {
-                Write-Host "    last-result written $((Get-Item -LiteralPath $lastResult).LastWriteTimeUtc.ToString('o'))"
+        # Bounded evidence for the Setup/guardian race on this drift (GAP-0573):
+        # the folder's access list, when the last lifecycle result was written and
+        # the guardian's repair lines after it.
+        function Write-RuntimeRepairEvidence([string]$When) {
+            try {
+                Write-Host "  runtime folder evidence ($When, $([DateTime]::UtcNow.ToString('o'))):"
+                & icacls.exe $runtimeDirectory 2>&1 | Select-Object -First 16 | ForEach-Object { Write-Host "    $_" }
+                $lastResult = Join-Path $env:SystemRoot 'Logs\DefenseClaw\last-result.json'
+                if (Test-Path -LiteralPath $lastResult) {
+                    Write-Host "    last-result written $((Get-Item -LiteralPath $lastResult).LastWriteTimeUtc.ToString('o'))"
+                }
+                $environment = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\DefenseClawHookGuardian' -Name Environment -ErrorAction SilentlyContinue).Environment
+                foreach ($entry in @($environment)) { if ($entry -like 'DEFENSECLAW_WINDOWS_SERVICE_LOG=*') { Write-Host "    guardian $entry" } }
+                $guardianLog = Join-Path $stateRoot 'logs\guardian\hook-guardian.log'
+                if (Test-Path -LiteralPath $guardianLog) {
+                    Write-Host "    $guardianLog $((Get-Item -LiteralPath $guardianLog).Length) bytes, last repair or runtime lines:"
+                    Get-Content -LiteralPath $guardianLog -Tail 600 | Where-Object { $_ -match 'defenseclaw_repair|\\runtime' } |
+                        Select-Object -Last 12 | ForEach-Object { Write-Host "      $($_.Substring(0, [Math]::Min(400, $_.Length)))" }
+                }
+                else { Write-Host "    $guardianLog is missing" }
             }
-            $environment = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\DefenseClawHookGuardian' -Name Environment -ErrorAction SilentlyContinue).Environment
-            foreach ($entry in @($environment)) { if ($entry -like 'DEFENSECLAW_WINDOWS_SERVICE_LOG=*') { Write-Host "    guardian $entry" } }
-            $guardianLog = Join-Path $stateRoot 'logs\guardian\hook-guardian.log'
-            if (Test-Path -LiteralPath $guardianLog) {
-                Write-Host "    $guardianLog $((Get-Item -LiteralPath $guardianLog).Length) bytes, last repair or runtime lines:"
-                Get-Content -LiteralPath $guardianLog -Tail 600 | Where-Object { $_ -match 'defenseclaw_repair|\\runtime' } |
-                    Select-Object -Last 12 | ForEach-Object { Write-Host "      $($_.Substring(0, [Math]::Min(400, $_.Length)))" }
+            catch { Write-Host "    evidence unavailable: $($_.Exception.Message)" }
+        }
+
+        Step 'Setup /ensure repairs a trusted-only drift of the runtime ACL with CONFIG='
+        & icacls.exe $runtimeDirectory /grant "*${usersSid}:(OI)(CI)RX" | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+        Write-RuntimeRepairEvidence 'after the drift'
+        $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Write-RuntimeRepairEvidence 'after ensure'
+        # The running hook guardian races Setup for this drift. Setup either puts
+        # the ACL back itself (ensure_repair or a change) or finds that the
+        # guardian already did and names that repair (guardian_repaired_drift,
+        # GAP-0573). Both are correct; either way ensure must not report a no-op.
+        Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
+        $repairResult = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+        foreach ($warning in @($repairResult.warnings)) {
+            if ($warning.code -eq 'guardian_repaired_drift' -and $warning.message.IndexOf($runtimeDirectory, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                Fail "ensure named a guardian repair that is not the drifted $runtimeDirectory`: $($warning.message)"
             }
-            else { Write-Host "    $guardianLog is missing" }
         }
-        catch { Write-Host "    evidence unavailable: $($_.Exception.Message)" }
-    }
+        Assert-ServicesRunning
+        if (@(Get-RuntimeUsersAces).Count -ne 0) { Fail "Setup left a Users entry on $runtimeDirectory" }
 
-    Step 'Setup /ensure repairs a trusted-only drift of the runtime ACL with CONFIG='
-    & icacls.exe $runtimeDirectory /grant "*${usersSid}:(OI)(CI)RX" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
-    Write-RuntimeRepairEvidence 'after the drift'
-    $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    Write-RuntimeRepairEvidence 'after ensure'
-    # The running hook guardian races Setup for this drift. Setup either puts
-    # the ACL back itself (ensure_repair or a change) or finds that the
-    # guardian already did and names that repair (guardian_repaired_drift,
-    # GAP-0573). Both are correct; either way ensure must not report a no-op.
-    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
-        $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
-    $repairResult = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
-    foreach ($warning in @($repairResult.warnings)) {
-        if ($warning.code -eq 'guardian_repaired_drift' -and $warning.message.IndexOf($runtimeDirectory, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            Fail "ensure named a guardian repair that is not the drifted $runtimeDirectory`: $($warning.message)"
+        Step 'Setup /ensure refuses a runtime folder another account can write, then converges after the named fix'
+        & icacls.exe $runtimeDirectory /grant "*${usersSid}:(OI)(CI)M" | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+        $run = Invoke-Lifecycle -Name '02-ensure-runtime-untrusted-refused' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        $refusal = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+        $refusalText = (@($refusal.errors | ForEach-Object { [string]$_.message }) -join ' ')
+        if ($run.ExitCode -eq 0 -or [bool]$refusal.ok -or [bool]$refusal.transaction_pending -or
+            $refusalText.IndexOf($runtimeDirectory, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            -not $refusalText.Contains($usersSid) -or -not $refusalText.Contains('/remove:g')) {
+            Fail "ensure did not refuse the Users-writable $runtimeDirectory naming the account and the fix (exit $($run.ExitCode)): $refusalText"
         }
-    }
-    Assert-ServicesRunning
-    if (@(Get-RuntimeUsersAces).Count -ne 0) { Fail "Setup left a Users entry on $runtimeDirectory" }
-
-    Step 'Setup /ensure refuses a runtime folder another account can write, then converges after the named fix'
-    & icacls.exe $runtimeDirectory /grant "*${usersSid}:(OI)(CI)M" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
-    $run = Invoke-Lifecycle -Name '02-ensure-runtime-untrusted-refused' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    $refusal = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
-    $refusalText = (@($refusal.errors | ForEach-Object { [string]$_.message }) -join ' ')
-    if ($run.ExitCode -eq 0 -or [bool]$refusal.ok -or [bool]$refusal.transaction_pending -or
-        $refusalText.IndexOf($runtimeDirectory, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
-        -not $refusalText.Contains($usersSid) -or -not $refusalText.Contains('/remove:g')) {
-        Fail "ensure did not refuse the Users-writable $runtimeDirectory naming the account and the fix (exit $($run.ExitCode)): $refusalText"
-    }
-    if (@(Get-RuntimeUsersAces -WriteOnly).Count -eq 0) {
-        Fail "ensure gave $runtimeDirectory a trusted access list back in place instead of refusing it"
-    }
-    Assert-ServicesRunning
-    & icacls.exe $runtimeDirectory /remove:g "*$usersSid" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "icacls could not remove the Users entry from $runtimeDirectory" }
-    $run = Invoke-Lifecycle -Name '02-ensure-runtime-after-fix' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    Assert-Result $run 'ensure-runtime-after-fix' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
-        $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
-    Assert-ServicesRunning
-    if (@(Get-RuntimeUsersAces).Count -ne 0) { Fail "a Users entry remains on $runtimeDirectory after the fix" }
-
-    Step 'Setup /ensure refuses foreign-OS config before replacing the running deployment'
-    $foreignConfig = Join-Path $stage 'foreign-os-config.yaml'
-    [IO.File]::WriteAllText($foreignConfig, "data_dir: /opt/cisco/defenseclaw/runtime`n" + $configText + "`n", [Text.UTF8Encoding]::new($false))
-    & icacls.exe $foreignConfig /setowner '*S-1-5-32-544' | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $foreignConfig" }
-    $previousHash = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
-    $previousServices = @{}
-    foreach ($name in $serviceNames) {
-        $previousServices[$name] = Get-CimInstance Win32_Service -Filter "Name='$name'"
-    }
-    $run = Invoke-Lifecycle -Name '02-foreign-os-refused' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$foreignConfig", 'JSON=1')
-    $refusal = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
-    if ($run.ExitCode -ne 1639 -or [bool]$refusal.transaction_pending -or
-        -not (@($refusal.errors | ForEach-Object { [string]$_.message }) -join ' ').Contains('data_dir')) {
-        Fail "foreign-OS ensure did not refuse data_dir before the transaction (exit $($run.ExitCode))"
-    }
-    if ((Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -cne $previousHash) {
-        Fail 'foreign-OS ensure replaced the installed config'
-    }
-    foreach ($name in $serviceNames) {
-        $current = Get-CimInstance Win32_Service -Filter "Name='$name'"
-        $previous = $previousServices[$name]
-        if ([int]$current.ProcessId -ne [int]$previous.ProcessId -or [int]$current.ProcessId -eq 0 -or
-            [string]$current.StartMode -cne [string]$previous.StartMode) {
-            Fail "foreign-OS ensure restarted, stopped or disabled $name"
+        if (@(Get-RuntimeUsersAces -WriteOnly).Count -eq 0) {
+            Fail "ensure gave $runtimeDirectory a trusted access list back in place instead of refusing it"
         }
+        Assert-ServicesRunning
+        & icacls.exe $runtimeDirectory /remove:g "*$usersSid" | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "icacls could not remove the Users entry from $runtimeDirectory" }
+        $run = Invoke-Lifecycle -Name '02-ensure-runtime-after-fix' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Assert-Result $run 'ensure-runtime-after-fix' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
+        Assert-ServicesRunning
+        if (@(Get-RuntimeUsersAces).Count -ne 0) { Fail "a Users entry remains on $runtimeDirectory after the fix" }
     }
-    Assert-ServicesRunning
 
-    Step 'Setup /repair still converges after a refused foreign-OS config'
-    $run = Invoke-Lifecycle -Name '02-repair-after-refusal' -FilePath $Setup -Arguments @('/repair', 'JSON=1')
-    Assert-Result $run 'repair-after-refusal' (@('--action', 'repair', '--installed', '--version', $Version, '--ready') + $installedChecks)
-    Assert-ServicesRunning
+    if (Test-StepGroup 'refusal') {
+        Step 'Setup /ensure refuses foreign-OS config before replacing the running deployment'
+        $foreignConfig = Join-Path $stage 'foreign-os-config.yaml'
+        [IO.File]::WriteAllText($foreignConfig, "data_dir: /opt/cisco/defenseclaw/runtime`n" + $configText + "`n", [Text.UTF8Encoding]::new($false))
+        & icacls.exe $foreignConfig /setowner '*S-1-5-32-544' | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $foreignConfig" }
+        $previousHash = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+        $previousServices = @{}
+        foreach ($name in $serviceNames) {
+            $previousServices[$name] = Get-CimInstance Win32_Service -Filter "Name='$name'"
+        }
+        $run = Invoke-Lifecycle -Name '02-foreign-os-refused' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$foreignConfig", 'JSON=1')
+        $refusal = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+        if ($run.ExitCode -ne 1639 -or [bool]$refusal.transaction_pending -or
+            -not (@($refusal.errors | ForEach-Object { [string]$_.message }) -join ' ').Contains('data_dir')) {
+            Fail "foreign-OS ensure did not refuse data_dir before the transaction (exit $($run.ExitCode))"
+        }
+        if ((Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash -cne $previousHash) {
+            Fail 'foreign-OS ensure replaced the installed config'
+        }
+        foreach ($name in $serviceNames) {
+            $current = Get-CimInstance Win32_Service -Filter "Name='$name'"
+            $previous = $previousServices[$name]
+            if ([int]$current.ProcessId -ne [int]$previous.ProcessId -or [int]$current.ProcessId -eq 0 -or
+                [string]$current.StartMode -cne [string]$previous.StartMode) {
+                Fail "foreign-OS ensure restarted, stopped or disabled $name"
+            }
+        }
+        Assert-ServicesRunning
 
-    Step 'installed CLI verify'
-    $run = Invoke-Lifecycle -Name '03-verify' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
-    Assert-Result $run 'verify' (@('--action', 'verify', '--installed', '--version', $Version, '--ready') + $installedChecks)
+        Step 'Setup /repair still converges after a refused foreign-OS config'
+        $run = Invoke-Lifecycle -Name '02-repair-after-refusal' -FilePath $Setup -Arguments @('/repair', 'JSON=1')
+        Assert-Result $run 'repair-after-refusal' (@('--action', 'repair', '--installed', '--version', $Version, '--ready') + $installedChecks)
+        Assert-ServicesRunning
 
-    Step 'installed CLI status'
-    $run = Invoke-Lifecycle -Name '04-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
-    Assert-Result $run 'status' (@('--action', 'status', '--installed', '--version', $Version) + $installedChecks)
-    Assert-ServicesRunning
+        # A refused supplied config stays reported until a run applies a config
+        # again (rel-1-0-10 GAP-1027, GAP-1038): /repair without CONFIG= puts the
+        # running config back, not the requested one, so verify still fails with
+        # config_rejected (cause config_refused), as it does after the Intune
+        # Remediate-Fix (ensure without a config).
+        Step 'installed CLI verify still reports the refused config after /repair'
+        $foreignDigest = (Get-FileHash -LiteralPath $foreignConfig -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 12)
+        $run = Invoke-Lifecycle -Name '03-verify-config-rejected' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
+        $rejected = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+        $rejectedErrors = @($rejected.errors | Where-Object { [string]$_.code -ceq 'config_rejected' })
+        $otherErrors = @($rejected.errors | Where-Object { [string]$_.code -cne 'config_rejected' })
+        if ($run.ExitCode -ne 1603 -or [bool]$rejected.ok -or [bool]$rejected.coverage_complete -or
+            $rejectedErrors.Count -ne 1 -or $otherErrors.Count -ne 0 -or
+            -not ([string]$rejectedErrors[0].message).Contains('cause config_refused') -or
+            -not ([string]$rejectedErrors[0].message).Contains("sha256 $foreignDigest")) {
+            $codes = (@($rejected.errors | ForEach-Object { [string]$_.code }) -join ', ')
+            Fail "verify after the refused foreign-OS config and /repair did not fail with one config_rejected naming config_refused and sha256 $foreignDigest (exit $($run.ExitCode), errors: $codes)"
+        }
 
-    Step 'MDM detection (detect.ps1 -RequireHealthy under Windows PowerShell 5.1)'
-    $detected = Invoke-Detect -RequireHealthy
-    if ($detected.ExitCode -ne 0 -or $detected.Output -notmatch [regex]::Escape($Version)) {
-        Fail "detect.ps1 exited $($detected.ExitCode) with '$($detected.Output)', want the installed version"
+        Step 'Setup /ensure CONFIG= applies the accepted config again and clears config_rejected'
+        $run = Invoke-Lifecycle -Name '02-ensure-after-refusal' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Assert-Result $run 'ensure-after-refusal' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
+        Assert-ServicesRunning
+
+        Step 'installed CLI verify'
+        $run = Invoke-Lifecycle -Name '03-verify' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
+        Assert-Result $run 'verify' (@('--action', 'verify', '--installed', '--version', $Version, '--ready') + $installedChecks)
     }
-    Write-Host "detect.ps1: $($detected.Output)"
 
-    Step 'installed CLI ensure without trust flags (the Remediate-Fix command)'
-    $run = Invoke-Lifecycle -Name '05-cli-ensure' -FilePath $cli -Arguments @('enterprise', 'windows', 'ensure', '--profile', 'standalone', '--json')
-    Assert-Result $run 'cli-ensure' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
-    if ((Get-MarkerValue 'TrustMode') -ne 'hash_pinned') {
-        Fail "the installed CLI's ensure changed the marker trust mode to '$(Get-MarkerValue 'TrustMode')'"
+    if (Test-StepGroup 'operate') {
+        Step 'installed CLI status'
+        $run = Invoke-Lifecycle -Name '04-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
+        Assert-Result $run 'status' (@('--action', 'status', '--installed', '--version', $Version) + $installedChecks)
+        Assert-ServicesRunning
+
+        Step 'MDM detection (detect.ps1 -RequireHealthy under Windows PowerShell 5.1)'
+        $detected = Invoke-Detect -RequireHealthy
+        if ($detected.ExitCode -ne 0 -or $detected.Output -notmatch [regex]::Escape($Version)) {
+            Fail "detect.ps1 exited $($detected.ExitCode) with '$($detected.Output)', want the installed version"
+        }
+        Write-Host "detect.ps1: $($detected.Output)"
+
+        Step 'installed CLI ensure without trust flags (the Remediate-Fix command)'
+        $run = Invoke-Lifecycle -Name '05-cli-ensure' -FilePath $cli -Arguments @('enterprise', 'windows', 'ensure', '--profile', 'standalone', '--json')
+        Assert-Result $run 'cli-ensure' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
+        if ((Get-MarkerValue 'TrustMode') -ne 'hash_pinned') {
+            Fail "the installed CLI's ensure changed the marker trust mode to '$(Get-MarkerValue 'TrustMode')'"
+        }
+        $detected = Invoke-Detect -RequireHealthy
+        if ($detected.ExitCode -ne 0) { Fail "detect.ps1 stopped detecting after the installed CLI's ensure: $($detected.Output)" }
+        Write-Host "detect.ps1 still detects: $($detected.Output)"
+
+        Step 'Setup /uninstall'
+        $run = Invoke-Lifecycle -Name '06-setup-uninstall' -FilePath $Setup -Arguments @('/uninstall', 'JSON=1')
+        Assert-Result $run 'setup-uninstall' @('--action', 'uninstall', '--changed', '--not-installed')
+        Assert-ServicesGone
+        if (Test-Path -LiteralPath $markerKey) { Fail "$markerKey remains after uninstall" }
+        if (Test-Path -LiteralPath $arpKey) { Fail 'the Add/Remove Programs entry remains after uninstall' }
+        if (Test-Path -LiteralPath $cli) { Fail "$cli remains after uninstall" }
+        Assert-PolicyGone 'after uninstall'
+        $detected = Invoke-Detect
+        if ($detected.ExitCode -eq 0) { Fail "detect.ps1 still detects a deployment after uninstall: $($detected.Output)" }
+        Write-Host 'detect.ps1: not detected'
     }
-    $detected = Invoke-Detect -RequireHealthy
-    if ($detected.ExitCode -ne 0) { Fail "detect.ps1 stopped detecting after the installed CLI's ensure: $($detected.Output)" }
-    Write-Host "detect.ps1 still detects: $($detected.Output)"
 
-    Step 'Setup /uninstall'
-    $run = Invoke-Lifecycle -Name '06-setup-uninstall' -FilePath $Setup -Arguments @('/uninstall', 'JSON=1')
-    Assert-Result $run 'setup-uninstall' @('--action', 'uninstall', '--changed', '--not-installed')
-    Assert-ServicesGone
-    if (Test-Path -LiteralPath $markerKey) { Fail "$markerKey remains after uninstall" }
-    if (Test-Path -LiteralPath $arpKey) { Fail 'the Add/Remove Programs entry remains after uninstall' }
-    if (Test-Path -LiteralPath $cli) { Fail "$cli remains after uninstall" }
-    Assert-PolicyGone 'after uninstall'
-    $detected = Invoke-Detect
-    if ($detected.ExitCode -eq 0) { Fail "detect.ps1 still detects a deployment after uninstall: $($detected.Output)" }
-    Write-Host 'detect.ps1: not detected'
-
-    if (-not $UpgradeFrom) {
+    if (Test-StepGroup 'reinstall') {
         Step 'Setup /ensure after uninstall installs a second time'
         $run = Invoke-Lifecycle -Name '07-setup-ensure-after-uninstall' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
         Assert-Result $run 'setup-ensure-after-uninstall' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
@@ -782,9 +847,10 @@ try {
     }
 
     Write-Host ''
-    Write-Host "install lane passed: Windows Setup $Version (results in $ResultsRoot)"
-    # The last native command (detect.ps1 reporting "not detected") exited 1;
-    # a caller that checks $LASTEXITCODE must see the lane's result instead.
+    Write-Host "install lane passed: Windows Setup $Version, groups $($Groups -join ', ') (results in $ResultsRoot)"
+    # The last native command may have failed on purpose (detect.ps1 reports
+    # "not detected" with exit 1 after /uninstall); a caller that checks
+    # $LASTEXITCODE must see the lane's result instead.
     $global:LASTEXITCODE = 0
 }
 catch {

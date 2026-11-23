@@ -65,8 +65,14 @@ type GuardrailProfile struct {
 	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 	// Sandbox tightens openshell.admin for subjects of this profile (only
 	// request_access overrides); nil adds nothing. See
-	// TightenOpenShellAdmin.
-	Sandbox *OpenShellAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	// TightenSandboxAdmin.
+	Sandbox *SandboxAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	// Cascade is the profile's guardrail.cascade scope (cascade.go); nil
+	// inherits.
+	Cascade *CascadeScope `mapstructure:"cascade" yaml:"cascade,omitempty"`
+	// Routing tightens routing.admin (and routing.*) for subjects of this
+	// profile; nil adds nothing. See TightenRoutingPolicy.
+	Routing *RoutingPolicyConfig `mapstructure:"routing" yaml:"routing,omitempty"`
 
 	// Enabled and HookFailMode are NOT allowed in a profile: both are baked
 	// into the hooks installed on the machine, so they cannot vary by
@@ -100,9 +106,28 @@ type ProfileMatch struct {
 	// Agents are stable agent identities (defenseclaw.agent.identity.id,
 	// "agt-" followed by 16 hex digits).
 	Agents []string `mapstructure:"agents" yaml:"agents,omitempty"`
+	// Substrate selects Agent Substrate actors (PLAN §7.3). A match that
+	// carries it never selects a host subject, which has no atespace.
+	Substrate *ProfileMatchSubstrate `mapstructure:"substrate" yaml:"substrate,omitempty"`
 }
 
-// Empty reports whether no selector key is set.
+// ProfileMatchSubstrate selects Substrate actors by atespace, template
+// ("<atespace>/<name>") or verified workload principal. Set keys combine
+// with AND. An atespace glob matches only atespaces DefenseClaw created or
+// lists (E3).
+type ProfileMatchSubstrate struct {
+	Atespaces []string `mapstructure:"atespaces" yaml:"atespaces,omitempty"`
+	Templates []string `mapstructure:"templates" yaml:"templates,omitempty"`
+	Workloads []string `mapstructure:"workloads" yaml:"workloads,omitempty"`
+}
+
+// Empty reports whether no Substrate selector is set.
+func (m *ProfileMatchSubstrate) Empty() bool {
+	return m == nil || len(m.Atespaces) == 0 && len(m.Templates) == 0 && len(m.Workloads) == 0
+}
+
+// Empty reports whether no host selector key is set. Substrate selectors
+// do not count: they never select a host subject.
 func (m ProfileMatch) Empty() bool {
 	return len(m.Groups) == 0 && len(m.Users) == 0 && len(m.Connectors) == 0 && len(m.Agents) == 0
 }
@@ -132,7 +157,13 @@ func (c *Config) ValidateGuardrailProfiles() error {
 	if err := c.Guardrail.validateProfiles(c.SecureClientIntegration()); err != nil {
 		return err
 	}
-	return c.validateSandboxProfiles()
+	if err := c.validateSandboxProfiles(); err != nil {
+		return err
+	}
+	if err := c.validateSecureClientRouting(); err != nil {
+		return err
+	}
+	return c.validateRoutingProfiles()
 }
 
 // UnknownGuardrailProfileError is a profile name that an assignment or
@@ -179,9 +210,14 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 				Profile: assignment.Profile, Defined: names,
 			}
 		}
-		if assignment.Match.Empty() {
+		if assignment.Match.Empty() && assignment.Match.Substrate.Empty() {
 			return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d]", i),
-				fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors or agents; use guardrail.default_profile for everyone else", i))
+				fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors, agents or substrate; use guardrail.default_profile for everyone else", i))
+		}
+		if sub := assignment.Match.Substrate; sub != nil {
+			if err := sub.validate(fmt.Sprintf("guardrail.profile_assignments[%d].match.substrate", i)); err != nil {
+				return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d].match.substrate", i), err)
+			}
 		}
 		// A selector that is only white space is trimmed to nothing at match
 		// time and selects nobody, while the assignment looked set
@@ -315,7 +351,7 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 	}
-	return deriveProfileFrom(base, profile), nil
+	return deriveProfileFrom(base, name, profile), nil
 }
 
 // deriveProfileFrom applies profile to a shallow copy of base, a private
@@ -325,12 +361,13 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 // connector_hooks, so the copy gets its own of those maps. One copy for all
 // profiles instead of one each: with 1,000 profiles the copies took a fifth
 // of the gateway start (GAP-0276).
-func deriveProfileFrom(base *Config, profile GuardrailProfile) *Config {
+func deriveProfileFrom(base *Config, name string, profile GuardrailProfile) *Config {
 	out := *base
 	out.Guardrail.Connectors = maps.Clone(base.Guardrail.Connectors)
 	out.ApplicationProtection.Connectors = maps.Clone(base.ApplicationProtection.Connectors)
 	out.ConnectorHooks = maps.Clone(base.ConnectorHooks)
 	applyGuardrailProfile(&out, profile)
+	out.Guardrail.profileName = name
 	return &out
 }
 
@@ -343,7 +380,7 @@ type DerivedGuardrailProfile struct {
 	// Sandbox is the profile's sandbox floor F: openshell.admin tightened
 	// by the profile's sandbox section. SandboxDigest is "sha256:..." of
 	// F's canonical JSON and the content of every pack it references.
-	Sandbox             OpenShellAdminConfig
+	Sandbox             SandboxAdminConfig
 	SandboxDigest       string
 	policySandboxDigest string
 }
@@ -366,7 +403,7 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 	out := make(map[string]DerivedGuardrailProfile, len(names))
 	for _, name := range names {
 		profile := c.Guardrail.Profiles[name]
-		derived := deriveProfileFrom(base, profile)
+		derived := deriveProfileFrom(base, name, profile)
 		floor, floorDigest, err := c.SandboxFloor(name)
 		if err != nil {
 			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
@@ -416,6 +453,11 @@ type guardrailPolicyDigestView struct {
 	// a policy that changed only it digested the same (GAP-0934). The
 	// default is left out, so the digest of a policy at full is unchanged.
 	CiscoTrustLevel string `json:"cisco_trust_level,omitempty"`
+	// Cascade and ProfileCascade are guardrail.cascade and the profile's
+	// own cascade scope, left out when unset so the digest of a policy
+	// without them is unchanged.
+	Cascade        *CascadeConfig `json:"cascade,omitempty"`
+	ProfileCascade *CascadeScope  `json:"profile_cascade,omitempty"`
 }
 
 // GuardrailPolicyDigest returns "sha256:" + the hex SHA-256 of the canonical
@@ -475,6 +517,11 @@ func guardrailPolicyDigest(cfg *Config, sandboxDigest string, rewrite func(strin
 		rules := g.Rules
 		view.Rules = &rules
 	}
+	if !g.Cascade.IsZero() {
+		cascade := g.Cascade
+		view.Cascade = &cascade
+	}
+	view.ProfileCascade = g.profileCascade
 	if len(g.profileConnectors) > 0 {
 		view.ProfileConnectors = g.profileConnectors
 	}
@@ -635,6 +682,7 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 		pc.Guardrail = overlayGuardrailPolicy(pc.Guardrail, fields, false)
 		ap.Connectors[name] = pc
 	}
+	g.profileCascade = profile.Cascade
 	g.profileMode = strings.TrimSpace(fields.Mode)
 	if g.profileMode != "" {
 		clearHookModes(out, "")
@@ -650,6 +698,7 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 		}
 		entry := overlayGuardrailPolicy(PerConnectorGuardrailConfig{}, pc, true)
 		entry.Rules = pc.Rules
+		entry.Cascade = pc.Cascade
 		g.profileConnectors[key] = entry
 		if strings.TrimSpace(pc.Mode) != "" {
 			clearHookModes(out, key)
@@ -765,6 +814,10 @@ func (c *Config) DeepCopy() (*Config, error) {
 	// The custom_packs verdict the loader recorded belongs to the load, not to
 	// the copy: a copy never re-reads a folder that has changed since.
 	out.Guardrail.customPackBase, out.Guardrail.customRulePackChecks = c.Guardrail.customPackBase, maps.Clone(c.Guardrail.customRulePackChecks)
+	// The verified policy module and the fallback verdict belong to the load,
+	// like the custom_packs verdict.
+	out.Guardrail.Cascade.policySource, out.Guardrail.Cascade.invalid = c.Guardrail.Cascade.policySource, c.Guardrail.Cascade.invalid
+	out.Guardrail.Cascade.ignored, out.Guardrail.Cascade.candidateErr = c.Guardrail.Cascade.ignored, c.Guardrail.Cascade.candidateErr
 	aid := c.CiscoAIDefense
 	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
 	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir
