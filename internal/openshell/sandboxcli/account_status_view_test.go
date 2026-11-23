@@ -116,6 +116,60 @@ func TestAccountViewIsAskedForAConnectorTheGatewayKnows(t *testing.T) {
 	}
 }
 
+// GAP-2068: `sandbox status --output json` named the account's reason at the
+// top (reason) and kept the daemon's install text in managed.unavailable
+// beside it, so a script reading that field got the wrong reason. The
+// managed object agrees with the reason: it carries the organization's text
+// for an organization-off account, and no install text (nor its recovery
+// step) for a profile deny. The keys stay the same, so the schema holds.
+func TestStatusJSONManagedUnavailableAgreesWithTheAccountReason(t *testing.T) {
+	withManagedHost(t)
+	read := func(t *testing.T, ta *testApp) (reason, unavailable, recovery string) {
+		t.Helper()
+		ta.out.Reset()
+		if err := ta.Status(bg, "", OutputJSON); err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Reason  string `json:"reason"`
+			Managed struct {
+				Unavailable string `json:"unavailable"`
+				Recovery    string `json:"recovery"`
+			} `json:"managed"`
+		}
+		if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil {
+			t.Fatalf("status --json: %v\n%s", err, ta.out.String())
+		}
+		return got.Reason, got.Managed.Unavailable, got.Managed.Recovery
+	}
+	t.Run("profile denies sandboxes", func(t *testing.T) {
+		ta, _ := profileRefusedFixture(t, "claudecode")
+		ta.daemon.status.Managed.Recovery = "stop the OpenShell gateway and run the migration"
+		reason, unavailable, recovery := read(t, ta)
+		if !strings.Contains(reason, profilePhrase) {
+			t.Fatalf("reason = %q, want the profile's refusal", reason)
+		}
+		if unavailable != "" || recovery != "" {
+			t.Errorf("managed.unavailable = %q, managed.recovery = %q; want the daemon's install text dropped next to reason %q", unavailable, recovery, reason)
+		}
+	})
+	t.Run("organization turned sandboxes off", func(t *testing.T) {
+		ta, _ := profileRefusedFixture(t, "claudecode")
+		ta.ManagedOrganizationOff = func(context.Context) bool { return true }
+		reason, unavailable, _ := read(t, ta)
+		if !strings.Contains(reason, orgPhrase) || !strings.Contains(unavailable, orgPhrase) || strings.Contains(unavailable, installPhrase) {
+			t.Errorf("reason = %q, managed.unavailable = %q; want the organization's reason in both", reason, unavailable)
+		}
+	})
+	t.Run("no verdict leaves the daemon status", func(t *testing.T) {
+		ta, _ := profileRefusedFixture(t, "")
+		_, unavailable, _ := read(t, ta)
+		if !strings.Contains(unavailable, installPhrase) {
+			t.Errorf("managed.unavailable = %q; want the daemon's install text while no account reason applies", unavailable)
+		}
+	})
+}
+
 // With no connector configured there is no view to ask for: the daemon's
 // status stands, and the gateway is not asked for a view of no connector.
 func TestAccountViewWithNoConnectorLeavesTheDaemonStatus(t *testing.T) {
