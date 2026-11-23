@@ -336,6 +336,11 @@ func memoHookCall() *hookCall {
 // (rel-1-0-10:GAP-1476). The goroutine of a call is already locked to its
 // thread; the lock nests, so its reads are unchanged.
 func currentHookCall() *hookCall {
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system keeps nothing in the call's
+		// memory and reads none of it: its answers are not the host's.
+		return nil
+	}
 	unlock := lockHookCallKey()
 	defer unlock()
 	id := hookCallKey()
@@ -430,6 +435,10 @@ type shareGate struct {
 func networkPathGate(path string, followLast bool) (gate shareGate) {
 	name := path
 	gate.read = name
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system asks no share (Unread).
+		return gate
+	}
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
@@ -667,6 +676,11 @@ func readGated[T any](op, name string, read func(path string) (T, error), discar
 		return none, gate.cut, networkShareError(op, name)
 	}
 	path := fixturefs.Map(gate.read)
+	if path == "" && name != "" {
+		// Inside fixturefs.Unread nothing is read: the name does not exist
+		// (filepath.EvalSymlinks of the empty name would answer itself).
+		return none, shareReadFinal, &fs.PathError{Op: op, Path: name, Err: fs.ErrNotExist}
+	}
 	if !gate.proved {
 		value, err := read(path)
 		return value, shareReadFinal, err

@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -1061,6 +1062,17 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 	return filepath.Clean(name)
 }
 
+// copyModeWholeCallByName reports a copy-mode actor's whole call (not one of
+// its statements, twins or host readings) that runs in a guest folder and
+// that this gateway judges in no folder (substrate-1 GAP-0922). A statement
+// after a cd keeps the call's guest folder, not its own, and the whole
+// call's decision already follows the cd.
+func copyModeWholeCallByName(request trustedActionRequest, input actionfacts.Input) bool {
+	return request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook &&
+		!request.simpleCommandPass && !request.readingTwin && request.hostTwinDepth == 0 &&
+		input.Command != "" && !filepath.IsAbs(input.CWD) && filepath.IsAbs(request.SandboxGuestCWD)
+}
+
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
 	// The link proof places the links of the call by the hook's folder (its own
 	// walk of the command); a write after a cd is judged by the other readers
@@ -1574,14 +1586,47 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if input.DialectHint != "" {
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
+	// mentionCWD and readMentions are the folder and the reads of the
+	// mention checks below: the decision's own.
+	mentionCWD, readMentions := input.CWD, func(read func()) { read() }
+	if decision == "" && copyModeWholeCallByName(request, input) {
+		// A copy-mode actor's call has no folder on this host: its files
+		// stay in the actor. The laptop's decision reads the call's words
+		// by name in the hook's folder and says protected for tar cz
+		// ~/.ssh, cd .ssh && tar cz . or a cd chain into ~/.ssh; in no
+		// folder it reads nothing, so the actor allowed what the laptop
+		// blocks (substrate-1 GAP-0922). Only this decision, and the
+		// mention checks of its verdict, run in the guest's folder, by name
+		// alone: no read reaches this host's file system
+		// (fixturefs.Unread), and the rest of the call stays in no folder.
+		// The first fix moved the whole proof to the guest folder: it
+		// opened host files and blocked calls the laptop allows.
+		guestCWD := request.SandboxGuestCWD
+		posixShell := trustedPOSIXShellCall(input, facts)
+		readMentions = fixturefs.Unread
+		readMentions(func() {
+			memo := hookpaths.NewTargetMemo().WithShellStartup(request.targetMemo.ShellStartup())
+			decision = memo.ActionCommandDecisionInShell(input.Command, guestCWD, facts.ActiveHome, globFacts, posixShell)
+			if input.DialectHint != "" {
+				decision = memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, guestCWD, facts.ActiveHome, input.DialectHint, globFacts)
+			}
+		})
+		if decision != "" {
+			mentionCWD = guestCWD
+		}
+	}
 	if decision != "" {
 		if request.nonWriteMention != nil && trustedShellCommandInput(request.Input) {
-			readsOnly := hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+			var readsOnly, noKnownWrite bool
+			readMentions(func() {
+				readsOnly = hookpaths.ActionMentionsNoWriteRole(input.Command, mentionCWD, facts.ActiveHome, input.DialectHint, globFacts)
+				noKnownWrite = !readsOnly && request.unknownMention != nil &&
+					hookpaths.ActionMentionsNoKnownWrite(input.Command, mentionCWD, facts.ActiveHome, input.DialectHint, globFacts)
+			})
 			switch {
 			case readsOnly && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook:
 				*request.nonWriteMention = true
-			case !readsOnly && request.unknownMention != nil &&
-				hookpaths.ActionMentionsNoKnownWrite(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) &&
+			case noKnownWrite &&
 				(!request.ProtectedHomeHook || clientMapClearsKeyFiles(clientTargets, facts.ActiveHome)):
 				// The unknown tier (rel-1-0-10:GAP-0843, ONE BOUND RULE): the
 				// shared unknown-tier finding decides, in every pack. A call
