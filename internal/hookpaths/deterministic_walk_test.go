@@ -87,6 +87,10 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 	if err := os.Link(late, alias); err != nil {
 		t.Fatal(err)
 	}
+	// A state folder changed within activeStateViewGuard (or the present
+	// filesystem clock tick) is not kept across calls (activeStateSettleLimit,
+	// DET111): let the new state settle so the index is kept and can be read.
+	time.Sleep(2 * activeStateViewGuard)
 	if _, same, _ := ResolveActiveStateHardlinkTarget(alias, home); !same {
 		t.Fatal("the hard link to the last cache entry was not found on an idle box")
 	}

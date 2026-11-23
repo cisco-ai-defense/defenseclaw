@@ -62,6 +62,10 @@ func TestGAP1789KnownFolderReadPastAnswerWait(t *testing.T) {
 	if err := os.Link(twin, twinLink); err != nil {
 		t.Fatal(err)
 	}
+	// A state folder changed within activeStateViewGuard (or the present
+	// filesystem clock tick) is not kept across calls (activeStateSettleLimit,
+	// DET111): let the new state settle so the index is kept and can be read.
+	time.Sleep(2 * activeStateViewGuard)
 
 	// The held read: a read of the slow folder made by stillPlain while
 	// holding is on waits readTakes, or until the test ends.
