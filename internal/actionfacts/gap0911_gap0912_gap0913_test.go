@@ -135,3 +135,36 @@ func TestGAP0913SearchInsideAProbeFolder(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP0925SearchFolderAfterACd: a recursive search's relative folder
+// after a cd is read in the folder the cd reaches, not in the call's start
+// folder; a cd the walk cannot follow leaves a file-unknown read
+// (substrate-1:GAP-0925: cd ~/.config && grep -r KEY gh read nothing, in
+// both rels too).
+func TestGAP0925SearchFolderAfterACd(t *testing.T) {
+	dir, home := searchReadsTree(t)
+	for _, row := range []struct {
+		command string
+		want    string
+	}{
+		{"cd home/.config && grep -r oauth_token gh", "gh/hosts.yml"},
+		{"cd ~/.config && grep -r oauth_token gh", "gh/hosts.yml"},
+		{"cd home/.config && grep -r oauth_token", "gh/hosts.yml"},
+		{"cd home && grep -r aws_secret_access_key .aws", ".aws/credentials"},
+		{"cd home/src && grep -r aws_secret_access_key ../.aws", ".aws/credentials"},
+		{"cd home/src && cd .. && grep -rl aws_secret_access_key .aws", ".aws/credentials"},
+		// A failed first cd leaves the second in another folder.
+		{"cd home/src; cd .. && grep -rl aws_secret_access_key .aws", "<unknown>"},
+		{`cd "$D" && grep -r oauth_token gh`, "<unknown>"},
+	} {
+		got := searchReads(t, dir, home, row.command)
+		if !slices.ContainsFunc(got, func(read string) bool { return strings.HasSuffix(read, row.want) }) {
+			t.Errorf("%q: reads %v, want one ending in %s", row.command, got, row.want)
+		}
+	}
+	for _, command := range []string{"cd home/src && grep -rn TODO .", "cd home && grep -r oauth_token src", "cd home/.config && grep -r oauth_token nothere"} {
+		if got := searchReads(t, dir, home, command); len(got) != 0 {
+			t.Errorf("%q: reads %v, want none", command, got)
+		}
+	}
+}

@@ -825,18 +825,19 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 				filter.rg = rgSearchFilterOf(command, argv, r.rgWorkingFolder(command))
 			}
 		}
+		base, placed := r.searchWorkFolder(command)
 		for _, index := range operands {
 			argument := command.Arguments[index]
 			r.argument(command.ID, argument, false)
 			if recursive && !argument.Expands && argument.Value != "" {
-				r.searchFolder(command.ID, argument.Value, filter)
+				r.searchFolder(command.ID, argument.Value, base, placed, filter)
 			}
 		}
 		if recursive && len(operands) == 0 && (program != "rg" || (!r.pipedStdin(command) && !parseRgCommandLine(argv).stdin)) {
 			// No folder operand: grep -r and rg search the working folder
 			// (an rg fed by a pipe, or given -, searches its input instead,
 			// substrate-1:GAP-0344).
-			r.searchFolder(command.ID, ".", filter)
+			r.searchFolder(command.ID, ".", base, placed, filter)
 		}
 		return operands
 	case credentialReadsSources:
@@ -1574,6 +1575,27 @@ var credentialWalkSkips = map[string]bool{
 	".git": true, "node_modules": true, "site-packages": true, "dist-packages": true,
 }
 
+// searchWorkFolder is the folder a recursive search of command reads a
+// relative folder operand in: the call's folder, or the one the static cd
+// steps before it reach. placed is false where a cd moved the search to a
+// folder the walk cannot place. A relative folder was joined to the call's
+// folder whatever cd came before, so cd ~/.config && grep -r KEY gh read
+// nothing (substrate-1 GAP-0925).
+func (r *credentialPathResolver) searchWorkFolder(command CommandFact) (base string, placed bool) {
+	if command.Dialect != DialectPOSIX {
+		return r.cwd, !windowsWorkFolders(r.commands)[command.ID].moved()
+	}
+	folders := command.workFolders
+	if !folders.moved() {
+		return r.cwd, r.outerCommandsStay(command)
+	}
+	if len(folders) != 1 {
+		return "", false
+	}
+	logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folders[0])
+	return filepath.FromSlash(logical), ok
+}
+
 // searchFolder resolves the credentials files under the folder a recursive
 // search reads, in it and in every folder below it (substrate-1:GAP-0344,
 // credentialPathWalk); for ripgrep, only the files and folders its filter
@@ -1585,16 +1607,22 @@ var credentialWalkSkips = map[string]bool{
 // file-unknown read: the chain's unknown tier, never a cap of the resolve,
 // so the search itself is judged as it was before the walk (T6 ruling
 // 2026-11-18).
-func (r *credentialPathResolver) searchFolder(id int64, folder string, filter credentialWalkFilter) {
+func (r *credentialPathResolver) searchFolder(id int64, folder, base string, placed bool, filter credentialWalkFilter) {
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
 	}
 	if !filepath.IsAbs(dir) {
-		if r.cwd == "" {
+		if !placed {
+			// A cd the walk cannot follow moved the search: the folder
+			// may hold any file (substrate-1 GAP-0925).
+			r.add(id, "", true)
 			return
 		}
-		dir = filepath.Join(r.cwd, dir)
+		if base == "" {
+			return
+		}
+		dir = filepath.Join(base, dir)
 	}
 	// The folder as rg names its paths: the shell expands ~/.
 	shown := folder

@@ -239,20 +239,8 @@ func (r *credentialPathResolver) rgWorkingFolder(command CommandFact) string {
 	}
 	folders := command.workFolders
 	if !folders.moved() {
-		// Bounded: a chain of outer commands deeper than 32 is unsure.
-		parent := command.ParentCommandID
-		for depth := 0; parent != 0; depth++ {
-			if depth == 32 {
-				return ""
-			}
-			index := slices.IndexFunc(r.commands, func(c CommandFact) bool { return c.ID == parent })
-			if index < 0 {
-				return ""
-			}
-			if r.commands[index].workFolders.moved() {
-				return ""
-			}
-			parent = r.commands[index].ParentCommandID
+		if !r.outerCommandsStay(command) {
+			return ""
 		}
 		return cwd
 	}
@@ -290,6 +278,23 @@ func (r *credentialPathResolver) rgWorkingFolder(command CommandFact) string {
 		}
 	}
 	return filepath.ToSlash(physical)
+}
+
+// outerCommandsStay reports that no command command runs inside moved
+// the folder. Bounded: a chain of outer commands deeper than 32 is unsure.
+func (r *credentialPathResolver) outerCommandsStay(command CommandFact) bool {
+	parent := command.ParentCommandID
+	for depth := 0; parent != 0; depth++ {
+		if depth == 32 {
+			return false
+		}
+		index := slices.IndexFunc(r.commands, func(c CommandFact) bool { return c.ID == parent })
+		if index < 0 || r.commands[index].workFolders.moved() {
+			return false
+		}
+		parent = r.commands[index].ParentCommandID
+	}
+	return true
 }
 
 // rgJoin is Rust's Path::join of a folder and a name: no "/" is added
