@@ -3,28 +3,12 @@
 
 package gateway
 
-import (
-	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
-)
+import "github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 
 // operandBoundReason is the audit reason of a call past the operand bound
 // (actionfacts.MaxOperandsPerCall): the bound rule's items cap
 // (rel-1-0-10:GAP-0313).
 var operandBoundReason = bounded.Of(bounded.Items).Reason()
-
-// operandBoundTruncated reports the evaluation-limit finding of a call past
-// the operand bound.
-func operandBoundTruncated(finding RuleFinding) bool {
-	return finding.RuleID == evaluationLimitRuleID && finding.Evidence == operandBoundReason
-}
-
-// operandBoundTruncatedString is operandBoundTruncated for a finding string
-// of a hook answer.
-func operandBoundTruncatedString(finding string) bool {
-	return strings.HasPrefix(finding, evaluationLimitRuleID+":") && strings.Contains(finding, operandBoundReason)
-}
 
 // operandBoundTierAction is the action of findings with the policy tier
 // applied, as the hook routes decide them (guardrailActionForProfile over the
