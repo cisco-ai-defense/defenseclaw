@@ -415,6 +415,10 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// guestMemo keeps the guest placement of the call (guestReadingMemo):
+	// the placed children, the split-gap reading and the sandbox hook-config
+	// guard read the same guest input. A copy of the request shares it.
+	guestMemo *guestReadingMemo
 	// inlineTierNested marks a request derived from one already dispatched:
 	// only the outermost call applies the inline hand-off tier
 	// (withInlineHandoffTier).
@@ -644,6 +648,9 @@ func dispatchTrustedActionOnce(
 	defer func() { findings = sedBackupUnresolvedFindings(request, findings) }()
 	if request.simpleMemo == nil {
 		request.simpleMemo = &trustedSimpleMemo{}
+	}
+	if request.guestMemo == nil {
+		request.guestMemo = &guestReadingMemo{}
 	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	// Only the strict tier judges the body of a function the text never
@@ -1176,7 +1183,7 @@ func dispatchTrustedActionOnce(
 	placed := placedReading{}
 	if input, ok := sandboxGuestPlacedInput(request, facts); ok {
 		analyzed := actionfacts.Analyze(input)
-		children, candidates, cut := sandboxGuestPlacedChildren(input, analyzed)
+		children, candidates, cut := sandboxGuestPlacedChildren(request.guestMemo, input, analyzed)
 		placed = placedReading{facts: &analyzed, everyOwner: true, children: children, candidates: candidates}
 		if cut.Any() {
 			// More placed commands than the reading takes: the call is
@@ -4720,8 +4727,8 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // target no command runs in (guestPlacement.candidate): they count only for
 // the private-key read proof, as the laptop's readers judge a candidate
 // directory (substrate-1 GAP-0379).
-func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
-	placements, stopped := sandboxGuestPlacements(input, facts, true)
+func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+	placements, stopped := memo.plan(input, facts).placements(true)
 	for _, placement := range placements {
 		child := input
 		child.Command, child.CWD = placement.text, placement.cwd
