@@ -799,9 +799,11 @@ func skillUseRefusedMessage(name string, q SubstrateQuarantine) string {
 
 // skillUsedFolder is the folder of dirs a PreToolUse call uses: the one the
 // Skill tool names by its folder name or its SKILL.md frontmatter name (a
-// plugin skill is "plugin:name"; case-insensitive), the one holding a path
-// the call names (as given, or as the kit resolved it: relative paths and
-// links), or one a command names; "" when the call uses none of them.
+// plugin skill is "plugin:name"; case-insensitive), or the one holding a
+// path the call names (Read file_path, NotebookRead notebook_path, as given
+// or as the kit resolved it: relative paths and links); "" when the call
+// uses none of them. These are the calls the kit runs the folder pass for
+// (kit readTools, skillTools).
 func skillUsedFolder(env substrateEnvelope, dirs []string) string {
 	var ev struct {
 		Tool  string         `json:"tool_name"`
@@ -821,7 +823,7 @@ func skillUsedFolder(env substrateEnvelope, dirs []string) string {
 		}
 	}
 	var named []string
-	for _, k := range []string{"file_path", "notebook_path", "path"} {
+	for _, k := range []string{"file_path", "notebook_path"} {
 		if f := str(k); strings.HasPrefix(f, "/") {
 			named = append(named, path.Clean(f))
 		}
@@ -839,7 +841,6 @@ func skillUsedFolder(env substrateEnvelope, dirs []string) string {
 			folders = substrateSkillFolders(env.Facts)
 		}
 	}
-	cmd := str("command")
 	for _, d := range dirs {
 		dir := path.Clean("/" + strings.TrimPrefix(d, "/"))
 		if skill != "" && (strings.EqualFold(skill, path.Base(dir)) || strings.EqualFold(skill, skillFrontmatterName(dir, folders[dir]))) {
@@ -849,9 +850,6 @@ func skillUsedFolder(env substrateEnvelope, dirs []string) string {
 			if n == dir || strings.HasPrefix(n, dir+"/") {
 				return dir
 			}
-		}
-		if cmd != "" && strings.Contains(cmd, path.Base(path.Dir(dir))+"/"+path.Base(dir)) {
-			return dir
 		}
 	}
 	return ""
