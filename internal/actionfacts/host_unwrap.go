@@ -1483,7 +1483,7 @@ func startProcessCommandLine(host string, line *psparse.StringLit) (string, bool
 		return "", false
 	}
 	words := strings.FieldsFunc(text, func(r rune) bool { return r == ' ' || r == '\t' })
-	body, _, ok := powerShellLauncherBody(append([]string{host}, words...))
+	body, ok := powerShellLauncherBody(append([]string{host}, words...))
 	if !ok {
 		return "", false
 	}

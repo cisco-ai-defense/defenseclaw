@@ -26,9 +26,7 @@ import (
 //
 //   - powershell, powershell.exe, pwsh, pwsh.exe: the words after -Command
 //     (-c and every prefix of it) joined with spaces, or those from the first
-//     word that is not an option. Positional marks the latter so the caller
-//     can use the host edition: Windows PowerShell 5.1 runs command text,
-//     while pwsh 7 treats the word as a script file;
+//     word that is not an option, which PowerShell runs as the command;
 //   - cmd, cmd.exe: the words after /c, /k or /r joined with spaces;
 //   - bash, sh, zsh, dash, ksh, mksh: the -c script word.
 //
@@ -54,9 +52,6 @@ type LauncherCall struct {
 	// Body is the script text and Dialect its language.
 	Body    string
 	Dialect Dialect
-	// Positional is a script supplied without -Command. Windows PowerShell
-	// 5.1 executes it as command text; pwsh 7 treats it as a script file.
-	Positional bool
 	// Trailing is set when words follow the script word that the script may
 	// run as code (the positional arguments of bash -c '"$@"' _ ...): they
 	// are not part of Body (rel-1-0-10:GAP-0803).
@@ -138,7 +133,7 @@ func shellLauncherCallAt(argv []string, start int) (LauncherCall, bool) {
 	switch launcherProgram(launcher[0]) {
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		call.Dialect = DialectPowerShell
-		call.Body, call.Positional, ok = powerShellLauncherBody(launcher)
+		call.Body, ok = powerShellLauncherBody(launcher)
 	case "cmd", "cmd.exe":
 		call.Dialect = DialectCMD
 		call.Body, ok = cmdLauncherBody(launcher)
@@ -253,32 +248,32 @@ func powerShellOptionIs(option, full string, min int) bool {
 // '<value>'; `, as the launcher reading of the same call as one command line
 // (launcherWorkingDirectory) and of its argv (argvWorkingDirectory) read it,
 // so the Codex shell argv ["pwsh", "-wd", <folder>, "-Command", <script>] is
-// read as the string is (rel-1-0-10:GAP-0198). The returned positional
-// bit distinguishes a Windows PowerShell 5.1 command from a pwsh 7 file.
-func powerShellLauncherBody(argv []string) (string, bool, bool) {
+// read as the string is (rel-1-0-10:GAP-0198); any other spelling of it has
+// no body, as before.
+func powerShellLauncherBody(argv []string) (string, bool) {
 	location := ""
-	join := func(words []string, positional bool) (string, bool, bool) {
+	join := func(words []string) (string, bool) {
 		body, ok := joinPowerShellBody(words)
-		return location + body, positional, ok
+		return location + body, ok
 	}
 	for i := 1; i < len(argv); i++ {
 		word := argv[i]
 		if word == "" {
-			return "", false, false
+			return "", false
 		}
 		if word[0] != '-' && word[0] != '/' {
-			return join(argv[i:], true)
+			return join(argv[i:])
 		}
 		switch {
 		case workingDirectoryWord(word):
 			move, ok := workingDirectoryMove(argv, i)
 			if !ok || location != "" {
-				return "", false, false
+				return "", false
 			}
 			location = move
 			i++
 		case powerShellOptionIs(word, "command", 1):
-			return join(argv[i+1:], false)
+			return join(argv[i+1:])
 		case powerShellOptionIs(word, "noprofile", 3),
 			powerShellOptionIs(word, "nologo", 3),
 			powerShellOptionIs(word, "noninteractive", 4),
@@ -292,15 +287,15 @@ func powerShellLauncherBody(argv []string) (string, bool, bool) {
 			powerShellOptionIs(word, "outputformat", 1):
 			i++
 			if i >= len(argv) {
-				return "", false, false
+				return "", false
 			}
 		default:
 			// -File, -EncodedCommand, -Version and every option not listed:
 			// the body is not one fixed text.
-			return "", false, false
+			return "", false
 		}
 	}
-	return "", false, false
+	return "", false
 }
 
 // joinPowerShellBody joins the words PowerShell runs as one command line.

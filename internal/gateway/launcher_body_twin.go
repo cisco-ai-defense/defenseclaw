@@ -101,9 +101,8 @@ type launcherBodyReading struct {
 //     one command line `<pwsh|powershell>[.exe] <words>` the bare launcher
 //     is (powerShellLineOfArgv), so the readings of a bare launcher string
 //     (psparse's script reading, the profile wrapper reduction, which counts
-//     only a match a profile or an outer redirect cannot undo) decide. On a
-//     Windows hook host, a positional powershell.exe argv runs its body as
-//     command text and uses that body reading (GAP-1557).
+//     only a match a profile or an outer redirect cannot undo) decide, and
+//     every spelling agrees with the bare one.
 //   - POSIX launcher (bash -c): the script only when the call's own analysis
 //     is limit_exceeded.
 //
@@ -185,18 +184,6 @@ func launcherCallTwin(
 		if bodyFacts.Parse.Status != actionfacts.StatusLimitExceeded {
 			launcher := words[call.Start:]
 			bare := launcherProgramName(launcher[0])
-			// A positional argv body is command text on the native Windows
-			// PowerShell 5.1 host. The existing bare-line reading cannot
-			// see it because psparse correctly leaves positional pwsh 7
-			// words as script files. Use the launcher's already parsed body
-			// here, including its -wd move, only for the 5.1 executable.
-			if isArgv && call.Positional && request.Input.WindowsHookHost &&
-				(bare == "powershell" || bare == "powershell.exe") {
-				twin.Input.Command, twin.Input.Args, twin.Input.Argv = call.Body, nil, nil
-				twin.Input.DialectHint = actionfacts.DialectPowerShell
-				twin.LegacyText = call.Body
-				return twin, true, fully && len(call.Body) <= actionfacts.MaxCommandBytes
-			}
 			if !isArgv && statement == 0 && call.Start == 0 && bare == launcher[0] {
 				return trustedActionRequest{}, false, false
 			}
