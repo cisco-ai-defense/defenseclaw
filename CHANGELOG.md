@@ -36,6 +36,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **The skill publisher is a content field.** A publisher a SKILL.md declares is the skill author's own text, so a redacting profile now masks a secret in `defenseclaw.inventory.skill.publisher`, as it already did in the declared description and version.
 - **A skill folder that has not changed is not read again on every scan.** Discovery keeps each folder's hash while none of its files changed and reads every folder in full at least once a day. On a managed Windows machine every scan still reads every folder.
 - **Managed scans on macOS and Linux report every install of an agent.** Each copy of an agent binary in a user's bin folders or the machine prefixes is its own discovery signal, with `defenseclaw.ai.component.location` (`~/.local/bin/claude`, or `/opt/homebrew/bin/codex` for a system location).
+- **DefenseClaw now also checks skills that OpenCode loads from `~/.config/opencode/skill` and `skills`, `~/.opencode/skill` and `skills`, a project's `.opencode/skill` and `skills`, and the `.claude/skills` and `.agents/skills` folders in a project or your home.**
 
 ### Security
 
@@ -65,6 +66,10 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - Standalone Setup no longer takes over a user's own earlier per-user DefenseClaw folder; it leaves that account as it found it. One busy or unusable profile no longer stops the install for every other user.
 - Managed Claude Code enrollment accepts an existing ClaudeCode policy in the machine registry that merges managed sources, instead of failing on any such policy.
 - A standalone reinstall keeps the shared hook files' owner when Intune or an administrator edited `requirements.toml` or `90-defenseclaw.json`, instead of failing with error 1603.
+- Setup no longer fails with error 1603 when an administrator has already placed a Codex `requirements.toml` on the machine with no DefenseClaw settings in it. A DefenseClaw section without its lock is still refused.
+- On a managed standalone Windows install, upgrading an older config that names the strict or permissive rule pack DefenseClaw ships keeps that pack as the preset, instead of treating it as a custom pack that needs a digest.
+- On a managed Windows machine the Hook Guardian no longer keeps about one CPU core busy while idle: a check that finds nothing changed renders the Claude Code machine settings once, not once per earlier hook contract.
+- On a managed Windows machine the hook release protection record is written before a new hook generation is published, so a failed write leaves the previous generation in place instead of one the record does not cover.
 
 #### Routing, budgets and cost
 - A Claude stream that stops before its usage record is charged to budgets as unknown spend, not as its opening token count.
