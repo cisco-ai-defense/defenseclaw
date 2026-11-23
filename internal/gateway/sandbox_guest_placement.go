@@ -614,9 +614,25 @@ type guestShellReading struct{ text, dir string }
 // with the statements times the folders followed (substrate-1 GAP-0885).
 // nil when the script does not parse or runs no unread command.
 func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool {
+	readings, _ := guestOwnShellWalk(command, cwd, home)
+	return readings
+}
+
+// guestOwnShellWalk is guestOwnShellFolders with, for each simple command
+// text, whether the walk placed it at every place it comes: true when each
+// is a statement of the call shell, read where the walk knew the folders the
+// shell may stand in (at top level, or on the path an && or a cd X || exit
+// runs); false when one sits inside another command (a subshell, a group,
+// an if, a loop, a function body, a pipeline, an || list) or comes after a
+// directory change the walk cannot follow. A text missing from it was not
+// read by the walk. The sandbox hook-config guard reads a candidate folder
+// of a placed text only where the walk says the shell may stand in it, and
+// keeps every candidate folder of a text the walk did not place
+// (agent_hook_config_guard.go, substrate-1 GAP-0888, B43).
+func guestOwnShellWalk(command, cwd, home string) (map[guestShellReading]bool, map[string]bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil || !path.IsAbs(cwd) {
-		return nil
+		return nil, nil
 	}
 	cdpath := strings.Contains(command, "CDPATH")
 	// Functions whose body changes the folder; a call of one leaves it unknown.
@@ -661,13 +677,11 @@ func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool 
 	}
 	unread := false
 	var readings map[guestShellReading]bool
+	placed := map[string]bool{}
 	// mark keys every simple command of node (one statement, run from the
 	// folders in) with each of those folders, once a command before it may
-	// have moved the shell.
+	// have moved the shell, and notes in placed whether the walk placed it.
 	mark := func(node syntax.Node, in []string) {
-		if !unread || len(in) == 0 {
-			return
-		}
 		syntax.Walk(node, func(inner syntax.Node) bool {
 			stmt, ok := inner.(*syntax.Stmt)
 			if !ok {
@@ -676,7 +690,16 @@ func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool 
 			if call, isCall := stmt.Cmd.(*syntax.CallExpr); !isCall || len(call.Args) == 0 {
 				return true
 			}
-			if span := text(stmt); span != "" {
+			span := text(stmt)
+			if span == "" {
+				return true
+			}
+			if inner != node || len(in) == 0 {
+				placed[span] = false
+			} else if _, seen := placed[span]; !seen {
+				placed[span] = true
+			}
+			if unread && len(in) != 0 {
 				if readings == nil {
 					readings = map[guestShellReading]bool{}
 				}
@@ -741,7 +764,7 @@ func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool 
 		succeeded, failed := step(stmt, current)
 		current = join(succeeded, failed)
 	}
-	return readings
+	return readings, placed
 }
 
 // guestStmtLeaves reports, lexically, a statement that is a plain exit or
