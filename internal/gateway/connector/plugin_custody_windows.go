@@ -215,19 +215,19 @@ func windowsCustodyProfileImagePath(sid *windows.SID) (string, error) {
 // windowsCustodyOwnElement reports whether path is a folder or file of this
 // account's own tree: a plain element (windowsCustodyPlainElementOwner) owned
 // by this account (the effective user, or the per-user target a privileged
-// guardian verifies), or by Administrators strictly below profile
+// guardian verifies), or by Administrators strictly below scope
 // (windowsCustodyAdministratorsScope) and reached from it through plain
 // folders only (a junction inside the profile may lead to a shared folder).
 // LocalSystem and TrustedInstaller own Windows' folders, never the user's. Any
 // read that fails is outside the tree.
-func windowsCustodyOwnElement(path string, extra *windows.SID, profile string) bool {
+func windowsCustodyOwnElement(path string, extra *windows.SID, scope string) bool {
 	owner := windowsCustodyPlainElementOwner(path)
 	if owner == nil {
 		return false
 	}
 	if managed.IsWindowsTrustedAdminOwner(owner) {
-		return profile != "" && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) &&
-			winpath.RejectReparseBelow(profile, path) == nil
+		return scope != "" && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) &&
+			winpath.RejectReparseBelow(scope, path) == nil
 	}
 	if extra != nil {
 		return owner.Equals(extra)
@@ -272,30 +272,34 @@ func windowsCustodyPlainElementOwner(path string) *windows.SID {
 }
 
 // windowsCustodyAdministratorsLeftOut reports whether path, a folder or file
-// outside the account's tree, is left out only because Administrators owns it
-// and the check could not show it below the account's profile (an elevated
-// run made it there, and the profile is unread or not plainly spelled, a
-// junction-redirected profile, or path an 8.3 or subst spelling). The folder
-// is then already in the profile, and the user takes it back or has an
-// administrator remove the entry; moving the plugin folder is no fix
-// (GAP-1917). path is compared with profile as spelled and once both resolve
-// to their final paths; with the profile unread it may be anywhere, and
-// either step still clears the entry. This only chooses the words of a step
-// by hand; it never puts path in the tree.
-func windowsCustodyAdministratorsLeftOut(path, profile string) bool {
+// outside the account's tree, is a plain one Administrators owns (leftOut),
+// and whether it is shown to be below the account's profile (inProfile): an
+// elevated run made it there, and the check left it out because the profile
+// is not plainly spelled, is a junction-redirected profile, or path is an 8.3
+// or subst spelling. The user then takes it back or has an administrator
+// remove the entry; moving the plugin folder is no fix (GAP-1917). path is
+// compared with profile as spelled and once both resolve to their final
+// paths. With the profile unread (empty) path may be in it or a shared folder
+// such as C:\tools, so inProfile is false (GAP-1920). This only chooses the
+// words of a step by hand; it never puts path in the tree.
+func windowsCustodyAdministratorsLeftOut(path, profile string) (leftOut, inProfile bool) {
 	owner := windowsCustodyPlainElementOwner(path)
 	if owner == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-		return false
+		return false, false
 	}
-	if profile == "" || windowsCustodyStrictlyBelow(profile, path) {
-		return true
+	if profile == "" {
+		return true, false
+	}
+	if windowsCustodyStrictlyBelow(profile, path) {
+		return true, true
 	}
 	finalProfile, err := atomicTransformResolveDirectoryPathPlatform(profile)
 	if err != nil {
-		return false
+		return false, false
 	}
 	finalPath, err := atomicTransformResolveDirectoryPathPlatform(path)
-	return err == nil && windowsCustodyStrictlyBelow(finalProfile, finalPath)
+	below := err == nil && windowsCustodyStrictlyBelow(finalProfile, finalPath)
+	return below, below
 }
 
 // windowsCustodyStrictlyBelow reports whether path names an element strictly
@@ -415,14 +419,18 @@ func (j *windowsCustodyJudge) write(path string, write *hookAPIUntrustedWriteErr
 // a shared folder changes every folder that inherits from it): the step by
 // hand names the folder that grants it, once per entry (GAP-1899). When every
 // such folder is one Administrators owns in the account's profile, the step
-// says to take it back or have an administrator remove the entry (GAP-1917).
+// says to take it back or have an administrator remove the entry (GAP-1917);
+// when the profile could not be read, the step says so only for a folder in
+// the profile and otherwise to move the plugin folder (GAP-1920).
 func (j *windowsCustodyJudge) place(path, trustee string, deny bool, carriers []string) {
 	var outside []string
-	administrators := true
+	administrators, inProfile := true, true
 	for _, carrier := range carriers {
 		if !j.inTree(carrier) {
 			outside = append(outside, pluginCustodyQuote(carrier))
-			administrators = administrators && windowsCustodyAdministratorsLeftOut(carrier, j.profile)
+			leftOut, in := windowsCustodyAdministratorsLeftOut(carrier, j.profile)
+			administrators = administrators && leftOut
+			inProfile = inProfile && in
 		}
 	}
 	if len(outside) > 0 {
@@ -441,7 +449,24 @@ func (j *windowsCustodyJudge) place(path, trustee string, deny bool, carriers []
 		}
 		j.outside[key] = true
 		granted := strings.Join(outside, ", ")
+		is, it := "is", "it"
+		if len(outside) > 1 {
+			is, it = "are", "them"
+		}
 		switch {
+		case administrators && !inProfile && own:
+			j.step(path, "Administrators owns "+granted+", so no command is printed for the "+kind+" entry of "+trustee+
+				" on it: if "+granted+" "+is+" inside this account's own profile, take ownership of "+it+" and remove the entry"+
+				" or have an administrator remove it, and if not, move the plugin folder under a folder this account owns"+
+				" (removing the entry there changes every folder that inherits from it)")
+			return
+		case administrators && !inProfile:
+			j.step(path, "the "+kind+" entry of "+trustee+" that "+pluginCustodyQuote(path)+" inherits is granted at "+granted+
+				", which Administrators owns, so no command is printed for it (a change there reaches every folder that inherits from it):"+
+				" if "+granted+" "+is+" inside this account's own profile, take ownership of "+it+" and remove the entry there"+
+				" or have an administrator remove it, and if not, have "+pluginCustodyQuote(path)+
+				" stop inheriting the entry or move the plugin folder under a folder this account owns")
+			return
 		case administrators && own:
 			j.step(path, "Administrators owns "+granted+", so no command is printed for the "+kind+" entry of "+trustee+
 				" on it: take ownership of "+granted+" and remove the entry, or have an administrator remove it")
