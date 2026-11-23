@@ -140,17 +140,18 @@ func TestMCPBridgeEndToEnd(t *testing.T) {
 	// The agent: its MCP client starts the shim the relay configured.
 	sock := filepath.Join(home, relay.MCPSocketDir, "notes.sock")
 	deadline := time.Now().Add(10 * time.Second)
+	// The relay makes the socket, then names the shim in the agent's MCP
+	// configuration; the agent's client starts from that entry.
 	for {
-		if _, err := os.Stat(sock); err == nil {
+		_, err := os.Stat(sock)
+		raw, _ := os.ReadFile(cfg.Relay.ClaudeStateFile)
+		if err == nil && strings.Contains(string(raw), `"mcp-stdio"`) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the relay never made the agent's socket")
+			t.Fatalf("the relay never made the agent's socket and MCP entry: %v %s", err, raw)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if raw, err := os.ReadFile(cfg.Relay.ClaudeStateFile); err != nil || !strings.Contains(string(raw), `"mcp-stdio"`) {
-		t.Fatalf("agent MCP entry: %s %v", raw, err)
 	}
 	agentIn, toShim := io.Pipe()
 	fromShim, agentOut := io.Pipe()
