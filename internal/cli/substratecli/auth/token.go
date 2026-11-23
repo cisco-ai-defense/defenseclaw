@@ -23,10 +23,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
 // refreshSkew: a token that expires within this window is refreshed.
 const refreshSkew = 60 * time.Second
+
+// signInRefreshAge: a sign-in token issued (iat) longer ago than this is
+// refreshed before it is used, so it is always younger than the admin
+// listener's sign-in age limit (identity.MaxPersonSignInAge, 15 minutes,
+// GAP-0409) whatever the issuer's exp says.
+const signInRefreshAge = 12 * time.Minute
 
 // Token is one sign-in. Issuer, Subject, Principal and Groups are read
 // from the JWT payload WITHOUT verification, for display only; the admin
@@ -55,41 +63,88 @@ func (t Token) GoString() string { return t.String() }
 
 // pick returns the bearer: the ID token when present and valid for more
 // than refreshSkew, else the access token. ok is false when neither is.
+// A JWT with an iat counts as expired MaxPersonSignInAge after it, when
+// that comes before its exp: the admin listener refuses it then (GAP-0409).
 func (t *Token) pick(now time.Time) (string, bool) {
 	if t.IDToken != "" {
-		exp := jwtExpiry(t.IDToken)
-		if exp.IsZero() {
-			exp = t.Expiry
-		}
-		if !exp.IsZero() && exp.After(now.Add(refreshSkew)) {
+		if exp := t.idUntil(); !exp.IsZero() && exp.After(now.Add(refreshSkew)) {
 			return t.IDToken, true
 		}
 	}
 	if t.AccessToken != "" {
-		exp := t.Expiry
-		if exp.IsZero() {
-			exp = jwtExpiry(t.AccessToken)
-		}
 		// An opaque access token with no stated expiry is taken as valid.
-		if exp.IsZero() || exp.After(now.Add(refreshSkew)) {
+		if exp := t.accessUntil(); exp.IsZero() || exp.After(now.Add(refreshSkew)) {
 			return t.AccessToken, true
 		}
 	}
 	return "", false
 }
 
-// stale reports whether the preferred token (ID, else access) is gone or
-// within refreshSkew of expiry, so a refresh is due.
+// stale reports whether the preferred token (ID, else access) is gone,
+// within refreshSkew of expiry, or issued more than signInRefreshAge ago,
+// so a refresh is due.
 func (t *Token) stale(now time.Time) bool {
 	if t.IDToken != "" {
-		exp := jwtExpiry(t.IDToken)
-		if exp.IsZero() {
-			exp = t.Expiry
-		}
-		return exp.IsZero() || !exp.After(now.Add(refreshSkew))
+		exp := t.idUntil()
+		return exp.IsZero() || !exp.After(now.Add(refreshSkew)) || signInOld(t.IDToken, now)
 	}
-	_, ok := t.pick(now)
-	return !ok
+	b, ok := t.pick(now)
+	return !ok || signInOld(b, now)
+}
+
+// idUntil is when the admin listener stops accepting the ID token.
+func (t *Token) idUntil() time.Time {
+	exp := jwtExpiry(t.IDToken)
+	if exp.IsZero() {
+		exp = t.Expiry
+	}
+	return signInLimit(t.IDToken, exp)
+}
+
+// accessUntil is when the admin listener stops accepting the access token;
+// zero for an opaque token with no stated expiry.
+func (t *Token) accessUntil() time.Time {
+	exp := t.Expiry
+	if exp.IsZero() {
+		exp = jwtExpiry(t.AccessToken)
+	}
+	return signInLimit(t.AccessToken, exp)
+}
+
+// UsableUntil is when the last of the stored bearers (ID and access
+// token) stops being accepted by the admin listener: its exp, or iat plus
+// identity.MaxPersonSignInAge when that comes first (GAP-0409). Zero when
+// no bearer states an expiry.
+func (t *Token) UsableUntil() time.Time {
+	var until time.Time
+	if t.IDToken != "" {
+		until = t.idUntil()
+	}
+	if t.AccessToken != "" {
+		if e := t.accessUntil(); e.After(until) {
+			until = e
+		}
+	}
+	return until
+}
+
+// signInLimit is exp, or iat plus identity.MaxPersonSignInAge when the
+// JWT states an iat and that comes first.
+func signInLimit(jwt string, exp time.Time) time.Time {
+	iat := decodeClaims(jwt).issuedAt()
+	if iat.IsZero() {
+		return exp
+	}
+	if limit := iat.Add(identity.MaxPersonSignInAge); exp.IsZero() || limit.Before(exp) {
+		return limit
+	}
+	return exp
+}
+
+// signInOld reports a JWT issued more than signInRefreshAge ago.
+func signInOld(jwt string, now time.Time) bool {
+	iat := decodeClaims(jwt).issuedAt()
+	return !iat.IsZero() && now.Sub(iat) > signInRefreshAge
 }
 
 // flexInt accepts a JSON number or a numeric string.
@@ -144,6 +199,7 @@ type claims struct {
 	PreferredUsername string          `json:"preferred_username"`
 	Email             string          `json:"email"`
 	Exp               any             `json:"exp"`
+	Iat               any             `json:"iat"`
 	Groups            json.RawMessage `json:"groups"`
 }
 
@@ -175,9 +231,15 @@ func parseClaims(jwt string) (claims, bool) {
 	return c, true
 }
 
-func (c claims) expiry() time.Time {
+func (c claims) expiry() time.Time { return claimTime(c.Exp) }
+
+func (c claims) issuedAt() time.Time { return claimTime(c.Iat) }
+
+// claimTime reads a NumericDate claim (a JSON number or a numeric string);
+// the zero time when it is missing or not a positive number.
+func claimTime(claim any) time.Time {
 	var sec float64
-	switch v := c.Exp.(type) {
+	switch v := claim.(type) {
 	case float64:
 		sec = v
 	case string:

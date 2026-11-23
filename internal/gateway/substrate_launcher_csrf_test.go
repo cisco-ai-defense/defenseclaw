@@ -39,7 +39,7 @@ func TestLauncherWritesPassTheAdminCSRFGate(t *testing.T) {
 			_, err := c.Create(ctx, substrateapi.CreateRequest{Profile: "p", Template: "t"})
 			return err
 		},
-		"delete":    func() error { return c.Delete(ctx, "eng-web", "a1") },
+		"delete":    func() error { _, err := c.Delete(ctx, "eng-web", "a1"); return err },
 		"decide":    func() error { return c.Decide(ctx, "ask-1", "approve", false, "") },
 		"setsecret": func() error { return c.SetSecret(ctx, "NPM_TOKEN", "v") },
 		"rmsecret":  func() error { return c.RemoveSecret(ctx, "NPM_TOKEN") },

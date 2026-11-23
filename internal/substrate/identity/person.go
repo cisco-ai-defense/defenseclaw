@@ -36,6 +36,15 @@ const (
 // issuers without accepting long-lived credentials).
 const MaxPersonTokenLifetime = 24 * time.Hour
 
+// MaxPersonSignInAge is how long after it was issued (iat) the admin
+// listener accepts a person's sign-in token, whatever its exp says
+// (GAP-0409): the gateway cannot revoke a sign-in, so after `defenseclaw
+// substrate logout` a copied token works for at most this long, not for
+// an issuer's 60 to 90 minute access-token lifetime. The launcher refreshes
+// its stored token before it is this old. Workload (CI) tokens keep their
+// own exp.
+const MaxPersonSignInAge = 15 * time.Minute
+
 // Person is a verified admin-listener caller: a person signed in with the
 // configured OIDC issuer (the launcher's device flow), or a CI workload
 // (workload_oidc).
@@ -48,7 +57,31 @@ type Person struct {
 	// unverified (email_verified false) is never the principal.
 	Principal string
 	Groups    []string
-	Expires   time.Time
+	// Expires is when the admin listener stops accepting the token: its
+	// exp, or for a person sign-in iat plus MaxPersonSignInAge when that
+	// comes first. For a Kubernetes caller it is when the gateway asks the
+	// API server again (the review cache), not the end of the token: that
+	// is TokenExpires.
+	Expires time.Time
+	// TokenExpires is a Kubernetes caller's own token exp, zero for a
+	// token that carries none (a static or provider token). Only the
+	// Kubernetes verifier sets it (GAP-0588).
+	TokenExpires time.Time
+}
+
+// SessionBound is the latest a token the gateway derives from this
+// caller's bearer (a relay session token) may live: the end of the bearer
+// itself. For a person sign-in that is also the sign-in age bound of
+// GAP-0409, so a session token never outlives a logout by more than
+// MaxPersonSignInAge. Zero means the end is unknown (an opaque Kubernetes
+// token): the derived token keeps its own cap (GAP-0588).
+func (p Person) SessionBound() time.Time {
+	if p.Kind == PersonKube {
+		// Expires is the review cache here; never cap a session at the
+		// cache time.
+		return p.TokenExpires
+	}
+	return p.Expires
 }
 
 // ID is the stable owner key of a person: issuer and subject.
@@ -250,14 +283,28 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 	case !matched:
 		return Person{}, reasonf(ReasonSubject, "token is from a workload this install does not trust")
 	}
-	if err := checkTimes(v.now(), v.skew, c.Expiry, c.NotBefore, c.IssuedAt, MaxPersonTokenLifetime); err != nil {
+	now := v.now()
+	if err := checkTimes(now, v.skew, c.Expiry, c.NotBefore, c.IssuedAt, MaxPersonTokenLifetime); err != nil {
 		return Person{}, err
+	}
+	expires := time.Unix(*c.Expiry, 0)
+	if is.Kind == PersonHuman {
+		// checkTimes has refused a token without iat.
+		limit := time.Unix(*c.IssuedAt, 0).Add(MaxPersonSignInAge)
+		// The sign-in age ends like exp: at the limit, with no skew
+		// grace (GAP-0569).
+		if !now.Before(limit) {
+			return Person{}, reasonf(ReasonExpired, "sign-in is older than %d minutes; sign in again", int(MaxPersonSignInAge/time.Minute))
+		}
+		if limit.Before(expires) {
+			expires = limit
+		}
 	}
 	sub := strings.TrimSpace(c.Subject)
 	if sub == "" || len(sub) > 255 || strings.HasPrefix(sub, ActorSubjectPrefix) || strings.HasPrefix(sub, WorkerSubjectPrefix) {
 		return Person{}, reasonf(ReasonSubject, "token subject is not a person")
 	}
-	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: time.Unix(*c.Expiry, 0)}
+	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: expires}
 	email := c.Email
 	if emailUnverified(raw["email_verified"]) {
 		// The issuer says it has not checked the address (a local user

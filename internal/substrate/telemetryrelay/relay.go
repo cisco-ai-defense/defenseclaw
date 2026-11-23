@@ -50,6 +50,17 @@ const (
 	KindEgress    = "egress"
 	KindCount     = "count"
 	KindGauge     = "gauge"
+	// KindAskClosed is a pending ask the leader closed because its actor
+	// crashed, was reverted or was deleted (GAP-0526): Reason is one of the
+	// AskClosed codes.
+	KindAskClosed = "ask_closed"
+)
+
+// Reason codes of a KindAskClosed record.
+const (
+	AskClosedActorCrashed  = "actor_crashed"
+	AskClosedActorReverted = "actor_reverted"
+	AskClosedActorDeleted  = "actor_deleted"
 )
 
 // Metrics a record of kind count or gauge may name.
@@ -101,6 +112,12 @@ type Record struct {
 	// the callout's, from the egress gateway's verified SPIFFE ID, and it has
 	// no UID and no profile (GAP-0581). What a poster sends here is ignored.
 	Unregistered bool `json:"unregistered,omitempty"`
+
+	// AskID, Unattended and Severity: the ask a KindAskClosed record names
+	// (Host is its host or tool, Reason its code).
+	AskID      string `json:"ask_id,omitempty"`
+	Unattended bool   `json:"unattended,omitempty"`
+	Severity   string `json:"severity,omitempty"`
 
 	// Metric and Value: a count (Value is the increment) or a gauge (the
 	// current value).
@@ -287,7 +304,7 @@ func jsonTextLen(s string) int {
 func textFields(r *Record) []*string {
 	return []*string{&r.Kind, &r.Atespace, &r.Actor, &r.UID, &r.ParentUID, &r.Profile, &r.Template, &r.Connector,
 		&r.Driver, &r.BatchID, &r.RunMode, &r.UserID, &r.UserName, &r.Lifecycle, &r.Host, &r.Path, &r.Decision,
-		&r.Category, &r.Reason, &r.Metric}
+		&r.Category, &r.Reason, &r.Metric, &r.AskID, &r.Severity}
 }
 
 // cutRecord cuts each text field of r to MaxFieldBytes.
@@ -354,7 +371,7 @@ func (s *Store) Add(recs ...Record) {
 			if !validMetric(r.Kind, r.Metric) || r.Value <= 0 {
 				continue
 			}
-		case KindLifecycle:
+		case KindLifecycle, KindAskClosed:
 		case KindEgress:
 			q = &s.egress
 		default:

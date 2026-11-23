@@ -146,6 +146,9 @@ type Result struct {
 	Session string
 	// Reconnects counts the connections after the first one.
 	Reconnects int
+	// Renewals counts the reconnects that were planned renews of an
+	// expired session token (GAP-0588); Reconnects includes them.
+	Renewals int
 	// Transport is the transport in use at the end.
 	Transport string
 }
@@ -153,6 +156,15 @@ type Result struct {
 // ClusterFullMessage is what connect, attach and run print while they wait
 // for room in a full cluster (GAP-0528: one wording for both).
 const ClusterFullMessage = "The cluster is full. Waiting for room (Ctrl-C to stop)..."
+
+// renewQuick and maxQuickRenews bound the planned renew (GAP-0588): a relay
+// that ends a connection for an expired session token is reconnected at
+// once, but connections that keep ending within renewQuick take the
+// reconnect path with its backoff after maxQuickRenews of them.
+const (
+	renewQuick     = 5 * time.Second
+	maxQuickRenews = 3
+)
 
 const (
 	// stableAfter: a connection that lasted this long resets the backoff.
@@ -306,6 +318,10 @@ type attacher struct {
 	prevInput string
 	prevSent  int64
 	lost      atomic.Bool
+	// renewed is set by a planned renew until the next greeting, and
+	// helloAt is when the relay last greeted, in Unix ns (GAP-0588).
+	renewed atomic.Bool
+	helloAt atomic.Int64
 	// drain is the outage reader: it runs from a lost connection until
 	// the relay greets the next one.
 	drainMu     sync.Mutex
@@ -419,6 +435,7 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 	park := a.newParker()
 	failures, connections := 0, 0
 	lostShown := false
+	quickRenews := 0
 	var lastErr error
 	var outageStart time.Time
 	defer a.endAllDrains()
@@ -459,6 +476,28 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 				res.Detached = true
 				a.say("Detached. The agent keeps running. Come back with: "+connectHint(o.Target.Name), true)
 				return res, nil
+			}
+		}
+		// The session token of the attachment ends: the launcher closed it
+		// just before (the gateway's SessionSecondsHeader), or the relay
+		// ended it at exp. The gateway caps the token at the end of the
+		// sign-in, so this is a planned renew, not a loss. Reconnect at
+		// once with a fresh bearer and no "Connection lost" line; the
+		// keyboard is not drained, so what is typed meanwhile goes to the
+		// next connection (GAP-0588). When the sign-in cannot be renewed,
+		// the next connection fails with the sign-in-again message.
+		if ar.Renew && connected {
+			// Measured from the greeting: a slow sign-in refresh does not
+			// make an attachment that ended at once look long.
+			if o.Now().Sub(time.Unix(0, a.helloAt.Load())) < renewQuick {
+				quickRenews++
+			} else {
+				quickRenews = 0
+			}
+			if quickRenews <= maxQuickRenews {
+				res.Renewals++
+				a.renewed.Store(true)
+				continue
 			}
 		}
 		// The link is down from here until the next connection: the
@@ -741,6 +780,7 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 			if c.Type == relay.CtlHello {
 				connected.Store(true)
 				a.noteWarning(c.Warning)
+				a.helloAt.Store(a.o.Now().UnixNano())
 				if c.Received != nil && resume != "" {
 					// Sent before the cut but never written to the
 					// agent: lost on the way (a suspend).
@@ -751,7 +791,14 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 				a.endDrain()
 				in.openGate()
 				if a.lost.Swap(false) {
+					a.renewed.Store(false)
 					a.say(backMsg+a.notSentNote(" ", true), true)
+				} else if a.renewed.Swap(false) {
+					// A renew shows nothing, unless keys typed at the cut
+					// may not have reached the agent (GAP-0170).
+					if note := a.notSentNote(" ", true); note != "" {
+						a.say(backMsg+note, true)
+					}
 				}
 			}
 		},

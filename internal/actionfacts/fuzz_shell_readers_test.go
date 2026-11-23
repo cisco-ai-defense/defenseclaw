@@ -40,7 +40,7 @@ func FuzzShellReadersNeverPanic(f *testing.F) {
 		}
 		input := Input{Tool: "shell", Command: command, CWD: cwd, DialectHint: dialects[int(hint)%len(dialects)]}
 		facts := analyze(input, "", nil)
-		simpleCommandsOfCall(input, facts, nil)
+		simpleCommandsOfCall(input, facts, nil, nil)
 		for _, simple := range SimpleCommands(input, facts) {
 			if simple.EvaluationFailure == EvaluationFailureInternal {
 				t.Fatalf("reader failed internally on %q", command)

@@ -37,14 +37,17 @@ var devinPin = tarballPin{
 }
 
 // devinPinSubstrate is the Devin CLI release of the Agent Substrate actor kit
-// (lane K1): the cert hosts' release, 3000.12.57 (above every devin-hooks-v1
-// pin, so an "untested newer version" warning). The digests are the ones
-// static.devin.ai/cli/3000.12.57/manifest.json publishes.
+// (lane K1): above every devin-hooks-v1 pin, so an "untested newer version"
+// warning. The digests are the ones
+// static.devin.ai/cli/3000.14.30821/manifest.json publishes. Devin serves
+// only recent versioned archives: the earlier 3000.12.57 pin answered 403
+// once Devin removed it, and no Devin base could be built (GAP-0462). Move
+// this pin with substrateReviewedBuilds when a build is gone.
 var devinPinSubstrate = tarballPin{
-	Version: "3000.12.57",
+	Version: "3000.14.30821",
 	Archives: map[string]tarballArchive{
-		"aarch64": {URL: "https://static.devin.ai/cli/3000.12.57/devin-3000.12.57-aarch64-unknown-linux.tar.gz", SHA256: "e0f03ce263e30940122547f73e1c57d4f163391553fd37c6c856b366463d766f"},
-		"x86_64":  {URL: "https://static.devin.ai/cli/3000.12.57/devin-3000.12.57-x86_64-unknown-linux.tar.gz", SHA256: "0946784ef886d716e82a8026f76933bf0a6e4f0a804a23722bb62047e8c07d4a"},
+		"aarch64": {URL: "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-aarch64-unknown-linux.tar.gz", SHA256: "3deb8af6b026060e975ed371936e139818020e5dc5abbcba07cde039f473a5a5"},
+		"x86_64":  {URL: "https://static.devin.ai/cli/3000.14.30821/devin-3000.14.30821-x86_64-unknown-linux.tar.gz", SHA256: "4dc43e3e4388bace60fe2aa8010cbb399402e724892d7175845b1cdef00e7ddb"},
 	},
 	DigestSource: "Devin versioned release manifest",
 }

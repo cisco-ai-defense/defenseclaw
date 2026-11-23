@@ -88,7 +88,19 @@ type KubeAPI interface {
 	// terminating ones included (they can still write); 0 when it does not
 	// exist.
 	DeploymentPods(ctx context.Context, namespace, name string) (int32, error)
+	// DeleteJob deletes a Job and, in the background, its pods; found is
+	// false when it does not exist.
+	DeleteJob(ctx context.Context, namespace, name string) (found bool, err error)
 }
+
+// LeftoverHookJobs are the chart's hook Jobs other than pre-delete
+// (templates/hooks/jobs.yaml). A failed hook keeps its Job and Error pod
+// (hook-delete-policy hook-succeeded; before-hook-creation only fires when
+// the same hook runs again), so the pre-delete hook removes them, by name in
+// the release namespace (GAP-0609). The chart's uninstall Role names the
+// same list.
+var LeftoverHookJobs = []string{"defenseclaw-chain-key", "defenseclaw-relay-session", "defenseclaw-pre-upgrade",
+	"defenseclaw-pre-rollback", "defenseclaw-bootstrap"}
 
 // StepReport is what a hook step did, for the Job log and `--json`.
 type StepReport struct {
@@ -277,14 +289,32 @@ func PreUpgrade(ctx context.Context, plan ChartPlan, config []byte, validate fun
 }
 
 // PreRollback refuses a rollback to a release that reads an older store
-// schema than the store has, naming the backup (E25).
+// schema than the store has, naming the backup (E25), and how to clear the
+// revision helm keeps for the refused rollback (GAP-0448).
 func PreRollback(ctx context.Context, plan ChartPlan, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "pre-rollback"}
 	st, err := storeState(ctx, plan, kube)
 	if err != nil {
 		return r, err
 	}
-	return r, CheckRollback(plan.StoreSchema, st)
+	if err := CheckRollback(plan.StoreSchema, st); err != nil {
+		return r, fmt.Errorf("%w. %s", err, RefusedRollbackRecovery(plan))
+	}
+	return r, nil
+}
+
+// RefusedRollbackRecovery says how to clear a refused rollback. helm
+// writes the rollback revision (status pending-rollback) before it runs
+// the pre-rollback hook and leaves it there when the hook fails, so every
+// later helm upgrade fails with "another operation (install/upgrade/
+// rollback) is in progress" (GAP-0448). A rollback to the revision that is
+// deployed now is allowed over it (helm checks no pending state on a
+// rollback), passes this check (that release reads the store's schema) and
+// changes nothing; then upgrades work again.
+func RefusedRollbackRecovery(plan ChartPlan) string {
+	return fmt.Sprintf("Nothing was rolled back, but helm keeps this rollback as a pending-rollback revision and refuses "+
+		"every helm upgrade until it is cleared: run helm -n %[1]s rollback %[2]s N, where N is the revision helm -n %[1]s "+
+		"history %[2]s shows as deployed (it changes nothing), then upgrade as usual", plan.Namespace, plan.Release)
 }
 
 // ErrPoliciesLeft fails the uninstall while DefenseClaw-written egress
@@ -348,6 +378,9 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 		r.note("helm removes the cluster-wide ClusterRoleBinding %s (gateway ServiceAccount to system:auth-delegator, "+
 			"for the Kubernetes sign-in) with the release", plan.AuthDelegatorBinding)
 	}
+	if len(left) == 0 {
+		deleteLeftoverHookJobs(ctx, plan, kube, &r)
+	}
 	r.Notes = append(r.Notes, PurgeSteps(plan)...)
 	if len(left) > 0 {
 		return r, restore(fmt.Errorf("%w on %d actor(s): %s. Delete them as an atespace editor "+
@@ -355,6 +388,25 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 			ErrPoliciesLeft, len(left), strings.Join(left, ", ")))
 	}
 	return r, nil
+}
+
+// deleteLeftoverHookJobs removes the hook Jobs (and their pods) that earlier
+// failed hooks left. A failure is a note: it never stops the uninstall.
+func deleteLeftoverHookJobs(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepReport) {
+	var gone []string
+	for _, name := range LeftoverHookJobs {
+		found, err := kube.DeleteJob(ctx, plan.Namespace, name)
+		if err != nil {
+			r.note("the hook Job %s could not be deleted (%v); delete it with kubectl -n %s delete job %s", name, err, plan.Namespace, name)
+			continue
+		}
+		if found {
+			gone = append(gone, name)
+		}
+	}
+	if len(gone) > 0 {
+		r.note("deleted the hook Job(s) %s and their pods, left by earlier failed hooks", strings.Join(gone, ", "))
+	}
 }
 
 // ScaleBackTimeout bounds the scale-back after a failed uninstall step; it
@@ -491,10 +543,11 @@ func PurgeSteps(plan ChartPlan) []string {
 		"  3. Check the bucket prefix for objects of deleted actors and remove them with your cloud's tools.",
 		"  4. The leader store volume (PVC defenseclaw-store) is kept on uninstall; delete it with " +
 			"kubectl -n " + plan.Namespace + " delete pvc defenseclaw-store once you no longer need the audit history.",
-		"  5. The access-policy grants stay (only a global owner can remove them): take " +
+		"  5. The access-policy grants stay (only a global owner can remove them), so a later ServiceAccount of the " +
+			"same name would get them. As a global owner, take " +
 			strings.Join(memberList(append(append([]string{}, plan.Editors...), plan.GlobalViewers...)), ", ") +
-			" out of the global policy and of the policies of " + strings.Join(orNone(plan.WritableAtespaces), ", ") +
-			" (kubectl ate get|update access-policy), so a later ServiceAccount of the same name gets nothing.",
+			" out of the global policy: kubectl ate get access-policy --global -o yaml > global.yaml, delete those " +
+			"members from its bindings, then kubectl ate update access-policy --global -f global.yaml." + atespaceGrantSteps(plan),
 	}
 	steps = append(steps, "  6. The Secrets the install hooks created are kept, so a reinstall keeps chain joins and the images built with "+
 		"the relay session key: "+ChainKeySecret+", "+CalloutTokenSecret+", "+plan.relaySessionSecret()+". Delete them with "+
@@ -505,6 +558,19 @@ func PurgeSteps(plan ChartPlan) []string {
 			"kubectl delete clusterrolebinding "+plan.AuthDelegatorBinding+" --ignore-not-found.")
 	}
 	return steps
+}
+
+// atespaceGrantSteps is the same edit for each writable atespace's policy.
+func atespaceGrantSteps(plan ChartPlan) string {
+	if len(plan.WritableAtespaces) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(" Then the same for each atespace policy:")
+	for _, a := range plan.WritableAtespaces {
+		fmt.Fprintf(&sb, " kubectl ate get access-policy -a %s -o yaml > %s.yaml, delete the members, kubectl ate update access-policy -a %s -f %s.yaml;", a, a, a, a)
+	}
+	return strings.TrimSuffix(sb.String(), ";") + "."
 }
 
 func memberList(principals []string) []string {

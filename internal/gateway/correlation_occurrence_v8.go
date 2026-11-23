@@ -239,12 +239,18 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	now := time.Now().UTC()
 	lifecycle, hasLifecycle := spec.LifecycleForEvent(req.HookEventName)
 	cursor, hasCursor := correlationCursorForHook(ctx, repo, instance.ConnectorInstanceID, req, spec, a.managedAIDOnly())
+	// A replica of a Substrate gateway sees only the hook calls that land on
+	// it: the turn it would mint or keep in its cursor for an actor session
+	// is not the other replicas' (substrate-1 GAP-0444, as GAP-0270 for the
+	// step index). An actor's hook calls carry the turn ID the agent sends,
+	// never a minted one.
+	_, actorCall := substrateActorFrom(ctx)
 	if hasCursor {
 		if req.AgentID == "" {
 			req.AgentID = cursor.AgentID
 			appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
 		}
-		if req.TurnID == "" && lifecycle != connector.CorrelationLifecycleTurnStart {
+		if req.TurnID == "" && lifecycle != connector.CorrelationLifecycleTurnStart && !actorCall {
 			req.TurnID = cursor.ActiveTurnID
 			appendHookCorrelationValue(&req, connector.CorrelationTargetTurn, req.TurnID, connector.CorrelationOriginMinted)
 		}
@@ -272,7 +278,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		}
 		appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
 	}
-	if req.TurnID == "" && lifecycle == connector.CorrelationLifecycleTurnStart &&
+	if req.TurnID == "" && lifecycle == connector.CorrelationLifecycleTurnStart && !actorCall &&
 		spec.Allows(connector.CorrelationInferencePromptBoundaryTurn) {
 		id, idErr := audit.NewSemanticEventID()
 		if idErr != nil {

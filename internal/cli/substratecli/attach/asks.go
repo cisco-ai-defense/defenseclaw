@@ -23,7 +23,10 @@ import (
 )
 
 const (
-	askPollEvery = 2 * time.Second
+	// askPollEvery: a new ask shows on the row within about a second of
+	// being raised (GAP-0483: the callout holds its request for about 1.5
+	// s, so the row is the person's cue to answer the agent's retry).
+	askPollEvery = time.Second
 	askPollMax   = 30 * time.Second
 	// askArmDelay: a key this soon after the answer prompt (or its
 	// confirmation) appears was not typed in answer to it (a paste that

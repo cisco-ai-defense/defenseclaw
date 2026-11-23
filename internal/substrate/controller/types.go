@@ -258,6 +258,14 @@ const (
 	// EventConfigRefused: a change that does not load was not applied.
 	EventConfigReloaded = "sandbox.config.reloaded"
 	EventConfigRefused  = "sandbox.config.refused"
+	// EventCalloutReplaced: Substrate's egress callout slot is not held by
+	// the DefenseClaw callout (another callout, or none); EventCalloutRestored:
+	// it is again (GAP-0505).
+	EventCalloutReplaced = "sandbox.callout_replaced"
+	EventCalloutRestored = "sandbox.callout_restored"
+	// EventCrashed: Substrate reports the actor CRASHED; the leader closes
+	// its open asks with reason actor_crashed (GAP-0526).
+	EventCrashed = "sandbox.crashed"
 )
 
 // Severities.

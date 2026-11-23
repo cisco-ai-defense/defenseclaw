@@ -395,13 +395,16 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	// ask waits for them, D12): it is not a finding with a severity, so
 	// min_severity does not drop it; an endpoint's events list still can
 	// (GAP-0557: a HIGH endpoint never heard of a queued ask).
-	actionItem := eventCategory == string(audit.ActionApprovalRequest)
+	// The closure of such an ask (its actor crashed, was reverted or was
+	// deleted, GAP-0526) goes where the request went.
+	closedAsk := eventCategory == substrateAskClosedAction
+	actionItem := eventCategory == string(audit.ActionApprovalRequest) || closedAsk
 	for i := range endpoints {
 		ep := &endpoints[i]
 		if rank < ep.minSeverity && !actionItem {
 			continue
 		}
-		if len(ep.events) > 0 && !ep.events[eventCategory] {
+		if len(ep.events) > 0 && !ep.events[eventCategory] && (!closedAsk || !ep.events[string(audit.ActionApprovalRequest)]) {
 			continue
 		}
 		cooldownKey := event.Target + "\x00" + action

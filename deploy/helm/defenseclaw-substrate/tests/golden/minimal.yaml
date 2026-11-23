@@ -336,6 +336,32 @@ rules:
   resourceNames: [defenseclaw-config]
   verbs: [get]
 ---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The controller reads which egress callout Substrate uses from
+# atenet-egress's live Envoy config (GAP-0505): when it is not the
+# DefenseClaw callout, actor policies follow the fail mode. get on that one
+# ConfigMap in the Substrate namespace, nothing else there (it holds no
+# secret: certificates come through SDS files), for the controller alone:
+# the gateway reads the controller's result through the leader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-defenseclaw-system-egress-read
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [atenet-egress]
+  verbs: [get]
+---
 # Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -397,6 +423,29 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: defenseclaw-controller
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-defenseclaw-system-egress-read
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-defenseclaw-system-egress-read
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-controller
@@ -1505,6 +1554,12 @@ rules:
 - apiGroups: [""]
   resources: [pods]
   verbs: [list]
+# Delete the Jobs (and, by propagation, the pods) of earlier failed hooks,
+# by name: setup.LeftoverHookJobs (GAP-0609).
+- apiGroups: [batch]
+  resources: [jobs]
+  resourceNames: [defenseclaw-chain-key, defenseclaw-relay-session, defenseclaw-pre-upgrade, defenseclaw-pre-rollback, defenseclaw-bootstrap]
+  verbs: [delete]
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1

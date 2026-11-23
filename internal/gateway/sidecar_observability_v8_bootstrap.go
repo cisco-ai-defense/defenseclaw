@@ -423,11 +423,17 @@ func (s *Sidecar) observabilityV8ResolverOrDefault() netguard.V8Resolver {
 // newObservabilityV8RedactionEngine builds the projection engine every
 // destination, the local store and the reporter share. Secure Client keeps
 // every identifier under every profile, as on main (issue #1092); elsewhere
-// strict removes the personal identifiers.
+// strict removes the personal identifiers. Every detecting profile also
+// replaces the spans the guardrail secret rules flag (GAP-0426), so a value
+// the hook reports as a secret is never stored or sent in clear.
 func newObservabilityV8RedactionEngine(cfg *config.Config, key redaction.CorrelationKey) (*redaction.Engine, error) {
 	engine, err := redaction.NewEngineWithCorrelationKey(key)
-	if err != nil || !cfg.SecureClientIntegration() {
+	if err != nil {
 		return engine, err
+	}
+	engine = engine.WithSecretSpans(guardrailSecretSpans)
+	if !cfg.SecureClientIntegration() {
+		return engine, nil
 	}
 	return engine.WithPersonalIdentifiersKept(), nil
 }

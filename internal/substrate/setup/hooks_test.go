@@ -179,6 +179,7 @@ func (k *fakeKube) DeploymentPods(_ context.Context, ns, name string) (int32, er
 	}
 	return k.replicas[ns+"/"+name], nil
 }
+func (k *fakeKube) DeleteJob(context.Context, string, string) (bool, error) { return false, nil }
 func (k *fakeKube) DeleteSecret(_ context.Context, ns, name string) error {
 	k.deleted = append(k.deleted, ns+"/"+name)
 	return nil

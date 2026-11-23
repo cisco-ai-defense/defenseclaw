@@ -38,6 +38,8 @@ func (a *APIServer) recordSubstrateRelay(ctx context.Context, b telemetryrelay.T
 			a.emitSubstrateLifecycleV8(ctx, r)
 		case telemetryrelay.KindEgress:
 			a.emitSubstrateEgressV8(ctx, r)
+		case telemetryrelay.KindAskClosed:
+			a.recordSubstrateAskClosed(ctx, r)
 		case telemetryrelay.KindCount:
 			a.recordSubstrateCount(r.Metric, r.Value)
 		}
