@@ -250,6 +250,55 @@ func (a *App) noteManaged(st *sandboxapi.Status) {
 	}
 }
 
+// accountStatus is st as every command that says why sandboxes are off reads
+// it (`sandbox status`, `sandbox run`'s refusal, `sandbox activity -f`), so
+// that all of them name the reason sandboxapi.Status.ManagedOff gives and no
+// command has an order of its own. The daemon's status can name the install
+// while the account's profile has refused sandboxes (a daemon that just
+// restarted has not settled its view of the account), so the managed
+// gateway's own settled view is added: a view that refuses the account sets
+// ManagedStatus.AccountDenied, as the daemon does when it has the view. A
+// status that is not managed, or whose reason is the organization's switch,
+// or a view that is provisional, allows the account or is not given, is
+// returned as it was (GAP-2059).
+func (a *App) accountStatus(ctx context.Context, st *sandboxapi.Status) *sandboxapi.Status {
+	if st == nil || st.Managed == nil || st.Managed.AccountDenied || a.ManagedAccountPolicy == nil ||
+		st.ManagedOff() == sandboxapi.ManagedOffOrganization || (st.Enabled && st.Available) {
+		return st
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), managedFactsTimeout)
+	defer cancel()
+	view, err := a.ManagedAccountPolicy(ctx, "")
+	if err != nil || view == nil || view.Provisional || view.Allowed {
+		return st
+	}
+	out := *st
+	m := *st.Managed
+	m.AccountDenied = true
+	if m.RequestAccess == "" {
+		m.RequestAccess = view.RequestAccess
+	}
+	out.Managed = &m
+	a.managedSeen = &m
+	return &out
+}
+
+// managedOffError is the DisabledError (exit status 1, as `sandbox run`'s)
+// with the one reason sandboxes are off for the account, or nil while they
+// are not, or when the daemon does not answer.
+func (a *App) managedOffError(ctx context.Context, api API) error {
+	st, err := api.Status(ctx)
+	if err != nil {
+		return nil
+	}
+	st = a.accountStatus(ctx, st)
+	if st.ManagedOff() == sandboxapi.ManagedOffNone {
+		return nil
+	}
+	a.noteManaged(st)
+	return &DisabledError{Message: st.OffMessage(), Enabled: st.Enabled}
+}
+
 // managedAccessRules are the openshell.admin rules an egress refusal names
 // in the access-refused form (sandboxapi.AccessRefused).
 var managedAccessRules = map[string]bool{

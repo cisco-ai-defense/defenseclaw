@@ -22,6 +22,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -407,6 +408,139 @@ func TestStatusJSONReasonIsTheOneManagedOffReason(t *testing.T) {
 				}
 				if got.Enabled != tc.enabled || got.Available {
 					t.Errorf("status --json enabled=%v available=%v, want %v and false", got.Enabled, got.Available, tc.enabled)
+				}
+			})
+		}
+	}
+}
+
+// viewDenied is the profile kind as a restarted daemon reports it: its status
+// has not settled, so it carries no account_denied and names the install
+// reason, while the managed gateway's own view of the account refuses it
+// (ManagedAccountPolicy). GAP-2059: `sandbox activity -f` printed the install
+// reason there, where `sandbox status` and `sandbox run` said the profile's.
+var viewDenied = offCase{kind: sandboxapi.ManagedOffProfile, name: "profile-view", enabled: true, elsewhere: "another account",
+	managed: prerequisiteJSON, allow: []string{profilePhrase}, closed: true}
+
+// offReasonFixture is offFixture for the kinds above and viewDenied, whose
+// daemon status alone names the install reason (viewDenied.kind is the kind
+// the gateway's view makes of it).
+func offReasonFixture(t *testing.T, tc offCase, goos string) (ta *testApp, want string) {
+	t.Helper()
+	if tc.name != viewDenied.name {
+		ta = offFixture(t, tc, goos, false, false)
+		return ta, ta.daemon.status.OffMessage()
+	}
+	ta, _ = launchAgentDoctorFixture(t, "", nil)
+	ta.GOOS = goos
+	ta.daemon.status.Enabled, ta.daemon.status.Available = tc.enabled, false
+	ta.daemon.status.GatewayElsewhere = tc.elsewhere
+	ta.daemon.status.Managed = managedFromJSON(t, tc.managed)
+	if got := ta.daemon.status.ManagedOff(); got != sandboxapi.ManagedOffUnavailable {
+		t.Fatalf("the raw status is kind %d, want the install reason (%d)", got, sandboxapi.ManagedOffUnavailable)
+	}
+	forbidden := managedExplainFixture()
+	forbidden.Allowed = false
+	ta.ManagedAccountPolicy = func(context.Context, string) (*sandboxapi.ManagedExplain, error) { return forbidden, nil }
+	denied := ta.daemon.status
+	m := *denied.Managed
+	m.AccountDenied = true
+	denied.Managed = &m
+	return ta, denied.OffMessage()
+}
+
+func offReasonCases() []offCase {
+	var out []offCase
+	for _, tc := range offCases {
+		if tc.kind != sandboxapi.ManagedOffNone {
+			out = append(out, tc)
+		}
+	}
+	return append(out, viewDenied)
+}
+
+// `sandbox activity -f`, `sandbox run` and `sandbox status` (text and json)
+// give the one reason ManagedOff names, for every kind, on linux and darwin,
+// in text and json output (GAP-2050, GAP-2059).
+func TestActivityRunAndStatusGiveTheSameOffReason(t *testing.T) {
+	withManagedHost(t)
+	for _, tc := range offReasonCases() {
+		for _, goos := range []string{"linux", "darwin"} {
+			for _, output := range []OutputFormat{OutputText, OutputJSON} {
+				t.Run(tc.name+"/"+goos+"/"+string(output), func(t *testing.T) {
+					ta, want := offReasonFixture(t, tc, goos)
+					phrase := settingPhrase
+					if len(tc.allow) > 0 {
+						phrase = tc.allow[0]
+					}
+					if !strings.Contains(want, phrase) {
+						t.Fatalf("the reason %q lacks %q", want, phrase)
+					}
+					err := ta.Activity(bg, ActivityOptions{Follow: true, Output: output})
+					var off *DisabledError
+					if !errors.As(err, &off) || off.Message != want {
+						t.Errorf("activity -f = %v, want a DisabledError saying %q", err, want)
+					}
+					if tc.name != viewDenied.name {
+						// The profile's own view is refused before the daemon
+						// in the daemon's ready words (a run that never reaches it).
+						var runOff *DisabledError
+						runErr := ta.Run(bg, RunOptions{Harness: "claude"})
+						if tc.kind != sandboxapi.ManagedOffElsewhere && (!errors.As(runErr, &runOff) || runOff.Message != want) {
+							t.Errorf("run = %v, want a DisabledError saying %q", runErr, want)
+						}
+					} else if runErr := ta.Run(bg, RunOptions{Harness: "claude"}); runErr == nil || !strings.Contains(runErr.Error(), phrase) {
+						t.Errorf("run = %v, want the profile's reason", runErr)
+					}
+					ta.out.Reset()
+					if err := ta.Status(bg, "", OutputJSON); err != nil {
+						t.Fatal(err)
+					}
+					var got struct {
+						Reason string `json:"reason"`
+					}
+					if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil {
+						t.Fatalf("status json: %v\n%s", err, ta.out.String())
+					}
+					if got.Reason != want {
+						t.Errorf("status --output json reason = %q, want %q", got.Reason, want)
+					}
+					ta.out.Reset()
+					if err := ta.Status(bg, "", OutputText); err != nil {
+						t.Fatal(err)
+					}
+					if text := ta.output(); !strings.Contains(text, phrase) {
+						t.Errorf("status says %q, want the reason with %q", text, phrase)
+					}
+				})
+			}
+		}
+	}
+}
+
+// An account whose sandboxes are off, on a daemon that is healthy and holds
+// the feed open, ends `sandbox activity -f` at once with the reason and exit
+// status 1 as `run` does, where it stayed open and silent (GAP-2059).
+func TestActivityFollowOnAnOffAccountWithAHealthyDaemonReturnsAtOnce(t *testing.T) {
+	withManagedHost(t)
+	for _, tc := range offReasonCases() {
+		for _, output := range []OutputFormat{OutputText, OutputJSON} {
+			t.Run(tc.name+"/"+string(output), func(t *testing.T) {
+				ta, want := offReasonFixture(t, tc, "linux")
+				ta.daemon.hold = make(chan struct{})
+				defer close(ta.daemon.hold)
+				ctx, cancel := context.WithCancel(bg)
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- ta.Activity(ctx, ActivityOptions{Follow: true, Output: output}) }()
+				select {
+				case err := <-done:
+					var off *DisabledError
+					if !errors.As(err, &off) || off.Message != want {
+						t.Fatalf("activity -f = %v, want a DisabledError saying %q", err, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("activity -f stayed open on an account whose sandboxes are off")
 				}
 			})
 		}

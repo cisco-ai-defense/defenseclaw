@@ -64,6 +64,13 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 	}
 	var started time.Time
 	noted := false
+	if o.Follow {
+		// A feed that stays open says nothing of why sandboxes are off for the
+		// account: say it now, as `sandbox run` does (GAP-2059).
+		if err := a.managedOffError(ctx, api); err != nil {
+			return err
+		}
+	}
 	if o.Output != OutputJSON {
 		started, noted = a.feedStartNote(ctx, api, o.Sandbox)
 	}
@@ -166,10 +173,8 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 // stopping or closing it: a line on stderr says so, and the exit status stays
 // what it was. An error that is not a clean end is left to the caller.
 func (a *App) endOfUnfollowedFeed(ctx context.Context, api API, ended bool) error {
-	st, err := api.Status(ctx)
-	if err == nil && st.ManagedOff() != sandboxapi.ManagedOffNone {
-		a.noteManaged(st)
-		return &DisabledError{Message: st.OffMessage(), Enabled: st.Enabled}
+	if err := a.managedOffError(ctx, api); err != nil {
+		return err
 	}
 	if ended {
 		a.warnErr("the activity feed ended: the DefenseClaw daemon stopped or closed the stream; run `" + CommandName + " activity -f` again to follow it")

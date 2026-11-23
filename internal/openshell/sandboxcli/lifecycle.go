@@ -200,6 +200,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		if err != nil {
 			return apiError(err)
 		}
+		st = a.accountStatus(ctx, st)
 		if format == OutputJSON {
 			return writeJSON(a.IO.Out, neutralStatus(st))
 		}
