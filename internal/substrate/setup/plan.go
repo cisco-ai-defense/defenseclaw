@@ -50,6 +50,9 @@ type ChartPlan struct {
 	// RelaySessionSecret is the relay session key Secret the relay-session
 	// hook creates when absent (gateway.relaySessionSecret).
 	RelaySessionSecret string `json:"relay_session_secret,omitempty"`
+	// RelayCASecret is the relay CA Secret the relay-session hook creates
+	// when absent (gateway.relayCASecret).
+	RelayCASecret string `json:"relay_ca_secret,omitempty"`
 }
 
 // ChartEditors are the principals the chart's plan makes editors

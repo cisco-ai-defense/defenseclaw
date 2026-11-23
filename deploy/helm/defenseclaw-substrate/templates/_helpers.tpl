@@ -584,6 +584,9 @@ the leader. */}}
 - name: relay-session
   mountPath: /var/run/secrets/defenseclaw-relay-session
   readOnly: true
+- name: relay-ca
+  mountPath: /var/run/secrets/defenseclaw-relay-ca
+  readOnly: true
 - name: llm-credentials
   mountPath: /var/run/secrets/defenseclaw-llm
   readOnly: true
@@ -605,6 +608,11 @@ the leader. */}}
 - name: relay-session
   secret:
     secretName: {{ .Values.gateway.relaySessionSecret }}
+    optional: true
+    defaultMode: 0440
+- name: relay-ca
+  secret:
+    secretName: {{ .Values.gateway.relayCASecret }}
     optional: true
     defaultMode: 0440
 - name: llm-credentials

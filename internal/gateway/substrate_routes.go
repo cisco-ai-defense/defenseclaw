@@ -99,6 +99,7 @@ type SubstrateCreated struct {
 	HarnessVersion string
 	HookContract   string
 	KitVersion     string
+	RelayStreams   string
 	// SandboxClass is the class the actor runs in (gvisor or microvm).
 	SandboxClass string
 }
@@ -540,7 +541,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		reg := registry.Registration{
 			Atespace: created.Atespace, Name: created.Name, UID: created.UID, Person: req.Owner,
 			Profile: profile, Template: created.Template, TemplateDigest: created.TemplateDigest,
-			KitVersion: created.KitVersion, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
+			KitVersion: created.KitVersion, RelayStreams: created.RelayStreams, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
 			HookContract: created.HookContract, BatchID: req.BatchID, Unattended: req.Unattended,
 			SandboxClass: created.SandboxClass,
 			Secrets:      append([]string(nil), req.Secrets...),

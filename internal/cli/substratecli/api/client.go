@@ -150,6 +150,9 @@ type Error struct {
 	// Retryable marks a refusal whose cause may pass (a template
 	// attestation that could not be checked now, GAP-0181).
 	Retryable bool
+	// RelayCertCleared comes with recover's not_crashed answer: the
+	// gateway cleared the agent's relay certificate record (GAP-0930).
+	RelayCertCleared bool
 }
 
 func (e *Error) Error() string {
@@ -247,11 +250,13 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 			ActorUID string `json:"actor_uid"`
 			Message  string `json:"message"`
 			Retry    bool   `json:"retryable"`
+			Cleared  bool   `json:"relay_cert_record_cleared"`
 		}
 		if json.Unmarshal(raw, &d) == nil {
 			e.Reason = d.Reason
 			e.Refusal, e.Detail, e.Actor, e.ActorUID, e.Retryable = d.Refusal, d.Detail, d.Actor, d.ActorUID, d.Retry
 			e.Message = safetext.Line(d.Message)
+			e.RelayCertCleared = d.Cleared
 		}
 		return e
 	}

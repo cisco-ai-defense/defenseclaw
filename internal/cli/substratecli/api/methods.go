@@ -266,8 +266,9 @@ func (c *Client) Get(ctx context.Context, atespace, name string) (Actor, error) 
 }
 
 // Recover brings a crashed actor back to its last snapshot and starts it
-// again (GAP-0410). The gateway answers 409 not_crashed for an actor that
-// has not crashed.
+// again (GAP-0410). It first clears the agent's relay certificate record
+// (GAP-0861, GAP-0930). The gateway answers 409 not_crashed for an actor
+// that has not crashed, with Error.RelayCertCleared.
 func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, error) {
 	var a Actor
 	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/recover", nil, map[string]any{}, &a)

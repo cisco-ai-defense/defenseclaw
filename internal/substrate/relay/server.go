@@ -57,7 +57,10 @@ type Options struct {
 	// (TamperReportPath, GAP-0120); default GatewayTamper over the kit
 	// transport.
 	Tamper func(ctx context.Context, connector, reason string) error
-	Now    func() time.Time
+	// Certs is the TLS serving certificate of a kit that serves TLS
+	// (B3.5); a resume asks for a new one ahead of the next attach.
+	Certs *CertSource
+	Now   func() time.Time
 	// sep runs everything the relay starts as the agent's user (GAP-0116;
 	// Main sets it from separate). nil: the relay's own user.
 	sep *separation
@@ -370,6 +373,11 @@ func (s *Server) watchResume() {
 		}
 		s.log.Info("relay.resume", "gap_ms", gap.Milliseconds())
 		s.preconnect(context.Background())
+		if c := s.opts.Certs; c != nil {
+			if err := c.Warm(context.Background()); err != nil {
+				s.log.Warn("relay.tls_cert", "state", "renew_failed", "reason", err.Error())
+			}
+		}
 	}
 }
 

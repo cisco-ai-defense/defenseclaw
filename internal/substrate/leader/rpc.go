@@ -80,6 +80,13 @@ const (
 	// (internal/substrate/revocation, B5.1).
 	MethodRevocationPut   = "RevocationPut"
 	MethodRevocationSince = "RevocationSince"
+	// MethodRelayCertClaim, MethodRelayCertClear and MethodRelayCertGet
+	// keep the live relay serving certificate per actor (GAP-0861): every
+	// gateway replica checks a certificate request without proof of the
+	// live key, a renewal (GAP-0928) and an attach against the same record.
+	MethodRelayCertClaim = "RelayCertClaim"
+	MethodRelayCertClear = "RelayCertClear"
+	MethodRelayCertGet   = "RelayCertGet"
 )
 
 // Methods lists every method a leader serves.
@@ -90,6 +97,7 @@ var Methods = []string{
 	MethodActivityObserve, MethodActivitySnapshot,
 	MethodCalloutPublish, MethodCalloutStatus,
 	MethodRevocationPut, MethodRevocationSince,
+	MethodRelayCertClaim, MethodRelayCertClear, MethodRelayCertGet,
 }
 
 // Error codes.

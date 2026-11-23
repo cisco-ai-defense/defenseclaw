@@ -486,6 +486,10 @@
           "type": "string",
           "minLength": 1
         },
+        "relayCASecret": {
+          "type": "string",
+          "minLength": 1
+        },
         "authDelegatorBinding": {
           "type": "string",
           "maxLength": 63

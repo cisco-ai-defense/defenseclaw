@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
@@ -97,7 +98,10 @@ const (
 	substrateRelayTask = "/api/v1/substrate/relay/task"
 	// substrateRelayTamper takes a relay guard trip (substrate_task.go).
 	substrateRelayTamper = "/api/v1/substrate/relay/tamper"
-	substrateLLMPrefix   = "/llm/"
+	// substrateRelayCert signs the relay's TLS serving certificate
+	// (substrate_relaycert.go).
+	substrateRelayCert = "/api/v1/substrate/relay/cert"
+	substrateLLMPrefix = "/llm/"
 
 	substrateShutdownTimeout = 10 * time.Second
 )
@@ -198,6 +202,21 @@ type SubstrateConfig struct {
 	// Relays reaches an actor's relay through the router for attach
 	// (nil: attach answers 503).
 	Relays SubstrateRelayDialer
+	// RelayCA signs relay serving certificates and verifies them on attach
+	// (B3.5, the gateway.relayCASecret Secret); nil: TLS relays cannot be
+	// reached and /relay/cert answers relay_ca_missing.
+	RelayCA *relaytls.CA
+	// RelayTLS is substrate.relay_tls ("" is auto).
+	RelayTLS relaytls.Mode
+	// RelayCerts is the leader's record of the live relay serving
+	// certificate per actor (GAP-0861), shared by every replica and kept
+	// over restarts. nil: in refuse mode /relay/cert answers
+	// relay_cert_record_unavailable; in flag mode every certificate asked
+	// for without proof of the live key is a HIGH row.
+	RelayCerts registry.RelayCerts
+	// RelayCertReissue is the active substrate.relay_cert_reissue (refuse
+	// or flag; "" is auto: refuse when Managed).
+	RelayCertReissue string
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
@@ -542,6 +561,8 @@ type substrateActorRoute struct {
 	task bool
 	// tamper is the relay's guard trip report (relay is set too).
 	tamper bool
+	// cert is the relay's certificate request (relay is set too).
+	cert bool
 }
 
 // classifySubstrateActorPath maps a path to its route, or false (404).
@@ -574,6 +595,8 @@ func (a *APIServer) classifySubstrateActorPath(path string) (substrateActorRoute
 		return substrateActorRoute{relay: true, task: true}, true
 	case path == substrateRelayTamper:
 		return substrateActorRoute{relay: true, tamper: true}, true
+	case path == substrateRelayCert:
+		return substrateActorRoute{relay: true, cert: true}, true
 	case strings.HasPrefix(path, substrateLLMPrefix) && len(path) > len(substrateLLMPrefix):
 		return substrateActorRoute{llm: true}, true
 	}
@@ -905,6 +928,9 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 		return
 	case route.tamper:
 		a.serveSubstrateRelayTamper(st, w, r)
+		return
+	case route.cert:
+		a.serveSubstrateRelayCert(st, w, r)
 		return
 	case route.relay:
 		a.serveSubstrateRelayVerify(st, w, r)

@@ -4948,6 +4948,12 @@ class SubstrateConfig:
     # block (default) or alert: a request after a secret read at the egress
     # callout; the leader reads it (GAP-0250).
     chain_egress_action: str = ""
+    # auto (default), required or off: how the gateway reaches an actor's
+    # relay (TLS when the template's kit serves it).
+    relay_tls: str = ""
+    # auto (default), flag or refuse: a second relay certificate for an actor
+    # without proof of the live key (auto: refuse in managed, flag in OSS).
+    relay_cert_reissue: str = ""
     # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
     workspace_max_bytes: int | None = None
     launcher: SubstrateLauncherConfig = field(default_factory=SubstrateLauncherConfig)
@@ -8312,6 +8318,8 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
         idle_suspend_without_cpu=_optional_bool(raw.get("idle_suspend_without_cpu")),
         chain_egress_action=str(raw.get("chain_egress_action", "") or ""),
+        relay_tls=str(raw.get("relay_tls", "") or ""),
+        relay_cert_reissue=str(raw.get("relay_cert_reissue", "") or ""),
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         launcher=SubstrateLauncherConfig(
             key_replay=str(_mapping(raw.get("launcher")).get("key_replay", "") or ""),

@@ -346,7 +346,7 @@ func init() {
 	substrateCmd.AddCommand(
 		newSubstrateLoginCmd(), newSubstrateLogoutCmd(), newSubstrateWhoamiCmd(),
 		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(),
-		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(),
+		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(), newSubstrateRecoverCmd(),
 		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(),
 		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateRevokeCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),

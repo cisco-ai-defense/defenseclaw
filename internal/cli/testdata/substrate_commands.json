@@ -1035,6 +1035,34 @@
     ]
   },
   {
+    "path": "substrate recover",
+    "use": "recover \u003cname\u003e",
+    "short": "Let the agent's relay get a new certificate; bring a crashed agent back",
+    "long": "Clears the cluster's record of the agent's relay certificate, so the relay's next request\ngets a first certificate and no certificate issued before it can renew. Use it when\n\"defenseclaw substrate connect\" fails because the relay restarted inside the agent, or after an\nemergency relay CA rotation, while substrate.relay_cert_reissue is refuse (the managed default).\nA crashed agent is also brought back to its last snapshot, as \"defenseclaw substrate undo\" does;\nwhat it did after that snapshot is lost, so it asks first. Only the agent's owner or an\nadministrator can run it.",
+    "example": "defenseclaw substrate recover fix-tests-7f3a",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false",
+        "usage": "do not ask"
+      }
+    ]
+  },
+  {
     "path": "substrate reject",
     "use": "reject \u003cid\u003e",
     "short": "Deny a waiting question",

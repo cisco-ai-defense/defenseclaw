@@ -158,7 +158,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: [{{ .Values.gateway.relaySessionSecret | quote }}]
+  resourceNames: [{{ .Values.gateway.relaySessionSecret | quote }}, {{ .Values.gateway.relayCASecret | quote }}]
   verbs: [get]
 - apiGroups: [""]
   resources: [secrets]

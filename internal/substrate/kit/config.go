@@ -127,6 +127,12 @@ type RelayConfig struct {
 	// person owns the agent. With both, a token must pass the keys and
 	// the gateway.
 	VerifyURL string `json:"verify_url"`
+	// Streams are the relay features the kit was built with (StreamTLS:
+	// the relay serves TLS with a certificate the gateway signs, B3.5).
+	// The template build writes them and its signed attestation carries
+	// them, so the gateway reads them from the template, never from the
+	// relay. Empty for kits built before 1.0.11.
+	Streams []string `json:"streams,omitempty"`
 	// OutputBufferBytes sizes the long-poll output ring.
 	OutputBufferBytes int `json:"output_buffer_bytes"`
 	// IdentityDir holds the actor's projected identity files (atespace,
@@ -313,11 +319,60 @@ func RelayVerifyURL(gatewayURL string) string {
 	return strings.TrimRight(strings.TrimSpace(gatewayURL), "/") + RelayVerifyPath
 }
 
+// StreamTLS marks a relay that serves TLS on its listen port.
+const StreamTLS = "tls"
+
+// relayCertPath is the actor-listener route that signs the relay's
+// serving certificate; it sits next to the verify route.
+const relayCertPath = "/api/v1/substrate/relay/cert"
+
+// ServesTLS reports whether the kit's relay serves TLS.
+func (r RelayConfig) ServesTLS() bool {
+	for _, s := range r.Streams {
+		if s == StreamTLS {
+			return true
+		}
+	}
+	return false
+}
+
+// CertURL is where the relay asks for its serving certificate: the
+// gateway of VerifyURL (the same egress path and actor JWT). "" when the
+// relay does not verify through the gateway.
+func (r RelayConfig) CertURL() string {
+	if r.VerifyURL == "" {
+		return ""
+	}
+	u, err := url.Parse(r.VerifyURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	u.Path, u.RawPath, u.RawQuery, u.Fragment = relayCertPath, "", "", ""
+	return u.String()
+}
+
+// checkStreams refuses an unknown relay stream and TLS without a gateway
+// to sign the certificate.
+func (r RelayConfig) checkStreams() error {
+	for _, s := range r.Streams {
+		if s != StreamTLS {
+			return fmt.Errorf("relay stream %q is not known", s)
+		}
+	}
+	if r.ServesTLS() && r.VerifyURL == "" {
+		return errors.New("relay stream tls needs relay.verify_url (the gateway signs the relay certificate)")
+	}
+	return nil
+}
+
 // CheckSessions is the relay's start-up rule for session verification
 // (GAP-0073), part of Validate, so the template build applies it too
 // (substrate-1 GAP-0147) and an image whose relay would refuse to start is
 // never built. Session keys need verify_url (GAP-0435) and their issuer.
 func (r RelayConfig) CheckSessions() error {
+	if err := r.checkStreams(); err != nil {
+		return err
+	}
 	if r.VerifyURL != "" {
 		u, err := url.Parse(r.VerifyURL)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {

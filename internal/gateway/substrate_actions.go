@@ -141,6 +141,8 @@ type SubstrateTemplateKit struct {
 	HookContract string
 	KitVersion   string
 	Digest       string
+	// RelayStreams are the signed kit's relay features (registry.JoinStreams).
+	RelayStreams string
 }
 
 func (s *SubstrateATEActions) templateKit(ctx context.Context, tmpl *ateapi.ActorTemplate) (SubstrateTemplateKit, error) {
@@ -260,7 +262,7 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 		Atespace: req.Atespace, Name: name, UID: a.GetMetadata().GetUid(),
 		Template: ateapi.Key(tref), Connector: req.Connector, SandboxClass: s.createdClass(ctx, tmpl, sel, req.SandboxClass),
 		HarnessVersion: kit.AgentVersion, HookContract: kit.HookContract,
-		KitVersion: kit.KitVersion, TemplateDigest: kit.Digest,
+		KitVersion: kit.KitVersion, TemplateDigest: kit.Digest, RelayStreams: kit.RelayStreams,
 	}, nil
 }
 

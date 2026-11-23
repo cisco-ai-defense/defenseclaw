@@ -726,6 +726,25 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("recover",),
+        "Let the agent's relay get a new certificate; bring a crashed agent back",
+        long=(
+            "Clears the cluster's record of the agent's relay certificate, so the relay's next request\n"
+            "gets a first certificate and no certificate issued before it can renew. Use it when\n"
+            '"defenseclaw substrate connect" fails because the relay restarted inside the agent, or after an\n'
+            "emergency relay CA rotation, while substrate.relay_cert_reissue is refuse (the managed default).\n"
+            'A crashed agent is also brought back to its last snapshot, as "defenseclaw substrate undo" does;\n'
+            "what it did after that snapshot is lost, so it asks first. Only the agent's owner or an\n"
+            "administrator can run it."
+        ),
+        example="defenseclaw substrate recover fix-tests-7f3a",
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("yes", "bool", "do not ask", short="y"),
+        ),
+    ),
+    _Cmd(
         ("reject",),
         "Deny a waiting question",
         long='Denies one question from "defenseclaw substrate approvals". The agent is told no.',

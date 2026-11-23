@@ -52,8 +52,8 @@ import (
 // person-bound session token: the gateway mints one for the signed-in
 // person and this actor incarnation for each request, so a token never
 // crosses the laptop's network. The hop from the router to the relay is
-// inside the cluster network; it is plain HTTP until the relay serves TLS
-// with a certificate the gateway can verify (GAP-0109, documented limit).
+// TLS for a template whose signed kit serves it (substrate.relay_tls,
+// substrate_relaycert.go); templates built before 1.0.11 are plain.
 
 // substrateAttachPath is the attach route and everything below it.
 var substrateAttachPath = regexp.MustCompile(`^/api/v1/substrate/actors/[^/]+/[^/]+/attach(/.*)?$`)
@@ -215,6 +215,11 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				}
 			}
 		}
+		dial, dstatus, dreason := a.substrateRelayDial(r.Context(), st, reg)
+		if dstatus != http.StatusOK {
+			writeSubstrateJSONError(w, dstatus, dreason)
+			return
+		}
 		space, name := reg.Atespace, reg.Name
 		proxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
@@ -244,10 +249,8 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				pr.Out.Header.Set("Authorization", "Bearer "+tok)
 			},
 			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return st.cfg.Relays.DialRelay(ctx, space, name)
-				},
-				Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
+				Proxy:       nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
 			},
 			FlushInterval: -1, // stream poll and task answers as they come
 			// A terminal WebSocket learns how long its session token

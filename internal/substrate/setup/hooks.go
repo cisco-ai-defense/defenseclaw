@@ -649,8 +649,8 @@ func PurgeSteps(plan ChartPlan) []string {
 			"members from its bindings, then kubectl ate update access-policy --global -f global.yaml." + atespaceGrantSteps(plan),
 	}
 	steps = append(steps, "  6. The Secrets the install hooks created are kept, so a reinstall keeps chain joins and the images built with "+
-		"the relay session key: "+ChainKeySecret+", "+CalloutTokenSecret+", "+plan.relaySessionSecret()+". Delete them with "+
-		"kubectl -n "+plan.Namespace+" delete secret "+ChainKeySecret+" "+CalloutTokenSecret+" "+plan.relaySessionSecret()+
+		"the relay session key and the relay CA: "+ChainKeySecret+", "+CalloutTokenSecret+", "+plan.relaySessionSecret()+", "+plan.relayCASecret()+". Delete them with "+
+		"kubectl -n "+plan.Namespace+" delete secret "+ChainKeySecret+" "+CalloutTokenSecret+" "+plan.relaySessionSecret()+" "+plan.relayCASecret()+
 		" once nothing uses them (images built with the old relay session key then need a rebuild).")
 	if plan.AuthDelegatorBinding != "" {
 		steps = append(steps, "  7. After helm uninstall --no-hooks or a lost release, check the cluster-wide binding is gone: "+
