@@ -110,7 +110,7 @@ func loadSubstrateTaskRecord(dataDir string, a api.Actor) (substrateTaskRecord, 
 // substrateTaskLost reports whether a's relay has no task: its run was lost
 // with a crash. It waits while a recovered agent's relay starts.
 func substrateTaskLost(ctx context.Context, cmd *cobra.Command, s *substrateSession, a api.Actor, transport string) (bool, error) {
-	o, err := substrateAttachOptions(cmd, s, a, transport, true)
+	o, err := substrateAttachOptions(cmd, s, a, transport, true, attach.KeyReplayOff)
 	if err != nil {
 		return false, err
 	}
@@ -154,7 +154,14 @@ func substrateRerunTask(ctx context.Context, cmd *cobra.Command, s *substrateSes
 	}
 	f := &substrateRunFlags{clone: rec.Clone, ref: rec.Ref, remoteDir: rec.RemoteDir, exclude: rec.Exclude, unmask: rec.Unmask, maxUploadMB: rec.MaxUploadMB, transport: rec.Transport}
 	if rec.Project != "" {
-		if err := substrateUploadFolder(ctx, cmd, s, a, f, rec.Project); err != nil {
+		// The copy is staged as run stages it: the cluster upload limit
+		// and upload scan, the masks and --unmask of the recorded run.
+		prepared, err := substratePreflight(ctx, cmd, s, f, rec.Project)
+		if err != nil {
+			return err
+		}
+		defer prepared.Close()
+		if err := substrateUploadFolder(ctx, cmd, s, a, prepared); err != nil {
 			return err
 		}
 	}
@@ -163,7 +170,7 @@ func substrateRerunTask(ctx context.Context, cmd *cobra.Command, s *substrateSes
 			return err
 		}
 	}
-	o, err := substrateAttachOptions(cmd, s, a, rec.Transport, true)
+	o, err := substrateAttachOptions(cmd, s, a, rec.Transport, true, attach.KeyReplayOff)
 	if err != nil {
 		return err
 	}
