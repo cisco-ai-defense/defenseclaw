@@ -39,10 +39,12 @@ import (
 //
 // The record names the ledger generation it was written for (the ledger's
 // updated_at) and the one it was built on. It counts only while the ledger
-// is that generation: another guardian (an earlier release after a
-// rollback) that published since may have re-rendered a target with the
-// times this record holds, and a record written for a generation whose
-// ledger write then failed is ahead of the ledger (GAP-1763).
+// is one of those two generations: another guardian (an earlier release
+// after a rollback) that published since may have re-rendered a target with
+// the times this record holds (GAP-1763). A record whose ledger write
+// failed (a crash, a failed replace) is ahead of the ledger it was built on
+// and still counts for it: its targets come from that ledger's rows and the
+// pass's own, and the times must match the published row (GAP-1885).
 const enterpriseHookReleaseProtectionFile = "release_protection.json"
 
 // enterpriseHookReleaseProtectionMaxBytes bounds the read: one short entry
@@ -103,8 +105,9 @@ func enterpriseHookTargetReleaseNotProtectedHere(opts enterprisehooks.InstallOpt
 // it and recorded new times) makes it no: its lock may then rightly name that
 // release. So does a ledger generation the record was not written for: an
 // earlier guardian that published since may have re-rendered the target with
-// the same recovery times (GAP-1763 c). Both records are SYSTEM-written; the
-// account can write neither.
+// the same recovery times (GAP-1763 c). A record ahead of the ledger it was
+// built on (its ledger write failed) counts for that ledger (GAP-1885). Both
+// records are SYSTEM-written; the account can write neither.
 func enterpriseHookTargetProtectedHere(opts enterprisehooks.InstallOptions) (bool, error) {
 	if !enterpriseHookReleaseProtectionRecorded() {
 		return false, nil
@@ -135,7 +138,8 @@ func enterpriseHookTargetProtectedHere(opts enterprisehooks.InstallOptions) (boo
 	if err != nil {
 		return false, err
 	}
-	if record.Generation == "" || record.Generation != authorization.UpdatedAt {
+	if authorization.UpdatedAt == "" || record.Generation == "" ||
+		(record.Generation != authorization.UpdatedAt && record.BaseGeneration != authorization.UpdatedAt) {
 		return false, nil
 	}
 	for _, row := range authorization.ProtectedTargets {
