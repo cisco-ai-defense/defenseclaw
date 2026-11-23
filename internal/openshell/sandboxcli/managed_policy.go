@@ -863,13 +863,25 @@ func (a *App) managedInstallPending(m *sandboxapi.ManagedStatus) bool {
 // computer a daemon's gateway_elsewhere (which could name another account's
 // process) is reduced to the fact that another account holds the gateway: the
 // field stays a non-empty flag for the consumers that read it (the TUI), with
-// nothing about whose it is.
+// nothing about whose it is. While sandboxes are off for the account, reason
+// is the one line the text status, `sandbox run` and `sandbox doctor` give
+// (Status.OffMessage, from Status.ManagedOff), not the daemon's own words,
+// which name another account's gateway whatever the reason (GAP-2055).
 func neutralStatus(st *sandboxapi.Status) *sandboxapi.Status {
-	if st == nil || st.Managed == nil || st.GatewayElsewhere == "" {
+	if st == nil || st.Managed == nil {
+		return st
+	}
+	off := st.ManagedOff() != sandboxapi.ManagedOffNone
+	if st.GatewayElsewhere == "" && !off {
 		return st
 	}
 	out := *st
-	out.GatewayElsewhere = "another account"
+	if out.GatewayElsewhere != "" {
+		out.GatewayElsewhere = "another account"
+	}
+	if off {
+		out.Reason = out.OffMessage()
+	}
 	return &out
 }
 

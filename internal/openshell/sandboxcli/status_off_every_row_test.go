@@ -366,3 +366,49 @@ func TestActivityFollowEndsWithAWordWhileSandboxesAreOn(t *testing.T) {
 		t.Errorf("activity -f printed %q on stdout, want nothing", got)
 	}
 }
+
+// `sandbox status --output json` while sandboxes are off for the account: its
+// reason is the line the text status, run and doctor give for the kind, though
+// the daemon words its own reason as another account's busy gateway for every
+// kind (GAP-2055). Every kind, and no other kind's reason in it.
+func TestStatusJSONReasonIsTheOneManagedOffReason(t *testing.T) {
+	withManagedHost(t)
+	for _, tc := range offCases {
+		if tc.kind == sandboxapi.ManagedOffNone {
+			continue
+		}
+		for _, goos := range []string{"linux", "darwin"} {
+			t.Run(tc.name+"/"+goos, func(t *testing.T) {
+				ta := offFixture(t, tc, goos, false, false)
+				ta.daemon.status.Reason = sandboxapi.AccountBusyMessage + "."
+				want := ta.daemon.status.OffMessage()
+				ta.out.Reset()
+				ta.ok(t, ta.Status(bg, "", OutputJSON))
+				var got struct {
+					Enabled          bool   `json:"enabled"`
+					Available        bool   `json:"available"`
+					Reason           string `json:"reason"`
+					GatewayElsewhere string `json:"gateway_elsewhere"`
+				}
+				if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil {
+					t.Fatalf("status --json is not json: %v\n%s", err, ta.output())
+				}
+				if got.Reason != want {
+					t.Errorf("status --json reason = %q, want the line the text status and run give: %q", got.Reason, want)
+				}
+				for _, reason := range []string{orgPhrase, profilePhrase, busyPhrase, installPhrase} {
+					allowed := false
+					for _, a := range tc.allow {
+						allowed = allowed || a == reason
+					}
+					if !allowed && strings.Contains(got.Reason, reason) {
+						t.Errorf("status --json reason names %q while the reason is %s: %q", reason, tc.name, got.Reason)
+					}
+				}
+				if got.Enabled != tc.enabled || got.Available {
+					t.Errorf("status --json enabled=%v available=%v, want %v and false", got.Enabled, got.Available, tc.enabled)
+				}
+			})
+		}
+	}
+}
