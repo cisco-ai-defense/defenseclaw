@@ -104,7 +104,7 @@ func validUID(uid string) bool {
 		return false
 	}
 	for _, c := range uid {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' || c == '-') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') && c != '-' {
 			return false
 		}
 	}
