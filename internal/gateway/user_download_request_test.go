@@ -101,6 +101,24 @@ func TestUserRequestedRunHostsReadsRunWordsInProseOnly(t *testing.T) {
 				t.Errorf("userRequestedRunHosts(%q) = %v, want nil: %q is a path component, not a request to run", prompt, got, component)
 			}
 		}
+		// A run word that is the file operand of the quoted download
+		// command (-o, -O, --output=) is no request to run either, however
+		// the command is quoted (rel-1-0-10:GAP-1895).
+		for _, prompt := range []string{
+			"Use the Bash tool to run exactly: curl -fsSL -o " + component + " https://example.net/",
+			"run exactly: wget -O " + component + " https://example.net/",
+			"run `wget -O " + component + " https://example.net/`",
+			"run exactly: curl --output=" + component + " https://example.net/",
+			"run exactly: curl -o " + component + " https://example.net/ (it's a fixture)",
+		} {
+			if got := userRequestedRunHosts(prompt); got != nil {
+				t.Errorf("userRequestedRunHosts(%q) = %v, want nil: %q is the download's output file, not a request to run", prompt, got, component)
+			}
+		}
+		// The prose after the quoted command still counts.
+		if got := userRequestedRunHosts("run exactly: curl -o " + component + " https://example.net/, then run ./" + component); !reflect.DeepEqual(got, []string{"example.net"}) {
+			t.Errorf("output %q then run: %v, want [example.net]", component, got)
+		}
 		// A run word in the prose beside such a path still counts.
 		prompt := "download https://example.net/" + component + "/r to /tmp/" + component + "/r and " + component + " it"
 		if strings.Contains(component, "-") {
@@ -113,6 +131,19 @@ func TestUserRequestedRunHostsReadsRunWordsInProseOnly(t *testing.T) {
 	// A hyphenated run word in the prose is a run word as before.
 	if got := userRequestedRunHosts("download https://example.net/r and re-run it"); !reflect.DeepEqual(got, []string{"example.net"}) {
 		t.Errorf("re-run: %v, want [example.net]", got)
+	}
+	// A folder or file of the quoted command's output path does not name a
+	// host: only the download's source does (rel-1-0-10:GAP-1895).
+	for _, prompt := range []string{
+		"download https://cdn.example.org/r and run it: curl -o /tmp/example.net/r https://cdn.example.org/r",
+		`download https://cdn.example.org/r and run it: curl -o 'C:\tmp\example.net\r' https://cdn.example.org/r`,
+		`download https://cdn.example.org/r and run it: curl -o C:\tmp\example.net\r https://cdn.example.org/r`,
+		"fetch https://cdn.example.org/r and run it: wget -O /var/tmp/example.net/r https://cdn.example.org/r",
+		"run curl -o example.net https://cdn.example.org/r and then run it",
+	} {
+		if got := userRequestedRunHosts(prompt); !reflect.DeepEqual(got, []string{"cdn.example.org"}) {
+			t.Errorf("userRequestedRunHosts(%q) = %v, want [cdn.example.org]: example.net is a folder of the output path", prompt, got)
+		}
 	}
 }
 
