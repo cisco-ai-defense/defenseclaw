@@ -92,7 +92,7 @@ func (s *ContinuousDiscoveryService) detectSubstrateLaunchers(procs []processInf
 			if err != nil {
 				continue
 			}
-			if r, ok := launcherpresence.Parse(b, p.PID); ok && r.Matches(p.StartedAt) {
+			if r, ok := launcherpresence.Parse(b, p.PID); ok && r.Kind == "" && r.Matches(p.StartedAt) {
 				found = append(found, p)
 				break
 			}
