@@ -27,6 +27,10 @@ type gap0377Row struct {
 	name, command string
 	benign        bool
 	stricter      string
+	// unnamed is a laptop rule the actor need not name: a laptop-side gap
+	// (substrate-1 GAP-0503: persistence.ssh_authorized_keys_command on a
+	// read in ~/.ssh).
+	unnamed string
 }
 
 // gap0377Shapes are the review's nearby shapes (RKGUEST3, substrate-1
@@ -326,7 +330,7 @@ func gap0377Check(t *testing.T, rows []gap0377Row) {
 					t.Errorf("%s: copy-mode actor %s %v is weaker than the laptop's %s %v", row.name, ca, cr, la, lr)
 				}
 				for _, rule := range lr {
-					if !slices.Contains(cr, rule) {
+					if rule != row.unnamed && !slices.Contains(cr, rule) {
 						t.Errorf("%s: copy-mode actor %s %v does not name the laptop's %s (%s %v)", row.name, ca, cr, rule, la, lr)
 					}
 				}

@@ -4719,14 +4719,27 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // candidates are the readings in a directory the call reaches only as a cd
 // target no command runs in (guestPlacement.candidate): they count only for
 // the private-key read proof, as the laptop's readers judge a candidate
-// directory (substrate-1 GAP-0379).
+// directory (substrate-1 GAP-0379). After a command the split cannot read
+// ($CMD, eval, source), which may change the folder, the laptop keeps such a
+// folder as one the later commands run in, as the hook-config guard does
+// here (GAP-0500): the readings there are children, judged by every owner.
+// cd .cache; bash <<< true; $CMD; cd s0; ...; cd ../.ssh; echo k >>
+// authorized_keys alerted where the laptop blocks (substrate-1 GAP-0628).
 func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	placements, stopped := sandboxGuestPlacements(input, facts, true)
+	dynamic := false
+	if slices.ContainsFunc(placements, func(placement guestPlacement) bool { return placement.candidate }) {
+		command := input.Command
+		if command == "" {
+			command, _ = trustedBashCommandInput(input)
+		}
+		dynamic = guestCallRunsUnreadCommand(command, input.ActiveHome)
+	}
 	for _, placement := range placements {
 		child := input
 		child.Command, child.CWD = placement.text, placement.cwd
 		child.Args, child.Argv = nil, nil
-		if placement.candidate {
+		if placement.candidate && !dynamic {
 			candidates = append(candidates, actionfacts.Analyze(child))
 		} else {
 			children = append(children, actionfacts.Analyze(child))

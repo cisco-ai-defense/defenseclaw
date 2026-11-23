@@ -158,12 +158,33 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// dirs are the directories the call's commands run in, targets the cd
 	// targets no command is read in yet; each keeps its first
 	// maxSandboxGuestCandidateDirs entries, the guest's directory first
-	// (substrate-1 GAP-0499).
+	// (substrate-1 GAP-0499). Past the bound a folder that may hold
+	// protected files (guestDirFirst: the home, a hidden folder such as
+	// ~/.ssh) takes the place of the last plain one kept: cd .cache; $CMD;
+	// cd s0; ...; cd s6 lists 2^7 plain folders, and the cd ../.ssh after
+	// them was never kept, so the authorized_keys write there was not read
+	// where the laptop blocks (substrate-1 GAP-0628).
 	keep := func(list []string, dir string) []string {
-		if !path.IsAbs(dir) || len(list) == maxSandboxGuestCandidateDirs || slices.Contains(list, path.Clean(dir)) {
+		if !path.IsAbs(dir) {
 			return list
 		}
-		return append(list, path.Clean(dir))
+		dir = path.Clean(dir)
+		if slices.Contains(list, dir) {
+			return list
+		}
+		if len(list) < maxSandboxGuestCandidateDirs {
+			return append(list, dir)
+		}
+		if !guestDirFirst(dir, input.ActiveHome) {
+			return list
+		}
+		for at := len(list) - 1; at > 0; at-- {
+			if !guestDirFirst(list[at], input.ActiveHome) {
+				list[at] = dir
+				return list
+			}
+		}
+		return list
 	}
 	var dirs, targets []string
 	dirs = keep(dirs, input.CWD)
@@ -177,13 +198,20 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	type pending struct {
 		text, cwd string
 		candidate bool
+		// seq is the reading's place in the order the pass lists its
+		// readings (collect).
+		seq int
 	}
+	arrivals := 0
 	// collect keeps the distinct readings of a pass, at most
 	// maxSandboxGuestPlacements. Past the bound the pass is cut (dropped): a
 	// plain reading is not kept, and a first reading (guestReadingFirst)
 	// takes the place of the last plain one kept, so the list stays at the
 	// bound (substrate-1 GAP-0624: a here-string call listed ~200k readings)
-	// and a protected tail is still read next to the limit (GAP-0501).
+	// and a protected tail is still read next to the limit (GAP-0501). Each
+	// reading keeps the order it was listed in (seq), so a first reading
+	// that takes an early plain slot is still placed after the first
+	// readings listed before it (substrate-1 GAP-0637).
 	// plain holds the indexes of the plain readings kept; listed maps each
 	// reading kept to its index.
 	//
@@ -204,6 +232,8 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 			return list
 		}
 		first := guestReadingFirst(reading.text)
+		reading.seq = arrivals
+		arrivals++
 		if len(list) >= maxSandboxGuestPlacements {
 			*dropped = true
 			if !first || len(*plain) == 0 {
@@ -222,12 +252,22 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		listed[at] = len(list)
 		return append(list, reading)
 	}
+	// placeAll places the first readings of a pass in the order they were
+	// listed, then the plain ones: under the statement budget an earlier
+	// protected reading is never skipped for a later one.
 	placeAll := func(p *pass, list []pending) bool {
-		for _, first := range []bool{true, false} {
-			for _, reading := range list {
-				if guestReadingFirst(reading.text) == first && !place(p, reading.text, reading.cwd, reading.candidate) {
-					return false
-				}
+		var firsts, plains []pending
+		for _, reading := range list {
+			if guestReadingFirst(reading.text) {
+				firsts = append(firsts, reading)
+			} else {
+				plains = append(plains, reading)
+			}
+		}
+		slices.SortFunc(firsts, func(a, b pending) int { return a.seq - b.seq })
+		for _, reading := range slices.Concat(firsts, plains) {
+			if !place(p, reading.text, reading.cwd, reading.candidate) {
+				return false
 			}
 		}
 		return true
@@ -275,13 +315,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		}
 		cwd := simple.CWD
 		if path.IsAbs(cwd) {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, cwd, false})
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, cwd, false, 0})
 		}
 		for _, dir := range dirs {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, false})
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, false, 0})
 		}
 		for _, dir := range targets {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, true})
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, true, 0})
 		}
 		bases := slices.Concat(dirs, targets)
 		if path.IsAbs(cwd) {
@@ -335,10 +375,10 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	var callsPlain []int
 	for _, call := range guestScriptCalls(command) {
 		for _, dir := range dirs {
-			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, false})
+			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, false, 0})
 		}
 		for _, dir := range targets {
-			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, true})
+			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, true, 0})
 		}
 		for _, target := range guestCDTargets(call, slices.Concat(dirs, targets), input.ActiveHome) {
 			targets = keep(targets, target)
@@ -350,10 +390,46 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 
 // guestReadingFirst reports a command text whose reading in another folder
 // may reach a different protected path: a word with a dot or a slash
-// (../.ssh/id_ed25519, .bashrc, a/b), a ~, an expansion or a pattern. A text
-// of plain words (touch f1, ls, cd sub) is read after them.
+// (../.ssh/id_ed25519, .bashrc, a/b), a ~, an expansion or a pattern, or a
+// bare name the laptop protects in a folder it cannot name (authorized_keys,
+// a private key id_*, the account and credential files:
+// unresolvedFolderWriteNames, unresolvedFolderReadNames; substrate-1
+// GAP-0625). A text of plain words (touch f1, ls, cd sub) is read after
+// them. The scan allocates nothing.
 func guestReadingFirst(text string) bool {
-	return strings.ContainsAny(text, "./~$`*?[{\\")
+	if strings.ContainsAny(text, "./~$`*?[{\\") {
+		return true
+	}
+	for start := 0; start < len(text); {
+		end := start
+		for end < len(text) && guestNameByte(text[end]) {
+			end++
+		}
+		if end == start {
+			start++
+			continue
+		}
+		word := text[start:end]
+		if strings.HasPrefix(word, "id_") || slices.Contains(unresolvedFolderWriteNames, word) ||
+			slices.Contains(unresolvedFolderReadNames, word) {
+			return true
+		}
+		start = end
+	}
+	return false
+}
+
+// guestDirFirst reports a folder kept before plain ones past the guest
+// placement's folder bound: the home, or a folder whose name starts with a
+// dot (~/.ssh, ~/.aws, ~/.defenseclaw, a project's .git or .claude).
+func guestDirFirst(dir, home string) bool {
+	return dir == path.Clean(home) || strings.HasPrefix(path.Base(dir), ".")
+}
+
+// guestNameByte reports a byte of a bare file name: a letter, a digit, _
+// or -.
+func guestNameByte(c byte) bool {
+	return c == '_' || c == '-' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // withSandboxGuestFolderTier gives a sandbox call the unknown tier the
