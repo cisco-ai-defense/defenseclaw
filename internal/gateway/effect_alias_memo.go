@@ -1,0 +1,230 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/effectrules"
+	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
+)
+
+// A link created by one agent call may be used by a later call. This memo
+// stores only proved credential members and placed aliases, never call text.
+const (
+	effectAliasSessionLimit    = 128
+	effectAliasPerSessionLimit = 32
+	effectAliasTTL             = 30 * time.Minute
+	effectAliasMaxSessionBytes = 256
+	effectAliasMaxPathBytes    = 4096
+)
+
+type effectAliasKey struct {
+	connector, session, home, cwd string
+}
+type effectAliasEntry struct {
+	proof decide.Proof
+	at    time.Time
+}
+type effectAliasSession struct {
+	aliases map[string]effectAliasEntry
+	at      time.Time
+}
+type effectAliasMemo struct {
+	mu       sync.Mutex
+	sessions map[effectAliasKey]*effectAliasSession
+}
+
+var sessionEffectAliases effectAliasMemo
+
+func aliasKey(request trustedActionRequest) (effectAliasKey, bool) {
+	key := effectAliasKey{
+		connector: strings.TrimSpace(request.Connector),
+		session:   strings.TrimSpace(request.sessionID),
+		home:      request.Input.ActiveHome,
+		cwd:       request.Input.CWD,
+	}
+	return key, key.connector != "" && len(key.connector) <= 64 &&
+		key.session != "" && len(key.session) <= effectAliasMaxSessionBytes &&
+		key.home != "" && len(key.home) <= effectAliasMaxPathBytes &&
+		key.cwd != "" && len(key.cwd) <= effectAliasMaxPathBytes
+}
+
+func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Result) []decide.Proof {
+	key, ok := aliasKey(request)
+	if !ok {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session := m.sessions[key]
+	if session == nil {
+		return nil
+	}
+	now := time.Now()
+	if now.Sub(session.at) > effectAliasTTL {
+		delete(m.sessions, key)
+		return nil
+	}
+	var proofs []decide.Proof
+	for _, e := range result.Effects {
+		if e.TargetState != effects.TargetStateKnown || e.RoleState != effects.RoleStateKnown || len(e.Reasons) != 0 {
+			continue
+		}
+		var kind decide.ProofKind
+		switch e.Kind {
+		case effects.KindRead:
+			kind = decide.KindRead
+		case effects.KindWrite:
+			kind = decide.KindWrite
+		case effects.KindAppend:
+			kind = decide.KindAppend
+		default:
+			continue
+		}
+		if len(e.Target.Path) > effectAliasMaxPathBytes {
+			continue
+		}
+		entry, found := session.aliases[e.Target.Path]
+		if !found {
+			continue
+		}
+		if now.Sub(entry.at) > effectAliasTTL {
+			delete(session.aliases, e.Target.Path)
+			continue
+		}
+		p := entry.proof
+		p.Kind, p.LinkTo = kind, true
+		proofs = appendCredentialReadProof(proofs, p)
+	}
+	return proofs
+}
+
+func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor) {
+	key, ok := aliasKey(request)
+	if !ok {
+		return
+	}
+	relevant, hasLink := false, false
+	for _, e := range result.Effects {
+		if e.Kind == effects.KindDelete {
+			relevant = true
+		}
+		if e.Kind == effects.KindLink && e.LinkTarget {
+			relevant, hasLink = true, true
+		}
+	}
+	if !relevant {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sessions == nil {
+		if !hasLink {
+			return
+		}
+		m.sessions = make(map[effectAliasKey]*effectAliasSession)
+	}
+	session := m.sessions[key]
+	if session == nil && !hasLink {
+		return
+	}
+	now := time.Now()
+	for k, s := range m.sessions {
+		if now.Sub(s.at) > effectAliasTTL {
+			delete(m.sessions, k)
+		}
+	}
+	session = m.sessions[key]
+	if session != nil {
+		for _, e := range result.Effects {
+			if e.Kind == effects.KindDelete && e.Target.Path != "" {
+				delete(session.aliases, e.Target.Path)
+			}
+		}
+	}
+	for i, e := range result.Effects {
+		if !e.LinkTarget || e.Kind != effects.KindLink || e.Cond || i+1 >= len(result.Effects) || i >= len(facts) {
+			continue
+		}
+		at := result.Effects[i+1]
+		if at.Kind != effects.KindLink || at.LinkTarget || at.Cond || at.Origin.Command != e.Origin.Command ||
+			len(at.Target.Path) > effectAliasMaxPathBytes ||
+			!effectrules.CanonicalAbsolute(at.Target.Path, flavor) {
+			continue
+		}
+		proof, known := knownAliasCredential(facts[i])
+		if session == nil && !known {
+			continue
+		}
+		if session == nil {
+			if len(m.sessions) >= effectAliasSessionLimit {
+				m.evictOldestSession()
+			}
+			session = &effectAliasSession{aliases: make(map[string]effectAliasEntry)}
+			m.sessions[key] = session
+		}
+		// A later link at the same alias supersedes the old member, including a
+		// link to a non-credential target.
+		delete(session.aliases, at.Target.Path)
+		if known {
+			if len(session.aliases) >= effectAliasPerSessionLimit {
+				evictOldestAlias(session)
+			}
+			session.aliases[at.Target.Path] = effectAliasEntry{proof: proof, at: now}
+		}
+		session.at = now
+	}
+}
+
+func knownAliasCredential(f *semanticpb.EffectFact) (decide.Proof, bool) {
+	if f.GetTargetState() != "known" || f.GetRoleState() != "known" {
+		return decide.Proof{}, false
+	}
+	set := decide.CredentialSet(effectCredentialMemberTail(f.GetTarget().GetPath()))
+	if set == "" {
+		return decide.Proof{}, false
+	}
+	for _, match := range f.GetTarget().GetProtected() {
+		if match.GetSet() != effectrules.SetCredentials || match.GetState() != "known" {
+			continue
+		}
+		target := decide.TargetCredential
+		switch match.GetReason() {
+		case "exact":
+		case "other_home":
+			target = decide.TargetOtherHomeCredential
+		default:
+			continue
+		}
+		return decide.Proof{Kind: decide.KindRead, Target: target, Certainty: decide.CertKnown,
+			Set: set, Source: effectProofSource}, true
+	}
+	return decide.Proof{}, false
+}
+
+func (m *effectAliasMemo) evictOldestSession() {
+	var oldest effectAliasKey
+	var first time.Time
+	for key, session := range m.sessions {
+		if first.IsZero() || session.at.Before(first) {
+			oldest, first = key, session.at
+		}
+	}
+	delete(m.sessions, oldest)
+}
+func evictOldestAlias(session *effectAliasSession) {
+	var oldest string
+	var first time.Time
+	for path, entry := range session.aliases {
+		if first.IsZero() || entry.at.Before(first) {
+			oldest, first = path, entry.at
+		}
+	}
+	delete(session.aliases, oldest)
+}

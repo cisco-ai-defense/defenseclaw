@@ -130,6 +130,8 @@ type EffectShadowResult struct {
 	// ReadProofs are private decision inputs. Do not serialize member paths or
 	// credential classes into the shadow telemetry record.
 	ReadProofs []decide.Proof `json:"-"`
+	// MutationProofs are member-exact effects writes graded by Decide.
+	MutationProofs []decide.Proof `json:"-"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -408,9 +410,10 @@ type effectClass struct {
 	// that placement (decide.RowEffectLink), whatever the link points to.
 	linkTo, linkAt bool
 	// known: some protected effect is known (mutation or credential read).
-	known         bool
-	knownMutation bool
-	readProofs    []decide.Proof
+	known          bool
+	knownMutation  bool
+	readProofs     []decide.Proof
+	mutationProofs []decide.Proof
 	// restrictedSets are the sets of the exact members that made the call
 	// restricted: the sets the restricted verdict is about. A file of ~/.ssh
 	// is also a known member of the authorized-keys set by its folder, but
@@ -489,6 +492,12 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		} else if proof, ok := knownCredentialReadProof(f); ok {
 			c.known = true
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
+		}
+		if proof, ok := knownAuthorizedKeysMutationProof(f, flavor); ok && fullyAccounted {
+			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+			c.restricted, c.restrictedRuling = true, true
+			c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
+			c.known, c.knownMutation = true, true
 		}
 		if c.program == "" && c.kind == "" {
 			c.program, c.kind = f.GetOrigin().GetProgram(), kind
@@ -772,6 +781,15 @@ func markOutermostEffectDispatch(ctx context.Context) (context.Context, bool) {
 // proof, so the existing 1.0.10 read row supplies the verdict.
 func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFinding {
 	var findings []RuleFinding
+	for _, proof := range res.MutationProofs {
+		ruleID := decide.RuleFor(proof)
+		if ruleID == "" {
+			continue
+		}
+		f := RuleFinding{RuleID: ruleID, Title: "Known authorized keys write", Severity: "CRITICAL", Confidence: 1, Proof: proof}
+		f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
+		findings = append(findings, f)
+	}
 	for _, proof := range res.ReadProofs {
 		ruleID := decide.RuleFor(proof)
 		if ruleID == "" {
@@ -820,6 +838,29 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		f.Proof = f.Proof.Enforce()
 	}
 	return append(findings, f)
+}
+
+// knownAuthorizedKeysMutationProof uses the resolved target, independent of
+// the program that produced the write. The exact file and a known account-home
+// match carry the same proof through an identity-preserving wrapper.
+func knownAuthorizedKeysMutationProof(f *semanticpb.EffectFact, flavor effects.Flavor) (decide.Proof, bool) {
+	if f == nil || (f.GetKind() != string(effects.KindWrite) && f.GetKind() != string(effects.KindAppend)) ||
+		f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
+		!effectrules.CanonicalAbsolute(f.GetTarget().GetPath(), flavor) {
+		return decide.Proof{}, false
+	}
+	for _, match := range f.GetTarget().GetProtected() {
+		if match.GetSet() == effectrules.SetSSHAuthorizedKeys && match.GetState() == "known" &&
+			(match.GetReason() == "exact" || match.GetReason() == "other_home") {
+			kind := decide.KindWrite
+			if f.GetKind() == string(effects.KindAppend) {
+				kind = decide.KindAppend
+			}
+			return decide.Proof{Kind: kind, Target: decide.TargetAuthorizedKeys,
+				Certainty: decide.CertKnown, Source: effectProofSource}, true
+		}
+	}
+	return decide.Proof{}, false
 }
 
 // knownCredentialReadProof extracts the one 1.0.10 credential class a Known

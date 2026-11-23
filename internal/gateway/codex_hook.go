@@ -335,6 +335,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Input:                         actionInput,
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
+			sessionID:                     req.SessionID,
 			EnforcementCapable:            true,
 			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "codex", runtime.GOOS),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
