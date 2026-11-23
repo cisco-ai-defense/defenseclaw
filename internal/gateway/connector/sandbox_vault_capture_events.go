@@ -50,9 +50,8 @@ func (e VaultCaptureEvent) Exposed() bool { return e.Point != VaultCapturePrompt
 
 // FromModel reports whether a secret at the event is one the agent's model
 // wrote or read (a tool call, a tool's output, a reply, another event), not
-// the person's prompt: a new entry counts toward the vault's
-// MaxCapturedFromModel, so model-side values never use up the room
-// prompts need.
+// the person's prompt: a new entry counts toward the vault's model-side
+// bound, so model-side values never use up the room prompts need.
 func (e VaultCaptureEvent) FromModel() bool {
 	return e.Point != VaultCapturePrompt && e.Point != VaultCapturePromptSeen
 }
