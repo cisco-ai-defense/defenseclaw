@@ -37,6 +37,16 @@ func TestMCPStdioShim(t *testing.T) {
 		errb.String() != "the laptop MCP server notes is not bridged right now\n" || out.Len() != 0 {
 		t.Fatalf("no socket: exit %d stderr %q stdout %q", code, errb.String(), out.String())
 	}
+	// The relay binary's subcommand is this shim.
+	errb.Reset()
+	if code := Main([]string{"mcp-stdio", "notes"}, &out, &errb); code != 1 ||
+		errb.String() != "the laptop MCP server notes is not bridged right now\n" {
+		t.Fatalf("defenseclaw-actor-relay mcp-stdio notes: exit %d stderr %q", code, errb.String())
+	}
+	errb.Reset()
+	if code := Main([]string{"mcp-stdio"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "usage: defenseclaw-actor-relay mcp-stdio NAME") {
+		t.Fatalf("mcp-stdio without NAME: exit %d stderr %q", code, errb.String())
+	}
 	errb.Reset()
 	if code := MCPStdio("../x", strings.NewReader(""), &out, &errb); code != 2 {
 		t.Fatalf("bad name: exit %d %q", code, errb.String())
