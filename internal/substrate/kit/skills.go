@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
@@ -72,9 +73,13 @@ var skillScanEvents = map[string]bool{
 	"PostToolUse": true, "postToolUse": true, "SessionStart": true, "sessionStart": true, "Stop": true, "stop": true,
 }
 
-// skillRoots are the directories whose subfolders an agent loads as skills:
-// in the home and the project, and every skills folder of an installed
-// Claude Code plugin (~/.claude/plugins/.../skills, also the project's).
+// skillRoots are the directories whose subfolders an agent loads as skills,
+// read from the one connector table (agentpaths, GAP-0788; it replaced the
+// kit's own list of .claude, .codex and .agents, which missed the Cursor,
+// Copilot, Devin, Amp, Antigravity, OpenCode and Hermes folders): the home,
+// config and absolute roots first, then the project's, each followed by the
+// skills folders found inside that side's plugin folders. Command folders
+// hold single files, not skill folders, and are left out.
 func skillRoots(home, cwd string) []string {
 	var roots []string
 	seen := map[string]bool{}
@@ -84,23 +89,69 @@ func skillRoots(home, cwd string) []string {
 			roots = append(roots, r)
 		}
 	}
-	for _, base := range []string{home, cwd} {
-		if base == "" || !filepath.IsAbs(base) {
-			continue
+	entries := agentpaths.ActorEntries()
+	for _, project := range []bool{false, true} {
+		var plugins []string
+		for _, e := range entries {
+			if (e.Base == agentpaths.Project) != project || e.Kind == agentpaths.Commands {
+				continue
+			}
+			for _, dir := range actorDirs(e, home, cwd) {
+				if e.Kind == agentpaths.Plugins {
+					plugins = append(plugins, dir)
+				} else {
+					add(dir)
+				}
+			}
 		}
-		for _, rel := range []string{".claude/skills", ".codex/skills", ".agents/skills"} {
-			add(filepath.Join(base, rel))
-		}
-		plugins := filepath.Join(base, ".claude", "plugins")
-		found, complete := pluginSkillRoots(plugins)
-		for _, r := range found {
-			add(r)
-		}
-		if !complete {
-			add(plugins) // stands in for the plugin skill roots not found
+		searched := map[string]bool{}
+		for _, dir := range plugins {
+			if searched[dir] {
+				continue
+			}
+			searched[dir] = true
+			found, complete := pluginSkillRoots(dir)
+			for _, r := range found {
+				add(r)
+			}
+			if !complete {
+				add(dir) // stands in for the plugin skill roots not found
+			}
 		}
 	}
 	return roots
+}
+
+// actorDirs resolves one table entry in the actor. A Config entry is looked
+// at both under the default config home and under the vendor variable's
+// folder (CLAUDE_CONFIG_DIR, CODEX_HOME, HERMES_HOME, OPENCODE_CONFIG_DIR)
+// when one is set: the agent may have been started with either.
+func actorDirs(e agentpaths.ActorEntry, home, cwd string) []string {
+	rel := filepath.FromSlash(e.Rel)
+	switch e.Base {
+	case agentpaths.Home:
+		if filepath.IsAbs(home) {
+			return []string{filepath.Join(home, rel)}
+		}
+	case agentpaths.Project:
+		if filepath.IsAbs(cwd) {
+			return []string{filepath.Join(cwd, rel)}
+		}
+	case agentpaths.Abs:
+		return []string{rel}
+	case agentpaths.Config:
+		var out []string
+		if filepath.IsAbs(home) {
+			out = append(out, filepath.Join(home, filepath.FromSlash(e.ConfigRel), rel))
+		}
+		if e.ConfigEnv != "" {
+			if v := strings.TrimSpace(os.Getenv(e.ConfigEnv)); filepath.IsAbs(v) {
+				out = append(out, filepath.Join(filepath.Clean(v), rel))
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // pluginSkillRoots finds the folders named skills below a plugins folder
