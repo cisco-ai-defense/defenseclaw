@@ -40,6 +40,14 @@ func FromPwshparse(src string, opts Options) (*Script, bool) {
 	sc.Statements = sb.Statements
 	sc.Params = sb.Params
 	for _, e := range res.Errors {
+		if e.ErrorID == "StreamAlreadyRedirected" ||
+			(e.ErrorID == "RedirectionNotSupported" && strings.Contains(a.src[a.off(e.Start):a.off(e.End)], ">&")) {
+			// The redirection is kept on its command (a second one of a
+			// stream through rejectedIn; a merge to a stream pwsh does not
+			// support, 1>&2, as its MergingRedirectionAst) and Parse reads it
+			// without a diagnostic: the construct is fully read (GAP-1915).
+			continue
+		}
 		a.p.diag(a.off(e.Start), a.off(e.End), pwErrorReason(e.ErrorID), e.ErrorID)
 	}
 	sc.Diagnostics = a.p.diags
@@ -327,12 +335,16 @@ func (a *pwAdapter) pipeline(n *pwshparse.Node) *Pipeline {
 			pl.Elements = append(pl.Elements, a.command(e))
 		case "CommandExpressionAst":
 			var ex Expr
+			var redirs []*pwshparse.Node
 			for _, k := range e.Kids {
-				if k.Type == "FileRedirectionAst" || k.Type == "MergingRedirectionAst" {
-					pl.Redirs = append(pl.Redirs, a.redirection(k))
+				if isRedirNode(k) {
+					redirs = append(redirs, k)
 				} else if ex == nil {
 					ex = a.expr(k)
 				}
+			}
+			for _, r := range sortByStart(append(redirs, a.rejectedIn(e)...)) {
+				pl.Redirs = append(pl.Redirs, a.redirection(r))
 			}
 			if ex == nil {
 				ex = &ErrorExpr{span: a.sp(e), Reason: ReasonIncompleteExpr}
@@ -382,6 +394,7 @@ func (a *pwAdapter) command(n *pwshparse.Node) *Command {
 			elems = append(elems, k)
 		}
 	}
+	redirs = append(redirs, a.rejectedIn(n)...)
 	if len(elems) > 0 {
 		cmd.Name = a.commandName(elems[0])
 		elems = elems[1:]
@@ -412,15 +425,48 @@ func (a *pwAdapter) command(n *pwshparse.Node) *Command {
 	}
 	// pwshparse keeps one redirection per stream ordered by stream; Parse keeps
 	// source order.
-	for i := 1; i < len(redirs); i++ {
-		for j := i; j > 0 && redirs[j].Start < redirs[j-1].Start; j-- {
-			redirs[j], redirs[j-1] = redirs[j-1], redirs[j]
-		}
-	}
-	for _, r := range redirs {
+	for _, r := range sortByStart(redirs) {
 		cmd.Redirs = append(cmd.Redirs, a.redirection(r))
 	}
 	return cmd
+}
+
+// sortByStart orders redirection nodes by source offset (insertion sort: a
+// command has a handful).
+func sortByStart(rs []*pwshparse.Node) []*pwshparse.Node {
+	for i := 1; i < len(rs); i++ {
+		for j := i; j > 0 && rs[j].Start < rs[j-1].Start; j-- {
+			rs[j], rs[j-1] = rs[j-1], rs[j]
+		}
+	}
+	return rs
+}
+
+// rejectedIn returns the redirections pwshparse read for command n but did not
+// attach (Result.Rejected: a second redirection of one stream, which pwsh
+// reports as StreamAlreadyRedirected). Parse keeps every redirection, and the
+// effects reader must see each target the text names even when pwsh would
+// refuse the script (GAP-1915: `... 1>&2 >> authorized_keys` lost its append),
+// so each one goes to the command it was read for: n contains it and none of
+// n's elements does (a redirection of a nested command lies inside an element).
+func (a *pwAdapter) rejectedIn(n *pwshparse.Node) []*pwshparse.Node {
+	var out []*pwshparse.Node
+	for _, r := range a.res.Rejected {
+		if r.Start < n.Start || r.End > n.End {
+			continue
+		}
+		nested := false
+		for _, k := range n.Kids {
+			if k.Start <= r.Start && r.End <= k.End {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // commandName mirrors parseCommandName: a generic token is one literal name
