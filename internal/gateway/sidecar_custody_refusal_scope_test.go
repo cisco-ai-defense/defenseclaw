@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -31,9 +30,6 @@ const custodyScopeProtectedCall = "rm -rf /"
 // failed the whole start, so the co-resident connector ran unchecked
 // (GAP-0798).
 func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the open-folder fixture is a Unix mode bit")
-	}
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)
 	s.cfg.Guardrail.Enabled = true
@@ -78,9 +74,7 @@ func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T)
 	lockBefore := connector.LoadHookContractLockEntry(s.cfg.DataDir, "opencode")
 
 	// Other accounts can now write the OpenCode folder.
-	if err := os.Chmod(configDir, 0o757); err != nil {
-		t.Fatal(err)
-	}
+	closeFolder := openFolderToOtherAccounts(t, configDir)
 	got, err := boot()
 	if err != nil {
 		t.Fatalf("an unsafe OpenCode folder stopped the start for every connector: %v", err)
@@ -95,7 +89,7 @@ func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T)
 	if !strings.Contains(reason, configDir) {
 		t.Errorf("reason does not name the folder %s: %q", configDir, reason)
 	}
-	if fix := got.notStartedRepairs["opencode"].Fix; !strings.Contains(fix, "chmod go-w") || !strings.Contains(fix, configDir) {
+	if fix := got.notStartedRepairs["opencode"].Fix; !strings.Contains(fix, custodyFolderRepairCommand) || !strings.Contains(fix, configDir) {
 		t.Errorf("repair does not carry the one command for %s: %+v", configDir, got.notStartedRepairs["opencode"])
 	}
 	if after, err := os.ReadFile(pluginPath); err != nil || !bytes.Equal(after, pluginBefore) {
@@ -121,9 +115,7 @@ func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T)
 
 	// The printed fix and a restart bring OpenCode back.
 	s.cfg.Guardrail.Mode = "observe"
-	if err := os.Chmod(configDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	closeFolder()
 	again, err := boot()
 	if err != nil || !reflect.DeepEqual(again.succeeded, []string{"codex", "opencode"}) {
 		t.Fatalf("start after the fix: err=%v succeeded=%v", err, again.succeeded)
