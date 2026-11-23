@@ -98,9 +98,14 @@ func powerShellReadingCommands(request trustedActionRequest) []powerShellReading
 			return []powerShellReadingCommand{{text: command}}
 		}
 		return nil
-	case strings.HasPrefix(home, "/") && !request.Input.WindowsHookHost:
+	case strings.HasPrefix(home, "/"):
+		// Only the PowerShell tool command is a Linux or macOS reading: a
+		// Windows hook host with a '/' home (unresolvedCallerHome: a managed
+		// peer with no Home, a service gateway with no identity home) runs
+		// that tool in Windows PowerShell (GAP-1254). The launcher scripts
+		// are read for every '/' home, as rel read them (GAP-1300).
 		var commands []powerShellReadingCommand
-		if hint == "" || hint == actionfacts.DialectPowerShell {
+		if !request.Input.WindowsHookHost && (hint == "" || hint == actionfacts.DialectPowerShell) {
 			if trustedPowerShellExecutionTool(request.Input.Tool) {
 				if command, known := trustedBashCommandInput(request.Input); known {
 					commands = append(commands, powerShellReadingCommand{text: command, posixTool: true})
