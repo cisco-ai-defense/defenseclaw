@@ -64,7 +64,7 @@ func TestMCPBridgeEndToEnd(t *testing.T) {
 	rs := relay.NewServer(relay.Options{Config: cfg, Verifier: scopedSessions{b.fixture},
 		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Warm: func(context.Context, string) error { return nil }})
-	real := httptest.NewUnstartedServer(rs.Handler())
+	rsrv := httptest.NewUnstartedServer(rs.Handler())
 	key, csr, err := relaytls.NewKeyAndCSR()
 	if err != nil {
 		t.Fatal(err)
@@ -77,10 +77,10 @@ func TestMCPBridgeEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	real.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}
-	real.StartTLS()
-	t.Cleanup(real.Close)
-	st.cfg.Relays = &dialRelay{addr: strings.TrimPrefix(real.URL, "https://")}
+	rsrv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}
+	rsrv.StartTLS()
+	t.Cleanup(rsrv.Close)
+	st.cfg.Relays = &dialRelay{addr: strings.TrimPrefix(rsrv.URL, "https://")}
 
 	// The laptop: the launcher's WebSocket and a stdio MCP server behind it
 	// (one message per line, as the launcher runs it).

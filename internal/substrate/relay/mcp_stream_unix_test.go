@@ -30,7 +30,6 @@ import (
 
 type mcpEnv struct {
 	t    *testing.T
-	s    *Server
 	home string
 	ws   string
 	tok  func(scope string) string
@@ -51,7 +50,7 @@ func newMCPEnv(t *testing.T, connector string) *mcpEnv {
 	s.opts.Config.Relay.ClaudeStateFile = filepath.Join(home, ".claude.json")
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &mcpEnv{t: t, s: s, home: home,
+	return &mcpEnv{t: t, home: home,
 		ws: "ws" + strings.TrimPrefix(srv.URL, "http") + "/dcrelay/1/mcp/",
 		tok: func(scope string) string {
 			return ec.token(t, claims(time.Now(), func(c map[string]any) { c["dc.scope"] = scope }), TokenType)
