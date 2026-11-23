@@ -71,7 +71,7 @@ const (
 	// SourceManual is an entry the person added.
 	SourceManual Source = "manual"
 	// SourceCaptured is an entry DefenseClaw took out of a sandboxed
-	// agent's prompt or tool call.
+	// agent's prompt, tool call or tool output.
 	SourceCaptured Source = "captured"
 )
 
@@ -129,6 +129,12 @@ type Entry struct {
 	// Confirmed: the person confirmed a captured entry is theirs (vault
 	// confirm) or replaced its value. Manual entries need no confirmation.
 	Confirmed bool `json:"confirmed,omitempty"`
+	// FromModel: captured where an agent's model wrote or read the value (a
+	// tool call, a tool's output), not from a person's prompt; until the
+	// person replaces the value it counts toward MaxCapturedFromModel.
+	FromModel bool `json:"from_model,omitempty"`
+	// Sandbox is the sandbox a captured entry came from, when known.
+	Sandbox string `json:"sandbox,omitempty"`
 }
 
 // Status is the entry's state as people see it.
@@ -178,6 +184,9 @@ type file struct {
 
 	// sealer is the parsed Seal header (nil: a file vault).
 	sealer *sealer
+	// pending is what the pending exposures did to Entries when the vault
+	// was read (applyPending).
+	pending pendingState
 }
 
 // Store is one account's vault.
@@ -358,17 +367,21 @@ func (s *Store) Resolve(name string) (Entry, string, error) {
 	if r.Host == "" {
 		return r.Entry, "", fmt.Errorf("%w: %s (bind one with: defenseclaw sandbox vault bind %s --host HOST)", ErrNoHost, name, name)
 	}
+	v := r.Value
 	if f.sealer != nil {
 		if err := s.readKey(f); err != nil {
 			return r.Entry, "", err
 		}
-		v, err := f.sealer.open(&r)
-		if err != nil {
+		if v, err = f.sealer.open(&r); err != nil {
 			return r.Entry, "", s.damaged(err.Error())
 		}
-		return r.Entry, v, nil
 	}
-	return r.Entry, r.Value, nil
+	if f.pendingExposes(v) {
+		// Recorded exposed while the vault could not be written.
+		r.Exposed = true
+		return r.Entry, "", fmt.Errorf("%w: %s; rotate it with its issuer, then: defenseclaw sandbox vault replace %s", ErrExposed, name, name)
+	}
+	return r.Entry, v, nil
 }
 
 // FindByValue returns the entry that holds value, if any. In a sealed vault
@@ -641,7 +654,12 @@ func (f *file) indexValue(value string) int {
 func (s *Store) read() (*file, error) {
 	b, err := safefile.ReadRegularFileBounded(s.Path(), maxFileBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return &file{Version: fileVersion}, nil
+		// Pending exposures can name a value no vault holds yet.
+		f := &file{Version: fileVersion}
+		if err := s.applyPending(f); err != nil {
+			return nil, err
+		}
+		return f, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read the vault %s: %w", s.Path(), err)
@@ -679,6 +697,9 @@ func (s *Store) read() (*file, error) {
 	default:
 		return nil, fmt.Errorf("the vault %s has version %d, which this DefenseClaw does not read", s.Path(), f.Version)
 	}
+	if err := s.applyPending(&f); err != nil {
+		return nil, err
+	}
 	return &f, nil
 }
 
@@ -700,6 +721,10 @@ const (
 func (s *Store) update(n need, change func(*file) error) error {
 	return s.updateWait(lockWait, n, change)
 }
+
+// errUnchanged is what a change returns when it changed nothing: the
+// vault is not written.
+var errUnchanged = errors.New("the vault is unchanged")
 
 // updateWait is update with a bounded wait for the writer lock. Keystore
 // work happens before the lock is taken: a keychain prompt or a slow
@@ -747,6 +772,24 @@ func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error)
 	}
 	if err == nil {
 		err = change(f)
+		if err == nil || errors.Is(err, errUnchanged) {
+			// A pending exposure of a value this change stored is
+			// written with it.
+			f.applyOpenPending()
+		}
+		if errors.Is(err, errUnchanged) {
+			if !p.fresh && !f.pending.changed {
+				// Nothing to write: the vault on disk is f as read, and
+				// the pin was checked against it.
+				p.done(f)
+				pu.apply(s, f)
+				s.dropPending(f)
+				return nil
+			}
+			// A new key seals the vault, or a pending exposure is
+			// written: that is a change to write.
+			err = nil
+		}
 	}
 	var b []byte
 	if err == nil {
@@ -764,5 +807,6 @@ func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error)
 	}
 	p.done(f)
 	pu.apply(s, f)
+	s.dropPending(f)
 	return nil
 }

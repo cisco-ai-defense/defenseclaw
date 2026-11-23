@@ -343,9 +343,10 @@ func (a OpenShellApprovalsConfig) AgentProposalsEnabled() bool {
 
 // OpenShellVaultConfig tunes the sandbox credential vault.
 type OpenShellVaultConfig struct {
-	// AutoCapture moves a secret with a well-known issuer shape that a
-	// sandboxed agent is given (a prompt or a tool call of Claude Code or
-	// Codex) into the account's vault and stops the call; nil means true.
+	// AutoCapture moves a secret with a well-known issuer shape that shows
+	// up in a sandboxed agent's hook call (a prompt, a tool call, a tool's
+	// output, the agent's reply) into the account's vault and answers the
+	// call with the strongest answer its event has; nil means true.
 	AutoCapture *bool `mapstructure:"auto_capture" yaml:"auto_capture,omitempty"`
 }
 

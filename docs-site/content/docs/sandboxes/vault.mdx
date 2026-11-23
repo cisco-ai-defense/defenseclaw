@@ -74,10 +74,10 @@ usual (`$STRIPE_API_KEY` in a header). It never holds the value.
 
 ## Secrets DefenseClaw captures for you
 
-When an agent in a sandbox is given a secret with a well-known shape, the
-secret goes into your vault and the call is stopped before the value reaches
-the model. This covers Claude Code and Codex prompts and tool calls, and these
-kinds of secret:
+When a secret with a well-known shape shows up in any hook call of an agent
+in a sandbox (your prompt, a tool call, a tool's output, the agent's reply),
+the secret goes into your vault and the value is removed from the call before
+DefenseClaw checks, records or forwards it. These kinds of secret are captured:
 
 | Kind | Vault name | Bound to |
 | --- | --- | --- |
@@ -96,8 +96,8 @@ call that looks like your prompt, so a captured value may be one it planted.
 `confirm` shows where the secret came from and the last 4 characters of its
 value before it asks.
 
-- **In a prompt.** The prompt is stopped before it reaches the model. Claude
-  Code and Codex hooks cannot edit a prompt, only stop it. Claude Code puts the
+- **In a prompt that is stopped.** Claude Code and Codex stop the prompt
+  before it reaches the model, and the secret stays unconfirmed. Their hooks cannot edit a prompt, only stop it. Claude Code puts the
   prompt back in its input box: delete the value, send the prompt again, and
   confirm the secret and start a sandbox with `--vault NAME` to let the agent
   use it. The
@@ -113,7 +113,42 @@ value before it asks.
   value written out in the tool call is seen: a command that makes up a value
   as it runs (from `/dev/urandom`, say) or builds it from parts (a `printf`
   format and a separate argument) is not. DefenseClaw's secret rules still flag
-  such a value when it shows up in a file or in output.
+  such a value when it shows up in a file or in output, and the value is
+  captured, marked exposed, when it shows up in the tool's output (below).
+- **In a prompt that reaches the model.** Copilot CLI, Hermes, Kiro, Amp,
+  Cursor and Devin hooks cannot keep a prompt from the model (or DefenseClaw
+  does not rely on them to). The secret is captured and marked **exposed:
+  rotate**, and the agent is told not to use it where the agent allows that.
+  Rotate it and run `defenseclaw sandbox vault replace NAME`.
+- **In a tool's output.** The model has read the value, so the secret is
+  captured and marked **exposed: rotate**, including a key a command put
+  together as it ran. Where the hook can answer the model (Claude Code and
+  Codex `PostToolUse`, Amp `tool.result`), the agent is told not to reuse the
+  value and that you must rotate it; elsewhere DefenseClaw raises an alert that
+  says the same.
+- **In the agent's reply or another hook event.** The value is removed from
+  what DefenseClaw records and passes on, and a secret your vault already
+  holds is marked **exposed: rotate**. A value the vault does not hold is not
+  stored from a reply: rotate it with its issuer.
+
+Where each agent captures:
+
+| Agent | Prompt | Tool call (stopped, exposed) | Tool output (exposed) |
+| --- | --- | --- | --- |
+| Claude Code | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block), `PostToolBatch`, `PostToolUseFailure` |
+| Codex | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block) |
+| Copilot CLI | exposed (`userPromptSubmitted`) | `preToolUse`, `permissionRequest` | `postToolUse`, `postToolUseFailure` |
+| OpenCode | no prompt hook | `tool.execute.before` | `tool.execute.after` |
+| Hermes | exposed (`pre_llm_call`) | `pre_tool_call` | `post_tool_call`, `transform_tool_result` |
+| Kiro | exposed (`userPromptSubmit`) | `preToolUse` | `postToolUse` |
+| Antigravity (`agy`) | not sent to hooks | `PreToolUse` | not sent to hooks |
+| Amp | exposed (`agent.start`) | `tool.call` | `tool.result` (answered block) |
+| Cursor | exposed (`beforeSubmitPrompt`) | `preToolUse`, `subagentStart` and the `before*` hooks | `postToolUse` and the `after*` hooks |
+| Devin | exposed (`UserPromptSubmit`) | `PreToolUse`, `PermissionRequest` | `PostToolUse` |
+
+Antigravity's hooks receive neither your prompt nor a tool's output, so a
+secret there is captured only when the model writes it into a tool call.
+Capture in Kiro, Antigravity, Amp, Cursor and Devin is in Preview.
 
 ![Claude Code in a sandbox: a prompt with a Stripe-shaped key is stopped by the UserPromptSubmit hook, and DefenseClaw says it moved the secret into the vault as STRIPE_API_KEY, sent only to api.stripe.com](/images/sandboxes/screens/vault-capture-claude.png)
 
@@ -128,10 +163,30 @@ a key the model typed into a `printf` command is stopped and marked exposed:
   caption="Codex in an OpenShell sandbox on Linux: the demo API call with a vault placeholder, a GitHub token in a prompt moved into the vault, a key the model typed into a tool call stopped and marked exposed, and a sandbox refused that exposed secret until it is rotated and replaced. The keys shown are made up for the recording."
 />
 
-Capture keeps at most 16 captured secrets; past that a call is still stopped
-and the value still removed, but nothing more is stored until you remove some.
-A test fixture that looks exactly like a real key (the right prefix and
-length) is treated as one: give fixtures an obviously fake shape.
+Capture keeps at most 16 secrets from prompts that you have not confirmed yet,
+and, separately, at most 8 from tool calls and tool output that you have not
+replaced yet, so tools that keep printing key-shaped test values never use up
+the room a prompt's secret needs. Past either limit a call is still answered
+and the value still removed, but nothing more of that kind is stored until you
+confirm, replace or remove some. One sandbox can hold at most 8 of the 16
+unconfirmed prompt secrets, so a program inside one sandbox cannot fill the
+room the others need. When a limit is reached, the prompt is still stopped and
+you are told to review the captures: `defenseclaw sandbox vault list` shows
+which sandbox each one came from, and you confirm the ones that are yours and
+remove the others. A secret the vault already holds is still
+marked exposed when the model sees it, even with the vault full. A test
+fixture that looks exactly like a real key (the right prefix and length) is
+treated as one: give fixtures an obviously fake shape.
+
+When another DefenseClaw command is writing the vault at the moment a secret
+is exposed, the exposure is kept in a small record next to the vault (it holds
+a keyed digest, never the value) and written into the vault right after. From
+the moment it is recorded the secret reads as exposed and no sandbox gets it.
+
+Capture follows the hook mode your administrator set for a sandbox. In
+observe mode nothing is stopped: a secret is still moved into the vault and
+reported, and a prompt that goes on to the model is marked **exposed:
+rotate**.
 
 AWS access keys are not captured: AWS signs each request with the key, which a
 placeholder swap cannot do. Turn capture off with `openshell.vault.auto_capture:
@@ -183,7 +238,8 @@ the command refuses on a managed computer, the card says so; run
 `defenseclaw sandbox vault list` in Terminal to see why.
 
 Only terminal agents run in a sandbox (Claude Code, Codex, Copilot CLI,
-OpenCode, Kiro, Hermes, Antigravity's `agy`), so only they can use the vault.
+OpenCode, Kiro, Hermes, Antigravity's `agy`, Amp, Cursor Agent, Devin), so only
+they can use the vault.
 Desktop apps and IDE agents do not run in an OpenShell sandbox.
 
 ## Where the vault lives
@@ -357,3 +413,9 @@ from the disk: rotate a secret if that matters to you.
 - A host that echoes the `Authorization` header back would return the value to
   the agent. Bind secrets to the API host itself.
 - Any program in the sandbox can use a secret against its host.
+- Going back to an earlier DefenseClaw version: an earlier version counts every
+  captured secret, from prompts and from tool calls and output alike, against
+  the single limit of 16, so it can report the vault full; confirm, replace or
+  remove captured secrets to make room. It also does not read exposures still
+  waiting to be written: run `defenseclaw sandbox vault list` before you go
+  back, which writes them.

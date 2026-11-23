@@ -269,8 +269,9 @@ func TestAddRefusesAValueTheVaultHolds(t *testing.T) {
 	}
 }
 
-// One call's captures are one write; past MaxCaptured nothing is stored.
-func TestCaptureAllIsBoundedAndAtomic(t *testing.T) {
+// One call's captures are one write; a value past a bound is not stored,
+// and the call's other values are.
+func TestCaptureAllIsBounded(t *testing.T) {
 	s := newStore(t)
 	var ins []CaptureInput
 	for i := 0; i < MaxCaptured; i++ {
@@ -279,10 +280,10 @@ func TestCaptureAllIsBoundedAndAtomic(t *testing.T) {
 	if _, err := s.CaptureAll(ins[:9], CaptureWait); err != nil {
 		t.Fatal(err)
 	}
-	// STRIPE_API_KEY.._9 are taken: the tenth stripe key has no name left,
-	// and the failed call stores none of its values.
-	if _, err := s.CaptureAll(ins[9:11], CaptureWait); err == nil {
-		t.Fatal("a tenth key of one kind was stored")
+	// STRIPE_API_KEY.._9 are taken: the tenth and eleventh stripe keys have
+	// no name left.
+	if out, err := s.CaptureAll(ins[9:11], CaptureWait); err == nil || out[0].Entry.Name != "" || out[1].Entry.Name != "" {
+		t.Fatalf("a tenth key of one kind was stored: %+v (%v)", out, err)
 	}
 	if list, _ := s.List(); len(list) != 9 {
 		t.Fatalf("entries after a failed call = %d", len(list))

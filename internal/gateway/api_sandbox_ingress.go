@@ -257,6 +257,10 @@ type SandboxHookFailure struct {
 }
 
 type sandboxIngressState struct {
+	// life ends when the ingress stops serving (RunSandboxIngressOn).
+	lifeMu sync.Mutex
+	life   context.Context
+
 	addr     string
 	bindings sandboxauth.Matcher
 	limiter  *sandboxauth.Limiter
@@ -431,6 +435,7 @@ func (a *APIServer) RunSandboxIngressOn(ctx context.Context, ln net.Listener) er
 		return errors.New("sandbox ingress is not configured")
 	}
 	a.startPendingHookRecovery(ctx)
+	st.setLife(ctx)
 	handler, err := a.SandboxIngressHandler()
 	if err != nil {
 		_ = ln.Close()
@@ -1176,8 +1181,10 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		// body before the call is relayed, so the managed gateway never sees it.
 		var captured *sandboxVaultCapture
 		if route == sandboxauth.RouteHook {
-			body, captured = captureSandboxVault(ctx, st.vault, binding.Connector, body)
-			a.alertSandboxVaultChanged(ctx, binding.Connector, captured)
+			// The managed gateway chooses the answer (and its mode): a
+			// prompt it lets go on is marked exposed after the answer.
+			body, captured = captureSandboxVault(ctx, st.vault, binding.Connector, r.Header, body, nil)
+			a.afterSandboxVaultCapture(ctx, binding.Connector, captured)
 		}
 		// Only the daemon says what it captured: a header the sandbox sent
 		// is dropped.
@@ -1205,14 +1212,12 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			return
 		}
 		if captured != nil && resp.Status >= 200 && resp.Status <= 299 {
-			resp.Body = a.relayedVaultCaptureAnswer(ctx, binding.Connector, body, resp.Body, captured)
+			var answer agentHookResponse
+			resp.Body, answer = a.relayedVaultCaptureAnswer(ctx, binding.Connector, body, resp.Body, captured)
 			if resp.Decision != nil {
+				// The decision the daemon records is the answer it sent.
 				d := *resp.Decision
-				d.Action, d.WouldBlock = "block", true
-				if d.Severity != "CRITICAL" {
-					d.Severity = "HIGH"
-				}
-				d.Reason = captured.message()
+				d.Action, d.WouldBlock, d.Severity, d.Reason = answer.Action, answer.WouldBlock, answer.Severity, answer.Reason
 				resp.Decision = &d
 			}
 		}
@@ -1297,4 +1302,20 @@ func writeSandboxRelayError(w http.ResponseWriter, err error) {
 	default:
 		writeSandboxIngressError(w, http.StatusBadGateway, "the managed DefenseClaw gateway is not reachable")
 	}
+}
+
+func (st *sandboxIngressState) setLife(ctx context.Context) {
+	st.lifeMu.Lock()
+	st.life = ctx
+	st.lifeMu.Unlock()
+}
+
+// lifeContext ends when the ingress stops; Background before it serves.
+func (st *sandboxIngressState) lifeContext() context.Context {
+	st.lifeMu.Lock()
+	defer st.lifeMu.Unlock()
+	if st.life == nil {
+		return context.Background()
+	}
+	return st.life
 }
