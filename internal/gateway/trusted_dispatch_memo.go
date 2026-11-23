@@ -130,7 +130,7 @@ func dispatchTrustedAction(parent context.Context, request trustedActionRequest)
 
 func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedActionRequest) []RuleFinding {
 	if request.record != nil || request.recordTelemetry != nil || request.recordEffectShadow != nil ||
-		request.guestWriteClaimOnly != nil ||
+		request.guestWriteClaimOnly != nil || request.guestByNameOnly != nil ||
 		trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
 		return dispatchTrustedActionOnce(ctx, request)
 	}

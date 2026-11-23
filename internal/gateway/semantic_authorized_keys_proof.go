@@ -1149,7 +1149,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// sees no more of the actor than the claim does: it cannot place
 			// the copy's destination either, so the kit's places still decide
 			// (substrate-1 GAP-0922).
-			own.SandboxGuestCWD = ""
+			own.SandboxGuestCWD, own.guestByNameOnly = "", nil
 			own.resolvedTarget, own.unprovenTarget, own.unresolvedTarget, own.overBudgetOmission, own.nonWriteMention =
 				nil, nil, nil, nil, nil
 			*request.guestWriteClaimOnly = !trustedExistingAuthorizedKeysSymlinkWrite(own, facts)
@@ -1618,6 +1618,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		})
 		if decision != "" {
 			mentionCWD = guestCWD
+			if request.guestByNameOnly != nil {
+				*request.guestByNameOnly = true
+			}
 		}
 	}
 	if decision != "" {

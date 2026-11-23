@@ -371,6 +371,10 @@ type trustedActionRequest struct {
 	guestClaimHomePlaces homePlaceView
 	guestHomePlaces      homePlaceView
 	guestWriteClaimOnly  *bool
+	// guestByNameOnly receives whether only the by-name reading of a
+	// copy-mode actor's call in its guest folder (copyModeWholeCallByName)
+	// found the protected target (substrate-1 GAP-0922).
+	guestByNameOnly *bool
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
