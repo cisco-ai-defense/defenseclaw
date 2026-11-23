@@ -23,7 +23,15 @@ import (
 // expandable / decodeBacktick, so a backtick-e or a u{} escape under
 // DialectUnknown is not static.
 func FromPwshparse(src string, opts Options) (*Script, bool) {
-	res := pwshparse.ParseTree(src)
+	// The port reads the same input as Parse (GAP-1947): past maxInput, or
+	// nested past maxPortNesting, it declines before it parses and Parse reads
+	// the call (its first maxInput bytes, a truncated row; its depth guard). A
+	// construct the port does not parse stops the port where it is found
+	// (ParseTreeOrDecline), so a give-up never pays for two full parses.
+	if len(src) > maxInput || nestingOver(src, maxPortNesting) {
+		return nil, false
+	}
+	res := pwshparse.ParseTreeOrDecline(src)
 	if res == nil || res.Root == nil || res.Unsupported {
 		return nil, false
 	}
@@ -49,6 +57,7 @@ func FromPwshparse(src string, opts Options) (*Script, bool) {
 			continue
 		}
 		a.p.diag(a.off(e.Start), a.off(e.End), pwErrorReason(e.ErrorID), e.ErrorID)
+		a.p.diags[len(a.p.diags)-1].Syntax = true
 	}
 	sc.Diagnostics = a.p.diags
 	return sc, true
@@ -80,6 +89,32 @@ func ParseEffects(src string, opts Options) (sc *Script, port bool, err error) {
 	}
 	sc, err = Parse(src, opts)
 	return sc, false, err
+}
+
+// maxPortNesting bounds the bracket nesting the port parses (GAP-1947): far
+// above real scripts, and a deeper input is read by Parse, whose own depth
+// guard (maxDepth) stops it early. The port's recursion guard is much deeper,
+// so without it a run of 64 KiB of { cost the port eight times Parse.
+const maxPortNesting = 8192
+
+// nestingOver reports whether the open brackets of src ( ( { [ and the $( @(
+// @{ forms) nest deeper than limit at some point, counting every bracket,
+// quoted or not: an upper bound of the parse depth in one linear pass.
+func nestingOver(src string, limit int) bool {
+	depth := 0
+	for i := 0; i < len(src); i++ {
+		switch src[i] {
+		case '(', '{', '[':
+			if depth++; depth > limit {
+				return true
+			}
+		case ')', '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
 }
 
 // pwErrorReason maps a pwshparse error id to the Reason code Parse uses.

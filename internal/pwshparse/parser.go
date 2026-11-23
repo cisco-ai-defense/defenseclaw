@@ -77,6 +77,19 @@ type Parser struct {
 	// of "$("$(..." nesting rescans the text inside it, so an unbounded parse is quadratic in the input
 	// (a 100 KB nest took 3 s on the hook path; the legacy reader stops at a linear budget too).
 	nestedWork, nestedBudget int
+	// declineEarly stops the parse at the first construct that makes it Unsupported (ParseTreeOrDecline).
+	declineEarly bool
+}
+
+// errDeclined unwinds a ParseTreeOrDecline parse from the point it became Unsupported.
+type errDeclined struct{}
+
+// markUnsupported flags the result Unsupported and, for ParseTreeOrDecline, stops the parse there.
+func (p *Parser) markUnsupported() {
+	p.Unsupported = true
+	if p.declineEarly {
+		panic(errDeclined{})
+	}
 }
 
 const maxParseDepth = 16000
@@ -89,7 +102,7 @@ const (
 )
 
 func (p *Parser) tooDeep() {
-	p.Unsupported = true
+	p.markUnsupported()
 	p.reportError(extent{p.tz.curIndex, p.tz.curIndex}, "ParseTooDeep")
 }
 
@@ -120,17 +133,34 @@ type parseState struct {
 	res Result
 }
 
-func Parse(input string) *Result { return parse(input, true) }
+func Parse(input string) *Result { return parse(input, true, false) }
 
 // ParseTree parses like Parse but does not keep the token stream (Result.Tokens is nil); the tree and the
 // errors are identical. This is the entry point for readers that only walk the tree.
-func ParseTree(input string) *Result { return parse(input, false) }
+func ParseTree(input string) *Result { return parse(input, false, false) }
 
-func parse(input string, wantTokens bool) *Result {
+// ParseTreeOrDecline parses like ParseTree but stops at the first construct that makes the result Unsupported
+// (a construct the port does not parse, nesting past its depth or nested-scan budget) and returns only
+// Result{Unsupported: true}. A reader that falls back to another parser on Unsupported uses it, so a give-up
+// costs the parse up to that point instead of a full parse before the fallback's own (GAP-1947).
+func ParseTreeOrDecline(input string) *Result { return parse(input, false, true) }
+
+func parse(input string, wantTokens, declineEarly bool) (out *Result) {
 	src := toUTF16(input)
 	ps := &parseState{}
 	p := &ps.p
 	p.src = src
+	if declineEarly {
+		p.declineEarly = true
+		defer func() {
+			if r := recover(); r != nil {
+				if _, ok := r.(errDeclined); !ok {
+					panic(r)
+				}
+				out = &Result{Source: src, Unsupported: true}
+			}
+		}()
+	}
 	p.nestedBudget = nestedWorkFactor*len(src) + nestedWorkSlack
 	if isASCII(input) {
 		p.ascii, p.asciiSrc = true, input

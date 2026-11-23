@@ -160,7 +160,7 @@ func (t *tokenizer) startNestedScan(nested *Token) tokenizerState {
 	if p := t.p; p != nil {
 		if p.nestedWork += len(nested.Value); p.nestedWork > p.nestedBudget {
 			if !p.Unsupported {
-				p.Unsupported = true
+				p.markUnsupported()
 				p.reportError(extent{nested.Start, nested.Start}, "ParseTooDeep")
 			}
 			t.script = nil
