@@ -145,7 +145,17 @@ func oldestUse(hosts map[string]time.Time) (host string, at time.Time) {
 // the most; each loses its oldest. So one person's many agents cannot push
 // out another person's last use (RV8-2: 80 agents of one person, 256 hosts
 // each, erased everyone else's when the trim kept the newest overall). An
-// actor whose person is not known counts as a person of its own.
+// actor with no person (a fork, an actor made outside DefenseClaw, or any
+// actor when the leader has no registry) is grouped by its atespace: the
+// registry attributes such an actor to its atespace, never to a person
+// (D3), and the atespace is the one thing the leader proves about it (the
+// registration must match the record's atespace). So many of them count
+// as one group and cannot outnumber the people (RV9-1: 100 attributed
+// actors, each a group of its own, pushed out another person's oldest
+// use). A fork is not grouped under its parent's person: DefenseClaw makes
+// no forks, the parent comes from the fork's source tag, and a fork is not
+// that person's actor (GAP-0425), so grouping it there would let forks
+// crowd out the parent person's own actors.
 func (s *Store) trimUsesLocked(keep int) {
 	type actorUses struct {
 		a    ActorRef
@@ -160,7 +170,7 @@ func (s *Store) trimUsesLocked(keep int) {
 		sortUses(au.uses)
 		key := s.useOwner[a]
 		if key == "" {
-			key = "\x00" + a.Atespace + "/" + a.UID
+			key = "\x00" + a.Atespace
 		}
 		groups[key] = append(groups[key], au)
 	}
