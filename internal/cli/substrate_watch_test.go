@@ -180,3 +180,61 @@ func TestWatchMissingNotifierTool(t *testing.T) {
 	// the notifications.substrate switches gate it when the tool is there
 	cfg.Notifications.Substrate = config.NotificationsSubstrateConfig{}
 }
+
+// GAP-1044: a poll that could not read an agent (a "-" row, a failed get)
+// keeps that agent's seen ask ids; the next good poll does not notify an ask
+// that stayed pending. Only a good read that no longer shows the ask, or an
+// agent that is gone, forgets it.
+func TestWatchKeepsSeenAsksAcrossUnreadablePolls(t *testing.T) {
+	pending := api.Activity{State: "waiting_on_ask", PendingAsks: 1}
+	cases := []struct {
+		name string
+		blip func(w *watchWorld, getFails *bool)
+	}{
+		{"list row without activity", func(w *watchWorld, _ *bool) { w.actors = []api.Actor{{Atespace: "dev", Name: "web"}} }},
+		{"get fails", func(_ *watchWorld, getFails *bool) { *getFails = true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &watchWorld{
+				actors: []api.Actor{watchActor("web", pending)},
+				asks:   map[string][]api.ActivityAsk{"dev/web": {{ID: "ask-1", Kind: "egress", Target: "api.stripe.com"}}},
+			}
+			getFails := false
+			get := func(ctx context.Context, atespace, name string) (api.Actor, error) {
+				if getFails {
+					return api.Actor{}, context.DeadlineExceeded
+				}
+				return w.get(ctx, atespace, name)
+			}
+			wt := newSubstrateWatcher(w.list, get, "")
+			pol := substrateNotifyPolicy{Asks: true, TaskEnd: true}
+			var sent []notify.Notification
+			runWatchOnce(t, wt, pol, &sent)
+			if len(sent) != 1 {
+				t.Fatalf("first poll: %d notifications, want 1", len(sent))
+			}
+			tc.blip(w, &getFails)
+			runWatchOnce(t, wt, pol, &sent)
+			w.actors, getFails = []api.Actor{watchActor("web", pending)}, false
+			runWatchOnce(t, wt, pol, &sent)
+			if len(sent) != 1 {
+				t.Fatalf("an ask that stayed pending was notified again after an unreadable poll: %+v", sent)
+			}
+			// answered (a good read without it), then a new ask with the same id is new again
+			w.actors[0].Activity = &api.Activity{State: "idle"}
+			runWatchOnce(t, wt, pol, &sent)
+			w.actors[0].Activity = &api.Activity{State: "waiting_on_ask", PendingAsks: 1}
+			runWatchOnce(t, wt, pol, &sent)
+			if len(sent) != 2 {
+				t.Fatalf("an ask that was answered and came back was not notified again: %+v", sent)
+			}
+			// the agent is deleted: its ids go too
+			w.actors = nil
+			runWatchOnce(t, wt, pol, &sent)
+			if len(wt.seenAsks) != 0 {
+				t.Fatalf("seenAsks = %v after the agent was gone", wt.seenAsks)
+			}
+		})
+	}
+}

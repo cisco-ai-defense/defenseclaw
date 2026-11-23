@@ -87,13 +87,13 @@ type substrateWatcher struct {
 	get    func(ctx context.Context, atespace, name string) (api.Actor, error)
 	filter string
 
-	seenAsks  map[string]bool
+	seenAsks  map[string]string // ask id -> atespace/name of its agent
 	taskEnded map[string]time.Time
 	started   bool
 }
 
 func newSubstrateWatcher(list func(context.Context) ([]api.Actor, error), get func(context.Context, string, string) (api.Actor, error), filter string) *substrateWatcher {
-	return &substrateWatcher{list: list, get: get, filter: strings.TrimSpace(filter), seenAsks: map[string]bool{}, taskEnded: map[string]time.Time{}}
+	return &substrateWatcher{list: list, get: get, filter: strings.TrimSpace(filter), seenAsks: map[string]string{}, taskEnded: map[string]time.Time{}}
 }
 
 func (w *substrateWatcher) wants(a api.Actor) bool {
@@ -112,22 +112,35 @@ func (w *substrateWatcher) poll(ctx context.Context) ([]substrateWatchEvent, err
 	}
 	var out []substrateWatchEvent
 	pending := map[string]bool{}
+	// present: agents the list shows; readable: agents whose activity was read
+	// this poll. A seen ask id is forgotten only when its agent was read and
+	// the ask is gone, or its agent is gone: a poll that could not read an
+	// agent ("-" row, failed get) keeps that agent's ids, so a blip does not
+	// raise the same ask again (GAP-1044).
+	present, readable := map[string]bool{}, map[string]bool{}
 	for _, a := range actors {
-		if !w.wants(a) || a.Activity == nil {
+		if !w.wants(a) {
 			continue
 		}
 		name := a.Atespace + "/" + a.Name
+		present[name] = true
+		if a.Activity == nil {
+			continue
+		}
 		act := a.Activity
 		off := act.Notify != nil && !*act.Notify
-		if act.PendingAsks > 0 {
+		if act.PendingAsks == 0 {
+			readable[name] = true
+		} else {
 			one, err := w.get(ctx, a.Atespace, a.Name)
 			if err == nil && one.Activity != nil {
+				readable[name] = true
 				for _, k := range one.Activity.Asks {
 					pending[k.ID] = true
-					if w.seenAsks[k.ID] {
+					if _, seen := w.seenAsks[k.ID]; seen {
 						continue
 					}
-					w.seenAsks[k.ID] = true
+					w.seenAsks[k.ID] = name
 					out = append(out, substrateWatchEvent{Kind: "ask", Actor: name, ID: k.ID, NotifyOff: off, Detail: safetext.Line(strings.TrimSpace(k.Kind + " " + k.Target))})
 				}
 			}
@@ -141,9 +154,9 @@ func (w *substrateWatcher) poll(ctx context.Context) ([]substrateWatchEvent, err
 			w.taskEnded[name] = time.Time{}
 		}
 	}
-	for id := range w.seenAsks {
-		if !pending[id] {
-			delete(w.seenAsks, id) // answered: the set does not grow
+	for id, name := range w.seenAsks {
+		if !pending[id] && (readable[name] || !present[name]) {
+			delete(w.seenAsks, id) // answered, or its agent is gone: the set does not grow
 		}
 	}
 	w.started = true
