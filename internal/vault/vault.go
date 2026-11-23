@@ -63,7 +63,7 @@ const (
 	// SourceManual is an entry the person added.
 	SourceManual Source = "manual"
 	// SourceCaptured is an entry DefenseClaw took out of a sandboxed
-	// agent's prompt or tool call.
+	// agent's prompt, tool call or tool output.
 	SourceCaptured Source = "captured"
 )
 
@@ -121,6 +121,10 @@ type Entry struct {
 	// Confirmed: the person confirmed a captured entry is theirs (vault
 	// confirm) or replaced its value. Manual entries need no confirmation.
 	Confirmed bool `json:"confirmed,omitempty"`
+	// FromModel: captured where an agent's model wrote or read the value (a
+	// tool call, a tool's output), not from a person's prompt; until the
+	// person replaces the value it counts toward MaxCapturedFromModel.
+	FromModel bool `json:"from_model,omitempty"`
 }
 
 // Status is the entry's state as people see it.
@@ -548,6 +552,10 @@ func (s *Store) update(change func(*file) error) error {
 	return s.updateWait(lockWait, change)
 }
 
+// errUnchanged is what a change returns when it changed nothing: the
+// vault is not written.
+var errUnchanged = errors.New("the vault is unchanged")
+
 // updateWait is update with a bounded wait for the writer lock.
 func (s *Store) updateWait(wait time.Duration, change func(*file) error) error {
 	if err := safefile.ProtectDirectory(s.dir); err != nil {
@@ -563,6 +571,9 @@ func (s *Store) updateWait(wait time.Duration, change func(*file) error) error {
 		return err
 	}
 	if err := change(f); err != nil {
+		if errors.Is(err, errUnchanged) {
+			return nil
+		}
 		return err
 	}
 	sort.Slice(f.Entries, func(i, j int) bool { return f.Entries[i].Name < f.Entries[j].Name })

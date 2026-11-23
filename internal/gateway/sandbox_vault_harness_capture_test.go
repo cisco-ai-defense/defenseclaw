@@ -35,6 +35,9 @@ type vaultHarnessCase struct {
 	stop bool
 	// exposed: the model has seen (or wrote) the value.
 	exposed bool
+	// held: the event stores nothing new (a reply); the vault holds the
+	// value before the call, and the call marks it exposed.
+	held bool
 }
 
 func vaultHarnessCases() []vaultHarnessCase {
@@ -53,7 +56,7 @@ func vaultHarnessCases() []vaultHarnessCase {
 				return `{"hook_event_name":"PostToolUse","session_id":"s-vc","cwd":"/work/app","tool_name":"Bash","tool_input":{"command":"sh gen.sh"},` +
 					`"tool_response":{"stdout":"STRIPE_KEY=` + k + `\n","stderr":"","interrupted":false,"isImage":false},"tool_use_id":"toolu_vc"}`
 			}},
-		{name: "claudecode-Stop", spec: harness.ClaudeCode, path: "/api/v1/claude-code/hook", event: "Stop", exposed: true,
+		{name: "claudecode-Stop", spec: harness.ClaudeCode, path: "/api/v1/claude-code/hook", event: "Stop", exposed: true, held: true,
 			body: func(k string) string {
 				return `{"hook_event_name":"Stop","session_id":"s-vc","cwd":"/work/app","stop_hook_active":false,"last_assistant_message":"Wrote STRIPE_KEY=` + k + ` to local.env"}`
 			}},
@@ -124,6 +127,13 @@ func vaultHarnessCases() []vaultHarnessCase {
 				return `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":3,"toolCall":{"name":"run_command","args":{` +
 					`"CommandLine":"printf 'STRIPE_KEY=` + k + `\\n' > local.env","Cwd":"/work/app","WaitMsBeforeAsync":500,"toolSummary":"write env","toolAction":"Writing env"}}}`
 			}},
+		// Amp's agent.start carries the prompt; its plugin can only add a
+		// note for the model there.
+		{name: "amp-agent.start", spec: harness.Amp, path: "/api/v1/amp/hook", event: "agent.start", anthropic: true, stop: true, exposed: true,
+			body: func(k string) string {
+				return `{"hook_event_name":"agent.start","thread_id":"T-vc","session_id":"T-vc","turn_id":"t1","message_id":"t1",` +
+					`"prompt":"call the API with ` + k + ` please","cwd":"/work/app"}`
+			}},
 		{name: "amp-tool.call", spec: harness.Amp, path: "/api/v1/amp/hook", event: "tool.call", stop: true, exposed: true,
 			body: func(k string) string {
 				return `{"hook_event_name":"tool.call","thread_id":"T-vc","session_id":"T-vc","tool_call_id":"toolu_amp_vc",` +
@@ -183,6 +193,11 @@ func TestSandboxVaultCaptureCoversEveryHarness(t *testing.T) {
 			if tc.anthropic {
 				key, name = vaultTestAnthropicKey(), "ANTHROPIC_API_KEY"
 			}
+			if tc.held {
+				if _, err := st.Add(vault.AddInput{Name: name, Value: key, Host: "api.example.com"}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.spec.Name == "codex" {
 				// Codex hooks name the event and contract they are bound to.
 				tc.headers = []string{"X-DefenseClaw-Hook-Event", tc.event, "X-DefenseClaw-Hook-Contract", contract.Contract.ContractID}
@@ -198,7 +213,7 @@ func TestSandboxVaultCaptureCoversEveryHarness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("no vault entry %s after a %s call that carried it: %v", name, tc.event, err)
 			}
-			if e.Exposed != tc.exposed || !strings.Contains(e.CapturedFrom, tc.event) || !strings.Contains(e.CapturedFrom, "dc-vc-"+tc.spec.Name) {
+			if e.Exposed != tc.exposed || (!tc.held && (!strings.Contains(e.CapturedFrom, tc.event) || !strings.Contains(e.CapturedFrom, "dc-vc-"+tc.spec.Name))) {
 				t.Fatalf("entry = %+v", e)
 			}
 			var resp map[string]interface{}

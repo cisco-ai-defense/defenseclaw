@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -24,9 +25,17 @@ import (
 // in the body by its tag ([vault:NAME]) before anything evaluates, audits or
 // relays the body. connector.SandboxVaultCaptureEventFor places the event:
 // a prompt the hook stops keeps the secret unconfirmed; everywhere else the
-// model has seen (or wrote) it, so it is stored exposed. The call gets the
-// strongest answer the event has (block, or alert where the event cannot
-// stop anything or a block would restart the agent's turn). Claude Code and Codex hooks cannot edit a
+// model has seen (or wrote) it, so it is stored exposed. A prompt, a tool
+// call or a tool's output stores a value the vault does not hold yet (a key
+// an agent assembled as its tool ran is first seen in the output); a reply
+// or another event only marks a held value exposed. Values from the model's
+// side have their own bound in the vault, so they never use up the room
+// prompts need. In action mode the call gets the strongest answer the
+// event has (block, or alert where the event cannot stop anything or a
+// block would restart the agent's turn); the configured mode is never
+// overridden, so in observe mode the capture is still stored and reported
+// and nothing is stopped (a prompt that goes on is then stored exposed).
+// Claude Code and Codex hooks cannot edit a
 // prompt (they can block it or add context), so the prompt is stopped and
 // the person sends it again without the value; a sandbox then uses the
 // secret through `sandbox run --vault NAME`, as a placeholder OpenShell swaps
@@ -48,7 +57,14 @@ import (
 const (
 	// maxVaultCaptureHeaderEntries bounds the relay header's entries.
 	maxVaultCaptureHeaderEntries = 16
+	// vaultCaptureRetryWait bounds the background retry that marks held
+	// values exposed when the vault lock was busy during the hook call.
+	vaultCaptureRetryWait = 5 * time.Second
 )
+
+// errVaultCaptureAmbiguous: the body has duplicate keys or trailing data,
+// so capture cannot read one meaning of it; nothing of it is forwarded.
+var errVaultCaptureAmbiguous = errors.New("the call's JSON is ambiguous (a repeated key or extra data)")
 
 // sandboxVaultCapture is what one hook call's capture did.
 type sandboxVaultCapture struct {
@@ -60,9 +76,19 @@ type sandboxVaultCapture struct {
 	// Entries are the vault entries the call's secrets are kept as, in
 	// order, one per distinct value.
 	Entries []vault.Entry
-	// Err is set when the vault could not keep the secrets; the values are
-	// still removed from the body and the call is still stopped.
+	// Err is set when the vault could not keep a secret; the values are
+	// still removed from the body and the call is still answered.
 	Err error
+	// Unkept: a value was removed from the body and is not in Entries (the
+	// vault could not keep it, or the event stores nothing new).
+	Unkept bool
+	// NotStopped: a prompt the event could have stopped went on (observe
+	// mode), so its secrets were marked exposed.
+	NotStopped bool
+	// markExposed marks this call's values exposed in the vault, waiting at
+	// most wait for its lock. Set only where the vault is owned (never from
+	// a relay header); it holds the values, so it is never logged.
+	markExposed func(wait time.Duration) error
 }
 
 // captureSandboxVault returns body with its capturable secrets replaced by
@@ -81,15 +107,24 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 	if _, reads := connector.SandboxVaultCaptureEventFor(name, ""); !reads {
 		return body, nil
 	}
-	if !hookToolCallJSONUnambiguous(name, body) {
-		// Duplicate keys or trailing values: the existing ambiguous-JSON
-		// rejection answers it; capture never picks one reading.
-		return body, nil
-	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var doc map[string]interface{}
-	if dec.Decode(&doc) != nil {
+	decodeErr := dec.Decode(&doc)
+	if !hookToolCallJSONUnambiguous(name, body) {
+		// Duplicate keys or trailing values may carry a secret: capture
+		// never picks one reading, and nothing of the body goes on, on any
+		// route (a prompt or output event relayed to a managed gateway
+		// included). The body left is still ambiguous (its event key twice),
+		// so the gateway's ambiguous-JSON handling answers it exactly as
+		// before: a structured tool call is denied as unread, any other
+		// event gets the audited rejection its hook's fail mode decides.
+		event := sandboxVaultCaptureEventName(name, header, doc)
+		return []byte(`{"hook_event_name":"` + event + `","hook_event_name":"` + event + `"}`), &sandboxVaultCapture{
+			Connector: name, Event: event, Sandbox: binding.SandboxName, Err: errVaultCaptureAmbiguous, Unkept: true,
+		}
+	}
+	if decodeErr != nil {
 		return body, nil
 	}
 	event := sandboxVaultCaptureEventName(name, header, doc)
@@ -112,21 +147,47 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 	from := strings.TrimSpace(fmt.Sprintf("%s %s (%s) in sandbox %s", name, point.Where(), event, binding.SandboxName))
 	ins := make([]vault.CaptureInput, 0, len(hits))
 	for _, h := range hits {
-		ins = append(ins, vault.CaptureInput{Value: h.value, Kind: h.kind, Exposed: point.Exposed(), From: from})
+		ins = append(ins, vault.CaptureInput{
+			Value: h.value, Kind: h.kind, Exposed: point.Exposed(), From: from,
+			FromModel: point.FromModel(), KnownOnly: !point.Stores(),
+		})
 	}
 	out := &sandboxVaultCapture{Connector: name, Event: event, Sandbox: binding.SandboxName}
-	names := map[string]string{}
-	if res, err := store.CaptureAll(ins, vault.CaptureWait); err != nil {
-		out.Err = err
-	} else {
-		have := map[string]bool{}
-		for i, c := range res {
-			names[hits[i].value] = c.Entry.Name
-			if !have[c.Entry.Name] {
-				have[c.Entry.Name] = true
-				out.Entries = append(out.Entries, c.Entry)
-			}
+	out.markExposed = func(wait time.Duration) error {
+		again := make([]vault.CaptureInput, len(ins))
+		for i, in := range ins {
+			in.Exposed, in.KnownOnly = true, true
+			again[i] = in
 		}
+		_, err := store.CaptureAll(again, wait)
+		return err
+	}
+	names := map[string]string{}
+	// A store error still returns the values the vault holds (their
+	// exposure is written whatever else failed).
+	res, err := store.CaptureAll(ins, vault.CaptureWait)
+	out.Err = err
+	if errors.Is(err, vault.ErrBusy) && point.Exposed() {
+		// Nothing was written: mark the held values exposed once the lock
+		// frees, so a value the model has seen never stays usable.
+		go func() { _ = out.markExposed(vaultCaptureRetryWait) }()
+	}
+	have := map[string]bool{}
+	for i, c := range res {
+		if c.Entry.Name == "" {
+			out.Unkept = true
+			continue
+		}
+		e := c.Entry
+		e.Exposed = e.Exposed || point.Exposed()
+		names[hits[i].value] = e.Name
+		if !have[e.Name] {
+			have[e.Name] = true
+			out.Entries = append(out.Entries, e)
+		}
+	}
+	if len(res) < len(hits) {
+		out.Unkept = true
 	}
 	redacted, collided := visitStrings(doc, func(s string) string { return vault.Redact(s, vault.FindCapturable(s), names) })
 	if collided {
@@ -246,16 +307,39 @@ func (c *sandboxVaultCapture) errorText() string {
 		return "it could not be saved"
 	case errors.Is(c.Err, vault.ErrBusy):
 		return "the vault is busy: another DefenseClaw command is writing it"
-	case errors.Is(c.Err, vault.ErrCaptureFull), errors.Is(c.Err, vault.ErrFull):
+	case errors.Is(c.Err, vault.ErrCaptureFull), errors.Is(c.Err, vault.ErrModelCaptureFull), errors.Is(c.Err, vault.ErrFull):
 		return c.Err.Error()
+	case errors.Is(c.Err, errVaultCaptureAmbiguous):
+		return c.Err.Error() + ", so DefenseClaw passed none of it on"
 	}
 	return "the vault could not be written; run `defenseclaw sandbox vault list` to see why"
 }
 
 // message is what the agent (and, for a prompt, the person) is told.
 func (c *sandboxVaultCapture) message() string {
+	msg := c.keptMessage()
+	if len(c.Entries) > 0 && c.Unkept {
+		msg += " Another secret in it was removed from what DefenseClaw passes on and records but is not in the vault"
+		if c.Err != nil {
+			msg += " (" + c.errorText() + ")"
+		}
+		msg += "; rotate it with its issuer."
+	}
+	return msg
+}
+
+func (c *sandboxVaultCapture) keptMessage() string {
 	point := c.point()
+	if c.NotStopped {
+		// A prompt the event could stop went on: it reads as one the
+		// model saw.
+		point.Point = connector.VaultCapturePromptSeen
+	}
 	if len(c.Entries) == 0 {
+		if c.Err == nil {
+			return "DefenseClaw found a secret in this " + point.Where() + " and removed it from what it passes on and records. " +
+				"The model has seen it: the user should rotate it with its issuer. Do not use, repeat or write the value."
+		}
 		if point.Point != connector.VaultCapturePrompt && point.Point != connector.VaultCaptureToolCall {
 			return "DefenseClaw found a secret in this " + point.Where() + ", and your vault could not keep it (" + c.errorText() +
 				"). The model may have seen it: rotate it with its issuer. Do not use or repeat the value."
@@ -326,6 +410,12 @@ func (c *sandboxVaultCapture) exposedMessage(point connector.VaultCaptureEvent) 
 		names = append(names, e.Name)
 	}
 	held, first := strings.Join(names, ", "), names[0]
+	if point.Point == connector.VaultCapturePromptSeen && c.NotStopped {
+		return fmt.Sprintf("DefenseClaw found a secret in this prompt and moved it into the user's vault as %s, marked exposed: "+
+			"DefenseClaw is in observe mode, so the prompt was not stopped and the model may have seen it. Never repeat or write "+
+			"the value. The user must rotate it with its issuer and replace it (`defenseclaw sandbox vault replace %s`) before any "+
+			"sandbox can use it.", held, first)
+	}
 	if point.Point == connector.VaultCapturePromptSeen {
 		return fmt.Sprintf("DefenseClaw found a secret in this prompt and moved it into the user's vault as %s, marked exposed: "+
 			"this agent's hooks cannot keep a prompt from the model, so the model may have seen it. Do not carry out the prompt "+
@@ -388,12 +478,18 @@ func vaultCaptureFromHeader(connectorName, v string) *sandboxVaultCapture {
 	return c
 }
 
-// stops reports whether the call is answered block.
+// stops reports whether the event's answer, in action mode, is block.
 func (c *sandboxVaultCapture) stops() bool { return c.point().Stop }
 
-// applySandboxVaultCapture turns a verdict into the capture's answer: block
-// where the event can stop (or the verdict blocked already), otherwise an
-// alert that still carries the capture's message.
+// applySandboxVaultCapture turns a verdict into the capture's answer in the
+// configured mode, which it never overrides. Action mode: block where the
+// event can stop (or the verdict blocked already); otherwise an allow is
+// raised to an alert that carries the capture's message, and a confirm or
+// alert is kept. Observe mode: nothing is stopped that observe mode would
+// not stop; the answer says what action mode would do (would_block) and
+// carries the message. A prompt the event could have stopped that goes on
+// is marked exposed in the vault. Cursor's stop and subagentStop get no
+// message: their only output starts a new turn.
 func (a *APIServer) applySandboxVaultCapture(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -403,10 +499,40 @@ func (a *APIServer) applySandboxVaultCapture(
 	resp agentHookResponse,
 	c *sandboxVaultCapture,
 ) agentHookResponse {
-	if c.stops() || resp.Action == "block" {
-		resp.Action, resp.RawAction, resp.Mode, resp.WouldBlock = "block", "block", "action", true
-	} else {
-		resp.Action, resp.RawAction, resp.Mode, resp.WouldBlock = "alert", "alert", "action", false
+	mode := resp.Mode
+	if mode == "" {
+		// The mode the verdict would have had: action for a sandbox call,
+		// unless a relayed call's guardrail profile sets its own.
+		mode = sandboxHookMode(ctx, c.Connector, a.agentHookMode(ctx, c.Connector))
+	}
+	resp.Mode = mode
+	switch {
+	case resp.Action == "block":
+		resp.RawAction = "block"
+	case mode != "action":
+		raw := "alert"
+		if c.stops() {
+			raw = "block"
+		}
+		if resp.RawAction != "block" {
+			resp.RawAction = raw
+		}
+		if resp.Action == "" {
+			resp.Action = "allow"
+		}
+		resp.WouldBlock = resp.WouldBlock || c.stops()
+	case c.stops():
+		resp.Action, resp.RawAction, resp.WouldBlock = "block", "block", true
+	case resp.Action == "allow" || resp.Action == "" || resp.Action == "alert":
+		resp.Action, resp.RawAction, resp.WouldBlock = "alert", "alert", false
+	default:
+		// confirm (or another non-block answer the verdict chose): kept.
+		if resp.RawAction == "" || resp.RawAction == "allow" {
+			resp.RawAction = resp.Action
+		}
+	}
+	if c.point().Point == connector.VaultCapturePrompt && resp.Action != "block" {
+		a.markVaultCaptureExposed(c)
 	}
 	if resp.Severity != "CRITICAL" {
 		resp.Severity = "HIGH"
@@ -414,7 +540,38 @@ func (a *APIServer) applySandboxVaultCapture(
 	if req.HookEventName == "" {
 		req.HookEventName = c.Event
 	}
-	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, c.message())
+	resp = a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, c.message())
+	if c.Connector == "cursor" && cursorTurnRestartEvent(c.Event) {
+		resp.AdditionalContext = ""
+		resp.HookOutput = nil
+	}
+	return resp
+}
+
+// markVaultCaptureExposed marks a prompt capture exposed because the
+// prompt went on to the model. A busy lock is retried in the background.
+func (a *APIServer) markVaultCaptureExposed(c *sandboxVaultCapture) {
+	c.NotStopped = true
+	for i := range c.Entries {
+		c.Entries[i].Exposed = true
+	}
+	if c.markExposed == nil {
+		return
+	}
+	if err := c.markExposed(vault.CaptureWait); errors.Is(err, vault.ErrBusy) {
+		mark := c.markExposed
+		go func() { _ = mark(vaultCaptureRetryWait) }()
+	}
+}
+
+// cursorTurnRestartEvent: Cursor's stop and subagentStop, whose only
+// output (followup_message) starts a new turn.
+func cursorTurnRestartEvent(event string) bool {
+	switch strings.ToLower(strings.TrimSpace(event)) {
+	case "stop", "subagentstop":
+		return true
+	}
+	return false
 }
 
 // sandboxVaultStore is the vault the ingress captures into, nil when it
@@ -429,13 +586,14 @@ func (a *APIServer) sandboxVaultStore() *vault.Store {
 }
 
 // relayedVaultCaptureAnswer rewrites the managed gateway's answer to a
-// relayed call whose secret the daemon captured: the call is stopped with
-// the capture's message whatever the gateway answered (alerted where the
-// event cannot stop) (a managed gateway
-// that reads VaultCaptureHeader answers block already; an older one does
-// not). The answer's other fields (delivery receipt, evaluation and agent
-// ids) are kept.
-func (a *APIServer) relayedVaultCaptureAnswer(ctx context.Context, connectorName string, body, answer []byte, c *sandboxVaultCapture) []byte {
+// relayed call whose secret the daemon captured, in the mode the managed
+// gateway answered in: in action mode the call is stopped with the
+// capture's message whatever the gateway answered (alerted where the event
+// cannot stop; a managed gateway that reads VaultCaptureHeader answers
+// block already, an older one does not). Its block and confirm are kept.
+// The answer's other fields (delivery receipt, evaluation and agent ids)
+// are kept. It returns the new body and the answer it rendered.
+func (a *APIServer) relayedVaultCaptureAnswer(ctx context.Context, connectorName string, body, answer []byte, c *sandboxVaultCapture) ([]byte, agentHookResponse) {
 	wire := map[string]interface{}{}
 	if len(answer) > 0 {
 		if err := json.Unmarshal(answer, &wire); err != nil || wire == nil {
@@ -446,9 +604,24 @@ func (a *APIServer) relayedVaultCaptureAnswer(ctx context.Context, connectorName
 	_ = json.Unmarshal(body, &payload)
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	req := agentHookRequest{ConnectorName: connectorName, HookEventName: c.Event, Payload: payload}
-	severity, _ := wire["severity"].(string)
-	resp := a.applySandboxVaultCapture(ctx, profile, req, body, payload, agentHookResponse{Severity: severity}, c)
+	prior := agentHookResponse{}
+	prior.Severity, _ = wire["severity"].(string)
+	prior.Mode, _ = wire["mode"].(string)
+	if action, _ := wire["action"].(string); action == "block" || action == "confirm" {
+		prior.Action, prior.RawAction = action, action
+	}
+	if wb, _ := wire["would_block"].(bool); wb {
+		prior.WouldBlock = true
+	}
+	resp := a.applySandboxVaultCapture(ctx, profile, req, body, payload, prior, c)
 	delete(wire, "findings")
+	if len(resp.HookOutput) == 0 {
+		delete(wire, hookOutputFieldName(profile.Name))
+		if f := strings.TrimSpace(profile.ResponseFieldName); f != "" {
+			delete(wire, f)
+		}
+		delete(wire, "additional_context")
+	}
 	for k, v := range renderAgentHookResponseForProfile(profile, resp) {
 		wire[k] = v
 	}
@@ -456,5 +629,5 @@ func (a *APIServer) relayedVaultCaptureAnswer(ctx context.Context, connectorName
 	if err != nil {
 		out, _ = json.Marshal(renderAgentHookResponseForProfile(profile, resp))
 	}
-	return append(out, '\n')
+	return append(out, '\n'), resp
 }

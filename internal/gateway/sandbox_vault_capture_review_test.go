@@ -143,12 +143,44 @@ func TestPromptWithAnExposedSecretNamesTheReplace(t *testing.T) {
 	}
 }
 
-// A body with a duplicate key is left to the ambiguous-JSON rejection.
-func TestCaptureSkipsAmbiguousJSON(t *testing.T) {
+// A body with a duplicate key or trailing data forwards none of itself, on
+// any route: what is left is still ambiguous, so the gateway's
+// ambiguous-JSON handling answers it as before, and nothing is stored.
+func TestCaptureAmbiguousJSONForwardsNothing(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
 	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
-	body := []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"` + vaultTestAnthropicKey() + `","prompt":"x"}`)
-	if _, c := captureSandboxVault(ctx, st, "claudecode", nil, body); c != nil {
-		t.Fatal("an ambiguous body was captured")
+	key := vaultTestAnthropicKey()
+	for _, body := range []string{
+		`{"hook_event_name":"UserPromptSubmit","prompt":"` + key + `","prompt":"x"}`,
+		`{"hook_event_name":"Stop","last_assistant_message":"` + key + `"}{"x":1}`,
+	} {
+		out, c := captureSandboxVault(ctx, st, "claudecode", nil, []byte(body))
+		if c == nil || !errors.Is(c.Err, errVaultCaptureAmbiguous) || strings.Contains(string(out), key) || hookToolCallJSONUnambiguous("claudecode", out) {
+			t.Fatalf("ambiguous body -> %s (%+v)", out, c)
+		}
+		if m := c.message(); strings.Contains(m, key) || !strings.Contains(m, "ambiguous") {
+			t.Fatalf("message = %s", m)
+		}
+	}
+	if list, _ := st.List(); len(list) != 0 {
+		t.Fatalf("an ambiguous body stored %+v", list)
+	}
+	// Relayed for a managed gateway: the relayed body carries no value.
+	relay := &vaultRelay{fakeRelay: &fakeRelay{}}
+	f := newSandboxIngressFixture(t, withTestVault(st), func(c *SandboxIngressConfig) {
+		c.Relay = relay
+		c.Registration = func(sandboxauth.Binding) (string, bool) { return "reg-1", true }
+	})
+	rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok,
+		`{"hook_event_name":"Stop","session_id":"s-amb","last_assistant_message":"`+key+`","last_assistant_message":"x","cwd":"/work/app"}`)
+	if strings.Contains(rec.Body.String(), key) {
+		t.Fatalf("answer: %d %s", rec.Code, rec.Body.String())
+	}
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	for _, call := range relay.calls {
+		if strings.Contains(string(call.Body), key) {
+			t.Fatal("an ambiguous body was relayed with its value")
+		}
 	}
 }

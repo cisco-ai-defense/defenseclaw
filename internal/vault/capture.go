@@ -29,17 +29,31 @@ var capturable = map[string]struct{ name, host string }{
 	"google-api-key":            {"GOOGLE_API_KEY", ""},
 }
 
-// MaxCaptured bounds the entries capture keeps: a session that keeps
-// writing token-shaped test fixtures cannot fill the vault. Past it a call
-// is still stopped and redacted, and nothing more is stored.
-const MaxCaptured = 16
+// Capture keeps two bounded sets of entries. MaxCaptured bounds the ones
+// taken from people's prompts; MaxCapturedFromModel bounds the ones taken
+// where an agent's model wrote or read the value (a tool call, a tool's
+// output). Only entries the person has not confirmed or replaced count.
+// They are separate so a session whose tools keep printing
+// token-shaped test fixtures can never use up the room a prompt's secret
+// needs. Past a bound the call is still answered and the value still
+// removed from the body; only nothing more of that kind is stored.
+const (
+	MaxCaptured          = 16
+	MaxCapturedFromModel = 8
+)
 
 // CaptureWait bounds how long a hook call waits for the vault lock.
 const CaptureWait = 500 * time.Millisecond
 
-// ErrCaptureFull is returned when the vault holds MaxCaptured captured
-// entries.
-var ErrCaptureFull = fmt.Errorf("the vault already holds %d captured secrets; remove the ones you do not need", MaxCaptured)
+var (
+	// ErrCaptureFull is returned when the vault holds MaxCaptured entries
+	// captured from prompts.
+	ErrCaptureFull = fmt.Errorf("the vault already holds %d unconfirmed secrets captured from prompts; confirm the ones that are yours and remove the others", MaxCaptured)
+	// ErrModelCaptureFull is returned when the vault holds
+	// MaxCapturedFromModel entries captured from agents' tool calls and
+	// output.
+	ErrModelCaptureFull = fmt.Errorf("the vault already holds %d secrets captured from agents' tool calls and output that are not replaced yet; rotate and replace them, or remove the ones you do not need", MaxCapturedFromModel)
+)
 
 // Prefixes are the issuer prefixes of the capturable kinds: a text holding
 // none of them holds no capturable credential (a cheap first screen).
@@ -75,9 +89,18 @@ type CaptureInput struct {
 	// From says where it was captured, for people ("claudecode prompt in
 	// sandbox demo").
 	From string
+	// FromModel: the agent's model wrote or read the value (a tool call, a
+	// tool's output), not the person's prompt. A new entry counts toward
+	// MaxCapturedFromModel instead of MaxCaptured.
+	FromModel bool
+	// KnownOnly: store no new entry; only mark a value the vault already
+	// holds exposed (a reply or another event, where a value the vault does
+	// not hold is only removed from the body).
+	KnownOnly bool
 }
 
-// Captured is the result of one capture.
+// Captured is the result of one capture. Entry.Name is empty when the value
+// was not kept (KnownOnly and not held, or the vault could not store it).
 type Captured struct {
 	Entry Entry
 	// New: the vault did not hold this value before.
@@ -94,13 +117,23 @@ func (s *Store) Capture(in CaptureInput) (Captured, error) {
 }
 
 // CaptureAll stores the credentials of one call in one write, waiting at
-// most wait for the vault lock. A value the vault already holds is not
-// stored twice: the existing entry is returned (and marked exposed if this
-// capture exposed it). A new value gets the kind's name, with _2 to _9
-// added when that name is taken, and the kind's host when it has one. An
-// exposed entry (an agent produced the value) is never handed to a sandbox
-// until the person replaces it (Resolve), so a value an agent planted
-// under a real API's name is never used. Any error stores nothing.
+// most wait for the vault lock, and returns one result per input, in
+// order. A value the vault already holds is not stored twice: the existing
+// entry is returned, and marked exposed if this capture exposed it. A new
+// value gets the kind's name, with _2 to _9 added when that name is taken,
+// and the kind's host when it has one. An exposed entry (an agent's model
+// saw the value) is never handed to a sandbox until the person replaces
+// it (Resolve), so a value an agent planted under a real API's name is
+// never used.
+//
+// Marking held values exposed never depends on storing the new ones: when
+// a new value cannot be stored (ErrFull, ErrCaptureFull,
+// ErrModelCaptureFull, no free name), the exposures and the other new
+// values are still written, the value's result is left empty, and the
+// first such error is returned with the results. When the lock is busy
+// (ErrBusy) nothing is written, and the results name the values the vault
+// already held. A call that changes nothing is answered from a read,
+// without the lock or a write.
 func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, error) {
 	for _, in := range ins {
 		if _, ok := capturable[in.Kind]; !ok {
@@ -110,33 +143,101 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 			return nil, err
 		}
 	}
-	var out []Captured
-	err := s.updateWait(wait, func(f *file) error {
-		out = out[:0]
-		now := s.now().UTC()
-		captured := 0
-		for _, e := range f.Entries {
-			if e.Source == SourceCaptured {
-				captured++
-			}
+	held, readErr := s.read()
+	if readErr == nil {
+		if out, changes := heldCaptures(held, ins); !changes {
+			return out, nil
 		}
-		for _, in := range ins {
-			kind := capturable[in.Kind]
-			if i := f.indexValue(in.Value); i >= 0 {
-				if in.Exposed && !f.Entries[i].Exposed {
-					f.Entries[i].Exposed = true
-					f.Entries[i].UpdatedAt = now
-				}
-				out = append(out, Captured{Entry: f.Entries[i].Entry})
-				continue
+	}
+	var out []Captured
+	var partial error
+	err := s.updateWait(wait, func(f *file) error {
+		var changed bool
+		out, changed, partial = s.capture(f, ins)
+		if !changed {
+			return errUnchanged
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrBusy) && readErr == nil {
+			out, _ = heldCaptures(held, ins)
+			return out, err
+		}
+		return nil, err
+	}
+	return out, partial
+}
+
+// heldCaptures answers ins from f without changing it; changes reports
+// whether storing them would change the vault.
+func heldCaptures(f *file, ins []CaptureInput) ([]Captured, bool) {
+	out := make([]Captured, len(ins))
+	changes := false
+	for i, in := range ins {
+		j := f.indexValue(in.Value)
+		switch {
+		case j >= 0:
+			out[i] = Captured{Entry: f.Entries[j].Entry}
+			if in.Exposed && !f.Entries[j].Exposed {
+				changes = true
 			}
-			if len(f.Entries) >= MaxEntries {
-				return ErrFull
-			}
-			if captured >= MaxCaptured {
-				return ErrCaptureFull
-			}
-			name := ""
+		case !in.KnownOnly:
+			changes = true
+		}
+	}
+	return out, changes
+}
+
+// capture applies ins to f: exposures of held values first, then new
+// values. partial is the first new value that could not be stored.
+func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bool, partial error) {
+	now := s.now().UTC()
+	out = make([]Captured, len(ins))
+	for i, in := range ins {
+		j := f.indexValue(in.Value)
+		if j < 0 {
+			continue
+		}
+		if in.Exposed && !f.Entries[j].Exposed {
+			f.Entries[j].Exposed = true
+			f.Entries[j].UpdatedAt = now
+			changed = true
+		}
+		out[i] = Captured{Entry: f.Entries[j].Entry}
+	}
+	fromPrompts, fromModel := 0, 0
+	for _, e := range f.Entries {
+		switch {
+		case e.Source != SourceCaptured || e.Confirmed:
+			// The person's own now: confirmed, or its value replaced.
+		case e.FromModel:
+			fromModel++
+		default:
+			fromPrompts++
+		}
+	}
+	for i, in := range ins {
+		if out[i].Entry.Name != "" || in.KnownOnly {
+			continue
+		}
+		if j := f.indexValue(in.Value); j >= 0 {
+			// The same value twice in one call.
+			out[i] = Captured{Entry: f.Entries[j].Entry}
+			continue
+		}
+		var err error
+		switch {
+		case len(f.Entries) >= MaxEntries:
+			err = ErrFull
+		case in.FromModel && fromModel >= MaxCapturedFromModel:
+			err = ErrModelCaptureFull
+		case !in.FromModel && fromPrompts >= MaxCaptured:
+			err = ErrCaptureFull
+		}
+		kind := capturable[in.Kind]
+		name := ""
+		if err == nil {
 			for n := 1; n <= 9; n++ {
 				candidate := kind.name
 				if n > 1 {
@@ -148,26 +249,34 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 				}
 			}
 			if name == "" {
-				return fmt.Errorf("the vault already holds %s and %s_2 to %s_9; rename or remove one", kind.name, kind.name, kind.name)
+				err = fmt.Errorf("the vault already holds %s and %s_2 to %s_9; rename or remove one", kind.name, kind.name, kind.name)
 			}
-			port := 0
-			if kind.host != "" {
-				port = 443
-			}
-			r := record{Entry: Entry{
-				Name: name, Host: kind.host, Port: port, Source: SourceCaptured, Kind: in.Kind,
-				Exposed: in.Exposed, CapturedFrom: strings.TrimSpace(in.From), CreatedAt: now, UpdatedAt: now,
-			}, Value: in.Value}
-			f.Entries = append(f.Entries, r)
-			captured++
-			out = append(out, Captured{Entry: r.Entry, New: true})
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		if err != nil {
+			if partial == nil {
+				partial = err
+			}
+			continue
+		}
+		port := 0
+		if kind.host != "" {
+			port = 443
+		}
+		r := record{Entry: Entry{
+			Name: name, Host: kind.host, Port: port, Source: SourceCaptured, Kind: in.Kind,
+			Exposed: in.Exposed, FromModel: in.FromModel, CapturedFrom: strings.TrimSpace(in.From),
+			CreatedAt: now, UpdatedAt: now,
+		}, Value: in.Value}
+		f.Entries = append(f.Entries, r)
+		if in.FromModel {
+			fromModel++
+		} else {
+			fromPrompts++
+		}
+		changed = true
+		out[i] = Captured{Entry: r.Entry, New: true}
 	}
-	return out, nil
+	return out, changed, partial
 }
 
 // Redact replaces every capturable credential in text with its vault tag

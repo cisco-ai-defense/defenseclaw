@@ -1204,18 +1204,12 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			return
 		}
 		if captured != nil && resp.Status >= 200 && resp.Status <= 299 {
-			resp.Body = a.relayedVaultCaptureAnswer(ctx, binding.Connector, body, resp.Body, captured)
+			var answer agentHookResponse
+			resp.Body, answer = a.relayedVaultCaptureAnswer(ctx, binding.Connector, body, resp.Body, captured)
 			if resp.Decision != nil {
+				// The decision the daemon records is the answer it sent.
 				d := *resp.Decision
-				if captured.stops() || d.Action == "block" {
-					d.Action, d.WouldBlock = "block", true
-				} else {
-					d.Action, d.WouldBlock = "alert", false
-				}
-				if d.Severity != "CRITICAL" {
-					d.Severity = "HIGH"
-				}
-				d.Reason = captured.message()
+				d.Action, d.WouldBlock, d.Severity, d.Reason = answer.Action, answer.WouldBlock, answer.Severity, answer.Reason
 				resp.Decision = &d
 			}
 		}

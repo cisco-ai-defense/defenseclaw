@@ -115,30 +115,35 @@ value before it asks.
   format and a separate argument) is not. DefenseClaw's secret rules still flag
   such a value when it shows up in a file or in output, and the value is
   captured, marked exposed, when it shows up in the tool's output (below).
-- **In a prompt that reaches the model.** Copilot CLI, Hermes, Kiro, Cursor
-  and Devin hooks cannot keep a prompt from the model (or DefenseClaw does not
-  rely on them to). The secret is captured and marked **exposed: rotate**, and
-  the agent is told not to use it where the agent allows that. Rotate it and
-  run `defenseclaw sandbox vault replace NAME`.
-- **In a tool's output or the agent's reply.** The model has read the value,
-  so the secret is captured and marked **exposed: rotate**. Where the hook can
-  answer the model (Claude Code and Codex `PostToolUse`, Amp `tool.result`),
-  the agent is told not to reuse the value and that you must rotate it;
-  elsewhere DefenseClaw raises an alert that says the same.
+- **In a prompt that reaches the model.** Copilot CLI, Hermes, Kiro, Amp,
+  Cursor and Devin hooks cannot keep a prompt from the model (or DefenseClaw
+  does not rely on them to). The secret is captured and marked **exposed:
+  rotate**, and the agent is told not to use it where the agent allows that.
+  Rotate it and run `defenseclaw sandbox vault replace NAME`.
+- **In a tool's output.** The model has read the value, so the secret is
+  captured and marked **exposed: rotate**, including a key a command put
+  together as it ran. Where the hook can answer the model (Claude Code and
+  Codex `PostToolUse`, Amp `tool.result`), the agent is told not to reuse the
+  value and that you must rotate it; elsewhere DefenseClaw raises an alert that
+  says the same.
+- **In the agent's reply or another hook event.** The value is removed from
+  what DefenseClaw records and passes on, and a secret your vault already
+  holds is marked **exposed: rotate**. A value the vault does not hold is not
+  stored from a reply: rotate it with its issuer.
 
 Where each agent captures:
 
 | Agent | Prompt | Tool call (stopped, exposed) | Tool output (exposed) |
 | --- | --- | --- | --- |
-| Claude Code | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block), `PostToolBatch`, `PostToolUseFailure`; the reply at `Stop` and `MessageDisplay` |
-| Codex | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block); the reply at `Stop` |
+| Claude Code | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block), `PostToolBatch`, `PostToolUseFailure` |
+| Codex | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block) |
 | Copilot CLI | exposed (`userPromptSubmitted`) | `preToolUse`, `permissionRequest` | `postToolUse`, `postToolUseFailure` |
 | OpenCode | no prompt hook | `tool.execute.before` | `tool.execute.after` |
-| Hermes | exposed (`pre_llm_call`) | `pre_tool_call` | `post_tool_call`, `transform_tool_result`; the reply at `post_llm_call` |
+| Hermes | exposed (`pre_llm_call`) | `pre_tool_call` | `post_tool_call`, `transform_tool_result` |
 | Kiro | exposed (`userPromptSubmit`) | `preToolUse` | `postToolUse` |
 | Antigravity (`agy`) | not sent to hooks | `PreToolUse` | not sent to hooks |
-| Amp | no prompt hook | `tool.call` | `tool.result` (answered block) |
-| Cursor | exposed (`beforeSubmitPrompt`) | `preToolUse` and the `before*` hooks | `postToolUse` and the `after*` hooks |
+| Amp | exposed (`agent.start`) | `tool.call` | `tool.result` (answered block) |
+| Cursor | exposed (`beforeSubmitPrompt`) | `preToolUse`, `subagentStart` and the `before*` hooks | `postToolUse` and the `after*` hooks |
 | Devin | exposed (`UserPromptSubmit`) | `PreToolUse`, `PermissionRequest` | `PostToolUse` |
 
 Antigravity's hooks receive neither your prompt nor a tool's output, so a
@@ -158,10 +163,20 @@ a key the model typed into a `printf` command is stopped and marked exposed:
   caption="Codex in an OpenShell sandbox on Linux: the demo API call with a vault placeholder, a GitHub token in a prompt moved into the vault, a key the model typed into a tool call stopped and marked exposed, and a sandbox refused that exposed secret until it is rotated and replaced. The keys shown are made up for the recording."
 />
 
-Capture keeps at most 16 captured secrets; past that a call is still stopped
-and the value still removed, but nothing more is stored until you remove some.
-A test fixture that looks exactly like a real key (the right prefix and
-length) is treated as one: give fixtures an obviously fake shape.
+Capture keeps at most 16 secrets from prompts that you have not confirmed yet,
+and, separately, at most 8 from tool calls and tool output that you have not
+replaced yet, so tools that keep printing key-shaped test values never use up
+the room a prompt's secret needs. Past either limit a call is still answered
+and the value still removed, but nothing more of that kind is stored until you
+confirm, replace or remove some. A secret the vault already holds is still
+marked exposed when the model sees it, even with the vault full. A test
+fixture that looks exactly like a real key (the right prefix and length) is
+treated as one: give fixtures an obviously fake shape.
+
+Capture follows the hook mode your administrator set for a sandbox. In
+observe mode nothing is stopped: a secret is still moved into the vault and
+reported, and a prompt that goes on to the model is marked **exposed:
+rotate**.
 
 AWS access keys are not captured: AWS signs each request with the key, which a
 placeholder swap cannot do. Turn capture off with `openshell.vault.auto_capture:

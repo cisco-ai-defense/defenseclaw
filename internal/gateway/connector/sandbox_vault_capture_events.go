@@ -48,6 +48,28 @@ type VaultCaptureEvent struct {
 // exposed: every point but a prompt the hook stops.
 func (e VaultCaptureEvent) Exposed() bool { return e.Point != VaultCapturePrompt }
 
+// FromModel reports whether a secret at the event is one the agent's model
+// wrote or read (a tool call, a tool's output, a reply, another event), not
+// the person's prompt: a new entry counts toward the vault's
+// MaxCapturedFromModel, so model-side values never use up the room
+// prompts need.
+func (e VaultCaptureEvent) FromModel() bool {
+	return e.Point != VaultCapturePrompt && e.Point != VaultCapturePromptSeen
+}
+
+// Stores reports whether a secret the vault does not hold yet is stored at
+// the event: a prompt, a tool call, or a tool's output (a key the agent
+// assembled as a tool ran is first seen there). At a reply or another
+// event the value is only removed from the body, and a value the vault
+// already holds is marked exposed.
+func (e VaultCaptureEvent) Stores() bool {
+	switch e.Point {
+	case VaultCapturePrompt, VaultCapturePromptSeen, VaultCaptureToolCall, VaultCaptureToolOutput:
+		return true
+	}
+	return false
+}
+
 // Where names the point for a person: "prompt", "tool call", ...
 func (e VaultCaptureEvent) Where() string {
 	switch e.Point {
@@ -79,8 +101,15 @@ var (
 // records and relays. Only Claude Code and Codex prompts are marked
 // stoppable: their prompt block is measured; Cursor's beforeSubmitPrompt
 // and Devin's UserPromptSubmit are answered block but their secret is still
-// stored exposed. Antigravity's PreInvocation and PostToolUse carry no
-// prompt and no tool output, OpenCode has no prompt hook.
+// stored exposed. Amp's agent.start carries the prompt, but its plugin can
+// only add a note for the model there (exposed; the note tells the agent).
+// Antigravity's PreInvocation carries no prompt and its documented
+// PostToolUse input carries no tool output: PostToolUse is placed as tool
+// output only so a secret in any field it does send is still kept exposed.
+// OpenCode has no prompt hook. Cursor's stop and subagentStop are replies
+// answered with no message: their only output (followup_message) starts a
+// new turn. Cursor's subagentStart is a tool call (the subagent's task,
+// which the model wrote) and is denied.
 var sandboxVaultCaptureEvents = map[string]map[string]VaultCaptureEvent{
 	"claudecode": {
 		"UserPromptSubmit": vcPrompt, "UserPromptExpansion": vcPrompt,
@@ -122,16 +151,17 @@ var sandboxVaultCaptureEvents = map[string]map[string]VaultCaptureEvent{
 		"Stop":        vcReply, "PostInvocation": vcReply,
 	},
 	"amp": {
+		"agent.start": vcPromptSeen,
 		"tool.call":   vcToolCall,
 		"tool.result": vcOutputStop,
 	},
 	"cursor": {
 		"beforeSubmitPrompt": vcPromptSeen,
 		"preToolUse":         vcToolCall, "beforeShellExecution": vcToolCall, "beforeMCPExecution": vcToolCall,
-		"beforeReadFile": vcToolCall, "beforeTabFileRead": vcToolCall,
+		"beforeReadFile": vcToolCall, "beforeTabFileRead": vcToolCall, "subagentStart": vcToolCall,
 		"postToolUse": vcOutput, "postToolUseFailure": vcOutput, "afterShellExecution": vcOutput,
 		"afterMCPExecution": vcOutput, "afterFileEdit": vcOutput, "afterTabFileEdit": vcOutput,
-		"afterAgentResponse": vcReply, "afterAgentThought": vcReply, "stop": vcReply,
+		"afterAgentResponse": vcReply, "afterAgentThought": vcReply, "stop": vcReply, "subagentStop": vcReply,
 	},
 	"devin": {
 		"UserPromptSubmit": vcPromptSeen,

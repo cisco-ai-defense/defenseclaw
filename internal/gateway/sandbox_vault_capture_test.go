@@ -236,9 +236,12 @@ func TestSandboxVaultCaptureBeforeRelay(t *testing.T) {
 
 // A relayed reply event the daemon captured is alerted, not blocked (a
 // Claude Code Stop answered block would restart the turn), and the value
-// is stored exposed.
+// the vault holds is marked exposed.
 func TestSandboxVaultCaptureBeforeRelayAlertsAReply(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
+	if _, err := st.Add(vault.AddInput{Name: "STRIPE_API_KEY", Value: vaultTestStripeKey(), Host: "api.stripe.com"}); err != nil {
+		t.Fatal(err)
+	}
 	relay := &vaultRelay{fakeRelay: &fakeRelay{}}
 	var obs sandboxObserver
 	f := newSandboxIngressFixture(t, obs.observe, withTestVault(st), func(c *SandboxIngressConfig) {
