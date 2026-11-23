@@ -417,6 +417,37 @@ func SubstrateSecretEchoHostCheck(secrets []config.SubstrateSecret, noSwap []str
 	return c
 }
 
+// SubstrateSecretBindingFormCheck is the substrate.secret_binding_form row
+// (RV3 P4-3): it warns for each binding whose template's form or basic
+// user changed since its value was stored, because the stored value then
+// makes an invalid header until the person sets it again. A binding stored
+// before 1.0.11 records no form and is not judged.
+func SubstrateSecretBindingFormCheck(store *secretbind.Store, templates []config.SubstrateSecretTemplate) SubstrateCheck {
+	c := SubstrateCheck{ID: "substrate.secret_binding_form", Status: "pass", Detail: "every binding's value is in its template's form"}
+	if store == nil {
+		c.Detail = "self-service bindings are off"
+		return c
+	}
+	catalog := secretbind.Catalog(templates)
+	var stale []string
+	for _, b := range store.All() {
+		t, ok := secretbind.Find(catalog, b.Template)
+		if !ok || b.Form == "" || b.State != secretbind.Active {
+			continue
+		}
+		if now := t.FormKey(b); now != b.Form {
+			stale = append(stale, b.Name+" ("+b.Template+": "+b.Form+" -> "+now+")")
+		}
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		c.Status = "warn"
+		c.Detail = "these bindings hold a value in a form their template no longer uses, so the header Substrate adds is not valid: " + strings.Join(stale, "; ")
+		c.Fix = "ask each owner to run defenseclaw substrate secrets set NAME again, or put the template's form back"
+	}
+	return c
+}
+
 // SubstrateSecretBindingStoreCheck is the substrate.secret_bindings row: the
 // self-service bindings ConfigMap reads, and no entry in it was left out as
 // invalid (a hand edit). A left-out entry is dropped on the next change, so

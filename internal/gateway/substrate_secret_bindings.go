@@ -207,6 +207,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			b.State, reason = secretbind.Waiting, "secret_binding_outside_templates"
 		}
 		stored, err := t.StoredValue(b, in.Value)
+		b.Form = t.FormKey(b)
 		if err != nil || b.Check() != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "secret_invalid")
 			return
@@ -319,13 +320,17 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 // (base64(user:token) for basic), so a re-set keeps injection working;
 // anything else (an admin per_person secret) is stored as given. reason is
 // set when the binding's template is gone or cannot form the value.
-func (a *APIServer) substrateStoredValue(st *substrateState, c substrateCaller, ns, name, key, value string) (stored, reason string) {
+//
+// form is the binding's form (Template.FormKey), "" for anything else: set
+// records it in the binding once the value is stored
+// (substrateStampBindingForm), so the doctor sees the binding re-formed.
+func (a *APIServer) substrateStoredValue(st *substrateState, c substrateCaller, ns, name, key, value string) (stored, reason, form string) {
 	if st.cfg.Bindings == nil || c.person.Subject == "" {
-		return value, ""
+		return value, "", ""
 	}
 	owner := render.PersonKey(c.person.Subject)
 	if ns != st.selfService().EffectiveNamespace() || name != secretbind.ValueSecretName(owner) {
-		return value, ""
+		return value, "", ""
 	}
 	for _, b := range st.cfg.Bindings.ForOwner(owner) {
 		if b.ID != key {
@@ -333,15 +338,33 @@ func (a *APIServer) substrateStoredValue(st *substrateState, c substrateCaller, 
 		}
 		t, ok := secretbind.Find(secretbind.Catalog(st.secretTemplates()), b.Template)
 		if !ok {
-			return "", "secret_template_unknown"
+			return "", "secret_template_unknown", ""
 		}
 		v, err := t.StoredValue(b, value)
 		if err != nil {
-			return "", "secret_invalid"
+			return "", "secret_invalid", ""
 		}
-		return v, ""
+		return v, "", t.FormKey(b)
 	}
-	return value, ""
+	return value, "", ""
+}
+
+// substrateStampBindingForm records form in the caller's binding key after
+// set stored a value made in it. A failure only leaves the doctor's form
+// row stale; the value is stored.
+func (a *APIServer) substrateStampBindingForm(ctx context.Context, st *substrateState, c substrateCaller, key, form string) {
+	owner := render.PersonKey(c.person.Subject)
+	err := st.cfg.Bindings.Update(ctx, func(d *secretbind.Doc) error {
+		for i := range d.Bindings {
+			if d.Bindings[i].ID == key && d.Bindings[i].Owner == owner {
+				d.Bindings[i].Form = form
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] binding %s: form not recorded: %v\n", key, err)
+	}
 }
 
 // substrateRemoveBinding drops the caller's binding named name from the

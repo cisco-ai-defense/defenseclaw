@@ -76,8 +76,12 @@ type Binding struct {
 	AllowEcho bool      `json:"allow_echo,omitempty"`
 	// BasicUser is the user of a basic-form binding when its template has
 	// none (generic-basic) or the person names another one.
-	BasicUser string    `json:"basic_user,omitempty"`
-	Created   time.Time `json:"created"`
+	BasicUser string `json:"basic_user,omitempty"`
+	// Form is the form the stored value was made in (Template.FormKey) at
+	// add or the last set; "" for a binding stored before 1.0.11. The
+	// doctor flags a binding whose template's form changed since (RV3 P4-3).
+	Form    string    `json:"form,omitempty"`
+	Created time.Time `json:"created"`
 }
 
 // Expired reports whether the binding has passed its expiry at now.
@@ -274,6 +278,16 @@ func (s *Store) Health() (loaded bool, dropped []string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.loaded, append([]string(nil), s.dropped...), s.lastErr
+}
+
+// All returns a copy of every binding.
+func (s *Store) All() []Binding {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneBindings(s.doc.Bindings)
 }
 
 // ForOwner returns a copy of the bindings of one person key.

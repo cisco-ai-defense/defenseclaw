@@ -194,6 +194,20 @@ func (t Template) StoredValue(b Binding, token string) (string, error) {
 	return stored, nil
 }
 
+// FormKey names the form StoredValue makes for b now: "bearer", "raw", or
+// "basic:<user>". A stored value made in another form no longer makes a
+// valid header (RV3 P4-3).
+func (t Template) FormKey(b Binding) string {
+	if t.Form != FormBasic {
+		return t.Form
+	}
+	user := b.BasicUser
+	if user == "" {
+		user = t.BasicUser
+	}
+	return FormBasic + ":" + user
+}
+
 // MaxStoredValue caps the stored (header) form of a value: the proxy's
 // default request header limit is 60 KiB in all, and the basic form grows
 // a token by 4/3 (RV3 P4-2). A larger value would fail every request.
