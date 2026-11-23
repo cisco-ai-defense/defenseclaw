@@ -380,7 +380,20 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		return placements, simplesCut
 	}
 	topCut := false
+	// byPosition reads each call of the script below only in the folders
+	// known at its own place. The hook-config guard (statementBudget false)
+	// reads by position only a call the laptop guard places statement by
+	// statement (agentHookConfigPlacedCommands: a cd and a TopLevelStatements
+	// split). The laptop guard reads any other call whole, each write operand
+	// in every folder the call's cds name, a later static cd's included: after
+	// cd -, popd, cd "$D", a called function, a group or a loop that cds,
+	// echo x > settings.json; cd ~/.claude && ls alerts
+	// tamper.agent_hook_config_write on the laptop and both rels, and the
+	// actor allowed it once every call was read by position (substrate-1
+	// GAP-0988).
+	byPosition := statementBudget
 	if statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome); ok {
+		byPosition = byPosition || len(statements) != 0 && hookpaths.ChangesDirectory(command)
 		top := &pass{statements: map[string]bool{}}
 		for _, statement := range statements {
 			if path.IsAbs(statement.Dir) && !place(top, statement.Command, statement.Dir, false) {
@@ -406,7 +419,9 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// block stayed (substrate-1 GAP-0947). The guest's folder, a folder the
 	// split reached through a followed value (followed) or that no static cd
 	// of the text names, and every folder of a call that names CDPATH are
-	// known from the start, as before. A call the simples pass read
+	// known from the start, as before. The hook-config guard reads a call
+	// the laptop guard does not place in every folder (byPosition,
+	// substrate-1 GAP-0988). A call the simples pass read
 	// (splitRead) is not read again: it was read in the folders known at its
 	// own place. Its cd targets are still kept.
 	scriptCalls := guestScriptCalls(command, input.ActiveHome)
@@ -421,12 +436,12 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 			continue
 		}
 		for _, dir := range dirs {
-			if known[dir] <= call.at {
+			if !byPosition || known[dir] <= call.at {
 				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call.text, dir, false, 0})
 			}
 		}
 		for _, dir := range targets {
-			if known[dir] <= call.at {
+			if !byPosition || known[dir] <= call.at {
 				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call.text, dir, true, 0})
 			}
 		}

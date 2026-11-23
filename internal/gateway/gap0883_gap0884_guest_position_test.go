@@ -14,8 +14,12 @@ import "testing"
 // default alert where the laptop and rel/1.0.10 allow (substrate-1 GAP-0883,
 // RV-SEC10 rows C01-C03, C08, B43, B44, B48), and so did a statement ending
 // in ; after pushd and popd, cd -, cd "$D", a function, a group or a loop
-// (substrate-1 GAP-0947, RV-SEC10B rows N01-N23). The rows are benign: the actor
-// must give the laptop's answer in every pack.
+// (substrate-1 GAP-0947, RV-SEC10B rows N01-N23). The hook-config write after a
+// folder change the laptop's statement reader cannot follow (cd -, popd, cd
+// "$D", a called function, a group or a loop that cds) keeps the laptop's
+// tamper.agent_hook_config_write alert for a later cd ~/.claude: the laptop
+// guard reads such a call whole (substrate-1 GAP-0988, RV-SEC10C rows Z01-Z12,
+// Y18). Every row must give the laptop's answer in every pack.
 func TestGAP0883GuestReadsEachStatementWhereItRuns(t *testing.T) {
 	gap0377Check(t, []gap0377Row{
 		{name: "C01 sub tmp later dc", command: "(cd /tmp)\n$CMD\necho m > config.yaml\ncd ~/.defenseclaw && ls", benign: true},
@@ -50,6 +54,23 @@ func TestGAP0883GuestReadsEachStatementWhereItRuns(t *testing.T) {
 		{name: "N21 cd var CMD later dc", command: "cd \"$D\"; $CMD; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
 		{name: "N22 group cd later dc", command: "{ cd src; }; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
 		{name: "N23 loop cd later dc", command: "for d in src; do cd $d; done; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		// RV-SEC10C: the laptop alerts the hook-config write after a folder
+		// change it cannot follow (substrate-1 GAP-0988) and allows it where
+		// it places each statement (Z05, Z10, Z13, Y12).
+		{name: "Z01 cd dash later claude", command: "cd -; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z02 pushd popd later claude", command: "pushd src; popd; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z03 popd later claude", command: "popd; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z04 cd var later claude", command: "cd \"$D\"; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z06 called fn later claude", command: "f() { cd src; }; f; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z07 group cd later claude", command: "{ cd src; }; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z08 loop cd later claude", command: "for d in src; do cd $d; done; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z09 build cd dash later claude", command: "cd build && make; cd -; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z12 fail cd dash later claude", command: "cd /nonexistent && true; cd -; echo '{}' > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Y18 build cd dash later claude", command: "cd build && cmake .. && make -j8; cd -; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z05 fn decl later claude", command: "f() { :; }; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z10 build cd up later claude", command: "cd build && make; cd ..; echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Z13 plain later claude", command: "echo x > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "Y12 later claude git", command: "ls ~/.claude; echo '{}' > settings.json; cd ~/.claude; git status", benign: true},
 	})
 }
 
