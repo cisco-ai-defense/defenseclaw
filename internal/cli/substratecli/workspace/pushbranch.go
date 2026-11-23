@@ -24,17 +24,18 @@ package workspace
 // a fast-forward).
 //
 // The agent can write its checkout's git config and refs, so the review
-// and the push read neither (RV4): they run in a scratch git directory
-// with the image's system config only, and talk to the one https address
-// the review names. What origin lacks comes from that address's ls-remote,
+// and the push read neither (RV4): the review uses a scratch git directory,
+// while the push builds a fresh bare repository from the reviewed commit's
+// content-addressed objects. Both disable system and global Git config and
+// talk to the one HTTPS address the review names. What origin lacks comes from that address's ls-remote,
 // and the "pushed before" record is kept on this computer.
 //
 // The agent can also write its object store's metadata (RV-SYNC5): a
-// checkout that borrows objects (objects/info/alternates) is refused, the
-// scratch directory reads the checkout's own loose objects and packs
-// only (never its info/ files: alternates, commit-graph), and the review
-// packs the objects origin lacks into a copy that the push then sends
-// from (GAP-0797). The push moves origin's branch only from the state the
+// checkout that borrows objects (objects/info/alternates) is refused. The
+// review's scratch directory reads the checkout's own loose objects and
+// packs only (never its info/ files), then packs the full closure of the
+// approved commit. The push copies only that pack into its fresh repository;
+// snapshot HEAD, refs, config and objects/info are not used (GAP-0797/0810). The push moves origin's branch only from the state the
 // review saw, with a lease that git and the server check (GAP-0798).
 
 import (
@@ -96,10 +97,13 @@ type BranchPush struct {
 	Placeholder []string
 	RunsCode    []string
 	Secrets     []osw.ScanFinding
-	// objects is the checkout's object directory; snapshot the folder in
-	// the actor holding the review's copy of the objects origin lacks,
-	// which the push sends from ("" once the push or Discard removed it).
+	// objects is the checkout's object directory; snapshot is the actor
+	// folder holding the review's full commit pack. The push imports only
+	// that pack ("" once Discard removed it).
 	objects, snapshot string
+	// pack is the one self-contained pack made from reviewedCommit.
+	// Commit may later become a merge with this computer's prior push.
+	pack, reviewedCommit string
 	// seen is origin's refs as the review read them (ref -> commit).
 	seen map[string]string
 }
@@ -151,22 +155,21 @@ printf 'dir\t%s\000url\t%s\000head\t%s\000commit\t%s\000made\t%s\000objects\t%s\
 `
 
 // pushGit is the start of the review and push scripts: no repository or
-// user config, no templates, hooks, replace refs, commit-graph, multi-pack
-// index or bitmaps, so nothing the agent set in its checkout changes where
+// system or user config, no templates, hooks, replace refs, commit-graph,
+// multi-pack index or bitmaps, so nothing in the checkout changes where
 // the push goes, what it carries, or what the review sees. g runs git.
 const pushGit = `set -u
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE
-export GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
 g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false "$@"; }
 `
 
-// pushReviewScript lists what origin lacks and makes the push's copy
+// pushReviewScript lists what origin lacks and makes the review pack
 // ($snap, printed as the "snapshot" frame): a bare git directory g whose
-// pack holds every object origin lacks, packed from the checkout's own
-// store ($1) at review time. Its one alternate, v, is a view of that store
-// with the loose object folders and packs only, so the agent's info/
-// files (alternates, commit-graph) are never read; v is read only for the
-// commits origin already has. A checkout that borrows objects is refused
+// pack holds every object reachable from the approved commit. Its one
+// alternate, v, views only the checkout's loose object folders and packs
+// during review; the agent's objects/info files are never read. The later
+// push copies only the named pack into a fresh repository. A checkout that borrows objects is refused
 // (exit 12). ls-remote of the push address gives the commits origin has
 // (the "refs" frame), and the range is the pushed commit ($3) without
 // those the checkout holds. Names come NUL-ended (-z), so git quotes none
@@ -191,9 +194,10 @@ g ls-remote "$url" > "$s/refs" || exit 11
 { printf '%s\n' "$c"; cut -f1 "$s/refs" | sort -u | g cat-file --batch-check='%(objectname) %(objecttype)' |
   awk '$2 == "commit" || $2 == "tag" { print "^" $1 }'; } > "$s/range" || exit 6
 g rev-list --count --stdin < "$s/range" > "$s/commits" || exit 6
-if [ "$(cat "$s/commits")" != 0 ]; then
-  g pack-objects --revs -q "$snap/g/objects/pack/pack" < "$s/range" > /dev/null || exit 13
-fi
+# Pack the full closure of the reviewed commit. The later push must not
+# borrow parent objects from the agent's writable checkout or its alternates.
+pack=$(printf '%s\n' "$c" | g pack-objects --revs -q "$snap/g/objects/pack/pack") || exit 13
+printf '%s' "$pack" > "$s/pack"
 names() { g log --diff-merges=first-parent --format= --name-only -z --no-renames "$@" --stdin < "$s/range"; }
 names > "$s/file" || exit 6
 names -G"$4" > "$s/placeholder" || exit 6
@@ -201,27 +205,35 @@ names -G"$5" > "$s/replaced" || exit 6
 : > "$s/patch"
 [ "$(cat "$s/commits")" = 0 ] || g log -p --diff-merges=first-parent --no-color --no-ext-diff --no-textconv --no-renames --format= -U0 --stdin < "$s/range" > "$s/patch" || exit 6
 printf '%s' "$snap" > "$s/snapshot"
-for f in commits file placeholder replaced patch refs snapshot; do
+for f in commits file placeholder replaced patch refs snapshot pack; do
   printf '%s %s\000' "$f" "$(wc -c < "$s/$f" | tr -d ' ')" && cat "$s/$f" || exit 6
 done
 ok=1
 `
 
-// pushScript pushes $3 to refs/heads/$4 of the push address from the
-// review's copy ($1); Discard removes the copy. $6 is the commit this
+// pushScript pushes $3 to refs/heads/$4 from a fresh bare repository
+// containing only the review's named pack ($1, $8); Discard removes the
+// review copy. $6 is the commit this
 // computer pushed to that branch before ("" for none): a branch origin has
 // is refused unless it is at that commit. $7 is the branch as the review
 // saw it ("" for none): the push is refused when origin's branch is not
 // there now (exit 10), and it carries a lease on that state, so a writer
 // that moves the branch during the push makes git or the server refuse it.
 const pushScript = pushGit + `snap=$1 url=$2 c=$3 b=$4 label=$5 prev=$6 seen=$7
-[ -f "$snap/g/objects/info/alternates" ] || { echo "the review's copy of the objects is gone" >&2; exit 6; }
-export GIT_DIR=$snap/g
-# Replace the post-review local config so url rewrites cannot redirect Git.
-rm -f "$snap/g/config" || exit 6
-printf '[core]\n\trepositoryformatversion = 0\n\tbare = true\n' > "$snap/g/config" || exit 6
+pack=$8
+case "$pack" in ''|*[!0-9a-f]*) echo "bad reviewed pack id" >&2; exit 6;; esac
+umask 077
 s=$(mktemp -d) || exit 6
 trap 'rm -rf "$s"' EXIT
+git init -q --bare --template= "$s/g" || exit 6
+src=$snap/g/objects/pack/pack-$pack
+[ -f "$src.pack" ] && [ -f "$src.idx" ] || { echo "the review's pack is gone" >&2; exit 6; }
+cp -- "$src.pack" "$src.idx" "$s/g/objects/pack/" || exit 6
+export GIT_DIR=$s/g
+# The copied pack is content-addressed. Verify the exact approved commit
+# and every reachable object before any network write.
+g fsck --strict --no-reflogs --no-progress "$c" >/dev/null 2>&1 ||
+  { echo "the review's objects changed or are incomplete" >&2; exit 6; }
 heads() { g ls-remote --heads "$url" > "$s/heads" && awk -v r="refs/heads/$b" '$2 == r { print $1; exit }' "$s/heads"; }
 cur=$(heads) || { echo "ls-remote failed" >&2; exit 6; }
 if [ -n "$cur" ] && [ "$cur" != "$prev" ]; then echo "exists $cur" >&2; exit 7; fi
@@ -230,7 +242,10 @@ if [ -n "$cur" ] && ! g merge-base --is-ancestor "$cur" "$c" 2>/dev/null; then
   # The branch holds this computer's earlier push of the agent's
   # uncommitted work, which is not in the agent's history: join the two,
   # so the branch moves forward and nothing on it is lost.
-  g cat-file -e "$cur^{commit}" 2>/dev/null || { echo "exists $cur" >&2; exit 7; }
+  # A prior approved push of uncommitted work may not be an ancestor of
+  # this review's commit. Obtain that exact branch tip from origin.
+  g fetch -q --no-tags "$url" "refs/heads/$b" || exit 8
+  g cat-file -e "$cur^{commit}" 2>/dev/null || { echo "moved ${cur:-gone}" >&2; exit 10; }
   export GIT_AUTHOR_NAME="DefenseClaw agent $label" GIT_AUTHOR_EMAIL=agent@defenseclaw.invalid
   export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
   c=$(g commit-tree "$c^{tree}" -p "$cur" -p "$c" -m "defenseclaw: work of agent $label") || exit 8
@@ -301,6 +316,8 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's commits: the answer was cut short"}
 	}
 	p.snapshot = parts["snapshot"]
+	p.pack = parts["pack"]
+	p.reviewedCommit = p.Commit
 	p.seen = pushRefs(parts["refs"])
 	p.Commits, _ = strconv.Atoi(strings.TrimSpace(parts["commits"]))
 	p.Files = pushNames(parts["file"])
@@ -467,11 +484,11 @@ func scanAddedLines(patch string) []osw.ScanFinding {
 // moves only when it is at prev, and then forward only (p.Commit becomes
 // what was pushed); and only from the state the review saw.
 func (p *BranchPush) Push(ctx context.Context, run BranchExec, branch, name, prev string) error {
-	if p.snapshot == "" {
+	if p.snapshot == "" || p.pack == "" {
 		return &BranchPushError{Kind: "failed", Msg: "not pushed: the review's copy of the agent's commits is gone; run pull --push-branch again"}
 	}
 	seen := p.seen["refs/heads/"+branch]
-	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushScript, "sh", p.snapshot, p.PushURL, p.Commit, branch, name, prev, seen}, p.Dir, pushEnv, 10*time.Minute)
+	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushScript, "sh", p.snapshot, p.PushURL, p.reviewedCommit, branch, name, prev, seen, p.pack}, p.Dir, pushEnv, 10*time.Minute)
 	if err != nil {
 		return err
 	}

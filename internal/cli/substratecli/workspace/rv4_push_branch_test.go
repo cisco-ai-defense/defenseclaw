@@ -40,22 +40,16 @@ type rv4 struct {
 }
 
 // rv4Setup is an actor checkout whose origin is
-// https://git.example.test/team/app.git. The image's system git config
-// (GIT_CONFIG_SYSTEM here) maps that address to a local bare repository,
-// standing in for egress; the checkout's own config maps it the same way
-// for the agent's own git.
+// https://git.example.test/team/app.git. The test executor maps that
+// address with an explicit -c setting; the checkout's own config maps it
+// the same way for the agent's own git.
 func rv4Setup(t *testing.T) *rv4 {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
 	s := &rv4{t: t, tmp: t.TempDir()}
 	s.origin = filepath.Join(s.tmp, "origin.git")
-	sys := filepath.Join(s.tmp, "gitconfig")
-	if err := os.WriteFile(sys, []byte("[url \"file://"+s.origin+"\"]\n\tinsteadOf = https://git.example.test/team/app.git\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-	t.Setenv("GIT_CONFIG_SYSTEM", sys)
+	t.Setenv("DC_TEST_PUSH_ORIGIN", s.origin)
 	gitT(t, s.tmp, "init", "-q", "--bare", s.origin)
 	s.root = filepath.Join(s.tmp, "work")
 	gitT(t, s.tmp, "clone", "-q", s.origin, s.root+"/app")

@@ -115,6 +115,9 @@ func TestRV5SnapshotConfigCannotRedirectApprovedPush(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(p.snapshot, "g", "config"), []byte("[url \"file://"+other+"\"]\n\t\tinsteadOf = https://git.example.test/team/app.git\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The push must not run Git in the writable snapshot, even if the
+	// snapshot config is replaced immediately before Git starts.
+	rv5InspectPush(t, s, fmt.Sprintf(`    [ "$GIT_DIR" != %q ] || exit 97`, filepath.Join(p.snapshot, "g")))
 	if err := p.Push(context.Background(), localExec, "agent/b14", "a1", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -123,6 +126,91 @@ func TestRV5SnapshotConfigCannotRedirectApprovedPush(t *testing.T) {
 	}
 	if rv4Ref(s.origin, "refs/heads/agent/b14") == "" {
 		t.Fatal("the reviewed destination did not receive the branch")
+	}
+}
+
+// rv5InspectPush makes the git process itself assert which repository and
+// config it sees at the push boundary.
+func rv5InspectPush(t *testing.T, s *rv4, check string) {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(s.tmp, "inspect")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sh := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = push ]; then\n%s\n    break\n  fi\ndone\nexec %q \"$@\"\n", check, real)
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(sh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// GAP-0810: the approved push must not execute Git against the agent-writable
+// review snapshot. Poison each metadata shape after review and assert that
+// the push process sees a fresh repository.
+func TestRV5SnapshotMetadataIsAbsentAtApprovedPush(t *testing.T) {
+	for _, shape := range []string{"HEAD", "refs", "objects-info"} {
+		t.Run(shape, func(t *testing.T) {
+			s := rv4Setup(t)
+			s.write("approved.txt", "reviewed\n")
+			p := s.prepare()
+			g := filepath.Join(p.snapshot, "g")
+			var check string
+			switch shape {
+			case "HEAD":
+				if err := os.WriteFile(filepath.Join(g, "HEAD"), []byte("ref: refs/heads/poison\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				check = `    [ "$(cat "$GIT_DIR/HEAD")" != "ref: refs/heads/poison" ] || exit 97`
+			case "refs":
+				ref := filepath.Join(g, "refs", "heads", "poison")
+				if err := os.MkdirAll(filepath.Dir(ref), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(ref, []byte(p.Commit+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				check = `    [ ! -e "$GIT_DIR/refs/heads/poison" ] || exit 97`
+			case "objects-info":
+				other := s.bare("borrowed.git")
+				info := filepath.Join(g, "objects", "info")
+				if err := os.WriteFile(filepath.Join(info, "alternates"), []byte(filepath.Join(other, "objects")+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				check = `    [ ! -e "$GIT_DIR/objects/info/alternates" ] || exit 97`
+			}
+			rv5InspectPush(t, s, check)
+			if err := p.Push(context.Background(), localExec, "agent/"+shape, "a1", ""); err != nil {
+				t.Fatalf("push from snapshot %s: %v", shape, err)
+			}
+			if rv4Ref(s.origin, "refs/heads/agent/"+shape) == "" {
+				t.Fatal("reviewed origin did not receive the branch")
+			}
+		})
+	}
+}
+
+// GAP-0810: neither the review nor the push reads the actor's system Git
+// config. The HTTPS fixture is supplied as an explicit per-command setting.
+func TestRV5ApprovedPushIgnoresSystemGitConfig(t *testing.T) {
+	s := rv4Setup(t)
+	s.write("approved.txt", "reviewed\n")
+	other := s.bare("system-redirect.git")
+	sys := filepath.Join(s.tmp, "hostile-system-config")
+	if err := os.WriteFile(sys, []byte("[url \"file://"+other+"\"]\n\tinsteadOf = https://git.example.test/team/app.git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_SYSTEM", sys)
+	p := s.prepare()
+	rv5InspectPush(t, s, `    [ "$GIT_CONFIG_NOSYSTEM" = 1 ] || exit 97`)
+	if err := p.Push(context.Background(), localExec, "agent/system", "a1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if rv4Ref(other, "refs/heads/agent/system") != "" || rv4Ref(s.origin, "refs/heads/agent/system") == "" {
+		t.Fatal("system config changed the reviewed destination")
 	}
 }
 

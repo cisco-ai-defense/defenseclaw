@@ -35,6 +35,12 @@ import (
 // localExec runs the actor scripts in a local shell (the relay exec runs
 // them the same way in the actor).
 func localExec(ctx context.Context, argv []string, dir string, env map[string]string, _ time.Duration) (string, string, int, error) {
+	// The HTTPS fixture uses an explicit git command setting. The scripts
+	// disable system and global config.
+	if origin := os.Getenv("DC_TEST_PUSH_ORIGIN"); origin != "" && len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.HasPrefix(argv[2], pushGit) {
+		argv = append([]string(nil), argv...)
+		argv[2] = `git() { command git -c "url.file://$DC_TEST_PUSH_ORIGIN.insteadOf=https://git.example.test/team/app.git" "$@"; }` + "\n" + argv[2]
+	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
@@ -74,12 +80,8 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	}
 	tmp := t.TempDir()
 	origin := filepath.Join(tmp, "origin.git")
-	// The image's system git config (egress here) reads the https origin as
-	// the local bare repository; the push reads no checkout config.
-	sys := filepath.Join(tmp, "gitconfig")
-	os.WriteFile(sys, []byte("[url \"file://"+origin+"\"]\n\tinsteadOf = https://git.example.test/team/app.git\n"), 0o644)
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-	t.Setenv("GIT_CONFIG_SYSTEM", sys)
+	// The test executor maps HTTPS with an explicit -c setting.
+	t.Setenv("DC_TEST_PUSH_ORIGIN", origin)
 	gitT(t, tmp, "init", "-q", "--bare", origin)
 	root := filepath.Join(tmp, "work")
 	gitT(t, tmp, "clone", "-q", origin, root+"/app")
