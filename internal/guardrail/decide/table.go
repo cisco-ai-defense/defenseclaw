@@ -155,16 +155,20 @@ const (
 	// content (GAP-1795). Target-decided sets (authorized_keys, DefenseClaw
 	// state, hook config, credential files) keep their rows.
 	RowEffectContentDecided = "effect-content-decided"
-	// RowEffectOwnKeyWrite: a Known effects write, append or mode change of
-	// one's own SSH private key file (~/.ssh/id_rsa and its siblings) is a
-	// shadow record. No 1.0.10 rule names that shape (PATH-SSH-KEY grades
+	// RowEffectOwnKeyWrite: a Known effects write or mode change of one's
+	// own SSH private key file (~/.ssh/id_rsa and its siblings) is a shadow
+	// record. No 1.0.10 rule names that shape (PATH-SSH-KEY grades
 	// reads of the key, persistence.ssh_authorized_keys_command the keys
 	// file), so 1.0.10 allows it; the provisioning step that installs a
 	// deploy key from the environment into ~/.ssh is benign (rel-1-0-10:
 	// GAP-1878, infraset-v1: 9 benign rows raised to alert and strict
 	// block). A read or copy of an existing key keeps its PATH-SSH-KEY row
 	// (the read proof is its own finding), and a write of authorized_keys
-	// keeps its row.
+	// keeps its row. An append changes the key file that is there, so it is
+	// not the install shape and keeps the credential row (rel-1-0-10:
+	// GAP-1666/114, `timeout --signal=KILL 5 echo marker >> ~/.ssh/id_ed25519`
+	// CRITICAL at 1.0.10: with its effect finding recorded the call fell to
+	// PATH-SSH-DIR HIGH beside the bound MEDIUM).
 	RowEffectOwnKeyWrite = "effect-own-key-write"
 	// RowEffectLink: a Known effects link placed at a protected member other
 	// than the DefenseClaw state (ln -s T ~/.ssh/authorized_keys, the
@@ -261,7 +265,7 @@ var builtin = Table{Rows: []Row{
 	},
 	{
 		ID: RowEffectOwnKeyWrite, Rules: []string{RuleEffectRestricted, RuleEffectUnknown},
-		Kinds: []ProofKind{KindWrite, KindAppend, KindPerm}, Targets: []TargetClass{TargetCredential},
+		Kinds: []ProofKind{KindWrite, KindPerm}, Targets: []TargetClass{TargetCredential},
 		Sets: []string{SetSSHPrivateKey}, Sources: []string{SourceEffects}, Content: true, SecureClient: true,
 		Source: "rel-1-0-10:no rule on an own SSH private key write (GAP-1878)",
 		Cells: [deploymentCount][tierCount]Cell{

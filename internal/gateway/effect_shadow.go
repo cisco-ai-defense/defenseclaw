@@ -123,6 +123,10 @@ type EffectShadowResult struct {
 	// credential member a restricted mutation of the call names belongs to
 	// (decide.Proof.Set of the mutation proof); "" when none or several.
 	WrittenCredentialSet string `json:"-"`
+	// CredentialAppend marks a call with a restricted append to an exact
+	// credential member: it changes a file that holds a credential, so the
+	// mutation proof is an append whatever effect came first (GAP-1666/114).
+	CredentialAppend bool `json:"-"`
 	// ReadProofs are private decision inputs. Do not serialize member paths or
 	// credential classes into the shadow telemetry record.
 	ReadProofs []decide.Proof `json:"-"`
@@ -416,6 +420,8 @@ type effectClass struct {
 	// (decide.CredentialSet) of the exact own-home credential members a
 	// restricted-eligible mutation of the call names.
 	writtenCredentialSets []string
+	// credentialAppend: one of those mutations appends to the member.
+	credentialAppend bool
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -511,6 +517,7 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			c.restrictedSets = append(c.restrictedSets, m.GetSet())
 			if m.GetSet() == effectrules.SetCredentials {
 				c.writtenCredentialSets = append(c.writtenCredentialSets, decide.CredentialSet(effectCredentialMemberTail(t.GetPath())))
+				c.credentialAppend = c.credentialAppend || kind == string(effects.KindAppend)
 			}
 			// The authorized-keys ruling blocks in every pack. A state write
 			// keeps the 1.0.10 tier of tamper.detector_state_write (alert in
@@ -894,6 +901,12 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 	}
 	if p.Target == decide.TargetCredential {
 		p.Set = res.WrittenCredentialSet
+		// The call's kind is its first effect; an append to the credential
+		// file is what the tier row reads (decide.RowEffectOwnKeyWrite records
+		// only a write or mode change of the key).
+		if res.CredentialAppend {
+			p.Kind = decide.KindAppend
+		}
 	}
 	if res.Tier != string(effectTierRestricted) && (!res.KnownMutation || len(res.Reach) > 0) {
 		p.Certainty = decide.CertMaybe
