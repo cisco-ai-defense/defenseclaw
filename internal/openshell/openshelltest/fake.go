@@ -17,7 +17,7 @@
 // Package openshelltest provides an in-memory OpenShell gateway for tests
 // of code that drives openshell.Client.
 //
-// Fake builds on the SDK's own fake (github.com/NVIDIA/OpenShell/sdk/go/
+// Fake builds on the SDK's own fake (github.com/ai-openshell/sdk-go/
 // openshell/v1/fake) for sandbox, provider and workspace storage and adds
 // what that fake leaves unimplemented and DefenseClaw needs: scripted exec,
 // sandbox configuration (policy replace and merge operations, settings,
@@ -40,9 +40,9 @@ import (
 	"sync"
 	"time"
 
-	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/fake"
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+	v1 "github.com/ai-openshell/sdk-go/openshell/v1"
+	"github.com/ai-openshell/sdk-go/openshell/v1/fake"
+	"github.com/ai-openshell/sdk-go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
@@ -245,9 +245,19 @@ func (f *Fake) Sandboxes() v1.SandboxInterface { return f.sandboxes }
 func (f *Fake) SandboxTemplates() v1.SandboxTemplateInterface { return f.sdk.SandboxTemplates() }
 
 // CreateSandboxFromTemplate delegates to the SDK fake.
-func (f *Fake) CreateSandboxFromTemplate(ctx context.Context, workspace, name, templateName string, spec *types.SandboxSpec, labels map[string]string, opts ...types.CreateOptions) (*types.Sandbox, error) {
-	return f.sdk.CreateSandboxFromTemplate(ctx, workspace, name, templateName, spec, labels, opts...)
+func (f *Fake) CreateSandboxFromTemplate(ctx context.Context, workspace, name, templateName string, spec *types.SandboxSpec, opts ...types.CreateOption) (*types.Sandbox, error) {
+	return f.sdk.CreateSandboxFromTemplate(ctx, workspace, name, templateName, spec, opts...)
 }
+
+// SandboxSuspendResume returns the SDK fake's suspend and resume
+// sub-client.
+func (f *Fake) SandboxSuspendResume() v1.SandboxSuspendResumeInterface {
+	return f.sdk.SandboxSuspendResume()
+}
+
+// SandboxLogsWatch returns the SDK fake's resumable log and event watch
+// sub-client.
+func (f *Fake) SandboxLogsWatch() v1.SandboxLogsWatchInterface { return f.sdk.SandboxLogsWatch() }
 
 // Services returns the SDK fake's service sub-client.
 func (f *Fake) Services() v1.ServiceInterface { return f.sdk.Services() }

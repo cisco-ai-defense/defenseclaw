@@ -11,7 +11,7 @@ kubectl create namespace defenseclaw-system
 kubectl label namespace defenseclaw-system ate.dev/api-access=true   # Substrate admits only labelled namespaces to ate-api
 # A one-time token of a Substrate global owner, for the OpenFGA bootstrap (deleted after use):
 kubectl -n defenseclaw-system create secret generic ate-bootstrap-owner --from-file=token=owner.token
-helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate --version 1.0.10 \
+helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate --version 1.0.11 \
   -n defenseclaw-system --set bootstrap.ownerTokenSecret=ate-bootstrap-owner -f my-values.yaml
 defenseclaw substrate setup     # the SubstrateInstall overlay for ate-setup (callout, router client)
 defenseclaw substrate doctor

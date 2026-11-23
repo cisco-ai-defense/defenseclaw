@@ -159,9 +159,11 @@ $state = Join-Path $Scratch '.defenseclaw-managed-hooks.state'
 $lock = Join-Path $Scratch '.defenseclaw-managed-hooks.writer.lock'
 function Set-Counter([int]$Size) { [IO.File]::WriteAllBytes($lock, [byte[]]::new($Size)) }
 # A second process plays the writer: it ends the transaction after a delay by
-# putting the hook copy of the end value in place and then making the counter even.
+# putting the hook copy of the end value in place and then making the counter even
+# in one size change, as the product writer's SetEndOfFile does (GAP-1869:
+# WriteAllBytes truncates to 0 first, and a poll in between read counter 0).
 function Start-Writer([int]$DelayMs, [string]$Copy, [int]$End) {
-    $command = "Start-Sleep -Milliseconds $DelayMs; Set-Content -LiteralPath '$Copy' -Value x -NoNewline; [IO.File]::WriteAllBytes('$lock', [byte[]]::new($End))"
+    $command = "Start-Sleep -Milliseconds $DelayMs; Set-Content -LiteralPath '$Copy' -Value x -NoNewline; `$f = [IO.File]::Open('$lock', 'Open', 'Write', 'ReadWrite'); `$f.SetLength($End); `$f.Dispose()"
     $start = @{ FilePath = (Get-Process -Id $PID).Path; ArgumentList = @('-NoLogo', '-NoProfile', '-Command', $command); PassThru = $true }
     if ($PSVersionTable.PSVersion.Major -lt 6 -or $IsWindows) { $start['WindowStyle'] = 'Hidden' }
     Start-Process @start

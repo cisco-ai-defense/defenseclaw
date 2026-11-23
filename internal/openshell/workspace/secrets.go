@@ -109,7 +109,9 @@ type secretScanOptions struct {
 	unmaskAsked []string
 	// rewrite, maxFileBytes, timeBudget and clock tune a copy's upload
 	// scan (StageOptions.RewriteSecrets, ScanMaxFileBytes, ScanTimeBudget).
-	rewrite      string
+	rewrite string
+	// prior seeds the placeholder numbering (StageOptions.PriorSecretLines).
+	prior        []SecretLine
 	maxFileBytes int64
 	timeBudget   time.Duration
 	clock        func() time.Time

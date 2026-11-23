@@ -56,7 +56,8 @@ func SubstrateGitPushFor(cfg *config.Config) func(profile string) string {
 }
 
 // substrateGitPushApproval is how long an approved git_push ask answers the
-// launcher's next call for the same push (it pushes right after the answer).
+// launcher's next call for the same push: same branch, repository and
+// head (it pushes right after the answer).
 const substrateGitPushApproval = 10 * time.Minute
 
 var (
@@ -83,6 +84,7 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 		var in struct {
 			Host    string `json:"host"`
 			Repo    string `json:"repo"`
+			URL     string `json:"url,omitempty"`
 			Branch  string `json:"branch"`
 			Head    string `json:"head"`
 			Commits int    `json:"commits"`
@@ -98,7 +100,8 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 		in.Host = strings.ToLower(strings.TrimSpace(in.Host))
 		in.Repo = strings.Trim(strings.TrimSpace(in.Repo), "/")
 		if !substrateGitPushHost.MatchString(in.Host) || in.Repo == "" || len(in.Repo) > 512 || strings.ContainsAny(in.Repo, " \t\r\n\"\\") ||
-			!substrateGitPushBranchOK(in.Branch) || !substrateGitPushHead.MatchString(in.Head) || in.Commits < 0 || in.Files < 0 || len(in.AskID) > 64 {
+			!substrateGitPushBranchOK(in.Branch) || !substrateGitPushHead.MatchString(in.Head) || in.Commits < 0 || in.Files < 0 || len(in.AskID) > 64 ||
+			in.URL != "" && in.URL != "https://"+in.Host+"/"+in.Repo && in.URL != "https://"+in.Host+"/"+in.Repo+".git" {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
@@ -107,7 +110,11 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// The ask names the exact address the launcher pushes to.
 		target := in.Host + "/" + in.Repo
+		if in.URL != "" {
+			target = in.URL
+		}
 		answer := func(decision, why string, extra map[string]any) {
 			a.substrateAuditGitPush(r, reg.Atespace+"/"+reg.Name, reg.Person.ID(), target, in.Branch, in.Commits, in.Files, decision, why)
 			out := map[string]any{"decision": decision, "reason": why}
@@ -127,8 +134,8 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 		}
 		ask := asks.Ask{
 			Kind: asks.KindGitPush, Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Profile: reg.Profile,
-			Host: in.Host, Tool: in.Branch, Rule: asks.GitPushRule(in.Repo),
-			Summary: fmt.Sprintf("Push %s (%d commits, %d files) to %s?", in.Branch, in.Commits, in.Files, target),
+			Host: in.Host, Tool: in.Branch, Rule: asks.GitPushRule(in.Repo, in.Head),
+			Summary: fmt.Sprintf("Push %s at %s (%d commits, %d files) to %s?", in.Branch, in.Head[:12], in.Commits, in.Files, target),
 		}
 		mine, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, OwnerID: ask.OwnerID})
 		if err != nil {

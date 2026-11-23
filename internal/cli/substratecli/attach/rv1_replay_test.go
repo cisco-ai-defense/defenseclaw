@@ -35,9 +35,9 @@ func TestReplayNotIntoAFreshSession(t *testing.T) {
 	waitFor(t, "reconnecting line", func() bool { return strings.Contains(r.errb.String(), "reconnecting") })
 	r.typ("blind")
 	waitFor(t, "outage count", func() bool { return strings.Contains(r.errb.String(), "5 typed character(s) held") })
-	s.fakeRelay.mu.Lock()
-	s.fakeRelay.received = map[string]int64{} // the actor restarted
-	s.fakeRelay.mu.Unlock()
+	s.mu.Lock()
+	s.received = map[string]int64{} // the actor restarted
+	s.mu.Unlock()
 	s.down.Store(false)
 	waitFor(t, "screen 2", func() bool { return strings.Contains(r.out.String(), "screen:2") })
 	time.Sleep(100 * time.Millisecond)

@@ -25,8 +25,11 @@ import (
 // PushRequest asks the gateway whether pull --push-branch may push an
 // actor's work to its origin (B2 2.4).
 type PushRequest struct {
-	Host    string `json:"host"`
-	Repo    string `json:"repo"`
+	Host string `json:"host"`
+	Repo string `json:"repo"`
+	// URL is the https address the review named and the push goes to:
+	// https://Host/Repo, with or without .git.
+	URL     string `json:"url,omitempty"`
 	Branch  string `json:"branch"`
 	Head    string `json:"head"`
 	Commits int    `json:"commits"`

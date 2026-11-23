@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -35,9 +34,6 @@ import (
 
 func b2NeedGit(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the actor side runs sh")
-	}
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("git not installed")

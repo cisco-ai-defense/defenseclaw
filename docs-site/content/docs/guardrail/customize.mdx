@@ -31,11 +31,7 @@ Everything you can change about the guardrail, with the command and the page tha
 
 A rule pack is the set of rules and the default block and alert levels. The mode decides whether findings are enforced.
 
-| Pack | Blocks at | Alerts at |
-| --- | --- | --- |
-| `default` | CRITICAL | MEDIUM and up |
-| `strict` | MEDIUM and up | LOW and up |
-| `permissive` | CRITICAL | HIGH and up |
+The three packs, `default`, `strict` and `permissive`, differ in which levels block and alert; [Thresholds](/docs/policies/thresholds#rule-pack-default-posture) lists them.
 
 ```bash
 defenseclaw guardrail list-packs                          # who enforces which
@@ -45,7 +41,7 @@ defenseclaw guardrail mode observe --connector codex      # record only, block n
 defenseclaw guardrail mode action                         # enforce
 ```
 
-Start in observe mode and move an agent to action once the alerts look right. Observe mode never blocks, with one exception: an agent that changes DefenseClaw's own files is blocked in every mode by the `strict` and `managed-strict` packs. More: [rules and custom packs](/docs/policies/rules), [policy defaults](/docs/policies/defaults), [Multi-connector](/docs/guardrail/multi-connector).
+Start in observe mode and move an agent to action once the alerts look right. Observe mode never blocks, with [one exception](/docs/guardrail/packs-and-modes#modes). More: [rules and custom packs](/docs/policies/rules), [policy defaults](/docs/policies/defaults), [Multi-connector](/docs/guardrail/multi-connector).
 
 ## Turn layers on or off
 

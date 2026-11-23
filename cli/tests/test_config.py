@@ -1107,6 +1107,42 @@ class TestConfigLoadSave(unittest.TestCase):
             with open(config_file) as f:
                 self.assertEqual(config_mod.parse_config_yaml(f.read())["ai_discovery"]["ide_inventory"], "off")
 
+    def test_skill_manifest_opt_in_roundtrip_keeps_collection_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=str(root / "audit.db"),
+                quarantine_dir=str(root / "quarantine"),
+                plugin_dir=str(root / "plugins"),
+                policy_dir=str(root / "policies"),
+                environment="linux",
+            )
+            cfg.ai_discovery.enabled = True
+            cfg.ai_discovery.ide_inventory = "ai_only"
+            cfg.save()
+            raw = config_mod.parse_config_yaml(config_path.read_text())
+            self.assertNotIn("include_skill_manifests", raw["ai_discovery"])
+
+            cfg.ai_discovery.include_skill_manifests = True
+            cfg.save()
+            raw = config_mod.parse_config_yaml(config_path.read_text())
+            self.assertTrue(raw["ai_discovery"]["include_skill_manifests"])
+            with patch("defenseclaw.config.default_data_path", return_value=root):
+                loaded = load()
+                self.assertTrue(loaded.ai_discovery.include_skill_manifests)
+                enabled_before = loaded.ai_discovery.enabled
+                scope_before = loaded.ai_discovery.ide_inventory
+                loaded.ai_discovery.include_skill_manifests = False
+                loaded.save()
+                saved = load()
+            raw = config_mod.parse_config_yaml(config_path.read_text())
+            self.assertNotIn("include_skill_manifests", raw["ai_discovery"])
+            self.assertFalse(saved.ai_discovery.include_skill_manifests)
+            self.assertEqual(saved.ai_discovery.enabled, enabled_before)
+            self.assertEqual(saved.ai_discovery.ide_inventory, scope_before)
+
     def test_global_only_asset_policy_omits_connectors_key(self):
         # An enabled-but-global-only config must NOT emit `connectors:` so it
         # stays byte-identical to a pre-OTHER-7 config (omitempty mirror).

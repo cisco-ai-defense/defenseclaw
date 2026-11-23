@@ -154,10 +154,7 @@ func LoadPull(dataDir, name string) (*PullResult, error) {
 // hold) and bundles every object the host does not already have. It
 // prints key=value lines.
 func captureScript(rec *CopyRecord, bundle bool) string {
-	head := rec.Head
-	if rec.Kind == CopyPlain {
-		head = rec.Baseline
-	}
+	head := rec.sandboxHead()
 	addArgs := "--all"
 	if rec.Kind == CopyPlain {
 		addArgs += " --force"
@@ -327,6 +324,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	}
 	rep.Name, rep.Project = rec.Name, rec.Project
 	rep.Findings = dropPutFindings(rep.Findings, held.put)
+	rep.Flags = sortFlags(append(rep.Flags, held.flags...))
 	pr.Review = *rep
 	pr.Review.Warnings = append(pr.Review.Warnings, held.notes...)
 	if dirs := strings.Trim(kv["gitdirs"], ","); dirs != "" {
@@ -904,12 +902,16 @@ func branchHolds(ctx context.Context, rec *CopyRecord, branch string, pr *PullRe
 	if err != nil {
 		return false
 	}
-	if whole, err := base.line(ctx, "rev-parse", "-q", "--verify", effective+"^{tree}"); err == nil && whole == tip {
+	secrets := len(rec.SecretLines) > 0
+	if whole, err := base.line(ctx, "rev-parse", "-q", "--verify", effective+"^{tree}"); err == nil && whole == tip && !secrets {
 		// The whole result: a branch an earlier build made, or one that
 		// keeps the folder's edits.
 		return true
 	}
 	want, _, _, err := branchTree(ctx, base, rec, effective, pr.baseCommit())
+	if err == nil && secrets {
+		want, err = secretFreeTree(ctx, base, rec, want)
+	}
 	return err == nil && want == tip
 }
 
@@ -965,22 +967,41 @@ func branchTree(ctx context.Context, g gitCmd, rec *CopyRecord, result, base str
 // branchCommit is the commit a branch of rec's work points at, in the
 // project where result and base are imported (branchTree): the result
 // itself, or one commit on the copy's HEAD with what the sandbox changed,
-// which names the sandbox's own commits it takes in. note says what the
-// branch holds of the folder's uncommitted edits, when it had any.
+// which names the sandbox's own commits it takes in. A copy with replaced
+// credentials always gets that one commit, without the files that held
+// them (secretFreeTree): the sandbox's commits hold placeholders and the
+// result the values (GAP-0753). note says what the branch holds of the
+// folder's uncommitted edits, when it had any.
 func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, base, branch string) (commit, note string, err error) {
 	tree, edits, kept, err := branchTree(ctx, proj, rec, result, base)
 	if err != nil {
 		return "", "", err
 	}
-	if commit, err = proj.line(ctx, "rev-parse", "--verify", result+"^{commit}"); err != nil || len(edits) == 0 {
+	secrets := len(rec.SecretLines) > 0
+	if secrets {
+		if tree, err = secretFreeTree(ctx, proj, rec, tree); err != nil {
+			return "", "", err
+		}
+		replaced := toSet(replacedFiles(rec))
+		var rest []string
+		for _, e := range edits {
+			if _, ok := replaced[e]; !ok {
+				rest = append(rest, e)
+			}
+		}
+		edits = rest
+	} else if commit, err = proj.line(ctx, "rev-parse", "--verify", result+"^{commit}"); err != nil || len(edits) == 0 {
 		return commit, "", err
 	}
 	what := "your folder's uncommitted edits from when the copy was made (" + strings.Join(firstN(edits, 5), ", ") + ")"
-	if kept != "" {
+	if kept != "" && len(edits) > 0 && !secrets {
 		return commit, "branch " + branch + " also holds " + what + ": " + kept, nil
 	}
-	msg := "defenseclaw: changes made in sandbox " + rec.Name + "\n\nThe folder's uncommitted edits from when the copy was made are left out."
-	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.Head+".."+result); err == nil {
+	msg := "defenseclaw: changes made in sandbox " + rec.Name
+	if len(edits) > 0 && kept == "" {
+		msg += "\n\nThe folder's uncommitted edits from when the copy was made are left out."
+	}
+	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.Head+".."+result); err == nil && rec.Head != "" {
 		var own []string
 		for _, s := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 			if s != "" && !strings.HasPrefix(s, "defenseclaw: ") {
@@ -991,8 +1012,18 @@ func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, bas
 			msg += "\n\nThe sandbox's commits it takes in:\n" + strings.Join(firstN(own, 20), "\n")
 		}
 	}
-	if commit, err = proj.line(ctx, "commit-tree", tree, "-p", rec.Head, "-m", msg); err != nil {
+	args := []string{"commit-tree", tree, "-m", msg}
+	if rec.Head != "" {
+		args = append(args, "-p", rec.Head)
+	}
+	if commit, err = proj.line(ctx, args...); err != nil {
 		return "", "", err
+	}
+	switch {
+	case len(edits) == 0:
+		return commit, "", nil
+	case kept != "":
+		return commit, "branch " + branch + " also holds " + what + ": " + kept, nil
 	}
 	return commit, "branch " + branch + " starts at " + shortOID(rec.Head) + " with only the sandbox's changes: " + what +
 		" are not on it, and stay in your working tree", nil

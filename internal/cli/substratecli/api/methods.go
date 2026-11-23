@@ -504,7 +504,7 @@ func (c *Client) TestSecret(ctx context.Context, name, agent string) (SecretTest
 	if err := c.do(ctx, http.MethodPost, "secrets/"+url.PathEscape(name)+"/test", nil, body, &out); err != nil {
 		return SecretTest{}, err
 	}
-	out.Secret = out.Secret.shown()
+	out.Secret = out.shown()
 	if out.Agent != nil {
 		out.Agent.Actor, out.Agent.Reason = safetext.Line(out.Agent.Actor), safetext.Line(out.Agent.Reason)
 	}

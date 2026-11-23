@@ -30,9 +30,11 @@ import (
 	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // substratePushWait bounds how long pull --push-branch waits for someone to
@@ -50,10 +52,18 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 	if err := workspace.CheckCloneRef(branch); err != nil || strings.HasPrefix(branch, "refs/") {
 		return cliusage.WithExitCode(fmt.Errorf("--push-branch %q is not a branch name git takes", branch), 2)
 	}
-	settings, _ := s.Client.Launcher(ctx)
+	settings, err := s.Client.Launcher(ctx)
+	if err != nil {
+		// RV4-9: without them neither push_branch nor https_rewrite is known.
+		return fmt.Errorf("could not read the cluster's settings, so nothing was pushed: %w", substrateFail(err))
+	}
 	if strings.EqualFold(settings.Git.PushBranch, config.SubstrateGitPushDeny) {
-		return cliusage.WithExitCode(errors.New("this cluster does not allow pushes from agents (substrate.git.push_branch: deny); "+
+		return cliusage.WithExitCode(errors.New("this cluster turned off pull --push-branch (substrate.git.push_branch: deny); "+
 			"bring the work home with --branch NAME and push from your computer"), substrateExitRefused)
+	}
+	dataDir, copyName := auth.StateDir(), substrateCopyName(a)
+	if err := substratePushBranchReplaced(dataDir, copyName, a.Name, branch); err != nil {
+		return err
 	}
 	rel, err := substrateOpenRelay(ctx, s, a)
 	if err != nil {
@@ -74,7 +84,10 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 		}
 		return substrateFail(err)
 	}
-	target := p.Host + "/" + p.Repo
+	// The review copied the objects origin lacks into a folder in the
+	// actor, which the push sends from; remove it when this run ends.
+	defer p.Discard(context.WithoutCancel(ctx), rel.Client.BranchExec)
+	target := p.PushURL
 	if p.Commits == 0 {
 		fmt.Fprintf(w, "Nothing to push: %s already has all of the agent's work.\n", target)
 		return nil
@@ -97,17 +110,20 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 		}
 	}
 	if err := substratePushDecide(ctx, cmd, f, s, a, api.PushRequest{
-		Host: p.Host, Repo: p.Repo, Branch: branch, Head: p.Commit, Commits: p.Commits, Files: len(p.Files),
+		Host: p.Host, Repo: p.Repo, URL: p.PushURL, Branch: branch, Head: p.Commit, Commits: p.Commits, Files: len(p.Files),
 	}); err != nil {
 		return err
 	}
 	fmt.Fprintf(errw, "Pushing %s to %s...\n", branch, target)
-	if err := p.Push(ctx, rel.Client.BranchExec, branch, a.Name); err != nil {
+	if err := p.Push(ctx, rel.Client.BranchExec, branch, a.Name, workspace.PushedBefore(dataDir, copyName, p.Host, p.Repo, branch)); err != nil {
 		var pe *workspace.BranchPushError
 		if errors.As(err, &pe) {
 			return cliusage.WithExitCode(err, substrateExitRefused)
 		}
 		return substrateFail(err)
+	}
+	if err := workspace.RecordPushed(dataDir, copyName, p.Host, p.Repo, branch, p.Commit); err != nil {
+		fmt.Fprintf(errw, "warning: could not record the push on this computer (%v); a later push to %s from here is refused as an existing branch\n", err, branch)
 	}
 	link := workspace.CompareLink(p.Host, p.Repo, branch)
 	if asJSON {
@@ -122,6 +138,26 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 	return nil
 }
 
+// substratePushBranchReplaced refuses pull --push-branch, before anything
+// reaches the agent, for a copy whose tracked files this computer sent with
+// credentials replaced (S9a, RV6-4): the sandbox's HEAD starts at the
+// placeholder commit, so every agent commit carries DC_SECRET_<n> where the
+// person's lines were (osw.CheckPushFromSandbox). A copy whose only replaced
+// files are untracked is not refused: no commit holds them, and a commit the
+// agent makes of one is refused by the placeholder scan in
+// workspace.PrepareBranchPush. A record that cannot be read refuses nothing
+// here; PrepareBranchPush refuses the same commits on any computer.
+func substratePushBranchReplaced(dataDir, copyName, actor, branch string) error {
+	rec, err := osw.LoadCopy(dataDir, copyName)
+	if err != nil {
+		return nil
+	}
+	if err := osw.CheckPushFromSandbox(rec); err != nil {
+		return cliusage.WithExitCode(fmt.Errorf("not pushed: %w: defenseclaw substrate pull %s --branch %s", err, actor, branch), substrateExitRefused)
+	}
+	return nil
+}
+
 // substratePushReview prints what the push carries and what is flagged.
 func substratePushReview(w io.Writer, p *workspace.BranchPush, branch, target string) {
 	fmt.Fprintf(w, "Push %s (%s, %s) to %s\n", branch, substratePlural(p.Commits, "commit"), substratePlural(len(p.Files), "file"), target)
@@ -133,16 +169,16 @@ func substratePushReview(w io.Writer, p *workspace.BranchPush, branch, target st
 			fmt.Fprintf(w, "  ... and %d more\n", len(p.Files)-20)
 			break
 		}
-		fmt.Fprintf(w, "  %s\n", name)
+		fmt.Fprintf(w, "  %s\n", workspace.DisplayName(name))
 	}
 	for _, name := range p.Placeholder {
-		fmt.Fprintf(w, "  ! %s writes the cluster's credential placeholder; the repository should not hold it\n", name)
+		fmt.Fprintf(w, "  ! %s writes the cluster's credential placeholder; the repository should not hold it\n", workspace.DisplayName(name))
 	}
 	for _, name := range p.RunsCode {
-		fmt.Fprintf(w, "  ! %s can run code where the branch lands (CI, hooks, scripts)\n", name)
+		fmt.Fprintf(w, "  ! %s can run code where the branch lands (CI, hooks, scripts)\n", workspace.DisplayName(name))
 	}
 	for _, sf := range p.Secrets {
-		fmt.Fprintf(w, "  ! %s: %s\n", sf.Path, sf.Title)
+		fmt.Fprintf(w, "  ! %s: %s\n", workspace.DisplayName(sf.Path), sf.Title)
 	}
 }
 
@@ -163,7 +199,7 @@ func substratePushDecide(ctx context.Context, cmd *cobra.Command, f *substratePu
 			return nil
 		case config.SubstrateGitPushAsk:
 		default:
-			msg := "your profile does not allow pushes from agents (git_push: deny)"
+			msg := "your profile turned off pull --push-branch (git_push: deny)"
 			if d.Reason == "ask_denied" {
 				msg = "the push was denied"
 			}
