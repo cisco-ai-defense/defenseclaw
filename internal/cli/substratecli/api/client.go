@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 const (
@@ -345,9 +346,22 @@ type LauncherSettings struct {
 	// Files are the admin switches of push and sync; nil from a gateway
 	// that predates them.
 	Files *LauncherFiles `json:"files,omitempty"`
+	// Git is substrate.git (B2 2.5); nil from a gateway that predates it.
+	Git *LauncherGit `json:"git,omitempty"`
 	// UploadScan is substrate.launcher.upload_scan; nil from a gateway that
 	// predates it, which keeps holding files with secrets back.
 	UploadScan *LauncherUploadScan `json:"upload_scan,omitempty"`
+}
+
+// LauncherGit is substrate.git as the gateway reports it: the effective
+// https rewrite map and the submodule and LFS switches of run --clone.
+type LauncherGit struct {
+	HTTPSRewrite []config.SubstrateGitRewrite `json:"https_rewrite"`
+	Submodules   bool                         `json:"submodules"`
+	LFS          bool                         `json:"lfs"`
+	// PushBranch is the cluster's substrate.git.push_branch (allow, ask or
+	// deny; "" from a gateway before 1.0.11).
+	PushBranch string `json:"push_branch_effective,omitempty"`
 }
 
 // LauncherUploadScan is substrate.launcher.upload_scan as the gateway

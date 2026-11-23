@@ -94,6 +94,10 @@ func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSes
 	if err != nil {
 		return nil, err
 	}
+	if f.git == nil {
+		g := substrateGitFrom(settings)
+		f.git = &g
+	}
 	if n := int64(f.maxUploadMB); n > 0 && n <= maxBytes>>20 {
 		maxBytes = n << 20
 	}
@@ -102,6 +106,7 @@ func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSes
 	prepared, err := workspace.Preflight(ctx, workspace.StartOptions{
 		Project: project, DataDir: auth.StateDir(), Home: home, RemoteRoot: f.remoteDir, MaxBytes: maxBytes,
 		Masks: f.exclude, Unmask: f.unmask, UnmaskAsked: f.unmask, Replace: true, Upstream: f.cloneHere,
+		UpstreamHTTPS:  substrateGitHTTPS(f.git.HTTPSRewrite),
 		RewriteSecrets: rewrite, ScanMaxFileBytes: scanMax, ScanTimeBudget: scanBudget,
 	})
 	if err != nil {
@@ -157,7 +162,7 @@ func substrateCloneHere(v string) bool {
 // history (the host copy), so there the agent clones the remote at the
 // branch instead, which needs the local work pushed: it returns "" and sets
 // --clone to the remote's address.
-func substratePrepareCloneHere(cmd *cobra.Command, f *substrateRunFlags) (string, error) {
+func substratePrepareCloneHere(cmd *cobra.Command, s *substrateSession, f *substrateRunFlags) (string, error) {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -169,7 +174,7 @@ func substratePrepareCloneHere(cmd *cobra.Command, f *substrateRunFlags) (string
 	if err := substrateCheckProject(dir); err != nil {
 		return "", err
 	}
-	up, err := osw.ResolveUpstream(ctx, dir)
+	up, err := osw.ResolveUpstream(ctx, dir, substrateGitHTTPS(substrateGitSettings(ctx, s, f).HTTPSRewrite))
 	if err != nil {
 		var refused *osw.UpstreamError
 		if errors.As(err, &refused) {

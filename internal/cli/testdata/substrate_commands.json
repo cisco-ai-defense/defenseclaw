@@ -864,8 +864,8 @@
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",
-    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.\n\nRun it on the computer you started the agent from: it compares the changes with the folder you\nsent, and only that computer keeps a record of it. From another computer, connect to the agent and\ngit push its work from inside it.",
-    "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
+    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch. --push-branch NAME (Preview) pushes the agent's work from inside the\nagent to its checkout's origin as a new branch, with the credential the cluster adds for that host; it\nasks first unless your profile allows it, and never forces.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.\n\nRun it on the computer you started the agent from: it compares the changes with the folder you\nsent, and only that computer keeps a record of it. From another computer, connect to the agent and\ngit push its work from inside it.",
+    "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests\ndefenseclaw substrate pull fix-tests-7f3a --push-branch agent/fix-tests",
     "args": [
       {
         "name": "name",
@@ -877,7 +877,7 @@
         "name": "allow-flagged",
         "type": "bool",
         "default": "false",
-        "usage": "with --apply: also write the files flagged as able to run code (review them first)"
+        "usage": "with --apply or --push-branch: also take the flagged files (review them first)"
       },
       {
         "name": "apply",
@@ -924,6 +924,11 @@
         "metavar": "FILE"
       },
       {
+        "name": "push-branch",
+        "type": "string",
+        "usage": "push the agent's work to its origin as a new branch of this name (Preview)"
+      },
+      {
         "name": "restore-secret-lines",
         "type": "bool",
         "default": "false",
@@ -949,7 +954,7 @@
     "path": "substrate push",
     "use": "push \u003cname\u003e [path...]",
     "short": "Send your newer changes into a running agent (Preview)",
-    "long": "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\nagent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are held\nback (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n\nBefore it writes, it saves a restore point: \"defenseclaw substrate undo NAME --to N\" goes back to it.\nWhen the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\nThen choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps the\nagent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\nWhat you send is not shown as the agent's work in a later pull. This command is a Preview.",
+    "long": "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\nagent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are held\nback (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n\nBefore it writes, it saves a restore point: \"defenseclaw substrate undo NAME --to N\" goes back to it.\nWhen the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\nThen choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps the\nagent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\nWhen sending yours would remove an agent file or folder in its way (a file where you made a folder, or\na folder where you made a file), --mine names it and sends nothing; add --replace to send yours anyway.\nWhat you send is not shown as the agent's work in a later pull. This command is a Preview.",
     "example": "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine",
     "args": [
       {
@@ -1007,6 +1012,12 @@
         "type": "string",
         "usage": "on a conflict, keep the agent's version and write your change to this file",
         "metavar": "FILE"
+      },
+      {
+        "name": "replace",
+        "type": "bool",
+        "default": "false",
+        "usage": "with --mine, also remove an agent file or folder in the way of yours (it stays in the restore point)"
       },
       {
         "name": "theirs",

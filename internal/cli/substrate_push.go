@@ -40,6 +40,7 @@ type substratePushFlags struct {
 	unmask  []string
 	exclude []string
 	mine    bool
+	replace bool
 	theirs  bool
 	patch   string
 	dryRun  bool
@@ -58,6 +59,8 @@ Before it writes, it saves a restore point: "defenseclaw substrate undo NAME --t
 When the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).
 Then choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps the
 agent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.
+When sending yours would remove an agent file or folder in its way (a file where you made a folder, or
+a folder where you made a file), --mine names it and sends nothing; add --replace to send yours anyway.
 What you send is not shown as the agent's work in a later pull. This command is a Preview.`,
 		Example: "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine",
 		Args:    cobra.MinimumNArgs(1),
@@ -69,6 +72,7 @@ What you send is not shown as the agent's work in a later pull. This command is 
 	fl.StringArrayVar(&f.unmask, "unmask", nil, "send a held-back secret file or pattern anyway (repeatable)")
 	fl.StringArrayVar(&f.exclude, "exclude", nil, "hold a path or glob back too (repeatable, for example 'data/**')")
 	fl.BoolVar(&f.mine, "mine", false, "on a conflict, send your version (the agent's stays in the restore point)")
+	fl.BoolVar(&f.replace, "replace", false, "with --mine, also remove an agent file or folder in the way of yours (it stays in the restore point)")
 	fl.BoolVar(&f.theirs, "theirs", false, "on a conflict, keep the agent's version and send the rest")
 	fl.StringVar(&f.patch, "patch-out", "", "on a conflict, keep the agent's version and write your change to this file")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "show what would be sent and the conflicts; send nothing")
@@ -89,8 +93,13 @@ func runSubstratePush(cmd *cobra.Command, f *substratePushFlags, ref string, pat
 	if modes > 1 {
 		return cliusage.WithExitCode(errors.New("choose one of --mine, --theirs or --patch-out FILE"), 2)
 	}
+	if f.replace && !f.mine {
+		return cliusage.WithExitCode(errors.New("--replace goes with --mine"), 2)
+	}
 	mode := osw.PushRefuse
 	switch {
+	case f.mine && f.replace:
+		mode = osw.PushMineReplace
 	case f.mine:
 		mode = osw.PushMine
 	case f.theirs:
@@ -156,7 +165,7 @@ func runSubstratePush(cmd *cobra.Command, f *substratePushFlags, ref string, pat
 		if conf := out.Plan.Conflicts(); len(conf) > 0 {
 			fmt.Fprintf(w, "The agent also changed %d of these files since your last send:\n", len(conf))
 			for _, c := range conf {
-				fmt.Fprintf(w, "  %s\n", c)
+				fmt.Fprintf(w, "  %s\n", substrateConflictLine(out.Plan, c))
 			}
 		}
 		fmt.Fprintln(w, "Nothing was sent (--dry-run).")
@@ -182,7 +191,11 @@ func runSubstratePush(cmd *cobra.Command, f *substratePushFlags, ref string, pat
 func substratePushDoc(agent string, out *workspace.PushOutcome, dry bool) map[string]any {
 	files := make([]map[string]any, 0, len(out.Plan.Changes))
 	for _, c := range out.Plan.Changes {
-		files = append(files, map[string]any{"path": c.Path, "status": c.Status, "bytes": c.Bytes, "conflict": c.Conflict, "same": c.Same})
+		f := map[string]any{"path": c.Path, "status": c.Status, "bytes": c.Bytes, "conflict": c.Conflict, "same": c.Same}
+		if c.Replaces != "" {
+			f["replaces"] = c.Replaces
+		}
+		files = append(files, f)
 	}
 	doc := map[string]any{"agent": agent, "files": files, "held_back": out.Plan.HeldBack, "conflicts": out.Plan.Conflicts(), "dry_run": dry, "sent": out.Result != nil}
 	if out.Checkpoint != "" {
@@ -192,6 +205,23 @@ func substratePushDoc(agent string, out *workspace.PushOutcome, dry bool) map[st
 		doc["kept"] = out.Result.Kept
 	}
 	return doc
+}
+
+// substrateConflictLine is one conflict as push lists it: the path, and
+// what sending yours would remove in the agent when that is more than the
+// path itself (RV2 N2).
+func substrateConflictLine(plan *osw.PushPlan, path string) string {
+	if plan != nil {
+		for _, c := range plan.Changes {
+			if c.Path == path {
+				if n := c.ReplaceNote(); n != "" {
+					return path + " (" + n + ")"
+				}
+				break
+			}
+		}
+	}
+	return path
 }
 
 // substratePushErr says a push refusal in plain words; a conflict or an
@@ -204,11 +234,28 @@ func substratePushErr(cmd *cobra.Command, agent string, err error, asJSON bool, 
 		} else {
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "The agent also changed %d of these files since your last send:\n", len(conf.Paths))
+			var plan *osw.PushPlan
+			if out != nil {
+				plan = out.Plan
+			}
 			for _, p := range conf.Paths {
-				fmt.Fprintf(w, "  %s\n", p)
+				fmt.Fprintf(w, "  %s\n", substrateConflictLine(plan, p))
 			}
 		}
 		return cliusage.WithExitCode(errors.New("nothing was sent. Choose: --mine (send yours), --theirs (keep the agent's) or --patch-out FILE"), substrateExitRefused)
+	}
+	var repl *osw.PushReplaceError
+	if errors.As(err, &repl) {
+		if asJSON && out != nil {
+			_ = writeSubstrateJSON(cmd.OutOrStdout(), substratePushDoc(agent, out, false))
+		} else {
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "Sending your version of %d file(s) removes agent files in the way:\n", len(repl.Changes))
+			for _, c := range repl.Changes {
+				fmt.Fprintf(w, "  %s (%s)\n", c.Path, c.ReplaceNote())
+			}
+		}
+		return cliusage.WithExitCode(errors.New("nothing was sent. Add --replace to send yours anyway (the agent's stays in the restore point), or choose --theirs or --patch-out FILE"), substrateExitRefused)
 	}
 	var big *workspace.TooLargeError
 	if errors.As(err, &big) {

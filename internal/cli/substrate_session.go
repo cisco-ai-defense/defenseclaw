@@ -473,7 +473,7 @@ func substrateLogoutNote(saved *auth.Token, now time.Time) string {
 	if note == "" {
 		return ""
 	}
-	return "This cluster's gateway can't end sign-ins (it is older than DefenseClaw 1.0.11, or ending sign-ins is off there), so it does not revoke a copied token. " + note
+	return "This cluster's gateway can't end sign-ins (it is older than DefenseClaw 1.0.11, or ending sign-ins is off there). " + note
 }
 
 // substrateLogoutCopyNote says until when a copy of saved works: its

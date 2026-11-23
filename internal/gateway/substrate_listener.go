@@ -218,6 +218,13 @@ type SubstrateConfig struct {
 	Revocations      *revocation.Snapshot
 	RevocationSource revocation.Source
 	Streams          *revocation.Streams
+	// Git reads substrate.git live for launchers (B2 2.5: the https
+	// rewrite map, submodules, LFS); nil reports the defaults.
+	Git func() config.SubstrateGitConfig
+	// GitPush is allow, ask or deny for pull --push-branch from an actor
+	// of profile (SubstrateGitPushFor, read live; B2 2.4). nil: the push
+	// route answers push_unavailable.
+	GitPush func(profile string) string
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck

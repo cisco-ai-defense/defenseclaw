@@ -43,23 +43,23 @@ func TestSubstrateDoctorSignInRevocationRow(t *testing.T) {
 	}{
 		{
 			name: "on",
-			want: []string{"ok    signin_revocation", "the gateway says: on: 0 person-wide end(s) active", "ready for agents"},
+			want: []string{"ok    signin_revocation", "the gateway says: on: 0 person-wide end(s) active", "the cluster components were not checked"},
 		},
 		{
 			name:       "off on the cluster",
 			doctorBody: `{"checks":[{"id":"substrate.signin_revocation","status":"warn","detail":"ending sign-ins is off: a copied sign-in token works until it expires (up to 24 h)","fix":"set substrate.identity.revocation.enabled: true and restart the gateway"}]}`,
 			want: []string{"warn  signin_revocation", "ending sign-ins is off", "to fix: set substrate.identity.revocation.enabled: true",
-				"ready for agents"},
+				"the cluster components were not checked"},
 		},
 		{
 			name:       "older gateway: no such row",
 			doctorBody: `{"checks":[{"id":"substrate.model_upstreams_private","status":"pass","detail":"x"}]}`,
-			want:       []string{"warn  signin_revocation", "older than 1.0.11", "keeps working until it expires (up to 24 h)", "upgrade DefenseClaw on the cluster", "ready for agents"},
+			want:       []string{"warn  signin_revocation", "older than 1.0.11", "keeps working until it expires (up to 24 h)", "upgrade DefenseClaw on the cluster", "the cluster components were not checked"},
 		},
 		{
 			name:         "older gateway: no doctor route",
 			doctorStatus: 404,
-			want:         []string{"warn  signin_revocation", "older than 1.0.11", "ready for agents"},
+			want:         []string{"warn  signin_revocation", "older than 1.0.11", "the cluster components were not checked"},
 		},
 		{name: "not an administrator", doctorStatus: 403, notWant: []string{"signin_revocation"}},
 		{
@@ -84,7 +84,7 @@ func TestSubstrateDoctorSignInRevocationRow(t *testing.T) {
 		{
 			name:         "doctor route unavailable",
 			doctorStatus: 503, doctorBody: "secret_store_unavailable",
-			want: []string{"warn  signin_revocation", "could not be read", "ready for agents"},
+			want: []string{"warn  signin_revocation", "could not be read", "the cluster components were not checked"},
 		},
 		{name: "not signed in", actorsStatus: 401, notWant: []string{"signin_revocation"}, wantExit: 1},
 	}

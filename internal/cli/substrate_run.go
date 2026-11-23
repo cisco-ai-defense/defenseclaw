@@ -557,6 +557,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 			}
 		}
 	}()
+	substrateGitRewriteAtStart(ctx, cmd, s, a, f)
 	if prepared != nil {
 		if err = substrateUploadFolder(ctx, cmd, s, a, prepared); err != nil {
 			return a, err
@@ -607,13 +608,18 @@ func substrateCloneInActor(ctx context.Context, cmd *cobra.Command, s *substrate
 	}
 	defer rel.Close()
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent...\n", safetext.Line(f.clone))
+	g := substrateGitSettings(ctx, s, f)
 	res, err := substrateCloneOnce(ctx, cmd, s.Client, a, f, func() (*workspace.CloneResult, error) {
-		return workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
+		return workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref,
+			workspace.CloneOptions{Submodules: g.Submodules, LFS: g.LFS})
 	})
 	if err != nil {
 		return cliusage.WithExitCode(err, 1)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(res.Dir))
+	for _, warn := range res.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s.\n", safetext.Line(warn))
+	}
 	if res.Note != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %s.\n", safetext.Line(res.Note))
 	}
@@ -660,7 +666,7 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	}
 	project := ""
 	if f.clone != "" && substrateCloneHere(f.clone) {
-		if project, err = substratePrepareCloneHere(cmd, f); err != nil {
+		if project, err = substratePrepareCloneHere(cmd, s, f); err != nil {
 			return err
 		}
 	}

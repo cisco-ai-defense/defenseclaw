@@ -95,13 +95,14 @@ func Sync(ctx context.Context, opts SyncOptions) error {
 	}
 	ign := newIgnoreCache(ctx, rec.Project, rec.Kind == osw.CopyGit)
 	events := opts.Events
+	var full <-chan struct{}
 	if events == nil {
 		w, err := newTreeWatcher(rec.Project, ign)
 		if err != nil {
 			return fmt.Errorf("watch %s: %w", rec.Project, err)
 		}
 		defer w.close()
-		events = w.events
+		events, full = w.events, w.full
 	}
 	s := &syncer{opts: opts, out: out, rec: rec, named: map[string]bool{}, ign: ign}
 	if err := s.checkpoint(ctx); err != nil {
@@ -171,6 +172,9 @@ func Sync(ctx context.Context, opts SyncOptions) error {
 			if waitTick == nil {
 				timer.Reset(wait)
 			}
+		case <-full:
+			full = nil
+			fmt.Fprintf(out, "Sync no longer sees new folders: %v. Restart sync to watch them again.\n", errKqueueBound)
 		case <-timer.C:
 			if err := flush(); err != nil {
 				return err
@@ -378,7 +382,14 @@ func (s *syncer) batch(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	for _, k := range res.Result.Kept {
-		s.once("conflict:"+k, fmt.Sprintf("The agent also changed %s; not synced (send it with: push %s --mine %s).", k, s.label(), k))
+		line := fmt.Sprintf("The agent also changed %s; not synced (send it with: push %s --mine %s).", k, s.label(), k)
+		for _, c := range res.Plan.Changes {
+			if c.Path == k && c.Replaces != "" {
+				line = fmt.Sprintf("The agent also changed %s (%s); not synced (send it with: push %s --mine --replace %s).", k, c.ReplaceNote(), s.label(), k)
+				break
+			}
+		}
+		s.once("conflict:"+k, line)
 	}
 	if line := res.SendLine("Synced"); line != "" {
 		fmt.Fprintln(s.out, line)
@@ -396,8 +407,12 @@ type treeWatcher struct {
 	files  int
 	root   string
 	events chan string
-	done   chan struct{}
-	exited chan struct{}
+	// full is closed the first time a folder made during the sync is not
+	// watched because of the macOS bound (RV2 N5).
+	full     chan struct{}
+	saidFull bool
+	done     chan struct{}
+	exited   chan struct{}
 }
 
 // maxKqueueEntries bounds what sync watches on macOS, where the watcher
@@ -405,12 +420,14 @@ type treeWatcher struct {
 // it, sync stops with advice instead of "too many open files" (RV1 P3-4).
 const maxKqueueEntries = 10000
 
+var errKqueueBound = fmt.Errorf("this folder has more than %d files outside the folders git ignores, and watching them on macOS holds one open file each; send changes with push instead, or ignore build output in .gitignore", maxKqueueEntries)
+
 func newTreeWatcher(root string, ign *ignoreCache) (*treeWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
-	t := &treeWatcher{w: w, ign: ign, root: root, events: make(chan string, 64), done: make(chan struct{}), exited: make(chan struct{})}
+	t := &treeWatcher{w: w, ign: ign, root: root, events: make(chan string, 64), full: make(chan struct{}), done: make(chan struct{}), exited: make(chan struct{})}
 	if err := t.addTree(root); err != nil {
 		w.Close()
 		return nil, err
@@ -432,7 +449,7 @@ func (t *treeWatcher) addTree(dir string) error {
 		if !e.IsDir() {
 			if runtime.GOOS == "darwin" {
 				if t.files++; t.files > maxKqueueEntries {
-					return fmt.Errorf("this folder has more than %d files outside the folders git ignores, and watching them on macOS holds one open file each; send changes with push instead, or ignore build output in .gitignore", maxKqueueEntries)
+					return errKqueueBound
 				}
 			}
 			return nil
@@ -459,7 +476,10 @@ func (t *treeWatcher) run() {
 			}
 			if ev.Has(fsnotify.Create) {
 				if fi, err := os.Lstat(ev.Name); err == nil && fi.IsDir() {
-					_ = t.addTree(ev.Name)
+					if err := t.addTree(ev.Name); errors.Is(err, errKqueueBound) && !t.saidFull {
+						t.saidFull = true
+						close(t.full)
+					}
 				}
 			}
 			select {

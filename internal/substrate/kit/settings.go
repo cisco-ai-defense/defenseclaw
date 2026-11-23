@@ -734,9 +734,18 @@ func codexManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, error
 func gitConfig() string {
 	var b strings.Builder
 	b.WriteString("# DefenseClaw actor image (root-owned): SSH remotes use HTTPS, credentials are placeholders.\n")
-	b.WriteString("[url \"https://\"]\n\tinsteadOf = ssh://git@\n\tinsteadOf = git+ssh://git@\n")
-	for _, host := range []string{"github.com", "gitlab.com", "bitbucket.org"} {
-		fmt.Fprintf(&b, "[url \"https://%s/\"]\n\tinsteadOf = git@%s:\n", host, host)
+	// The baked rules: the generic ssh rules, then the default map
+	// (config.SubstrateGitBakedRewrites, which the launcher reads as the
+	// rules git applies first). An admin's own map is written into the
+	// actor user's git config at run (B2 2.5) and adds to them, so the
+	// image needs no rebuild per host. Rules with one target share a
+	// section.
+	baked := config.SubstrateGitBakedRewrites()
+	for i, r := range baked {
+		if i == 0 || baked[i-1].To != r.To {
+			fmt.Fprintf(&b, "[url \"%s\"]\n", r.To)
+		}
+		fmt.Fprintf(&b, "\tinsteadOf = %s\n", r.From)
 	}
 	fmt.Fprintf(&b, "[credential]\n\thelper = %s\n\tuseHttpPath = false\n", CredHelper)
 	fmt.Fprintf(&b, "[http]\n\tsslCAInfo = %s\n", TrustBundle)

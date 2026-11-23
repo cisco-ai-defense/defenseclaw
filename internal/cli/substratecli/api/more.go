@@ -50,3 +50,26 @@ func (c *Client) Migrate(ctx context.Context, atespace, name string) (map[string
 	var out map[string]any
 	return out, c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/migrate", nil, map[string]any{}, &out)
 }
+
+// HostAllowed asks the policy explain route whether actor's network rules
+// allow host. known is false when the gateway cannot say (an older
+// gateway, the control API did not answer, any error): then the caller
+// keeps its old guess. No policy, or only the DefenseClaw rule after a
+// policy conflict, allows no host.
+func (c *Client) HostAllowed(ctx context.Context, actor, host string) (allowed, known bool) {
+	out, err := c.PolicyQuery(ctx, actor, map[string]string{"host": host})
+	if err != nil {
+		return false, false
+	}
+	eg, _ := out["egress"].(map[string]any)
+	pol, _ := eg["policy"].(string)
+	h, _ := out["host"].(map[string]any)
+	v, ok := h["allowed"].(bool)
+	switch {
+	case pol == "" || pol == "unknown" || !ok:
+		return false, false
+	case pol == "in force":
+		return v, true
+	}
+	return false, true
+}

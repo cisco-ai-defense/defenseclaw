@@ -132,7 +132,7 @@ func TestCloneHereNoCommonBaseRefused(t *testing.T) {
 	e.git(e.project, "remote", "add", "origin", "https://git.example.test/team/app.git")
 	e.git(e.project, "fetch", "-q", other, "+main:refs/remotes/origin/main")
 	const want = "this branch shares no commit with origin; use run without --clone ."
-	if _, err := ResolveUpstream(bg, e.project); err == nil || err.Error() != want {
+	if _, err := ResolveUpstream(bg, e.project, nil); err == nil || err.Error() != want {
 		t.Fatalf("ResolveUpstream err = %v, want %q", err, want)
 	}
 	opts := e.stageOpts("nobase")
@@ -148,7 +148,8 @@ func TestCloneHereRemoteRefused(t *testing.T) {
 	for _, tc := range []struct{ name, url, sub, want string }{
 		{"local path", "/srv/git/app.git", "", "remote origin is a local path; use run without --clone ."},
 		{"file url", "file:///srv/git/app.git", "", "remote origin is a local path; use run without --clone ."},
-		{"scp form", "git@git.example.test:team/app.git", "", "remote origin is an ssh address; --clone . needs an https remote for now (use run without --clone .)"},
+		{"scp form", "git@git.example.test:team/app.git", "", "remote origin is an ssh address no https rewrite covers; ask your administrator to add it to substrate.git.https_rewrite"},
+		{"http url", "http://git.example.test/team/app.git", "", "remote origin uses http://, which sends your git credentials unencrypted"},
 		{"no remote", "", "", "this checkout has no remote origin; use run without --clone ."},
 		{"subfolder", "https://git.example.test/team/app.git", "src", "not the top folder of a git checkout"},
 	} {
@@ -158,10 +159,39 @@ func TestCloneHereRemoteRefused(t *testing.T) {
 			if tc.url != "" {
 				e.git(e.project, "remote", "add", "origin", tc.url)
 			}
-			_, err := ResolveUpstream(bg, filepath.Join(e.project, tc.sub))
+			_, err := ResolveUpstream(bg, filepath.Join(e.project, tc.sub), nil)
 			var refused *UpstreamError
 			if !errors.As(err, &refused) || !strings.Contains(refused.Msg, tc.want) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// B2 2.5: an scp-form or ssh remote a rewrite covers is cloned at its
+// https address; one no rewrite covers is refused with the key to set.
+func TestB2CloneHereSSHRemoteRewritten(t *testing.T) {
+	toHTTPS := func(raw string) (string, bool) {
+		if rest, ok := strings.CutPrefix(raw, "git@git.example.test:"); ok {
+			return "https://git.example.test/" + rest, true
+		}
+		return "", false
+	}
+	for _, tc := range []struct{ url, want string }{
+		{"git@git.example.test:team/app.git", "https://git.example.test/team/app.git"},
+		{"git@other.example.test:team/app.git", ""},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			e := newEnv(t)
+			e.initRepo()
+			e.git(e.project, "remote", "add", "origin", tc.url)
+			e.git(e.project, "update-ref", "refs/remotes/origin/HEAD", "HEAD")
+			up, err := ResolveUpstream(bg, e.project, toHTTPS)
+			switch {
+			case tc.want != "" && (err != nil || up.URL != tc.want):
+				t.Errorf("up %+v err %v, want %s", up, err, tc.want)
+			case tc.want == "" && (err == nil || !strings.Contains(err.Error(), "substrate.git.https_rewrite")):
+				t.Errorf("err %v, want the rewrite refusal", err)
 			}
 		})
 	}

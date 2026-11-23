@@ -588,6 +588,10 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			FilesPush:   func() bool { return live().Substrate.Files.PushAllowed() },
 			FilesSync:   func() bool { return live().Substrate.Files.SyncAllowed() },
 			Revocations: revs.snap, RevocationSource: revs.src, Streams: revs.streams,
+			// B2 2.5: the https rewrite map, submodules and LFS, read live.
+			Git: func() config.SubstrateGitConfig { return live().Substrate.Git },
+			// B2 2.4: git_push and substrate.git.push_branch, read live.
+			GitPush: func(profile string) string { return gateway.SubstrateGitPushFor(live())(profile) },
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),

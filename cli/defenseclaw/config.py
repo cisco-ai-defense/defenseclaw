@@ -2267,6 +2267,7 @@ class SandboxAdminConfig:
     idle_suspend_after: str = ""  # Go duration, >= 1m (the shortest wins)
     idle_suspend_tasks: bool | None = None  # true opts --task runs into idle suspend (true wins)
     unattended_asks: str = ""  # deny | queue (deny wins)
+    git_push: str = ""  # allow | ask | deny (deny wins; unset follows substrate.git.push_branch)
     ask_timeout: str = ""  # Go duration, 1m to 24h (the shortest wins)
     actor_secrets: list[str] | None = None  # exposed values (unset = none)
     # The egress ask keys (Go sandbox_ask_keys.go, GAP-0171): allowed hosts
@@ -2305,6 +2306,7 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "actor_secrets",
     "ask_hosts",
     "url_rules",
+    "git_push",
 )
 
 # The Agent Substrate floor keys, refused in openshell.admin (Go
@@ -2318,6 +2320,7 @@ _SANDBOX_SUBSTRATE_ONLY_KEYS = (
     "actor_secrets",
     "ask_hosts",
     "url_rules",
+    "git_push",
 )
 
 
@@ -4025,7 +4028,7 @@ def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str 
     for index, name in enumerate(runtimes if isinstance(runtimes, list) else []):
         if name not in ("openshell", "substrate"):
             return f"{prefix}.runtimes[{index}]: {_go_quote(name)} must be openshell or substrate"
-    for key, allowed in (("sandbox_class", ("gvisor", "microvm")), ("unattended_asks", ("deny", "queue"))):
+    for key, allowed in (("sandbox_class", ("gvisor", "microvm")), ("unattended_asks", ("deny", "queue")), ("git_push", ("allow", "ask", "deny"))):
         error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
         if error:
             return error
@@ -4698,6 +4701,19 @@ class SubstrateFilesConfig:
 
 
 @dataclass
+class SubstrateGitConfig:
+    # How agents reach private repositories (B2 2.5). https_rewrite is a
+    # list of {"from": ..., "to": ...} pairs added to the rules every actor
+    # image bakes in (None means the built-in default of the three SaaS
+    # hosts); a "to" must end in "/". submodules and lfs: None means on.
+    https_rewrite: list[dict[str, str]] | None = None
+    submodules: bool | None = None
+    lfs: bool | None = None
+    # allow | ask | deny ("" means ask): pull --push-branch (B2 2.4).
+    push_branch: str = ""
+
+
+@dataclass
 class SubstrateUnattendedConfig:
     asks: str = ""
     ask_timeout: str = ""
@@ -4936,6 +4952,7 @@ class SubstrateConfig:
     workspace_max_bytes: int | None = None
     launcher: SubstrateLauncherConfig = field(default_factory=SubstrateLauncherConfig)
     files: SubstrateFilesConfig = field(default_factory=SubstrateFilesConfig)
+    git: SubstrateGitConfig = field(default_factory=SubstrateGitConfig)
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
@@ -8317,6 +8334,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             push=_optional_bool(_mapping(raw.get("files")).get("push")),
             sync=_optional_bool(_mapping(raw.get("files")).get("sync")),
         ),
+        git=_merge_substrate_git(_mapping(raw.get("git"))),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),
@@ -8365,6 +8383,26 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
+    )
+
+
+def _merge_substrate_git(raw: dict[str, Any]) -> SubstrateGitConfig:
+    rewrite = raw.get("https_rewrite")
+    pairs: list[dict[str, str]] | None = None
+    if isinstance(rewrite, list):
+        pairs = [
+            {"from": r["from"], "to": r["to"]}
+            for r in rewrite
+            if isinstance(r, dict)
+            and isinstance(r.get("from"), str)
+            and isinstance(r.get("to"), str)
+            and r["to"].endswith("/")
+        ]
+    return SubstrateGitConfig(
+        https_rewrite=pairs,
+        submodules=_optional_bool(raw.get("submodules")),
+        lfs=_optional_bool(raw.get("lfs")),
+        push_branch=raw.get("push_branch") if isinstance(raw.get("push_branch"), str) else "",
     )
 
 
@@ -8988,6 +9026,7 @@ def _merge_openshell_admin(raw: Any) -> SandboxAdminConfig:
         idle_suspend_after=_openshell_str(admin.get("idle_suspend_after")),
         idle_suspend_tasks=_openshell_optional_bool(admin.get("idle_suspend_tasks")),
         unattended_asks=_openshell_str(admin.get("unattended_asks")),
+        git_push=_openshell_str(admin.get("git_push")),
         ask_timeout=_openshell_str(admin.get("ask_timeout")),
         actor_secrets=_openshell_optional_str_list(admin.get("actor_secrets")),
         ask_hosts=_openshell_optional_str_list(admin.get("ask_hosts")),

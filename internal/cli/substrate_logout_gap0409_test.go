@@ -53,7 +53,7 @@ func TestSubstrateLogoutNoteSignInAgeGAP0409(t *testing.T) {
 	// Issued 5 minutes ago with exp an hour ahead: works for 10 more minutes.
 	tok := &auth.Token{AccessToken: jwt(now.Add(-5 * time.Minute)), IDToken: jwt(now.Add(-6 * time.Minute)), Expiry: now.Add(time.Hour)}
 	note := substrateLogoutNote(tok, now)
-	for _, want := range []string{"works until 16:10 UTC", "about 10 min", "at most 15 minutes", "does not revoke"} {
+	for _, want := range []string{"works until 16:10 UTC", "about 10 min", "at most 15 minutes", "can't end sign-ins"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note %q has no %q", note, want)
 		}

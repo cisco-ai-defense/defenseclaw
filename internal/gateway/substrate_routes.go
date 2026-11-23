@@ -169,6 +169,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/policy/reset", a.substratePolicyReset(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/recover", a.substrateRecoverActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/snapshot", a.substrateSnapshotActor(st))
+	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/push", a.substrateGitPush(st))
 	mux.HandleFunc("POST /api/v1/substrate/session-cert", a.substrateSessionCert(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach", a.substrateAttach(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach/{rest...}", a.substrateAttach(st))
@@ -182,6 +183,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
 			"upload_scan":         substrateUploadScan(st.cfg.UploadScan),
 			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
+			"git":                 substrateLauncherGit(st.cfg.Git),
 		})
 	})
 	mux.HandleFunc("POST /api/v1/substrate/signin/revoke", a.substrateSigninRevoke(st))
@@ -1046,6 +1048,18 @@ func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 
 // substrateSwitch reads a live admin switch; on when not wired.
 func substrateSwitch(read func() bool) bool { return read == nil || read() }
+
+// substrateLauncherGit is substrate.git as launchers use it: the effective
+// rewrite map (the default when unset), the two switches and the
+// cluster's push_branch (a profile can tighten it; the push route decides).
+func substrateLauncherGit(read func() config.SubstrateGitConfig) map[string]any {
+	var g config.SubstrateGitConfig
+	if read != nil {
+		g = read()
+	}
+	return map[string]any{"https_rewrite": g.EffectiveHTTPSRewrite(), "submodules": g.SubmodulesOn(), "lfs": g.LFSOn(),
+		"push_branch_effective": g.EffectivePushBranch()}
+}
 
 // substrateUploadScan is substrate.launcher.upload_scan for launchers, its
 // defaults filled in (replace, token, 8 MiB, 120s) when not wired or unset.

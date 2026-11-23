@@ -61,6 +61,9 @@ type StartOptions struct {
 	// fetch the rest of the branch's history from its remote. Windows (the
 	// host copy) does not take it; the CLI clones there instead.
 	Upstream bool
+	// UpstreamHTTPS turns an ssh or scp-form remote into the https address
+	// the actor clones (osw.StageOptions.UpstreamHTTPS).
+	UpstreamHTTPS func(string) (string, bool)
 	// MaxBytes caps the copy at the limit reported by the cluster.
 	MaxBytes int64
 	// Masks add secret-file globs to the built-in rules; Unmask shares a
@@ -220,7 +223,7 @@ func Preflight(ctx context.Context, opts StartOptions) (*PreparedUpload, error) 
 	} else {
 		p.copy, err = osw.PrepareCopy(ctx, osw.StageOptions{
 			Project: opts.Project, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
-			RemoteRoot: opts.RemoteRoot, GitDepth: opts.GitDepth, MaxBytes: opts.MaxBytes, Upstream: opts.Upstream,
+			RemoteRoot: opts.RemoteRoot, GitDepth: opts.GitDepth, MaxBytes: opts.MaxBytes, Upstream: opts.Upstream, UpstreamHTTPS: opts.UpstreamHTTPS,
 			FolderName: hostFolderName(opts.Project), Summary: &p.summary,
 			Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked, UnmaskExact: opts.UnmaskExact,
 			Detector: opts.Detector, DisableContentScan: opts.DisableContentScan,

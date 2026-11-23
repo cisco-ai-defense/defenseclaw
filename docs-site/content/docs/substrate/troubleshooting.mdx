@@ -317,6 +317,11 @@ Administrators set the cap with `substrate.workspace_max_bytes`. A run can lower
 Run `push` again with `--mine` to send your version (the agent's stays in the restore point the push saves),
 `--theirs` to keep the agent's and send the rest, or `--patch-out FILE` to keep the agent's and get your change as a patch.
 The same edit on both sides is not a conflict.
+A listed file with a note such as `the agent has a file or link at out; sending yours removes it` means your version needs that agent file or folder gone.
+`--mine` then sends nothing and says so; add `--replace` to send yours anyway (the agent's stays in the restore point).
+
+`another push or sync is writing into this agent` means another push or sync was writing at the same time; try again.
+A push that was interrupted while writing can leave its lock behind; it clears after 15 minutes.
 
 `your administrator turned off sending more files into a running agent` means `substrate.files.push` is `false`.
 `the copy in the agent moved` means another computer sent to it or the copy was replaced: pull first, or run again.
@@ -324,13 +329,15 @@ An agent started from Windows has no push or sync yet; run it again to send a ne
 
 ## Sync skips a file or stops (Preview)
 
-`The agent also changed FILE; not synced` means the agent edited that file too. Sync keeps the agent's version and goes on with the rest; send yours with `push NAME --mine FILE`.
+`The agent also changed FILE; not synced` means the agent edited that file too. Sync keeps the agent's version and goes on with the rest; send yours with `push NAME --mine FILE` (or `--mine --replace FILE` when the message says yours removes an agent file or folder).
 `Held back: FILE (looks like a secret)` means the file matches the secret rules; send it once with `push NAME --unmask FILE`.
 `The agent is suspended; changes wait` means nothing is sent until the agent is back; sync does not wake it.
 `Sync paused: ... sent in the last hour` means sync sent four times the upload limit in an hour; changes wait. The check runs before each batch, so the last batch of the hour can go past it by up to one upload limit.
 `your administrator turned off syncing into a running agent` means `substrate.files.sync` or `substrate.files.push` is `false`.
 `The agent is gone; sync stopped` means the agent was deleted.
 On a very large folder each batch takes longer, because sync reads the whole folder again for each batch.
+`Sync no longer sees new folders` (macOS) means the folder now has more files to watch than macOS allows sync to hold open; changes in new folders go with the next batch something else starts. Restart sync, or ignore build output in `.gitignore`.
+Sync reads `.gitignore` when it starts; restart it after you change `.gitignore`.
 
 ## Keys typed while disconnected (Preview)
 
@@ -344,3 +351,15 @@ so they are never replayed; the launcher says how many to check.
 
 Use `--key-replay on` to send them without asking, or `--key-replay off` to drop them. Administrators set `substrate.launcher.key_replay`;
 the flag can only tighten it.
+
+### `pull --push-branch` is refused (Preview)
+
+- **"branch ... already exists on origin"** or **"has commits the agent's work does not have"**: the push never forces. Only a branch you pushed from this computer with `--push-branch` moves forward. Pick a new branch name.
+- **"branch ... on origin changed after the review"**: someone created, moved or deleted the branch between the review and the push, so nothing was pushed. Run the same `pull --push-branch` again to review the branch as it is now.
+- **"the agent's checkout borrows objects from another store"**: the checkout uses `objects/info/alternates`, and the push carries only what the checkout holds itself. Bring the work home with `pull NAME --branch BRANCH` and push from your computer.
+- **"could not read the cluster's settings"**: the launcher could not read the cluster's settings, so it did not push. Check that you can reach the cluster, then run again.
+- **"your profile turned off pull --push-branch"** or **"this cluster turned off pull --push-branch"**: `git_push: deny` or `substrate.git.push_branch: deny`. They turn off this command only; an agent's own `git push` follows the egress rules. Bring the work home with `pull NAME --branch BRANCH` and push from your computer.
+- **"replaced your credentials with placeholders"** or **"credential placeholders (`DC_SECRET_<n>`)"**: a tracked file in the folder was sent with credentials replaced, or the agent's commits add a placeholder, so a push would put the placeholders upstream in place of your lines. Run `pull NAME --branch BRANCH` on the computer you sent it from, then push from there.
+- **"... refused the push"**: the credential the cluster binds to that host cannot write to the repository. Ask your administrator for one with write access, or push from your computer.
+- **"the agent's checkout has no origin remote"**: the agent was not started with `run --clone`. Use `--branch` instead.
+- **"not pushed: the review flagged files"**: look at the flagged files, then run again with `--allow-flagged`.
