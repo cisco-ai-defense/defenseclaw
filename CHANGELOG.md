@@ -72,6 +72,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 ### Fixed
 - **`defenseclaw uninstall` names the backup folder of an OpenHands or OmniGent setup that an earlier uninstall kept.** `~/.defenseclaw-removed-connector-backups` holds your own copy of files from before DefenseClaw's setup, so no uninstall deletes it, but a later uninstall found nothing to move and never mentioned it again. The uninstall now lists each such folder under a heading, with the command that deletes it, and does not follow a link in its place.
 
+- **Guardrail check errors:** when the guardrail's local pattern check stopped with an internal error, the judge-first mode allowed the prompt on the judge's answer alone and the regex-judge mode failed the check. Both now treat the prompt as a critical finding: it is blocked in action mode and reported in observe mode, and the error is logged.
 #### Windows managed install, upgrade and uninstall
 - Windows managed upgrade: an account that is signed out during the upgrade no longer makes Copilot show failed or the administrator's verify return 1603; Copilot waits for the account to sign in.
 - Setup `/uninstall` asks again after waiting for the managed lock instead of failing.

@@ -1234,7 +1234,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	ciscoClient := g.currentCiscoInspector()
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	signals := triagePatternsFor(ctx, direction, content)
+	signals, triageFaulted := g.guardedTriagePatterns(ctx, direction, content)
 	judge := g.requestJudge(ctx)
 	if judge != nil && direction == "prompt" {
 		// Opt-in only: a prompt with one half of an injection shape goes to the
@@ -1281,6 +1281,9 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	if len(high) > 0 && (regexVerdictForSpan == nil || severityRank["HIGH"] > severityRank[regexVerdictForSpan.Severity]) {
 		regexVerdictForSpan = &ScanVerdict{Action: guardrailFallbackActionForSeverity("HIGH"), Severity: "HIGH"}
 	}
+	if triageFaulted {
+		regexVerdictForSpan = withTriageFault(regexVerdictForSpan)
+	}
 	endRegex(phaseAction(regexVerdictForSpan), phaseSeverity(regexVerdictForSpan), time.Since(regexStart))
 
 	var ciscoResult *ScanVerdict
@@ -1295,12 +1298,16 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 	}
 
-	// HIGH_SIGNAL triage findings produce an immediate verdict.
-	if len(high) > 0 {
+	// HIGH_SIGNAL triage findings, or a triage fault (GAP-1953), produce
+	// an immediate verdict.
+	if len(high) > 0 || triageFaulted {
 		verdict := signalsToVerdict(high, "local-triage")
 		verdict.ScannerSources = []string{"local-triage"}
 		if ruleVerdict != nil {
 			verdict = mergeVerdicts(verdict, ruleVerdict)
+		}
+		if triageFaulted {
+			verdict = withTriageFault(verdict)
 		}
 		local := verdict
 
@@ -1400,8 +1407,13 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		err     bool
 	}
 
+	type triageResult struct {
+		signals []TriageSignal
+		faulted bool
+	}
+
 	judgeCh := make(chan result, 1)
-	triageCh := make(chan []TriageSignal, 1)
+	triageCh := make(chan triageResult, 1)
 
 	// Run judge and triage in parallel.
 	//
@@ -1410,7 +1422,8 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// request and permanently pinning the http handler goroutine.
 	// Both producers therefore wrap their body in defer/recover() and
 	// fall back to an error sentinel so the parent always proceeds
-	// (judge → regex fallback, triage → empty signal set) even under
+	// (judge → regex fallback, triage → the triage fault, which raises
+	// the verdict and is never an empty signal set: GAP-1953) even under
 	// a pathological policy / scanner bug.
 	if judge := g.requestJudge(ctx); judge != nil && judge.cfg != nil {
 		go func() {
@@ -1436,20 +1449,21 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			if rec := recover(); rec != nil {
 				g.recordRecoveredPanic(ctx)
 				fmt.Fprintf(defaultLogWriter, "[guardrail] judge_first: triage goroutine panic recovered: %v\n", rec)
-				triageCh <- nil
+				triageCh <- triageResult{faulted: true}
 			}
 		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
-		sigs := triagePatternsFor(ctx, direction, content)
+		sigs, faulted := g.guardedTriagePatterns(ctx, direction, content)
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
 		endRegex("", "", time.Since(regexStart))
-		triageCh <- sigs
+		triageCh <- triageResult{signals: sigs, faulted: faulted}
 	}()
 
 	judgeRes := <-judgeCh
-	signals := <-triageCh
+	triage := <-triageCh
+	signals := triage.signals
 
 	// If the judge failed completely (nil, explicit error, or all sub-judges
 	// errored), fall back to full regex scanning. If the judge partially
@@ -1472,6 +1486,9 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart))
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
+		}
+		if triage.faulted {
+			localResult = withTriageFault(localResult)
 		}
 		local := localResult
 		// Also run Cisco remote on fallback for full parity with regex_only path.
@@ -1508,6 +1525,9 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	if len(high) > 0 {
 		regexVerdict := signalsToVerdict(high, "local-triage")
 		merged = mergeWithJudge(merged, regexVerdict)
+	}
+	if triage.faulted {
+		merged = withTriageFault(merged)
 	}
 
 	if len(ruleFindings) > 0 {
