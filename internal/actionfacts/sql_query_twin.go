@@ -14,35 +14,70 @@ type sqlQueryWord struct {
 	glued  bool
 }
 
-// sqlQueryWordTwin is the stand-in, single-quoted for the shell, of the
+// maxSQLQueryChunks is the per-call budget of readings of one over-limit
+// inline query: the query is read in chunks of whole statements, each within
+// the shell word bound, at most as many as the command bound holds words of
+// that bound. The statements past the budget are not read and the call keeps
+// its truncation record, which raises nothing (DET111 ruling B on GAP-1926).
+const maxSQLQueryChunks = maxCommandBytes / maxScalarBytes
+
+// sqlQueryWordChunks are the stand-ins, single-quoted for the shell, of the
 // inline query of a SQL client that is past the shell word bound. A quoted
 // literal, a quoted identifier and a comment past stubKeepBytes are data in
 // the grammar of SQL, as a data word is to the shell: each is shortened with
 // its quoting (sqlQueryShortened), so every statement keeps its shape and the
-// SQL readers judge it as the same query with short literals. When the query
-// is still past the bound it is cut after its last complete statement
-// within the bound; the statements past the cut are not read, and the call
-// keeps the truncation record (DET111 ruling on FIX-T20B: the cut is
-// recorded and raises nothing by itself; a rule that matches inside the kept
-// statements fires). A query with no complete statement within the bound
-// leaves the stand-in x, as a data word does.
-func sqlQueryWordTwin(word sqlQueryWord, value string) string {
+// SQL readers judge it as the same query with short literals. A query still
+// past the bound is cut into chunks of complete statements, each within the
+// bound, in order (DET111 ruling B on GAP-1926: the statements past the first
+// cut are read too, under the per-call budget maxSQLQueryChunks); each chunk
+// is read as the query of its own reading of the call, and each statement of
+// a chunk is read alone (sqlStatementCandidates). A statement that is itself
+// past the bound ends the chunks, and the statements from there on are not
+// read; the call keeps the truncation record (the cut raises nothing by
+// itself). A query with no complete statement within the bound leaves the
+// stand-in x, as a data word does.
+func sqlQueryWordChunks(word sqlQueryWord, value string) []string {
 	option := ""
 	if word.glued {
 		name, query, _ := strings.Cut(value, "=")
 		option, value = name+"=", query
 	}
 	query, ends := sqlQueryShortened(word.engine, value)
-	if len(option)+len(query) > maxScalarBytes {
-		kept := ""
-		for _, end := range ends {
-			if len(option)+end > maxScalarBytes {
-				break
-			}
-			kept = query[:end]
-		}
-		query = kept
+	if len(option)+len(query) <= maxScalarBytes {
+		return []string{sqlQueryChunkWord(option, query)}
 	}
+	var chunks []string
+	for start := 0; len(chunks) < maxSQLQueryChunks; {
+		rest := query[start:]
+		if strings.TrimSpace(rest) == "" {
+			break
+		}
+		if len(option)+len(rest) <= maxScalarBytes {
+			chunks = append(chunks, sqlQueryChunkWord(option, rest))
+			break
+		}
+		// The chunk ends after its last complete statement within the
+		// bound; none when the next statement is itself past the bound.
+		kept := start
+		for _, end := range ends {
+			if end > start && len(option)+end-start <= maxScalarBytes {
+				kept = end
+			}
+		}
+		if kept == start {
+			break
+		}
+		chunks = append(chunks, sqlQueryChunkWord(option, query[start:kept]))
+		start = kept
+	}
+	if len(chunks) == 0 {
+		chunks = []string{sqlQueryChunkWord(option, "")}
+	}
+	return chunks
+}
+
+// sqlQueryChunkWord is the shell word of one chunk of an inline query.
+func sqlQueryChunkWord(option, query string) string {
 	// A shortened comment leaves a space; at either end of the query it is
 	// no part of a statement, and the exact readers refuse a query with
 	// surrounding space.
@@ -52,23 +87,29 @@ func sqlQueryWordTwin(word sqlQueryWord, value string) string {
 	return posixSingleQuoted(option + query)
 }
 
-// sqlQueryShortened is query with each quoted literal or identifier and each
-// comment longer than stubKeepBytes shortened, and the offsets in the result
-// just after each semicolon that ends a statement. It reads the quoting of
-// SQL: a doubled quote stays inside its string; a backslash escapes in a
-// MySQL string and in a PostgreSQL E string; a PostgreSQL dollar quote
-// ($$...$$, $tag$...$tag$) ends at its own tag. An unterminated quote runs
-// to the end of the text.
-func sqlQueryShortened(engine, query string) (string, []int) {
-	var out strings.Builder
-	var ends []int
-	keep := func(part, short string) {
-		if len(part) > stubKeepBytes {
-			out.WriteString(short)
-			return
-		}
-		out.WriteString(part)
-	}
+// sqlSpanKind is the kind of one span of SQL text (sqlSpans).
+type sqlSpanKind uint8
+
+const (
+	// sqlSpanByte is one byte of SQL outside quotes and comments.
+	sqlSpanByte sqlSpanKind = iota
+	// sqlSpanQuoted is a quoted literal or identifier, or a PostgreSQL
+	// dollar quote, with its quotes.
+	sqlSpanQuoted
+	// sqlSpanComment is a line or block comment.
+	sqlSpanComment
+	// sqlSpanEnd is the semicolon that ends a statement.
+	sqlSpanEnd
+)
+
+// sqlSpans calls visit with each span of query, in order. It reads the
+// quoting of SQL: a doubled quote stays inside its string; a backslash
+// escapes in a MySQL string and in a PostgreSQL E string; a PostgreSQL dollar
+// quote ($$...$$, $tag$...$tag$) ends at its own tag. An unterminated quote
+// or block comment runs to the end of the text. It is the one reading of
+// statement boundaries of the inline query of a SQL client: the shortened
+// twin (sqlQueryShortened) and the statement split (sqlStatements) share it.
+func sqlSpans(engine, query string, visit func(kind sqlSpanKind, start, end int)) {
 	for i := 0; i < len(query); {
 		c := query[i]
 		switch {
@@ -76,12 +117,12 @@ func sqlQueryShortened(engine, query string) (string, []int) {
 			backslash := engine == "mysql" && c != '`' ||
 				c == '\'' && i > 0 && (query[i-1] == 'E' || query[i-1] == 'e') && (i < 2 || !isSQLASTWordByte(query[i-2]))
 			end := sqlQuotedEnd(query, i, c, backslash)
-			keep(query[i:end], string(c)+"x"+string(c))
+			visit(sqlSpanQuoted, i, end)
 			i = end
 		case c == '$' && engine == "postgresql":
 			tag, ok := sqlDollarTag(query[i:])
 			if !ok {
-				out.WriteByte(c)
+				visit(sqlSpanByte, i, i+1)
 				i++
 				continue
 			}
@@ -89,32 +130,108 @@ func sqlQueryShortened(engine, query string) (string, []int) {
 			if close := strings.Index(query[i+len(tag):], tag); close >= 0 {
 				end = i + len(tag) + close + len(tag)
 			}
-			keep(query[i:end], tag+"x"+tag)
+			visit(sqlSpanQuoted, i, end)
 			i = end
 		case c == '-' && strings.HasPrefix(query[i:], "--"):
 			end := len(query)
 			if newline := strings.IndexByte(query[i:], '\n'); newline >= 0 {
 				end = i + newline
 			}
-			keep(query[i:end], " ")
+			visit(sqlSpanComment, i, end)
 			i = end
 		case c == '/' && strings.HasPrefix(query[i:], "/*"):
 			end := len(query)
 			if close := strings.Index(query[i+2:], "*/"); close >= 0 {
 				end = i + 2 + close + 2
 			}
-			keep(query[i:end], " ")
+			visit(sqlSpanComment, i, end)
 			i = end
 		case c == ';':
-			out.WriteByte(c)
-			ends = append(ends, out.Len())
+			visit(sqlSpanEnd, i, i+1)
 			i++
 		default:
-			out.WriteByte(c)
+			visit(sqlSpanByte, i, i+1)
 			i++
 		}
 	}
+}
+
+// sqlQueryShortened is query with each quoted literal or identifier and each
+// comment longer than stubKeepBytes shortened, and the offsets in the result
+// just after each semicolon that ends a statement (sqlSpans).
+func sqlQueryShortened(engine, query string) (string, []int) {
+	var out strings.Builder
+	var ends []int
+	sqlSpans(engine, query, func(kind sqlSpanKind, start, end int) {
+		part := query[start:end]
+		switch {
+		case kind == sqlSpanQuoted && len(part) > stubKeepBytes:
+			if part[0] == '$' {
+				tag, _ := sqlDollarTag(part)
+				out.WriteString(tag + "x" + tag)
+			} else {
+				out.WriteString(string(part[0]) + "x" + string(part[0]))
+			}
+		case kind == sqlSpanComment && len(part) > stubKeepBytes:
+			out.WriteByte(' ')
+		default:
+			out.WriteString(part)
+		}
+		if kind == sqlSpanEnd {
+			ends = append(ends, out.Len())
+		}
+	})
 	return out.String(), ends
+}
+
+// sqlStatement is one statement of an inline query: its text as written
+// (comments kept, for the exact readers that remove them themselves) and
+// its words in upper case with comments removed (for the transaction
+// reading).
+type sqlStatement struct {
+	text  string
+	words []string
+}
+
+// sqlStatements is query cut at each semicolon that ends a statement
+// (sqlSpans: never inside a quote, a dollar quote or a comment), each
+// statement trimmed; a statement of only space and comments is left out. At
+// most maxSQLASTStatements are read; capped reports that more were left
+// unread.
+func sqlStatements(engine, query string) (statements []sqlStatement, capped bool) {
+	start, content := 0, false
+	var bare strings.Builder
+	flush := func(end int) {
+		if content {
+			if len(statements) == maxSQLASTStatements {
+				capped = true
+			} else {
+				statements = append(statements, sqlStatement{
+					text:  strings.TrimSpace(query[start:end]),
+					words: strings.Fields(strings.ToUpper(bare.String())),
+				})
+			}
+		}
+		bare.Reset()
+		content = false
+	}
+	sqlSpans(engine, query, func(kind sqlSpanKind, spanStart, spanEnd int) {
+		switch kind {
+		case sqlSpanEnd:
+			flush(spanStart)
+			start = spanEnd
+		case sqlSpanComment:
+			bare.WriteByte(' ')
+		default:
+			part := query[spanStart:spanEnd]
+			if strings.TrimSpace(part) != "" {
+				content = true
+			}
+			bare.WriteString(part)
+		}
+	})
+	flush(len(query))
+	return statements, capped
 }
 
 // sqlQuotedEnd is the offset just after the quote that closes the quoted

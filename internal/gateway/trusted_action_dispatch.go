@@ -1186,8 +1186,12 @@ func dispatchTrustedActionOnce(
 	// word shortened, and the word leaves a detection-only record
 	// (rel-1-0-10:GAP-0382).
 	if twin, split, ok := posixDataWordTwinRequest(request, facts); ok {
+		chunks := sqlQueryChunkRequests(request, facts, split)
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			for _, chunk := range chunks {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, chunk))
+			}
 			unreadDataWord = split.Data > 0
 			cutSQLQuery = split.Query > 0
 		}()

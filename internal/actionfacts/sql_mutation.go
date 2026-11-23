@@ -25,6 +25,10 @@ type exactSQLMutationInput struct {
 	source             SQLMutationQuerySource
 	connectionIdentity string
 	databaseIdentity   string
+	// rolledBack marks a statement of a multi-statement query inside a
+	// transaction the query undoes (sqlStatementCandidates): it changes no
+	// data, and the mutation reader leaves it out.
+	rolledBack bool
 }
 
 // ExactSQLMutations returns validated value-free copies of all exact mutation

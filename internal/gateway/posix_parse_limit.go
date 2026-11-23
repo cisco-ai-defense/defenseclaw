@@ -191,6 +191,31 @@ func posixDataWordTwinRequest(request trustedActionRequest, facts actionfacts.Fa
 	return twin, split, true
 }
 
+// sqlQueryChunkRequests are the readings of the statements of an over-limit
+// inline query past its first chunk (actionfacts.OverLimitWordSplit
+// .QueryChunks): the call with the query replaced by each further chunk of
+// whole statements, judged as the twin is and joined raise-only (DET111
+// ruling B on GAP-1926). A chunk whose reading is past a bound is not read;
+// its statements stay under the truncation record, which raises nothing.
+func sqlQueryChunkRequests(request trustedActionRequest, facts actionfacts.Facts, split actionfacts.OverLimitWordSplit) []trustedActionRequest {
+	if len(split.QueryChunks) == 0 {
+		return nil
+	}
+	command := posixByteBoundCommand(request, facts)
+	requests := make([]trustedActionRequest, 0, len(split.QueryChunks))
+	for _, text := range split.QueryChunks {
+		if actionfacts.ShellInputPastByteBound(text, len(request.Input.Args)) {
+			continue
+		}
+		chunk := bashReadingRequest(request, command, text)
+		if !actionfacts.OverLimitTwinWithinBounds(chunk.Input, text) {
+			continue
+		}
+		requests = append(requests, chunk)
+	}
+	return requests
+}
+
 // posixDataWordTitle is the reason of the record a data word leaves.
 const posixDataWordTitle = "Shell word past the analysis bound is data to the local shell, not read (bounded_truncated cap=bytes, operand)"
 

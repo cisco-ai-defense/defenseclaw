@@ -58,9 +58,15 @@ type OverLimitWordSplit struct {
 	// Query counts the over-limit inline queries of a SQL client (psql -c,
 	// mysql -e): code to the server, so the call is recorded truncated, but
 	// the twin keeps the query with its long literals shortened, cut after
-	// its last statement within the bound (sqlQueryWordTwin), and the cut by
+	// its last statement within the bound (sqlQueryWordChunks), and the cut by
 	// itself raises nothing (DET111 ruling on FIX-T20B).
 	Query int
+	// QueryChunks are the further readings of the call when a query is
+	// past the bound even shortened: the twin with each such query replaced
+	// by its next chunk of whole statements (x when it has no more), so the
+	// statements past the first cut are read too, at most maxSQLQueryChunks
+	// readings in all (DET111 ruling B on GAP-1926).
+	QueryChunks []string
 	// Why is the reason the text could not be split, "" when it could.
 	Why string
 }
@@ -104,11 +110,15 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 		return true
 	})
 	var split OverLimitWordSplit
-	type replacement struct {
-		start, end int
-		text       string
-	}
+	type replacement = overLimitReplacement
 	var replacements []replacement
+	// queryChunks holds, for each over-limit query, the index of its
+	// replacement and its chunks past the first.
+	type queryChunk struct {
+		index  int
+		chunks []string
+	}
+	var queryChunks []queryChunk
 	valid := true
 	syntax.Walk(file, func(node syntax.Node) bool {
 		word, isWord := node.(*syntax.Word)
@@ -124,8 +134,11 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 				valid = false
 				return false
 			}
-			replacements = append(replacements, replacement{start, end,
-				sqlQueryWordTwin(query, projectPOSIXWord(word).Value)})
+			chunks := sqlQueryWordChunks(query, projectPOSIXWord(word).Value)
+			if len(chunks) > 1 {
+				queryChunks = append(queryChunks, queryChunk{len(replacements), chunks[1:]})
+			}
+			replacements = append(replacements, replacement{start, end, chunks[0]})
 			split.Query++
 			return false
 		}
@@ -173,21 +186,54 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 		split.Why = "no data word"
 		return split, false
 	}
-	slices.SortFunc(replacements, func(a, b replacement) int { return a.start - b.start })
+	twin, ok := overLimitTwinText(command, replacements)
+	if !ok {
+		split.Why = "overlapping parts"
+		return split, false
+	}
+	split.Twin = twin
+	for k := 0; len(queryChunks) != 0 && len(split.QueryChunks) < maxSQLQueryChunks-1; k++ {
+		more := false
+		chunked := slices.Clone(replacements)
+		for _, query := range queryChunks {
+			chunked[query.index].text = posixSingleQuoted("x")
+			if k < len(query.chunks) {
+				chunked[query.index].text, more = query.chunks[k], true
+			}
+		}
+		if !more {
+			break
+		}
+		text, _ := overLimitTwinText(command, chunked)
+		split.QueryChunks = append(split.QueryChunks, text)
+	}
+	return split, true
+}
+
+// overLimitReplacement is the text that stands in for command[start:end]
+// in a twin.
+type overLimitReplacement struct {
+	start, end int
+	text       string
+}
+
+// overLimitTwinText is command with each replacement made, false when two
+// overlap.
+func overLimitTwinText(command string, replacements []overLimitReplacement) (string, bool) {
+	sorted := slices.Clone(replacements)
+	slices.SortFunc(sorted, func(a, b overLimitReplacement) int { return a.start - b.start })
 	var twin strings.Builder
 	last := 0
-	for _, r := range replacements {
+	for _, r := range sorted {
 		if r.start < last {
-			split.Why = "overlapping parts"
-			return split, false
+			return "", false
 		}
 		twin.WriteString(command[last:r.start])
 		twin.WriteString(r.text)
 		last = r.end
 	}
 	twin.WriteString(command[last:])
-	split.Twin = twin.String()
-	return split, true
+	return twin.String(), true
 }
 
 // OverLimitTwinWithinBounds reports a twin of SplitOverLimitWords that the

@@ -358,22 +358,47 @@ func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact,
 			})
 		}
 
-		operation, scope, object, ok := exactSQLMutation(candidate.engine, candidate.query)
-		if candidate.engine == "sqlite" {
-			object, ok = exactSQLiteUnboundedDelete(candidate.query)
-			operation = SQLMutationDeleteUnbounded
-			scope = SQLMutationScopeTable
-		} else if !ok && !parsed.unknown {
-			operation, scope, object, ok = exactSQLASTMutationParsed(candidate.engine, candidate.query, parsed)
+		// Each statement of a multi-statement inline query is judged as
+		// its bare form (DET111 ruling B on GAP-1926); a statement a
+		// rolled back transaction undoes changes no data.
+		statements, capped := sqlStatementCandidates(candidate)
+		if capped {
+			caps = caps.Union(bounded.Of(bounded.Items))
 		}
-		if !ok {
-			continue
-		}
-		if fact, valid := projectSQLMutationFact(candidate, operation, scope, object); valid {
-			mutations = append(mutations, fact)
+		for _, statement := range statements {
+			if statement.rolledBack {
+				continue
+			}
+			if fact, ok := exactSQLMutationOf(statement, parsed, len(statements) > 1); ok {
+				mutations = append(mutations, fact)
+			}
 		}
 	}
 	return mutations, sqlFacts, caps
+}
+
+// exactSQLMutationOf is the exact mutation fact of one statement candidate:
+// the text grammar (exactSQLMutation), else the SQL facts reading of it
+// (exactSQLASTMutationParsed). parsed is the reading of the whole query, read
+// again for the statement alone when split.
+func exactSQLMutationOf(candidate exactSQLMutationInput, parsed sqlASTResult, split bool) (SQLMutationFact, bool) {
+	operation, scope, object, ok := exactSQLMutation(candidate.engine, candidate.query)
+	if candidate.engine == "sqlite" {
+		object, ok = exactSQLiteUnboundedDelete(candidate.query)
+		operation = SQLMutationDeleteUnbounded
+		scope = SQLMutationScopeTable
+	} else if !ok {
+		if split {
+			parsed = parseSQLAST(candidate.query)
+		}
+		if !parsed.unknown {
+			operation, scope, object, ok = exactSQLASTMutationParsed(candidate.engine, candidate.query, parsed)
+		}
+	}
+	if !ok {
+		return SQLMutationFact{}, false
+	}
+	return projectSQLMutationFact(candidate, operation, scope, object)
 }
 
 func exactSQLASTMutationParsed(engine, query string, parsed sqlASTResult) (SQLMutationOperation, SQLMutationScope, string, bool) {
