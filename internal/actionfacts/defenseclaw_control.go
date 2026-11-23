@@ -1457,12 +1457,15 @@ var (
 	// credentials or session, or start, connect to or change an agent runtime.
 	// A Substrate verb in neither table is judged the same way (an ambiguous
 	// verb is a control); this table names the registered ones so the CLI
-	// drift test can tell a new verb from a reviewed one.
+	// drift test can tell a new verb from a reviewed one. `port` forwards a
+	// port of a running agent to this computer over the agent's tunnel: like
+	// `connect` it reaches into an agent runtime with the person's session,
+	// and it opens a listener and a presence record, so it is not a read.
 	defenseClawSubstrateStopVerbs = map[string]bool{
 		"run": true, "connect": true, "pull": true, "checkpoint": true, "undo": true, "delete": true,
 		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
 		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
-		"publish": true, "keygen": true, "serve": true,
+		"publish": true, "keygen": true, "serve": true, "port": true,
 	}
 )
 

@@ -12,11 +12,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -161,17 +159,6 @@ func startedPID(t *testing.T, fr frame) int {
 		t.Fatalf("want the started message as a binary frame, got kind %d %q", fr.kind, fr.b)
 	}
 	return m.Params.PID
-}
-
-func pidAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		return true
-	}
-	return p.Signal(syscall.Signal(0)) == nil
 }
 
 func waitGone(t *testing.T, pid int, what string) {

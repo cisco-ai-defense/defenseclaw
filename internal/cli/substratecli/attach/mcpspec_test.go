@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -20,22 +21,48 @@ func specCode(err error) string {
 	return ""
 }
 
-// TestParseMCPSpec: B3.3 --mcp NAME=CMD. The command splits on quotes and
-// backslashes only; $VAR, globs, ~ and pipes stay as typed, and nothing runs
-// through a shell.
+type mcpSpecCase struct {
+	in   string
+	name string
+	argv []string
+}
+
+// TestParseMCPSpec: B3.3 --mcp NAME=CMD. On POSIX the command splits on
+// quotes and backslashes only; $VAR, globs, ~ and pipes stay as typed, and
+// nothing runs through a shell. On Windows ParseMCPSpec uses the Windows
+// split by design (no single quote, a backslash is literal except before a
+// double quote), so the quoting cases are per GOOS and each table pins what
+// that split really does.
 func TestParseMCPSpec(t *testing.T) {
-	good := []struct {
-		in   string
-		name string
-		argv []string
-	}{
+	good := []mcpSpecCase{
 		{"files=npx -y @modelcontextprotocol/server-filesystem .", "files", []string{"npx", "-y", "@modelcontextprotocol/server-filesystem", "."}},
 		{"a=/usr/bin/true", "a", []string{"/usr/bin/true"}},
 		{"my_srv-2=prog  two   spaces", "my_srv-2", []string{"prog", "two", "spaces"}},
-		{`q=prog "a b" 'c d' e\ f g"h i"j`, "q", []string{"prog", "a b", "c d", "e f", "gh ij"}},
-		{`q=prog "say \"hi\"" 'it\n' "back\\slash" ""`, "q", []string{"prog", `say "hi"`, `it\n`, `back\slash`, ""}},
 		{"x=prog $HOME * ~ a|b >out ${X} `id` $(id) ;", "x", []string{"prog", "$HOME", "*", "~", "a|b", ">out", "${X}", "`id`", "$(id)", ";"}},
 		{"x=prog --token=a=b", "x", []string{"prog", "--token=a=b"}},
+	}
+	bad := []string{
+		"", "noequals", "=cmd", "Bad=cmd", "-x=cmd", "_x=cmd", strings.Repeat("a", 33) + "=cmd", "a b=cmd", "a/b=cmd", "x=", "x=   ",
+		`x=prog "unterminated`, `x=""`,
+	}
+	if runtime.GOOS == "windows" {
+		good = append(good,
+			// A single quote is an ordinary character; a backslash is
+			// literal unless it sits before a double quote.
+			mcpSpecCase{`q=prog "a b" 'c d' e\ f g"h i"j`, "q", []string{"prog", "a b", "'c", "d'", `e\`, "f", "gh ij"}},
+			mcpSpecCase{`q=prog "say \"hi\"" 'it\n' "back\\slash" ""`, "q", []string{"prog", `say "hi"`, `'it\n'`, `back\\slash`, ""}},
+			mcpSpecCase{`w=C:\tools\srv.exe --root "C:\Program Files\x"`, "w", []string{`C:\tools\srv.exe`, "--root", `C:\Program Files\x`}},
+			mcpSpecCase{`x=prog 'unterminated`, "x", []string{"prog", `'unterminated`}},
+			mcpSpecCase{`x=prog trailing\`, "x", []string{"prog", `trailing\`}},
+		)
+		// \" inside quotes is an escaped quote, so this one never closes.
+		bad = append(bad, `x=prog "C:\dir\"`)
+	} else {
+		good = append(good,
+			mcpSpecCase{`q=prog "a b" 'c d' e\ f g"h i"j`, "q", []string{"prog", "a b", "c d", "e f", "gh ij"}},
+			mcpSpecCase{`q=prog "say \"hi\"" 'it\n' "back\\slash" ""`, "q", []string{"prog", `say "hi"`, `it\n`, `back\slash`, ""}},
+		)
+		bad = append(bad, `x=prog 'unterminated`, `x=prog trailing\`)
 	}
 	for _, tc := range good {
 		spec, err := ParseMCPSpec(tc.in)
@@ -47,13 +74,10 @@ func TestParseMCPSpec(t *testing.T) {
 			t.Errorf("ParseMCPSpec(%q) = %q %q; want %q %q", tc.in, spec.Name, spec.Argv, tc.name, tc.argv)
 		}
 	}
-	for _, bad := range []string{
-		"", "noequals", "=cmd", "Bad=cmd", "-x=cmd", "_x=cmd", strings.Repeat("a", 33) + "=cmd", "a b=cmd", "a/b=cmd", "x=", "x=   ",
-		"x=prog 'unterminated", `x=prog "unterminated`, `x=prog trailing\`, `x=""`,
-	} {
-		spec, err := ParseMCPSpec(bad)
+	for _, b := range bad {
+		spec, err := ParseMCPSpec(b)
 		if err == nil || specCode(err) != "mcp_spec_invalid" {
-			t.Errorf("ParseMCPSpec(%q) = %+v, %v; want mcp_spec_invalid", bad, spec, err)
+			t.Errorf("ParseMCPSpec(%q) = %+v, %v; want mcp_spec_invalid", b, spec, err)
 		}
 	}
 	if _, err := ParseMCPSpec(strings.Repeat("a", 32) + "=cmd"); err != nil {
