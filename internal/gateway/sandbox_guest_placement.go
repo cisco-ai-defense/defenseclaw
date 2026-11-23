@@ -302,6 +302,9 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// true | { cd ~/.claude && ls; }; echo x > settings.json keeps the
 	// laptop's tamper.agent_hook_config_write alert (GAP-0648 review P2-1).
 	stoodIn, standing := "", false
+	// splitRead holds the texts the simples pass read, each in the folders
+	// known at its own place in the call.
+	splitRead := map[string]bool{}
 	settle := func(simple actionfacts.SimpleCommand) {
 		if !standing || simple.OtherFolder {
 			return
@@ -318,6 +321,7 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		if guestPlacementSkips(simple) {
 			continue
 		}
+		splitRead[simple.Text] = true
 		cwd := simple.CWD
 		if path.IsAbs(cwd) {
 			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, cwd, false, 0})
@@ -373,17 +377,26 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// Every call of the script, a function body's included: the split stops
 	// at a construct it cannot read (f() { cd .cache; }; f; $CMD gives one
 	// parse failure), while a static cd anywhere in the text is still a
-	// directory the laptop's readers keep.
+	// directory the laptop's readers keep. A call the simples pass read
+	// (splitRead) is not read again here: it was read in the folders known
+	// at its own place, and these lists also hold the folders of later
+	// statements. Reading it in them gave echo m > config.yaml; cd
+	// ~/.defenseclaw && ls the reading echo m > config.yaml in
+	// ~/.defenseclaw, and the strict actor blocked with
+	// tamper.detector_state_write where the laptop and rel allow
+	// (substrate-1 GAP-0883). Its cd targets are still kept.
 	calls := &pass{statements: map[string]bool{}}
 	var callReadings []pending
 	callsDropped, callsListed := false, map[key]int{}
 	var callsPlain []int
 	for _, call := range guestScriptCalls(command) {
-		for _, dir := range dirs {
-			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, false, 0})
-		}
-		for _, dir := range targets {
-			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, true, 0})
+		if !splitRead[call] {
+			for _, dir := range dirs {
+				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, false, 0})
+			}
+			for _, dir := range targets {
+				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, true, 0})
+			}
 		}
 		for _, target := range guestCDTargets(call, slices.Concat(dirs, targets), input.ActiveHome) {
 			targets = keep(targets, target)
@@ -568,27 +581,39 @@ func guestNodeRunsUnreadCommand(root syntax.Node, home string) bool {
 	return found
 }
 
-// guestOwnShellFolders returns, lexically, the folders the call's own shell
-// may stand in after a command the statement split cannot read ($CMD, eval,
-// source; guestCallRunsUnreadCommand): the folders a static cd or pushd
+// guestShellReading is one statement of a call, by its source text, and a
+// folder the call's own shell may stand in when it runs (guestOwnShellFolders).
+type guestShellReading struct{ text, dir string }
+
+// guestOwnShellFolders returns, lexically, each simple command of the call
+// that runs after a command the statement split cannot read ($CMD, eval,
+// source; guestCallRunsUnreadCommand), with each folder the call's own shell
+// may stand in when that command runs: the folders a static cd or pushd
 // moves it to from cwd, when that cd runs in the shell itself, at top level
 // or on the path an && runs. The laptop keeps such a folder as one the later
 // commands run in, and so does sandboxGuestPlacedChildren (cd .cache; bash
 // <<< true; $CMD; cd s0; ...; cd ../.ssh; echo k >> authorized_keys blocks,
-// substrate-1 GAP-0628). As in the laptop's statement reader
-// (hookpaths.TopLevelStatements) a cd may fail: the shell then stays where
-// it was, so a statement after ; runs in both folders and one an && runs
-// after the cd only in the new one. A cd anywhere else never moves the
-// shell the later commands run in: a ( ... ) subshell, a function that is
-// never called, an & list ((cd ~/.defenseclaw || cd /tmp); $CMD; echo m >
-// config.yaml stays the laptop's allow). A directory change the walk cannot
-// follow (cd -, cd "$D", popd, CDPATH, a called function that cds, an
-// alternative of ||, one in a group, loop or pipeline) leaves the folder
-// unknown: no folder after it is kept until a static cd names one. At most
-// maxSandboxGuestOwnShellFolders folders are followed at once, those that
-// may hold protected files first (guestDirFirst). nil when the script does
-// not parse or runs no unread command.
-func guestOwnShellFolders(command, cwd, home string) map[string]bool {
+// substrate-1 GAP-0628). Each command is keyed with the folders known at its
+// own place, never with those of a later cd: a folder set for the whole call
+// promoted echo m > config.yaml in ~/.defenseclaw for (cd ~/.defenseclaw ||
+// cd /tmp); $CMD; echo m > config.yaml; cd ~/.defenseclaw && ls, a block
+// where the laptop allows (substrate-1 GAP-0883). As in the laptop's
+// statement reader (hookpaths.TopLevelStatements) a cd may fail: the shell
+// then stays where it was, so a statement after ; runs in both folders and
+// one an && runs after the cd only in the new one; after cd X || exit (or
+// return) the shell goes on only in X, as on the laptop (substrate-1
+// GAP-0884). A cd anywhere else never moves the shell the later commands run
+// in: a ( ... ) subshell, a function that is never called, an & list ((cd
+// ~/.defenseclaw || cd /tmp); $CMD; echo m > config.yaml stays the laptop's
+// allow). A directory change the walk cannot follow (cd -, cd "$D", popd,
+// CDPATH, a called function that cds, another alternative of ||, one in a
+// group, loop or pipeline) leaves the folder unknown: no folder after it is
+// kept until a static cd names one. At most maxSandboxGuestOwnShellFolders
+// folders are followed at once, those that may hold protected files first
+// (guestDirFirst). The walk reads each statement once, so its cost grows
+// with the statements times the folders followed (substrate-1 GAP-0885).
+// nil when the script does not parse or runs no unread command.
+func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil || !path.IsAbs(cwd) {
 		return nil
@@ -611,9 +636,11 @@ func guestOwnShellFolders(command, cwd, home string) map[string]bool {
 	}
 	join := func(sets ...[]string) []string {
 		var out []string
+		seen := map[string]bool{}
 		for _, set := range sets {
 			for _, dir := range set {
-				if dir = path.Clean(dir); path.IsAbs(dir) && !slices.Contains(out, dir) {
+				if dir = path.Clean(dir); path.IsAbs(dir) && !seen[dir] {
+					seen[dir] = true
 					out = append(out, dir)
 				}
 			}
@@ -633,22 +660,49 @@ func guestOwnShellFolders(command, cwd, home string) map[string]bool {
 		return out
 	}
 	unread := false
-	var folders map[string]bool
-	mark := func(in []string) {
-		if !unread {
+	var readings map[guestShellReading]bool
+	// mark keys every simple command of node (one statement, run from the
+	// folders in) with each of those folders, once a command before it may
+	// have moved the shell.
+	mark := func(node syntax.Node, in []string) {
+		if !unread || len(in) == 0 {
 			return
 		}
-		for _, dir := range in {
-			if folders == nil {
-				folders = map[string]bool{}
+		syntax.Walk(node, func(inner syntax.Node) bool {
+			stmt, ok := inner.(*syntax.Stmt)
+			if !ok {
+				return true
 			}
-			folders[dir] = true
-		}
+			if call, isCall := stmt.Cmd.(*syntax.CallExpr); !isCall || len(call.Args) == 0 {
+				return true
+			}
+			if span := text(stmt); span != "" {
+				if readings == nil {
+					readings = map[guestShellReading]bool{}
+				}
+				for _, dir := range in {
+					readings[guestShellReading{span, dir}] = true
+				}
+			}
+			return true
+		})
 	}
 	// step runs one statement from the folders in: the folders the shell
 	// stands in where it succeeded and where it failed.
 	var step func(*syntax.Stmt, []string) (succeeded, failed []string)
 	step = func(stmt *syntax.Stmt, in []string) (succeeded, failed []string) {
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && !stmt.Background && len(stmt.Redirs) == 0 {
+			switch {
+			case pair.Op == syntax.AndStmt:
+				leftOK, leftFailed := step(pair.X, in)
+				rightOK, rightFailed := step(pair.Y, leftOK)
+				return rightOK, join(leftFailed, rightFailed)
+			case pair.Op == syntax.OrStmt && guestStmtLeaves(pair.Y, home):
+				leftOK, _ := step(pair.X, in)
+				return leftOK, nil
+			}
+		}
+		mark(stmt, in)
 		defer func() { unread = unread || guestNodeRunsUnreadCommand(stmt, home) }()
 		if stmt.Background {
 			return in, in // an & list runs in a subshell
@@ -674,13 +728,6 @@ func guestOwnShellFolders(command, cwd, home string) map[string]bool {
 				return join(moved), in
 			}
 			return in, in
-		case *syntax.BinaryCmd:
-			if cmd.Op == syntax.AndStmt && len(stmt.Redirs) == 0 {
-				leftOK, leftFailed := step(cmd.X, in)
-				mark(leftOK)
-				rightOK, rightFailed := step(cmd.Y, leftOK)
-				return rightOK, join(leftFailed, rightFailed)
-			}
 		case *syntax.Subshell, *syntax.FuncDecl:
 			return in, in
 		}
@@ -691,11 +738,21 @@ func guestOwnShellFolders(command, cwd, home string) map[string]bool {
 	}
 	current := []string{path.Clean(cwd)}
 	for _, stmt := range file.Stmts {
-		mark(current)
 		succeeded, failed := step(stmt, current)
 		current = join(succeeded, failed)
 	}
-	return folders
+	return readings
+}
+
+// guestStmtLeaves reports, lexically, a statement that is a plain exit or
+// return: the shell does not go on past it.
+func guestStmtLeaves(stmt *syntax.Stmt, home string) bool {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Negated || len(call.Args) == 0 {
+		return false
+	}
+	program, static := hookpaths.StaticWord(call.Args[0], home)
+	return static && (program == "exit" || program == "return")
 }
 
 // guestNodeChangesDirectory reports, lexically, a cd, pushd or popd, or a

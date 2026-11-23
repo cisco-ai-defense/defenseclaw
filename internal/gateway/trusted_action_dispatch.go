@@ -4723,8 +4723,12 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // directory (substrate-1 GAP-0379). After a command the split cannot read
 // ($CMD, eval, source), which may change the folder, the laptop keeps such a
 // folder as one the later commands run in when the call's own shell stands
-// there (guestOwnShellFolders): the readings there are children, judged by
-// every owner. cd .cache; bash <<< true; $CMD; cd s0; ...; cd ../.ssh; echo
+// there when that command runs (guestOwnShellFolders, keyed by the
+// statement and the folder): the readings there are children, judged by
+// every owner. A folder only a later cd reaches stays a candidate for the
+// statements before it: (cd ~/.defenseclaw || cd /tmp); $CMD; echo m >
+// config.yaml; cd ~/.defenseclaw && ls blocked in strict where the laptop
+// allows (substrate-1 GAP-0883). cd .cache; bash <<< true; $CMD; cd s0; ...; cd ../.ssh; echo
 // k >> authorized_keys alerted where the laptop blocks (substrate-1
 // GAP-0628). A folder a subshell, an uncalled function or an || alternative
 // cds to stays a candidate: promoting every candidate after $CMD blocked
@@ -4732,7 +4736,7 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // laptop allows.
 func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	placements, stopped := sandboxGuestPlacements(input, facts, true)
-	var folders map[string]bool
+	var folders map[guestShellReading]bool
 	if slices.ContainsFunc(placements, func(placement guestPlacement) bool { return placement.candidate }) {
 		command := input.Command
 		if command == "" {
@@ -4744,7 +4748,7 @@ func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts
 		child := input
 		child.Command, child.CWD = placement.text, placement.cwd
 		child.Args, child.Argv = nil, nil
-		if placement.candidate && !folders[path.Clean(placement.cwd)] {
+		if placement.candidate && !folders[guestShellReading{placement.text, path.Clean(placement.cwd)}] {
 			candidates = append(candidates, actionfacts.Analyze(child))
 		} else {
 			children = append(children, actionfacts.Analyze(child))
