@@ -70,6 +70,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **Codex machine requirements on managed Linux and macOS, more repairs:** the hook guardian now also puts back `/etc/codex/requirements.toml` when an edit leaves the file unreadable as a whole (for example a table that clashes with DefenseClaw's hooks) or when a symbolic link replaces it. `ensure` and `repair` now replace such a link instead of failing, and never write to the file it points at. When `ensure`, `repair`, an upgrade or a config-apply job puts back the file over an edit, the edited file is saved first in `/etc/codex/defenseclaw-replaced/` (root only, last 10 kept), and the change line names it.
 
 ### Fixed
+- **`defenseclaw uninstall` names the backup folder of an OpenHands or OmniGent setup that an earlier uninstall kept.** `~/.defenseclaw-removed-connector-backups` holds your own copy of files from before DefenseClaw's setup, so no uninstall deletes it, but a later uninstall found nothing to move and never mentioned it again. The uninstall now lists each such folder under a heading, with the command that deletes it, and does not follow a link in its place.
 
 #### Windows managed install, upgrade and uninstall
 - Windows managed upgrade: an account that is signed out during the upgrade no longer makes Copilot show failed or the administrator's verify return 1603; Copilot waits for the account to sign in.
