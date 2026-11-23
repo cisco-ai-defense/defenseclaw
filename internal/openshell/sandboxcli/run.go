@@ -819,6 +819,11 @@ func (a *App) refuseForbiddenAccount(ctx context.Context, harness string) error 
 	if err != nil || view == nil || view.Provisional || view.Allowed {
 		return nil
 	}
+	if a.ManagedOrganizationOff != nil && a.ManagedOrganizationOff(ctx) {
+		// The organization's switch outranks the account's profile
+		// (sandboxapi.Status.ManagedOff): the words of `sandbox status`.
+		return &DisabledError{Message: sandboxapi.OrganizationOffMessage(view.RequestAccess) + sandboxRuntimeMissing()}
+	}
 	a.managedSeen = managedStatusOfExplain(view)
 	return apiError(&sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 		Message: sandboxapi.AccountNotAllowedMessage, Detail: sandboxrelay.ReasonNotAllowed})

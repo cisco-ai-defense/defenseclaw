@@ -271,12 +271,10 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 	if st.Enabled {
 		if st.Available {
 			row("OpenShell", "connected")
-		} else if st.Managed != nil && st.PortConflict != nil {
-			row("OpenShell", "unavailable: "+st.PortConflict.Message())
-		} else if st.Managed != nil && st.GatewayElsewhere != "" {
-			row("OpenShell", managedAccountBusyText)
-		} else if st.Managed != nil && st.Managed.Unavailable == "" {
-			row("OpenShell", a.managedFirstRunText(st.Managed))
+		} else if st.Managed != nil {
+			if text, ok := a.managedOpenShellRow(st); ok {
+				row("OpenShell", text)
+			}
 		} else {
 			row("OpenShell", "unavailable: "+firstNonEmpty(st.Reason, "not connected"))
 		}

@@ -747,6 +747,29 @@ func managedOffState(st *sandboxapi.Status) string {
 	return "off on this computer; your organization manages this setting"
 }
 
+// managedOpenShellRow is the OpenShell row of `status` on a managed computer
+// whose OpenShell is not connected. It names the one reason ManagedOff
+// decides, so it cannot say "another account" while the profile refuses the
+// account or the install cannot run sandboxes; ok is false when the Sandboxes
+// row above already says all there is to say (the organization turned
+// sandboxes off, or the profile does not allow them).
+func (a *App) managedOpenShellRow(st *sandboxapi.Status) (text string, ok bool) {
+	switch st.ManagedOff() {
+	case sandboxapi.ManagedOffOrganization, sandboxapi.ManagedOffProfile:
+		return "", false
+	case sandboxapi.ManagedOffUnavailable:
+		return "not available on this computer: " + sandboxapi.DisplayText(st.Managed.Unavailable), true
+	case sandboxapi.ManagedOffElsewhere:
+		if st.PortConflict == nil {
+			return managedAccountBusyText, true
+		}
+	}
+	if st.PortConflict != nil {
+		return "unavailable: " + st.PortConflict.Message(), true
+	}
+	return a.managedFirstRunText(st.Managed), true
+}
+
 // managedProfileSuffix names the profile that refuses the account
 // sandboxes, as the status row of a refused account ends.
 func managedProfileSuffix(m *sandboxapi.ManagedStatus) string {
@@ -769,6 +792,24 @@ func managedOpenShellText(m *sandboxapi.ManagedStatus) string {
 		return "OpenShell " + installed
 	case required != "":
 		return "OpenShell " + required
+	}
+	return ""
+}
+
+// managedDockerNotNeeded is the Docker row of a doctor run on an account that
+// can run no sandbox now, whatever its Docker does: the reason of off
+// ("" when sandboxes are not off for the account).
+func managedDockerNotNeeded(off sandboxapi.ManagedOffKind) string {
+	switch off {
+	case sandboxapi.ManagedOffOrganization:
+		return "not needed: " + sandboxapi.OrganizationOffReason
+	case sandboxapi.ManagedOffProfile:
+		return "not needed: " + sandboxapi.AccountNotAllowedReason
+	case sandboxapi.ManagedOffUnavailable:
+		return "not needed now: sandboxes can't run on this computer (see Sandbox runtime)"
+	case sandboxapi.ManagedOffElsewhere:
+		return "not needed now: another account is using sandboxes on this computer (one account at a time, see DefenseClaw daemon); " +
+			"Docker Desktop answers only the account signed in to this Mac's desktop"
 	}
 	return ""
 }
@@ -1278,14 +1319,17 @@ func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStat
 // and Docker Desktop answers only an account signed in to the Mac's desktop:
 // starting it or building images is no fix then, and the row says so
 // instead of failing (GAP-0515); the DefenseClaw daemon row names the wait.
-func (a *App) managedDockerCheck(ctx context.Context, m *sandboxapi.ManagedStatus, elsewhere bool) openshell.Check {
+// off is why sandboxes are off for the account (Status.ManagedOff): the row
+// gives that reason, so another account is never named while the
+// organization, the profile or the install is the cause.
+func (a *App) managedDockerCheck(ctx context.Context, m *sandboxapi.ManagedStatus, off sandboxapi.ManagedOffKind) openshell.Check {
 	c := openshell.Check{ID: "managed-docker", Title: "Docker", Status: openshell.StatusPass}
 	engine, err := a.DockerEngine(ctx)
-	if err != nil && elsewhere {
-		c.Status = openshell.StatusSkip
-		c.Detail = "not needed now: another account is using sandboxes on this computer (one account at a time, see DefenseClaw daemon); " +
-			"Docker Desktop answers only the account signed in to this Mac's desktop"
-		return c
+	if err != nil {
+		if detail := managedDockerNotNeeded(off); detail != "" {
+			c.Status, c.Detail = openshell.StatusSkip, detail
+			return c
+		}
 	}
 	if err != nil {
 		c.Status, c.Detail = openshell.StatusFail, "Docker does not answer for your account, and your agent's sandbox image is built in it"

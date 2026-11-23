@@ -260,7 +260,7 @@ func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver)
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if a.GOOS == "darwin" {
-				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.elsewhere))
+				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.offKind))
 			}
 			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
 				rep.Checks = append(rep.Checks, *c)
@@ -359,10 +359,10 @@ type statusProbe struct {
 	daemonUID *int
 	// managed is the managed part of the daemon's status (managed computers).
 	managed *sandboxapi.ManagedStatus
-	// elsewhere: another account holds this computer's sandbox ports
-	// (sandboxapi.Status.GatewayElsewhere).
-	elsewhere bool
-	check     openshell.Check
+	// offKind is why sandboxes are off for the caller, by the one decision
+	// of sandboxapi.Status.ManagedOff (ManagedOffNone when they are not).
+	offKind sandboxapi.ManagedOffKind
+	check   openshell.Check
 }
 
 // doctorSnapshot is confined to one read-only doctor run. Its error is
@@ -818,7 +818,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			p.ingressListening = st.IngressAddr != ""
 			p.egressListening = st.EgressAddr != ""
 			p.listenersProven = st.ListenersProven
-			p.elsewhere = st.GatewayElsewhere != ""
+			p.offKind = st.ManagedOff()
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {
@@ -831,6 +831,11 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		case !st.Enabled && st.Managed != nil:
 			// Nothing the user can turn on or hand over: the organization
 			// manages it, and another account is only ever "another account".
+			c.Status, c.Detail = openshell.StatusSkip, "running; "+managedOffState(st)
+		case st.Managed != nil && !st.Available && st.ManagedOff() == sandboxapi.ManagedOffProfile:
+			// The profile refuses the account: no sandbox runs for it,
+			// whatever the gateway does, and it is not another account's
+			// fault.
 			c.Status, c.Detail = openshell.StatusSkip, "running; "+managedOffState(st)
 		case !st.Enabled && st.GatewayElsewhere != "":
 			// The Gateway service row names the one cause and the way on;
@@ -866,16 +871,18 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
-			switch {
-			case st.Managed != nil && st.GatewayElsewhere != "":
+			switch st.ManagedOff() {
+			case sandboxapi.ManagedOffUnavailable:
+				// The Sandbox runtime row names the one cause, with the
+				// organization's contact: counted once. It comes before
+				// another account's gateway, which changes nothing while the
+				// install itself cannot run sandboxes.
+				c.Status, c.Detail = openshell.StatusSkip, "running; sandboxes are unavailable (see Sandbox runtime)"
+			case sandboxapi.ManagedOffElsewhere:
 				// Another account's sandboxes hold the one gateway port: no
 				// fault of this account's, and it clears (GAP-0461).
 				c.Status, c.Detail = openshell.StatusWarn, "running; OpenShell is "+managedAccountBusyText
 				c.Fix = &openshell.Fix{Summary: "try again when that account has no sandbox running; " + busyContact(st.Managed.RequestAccess)}
-			case st.Managed != nil && st.Managed.Unavailable != "":
-				// The Sandbox runtime row names the one cause, with the
-				// organization's contact: counted once.
-				c.Status, c.Detail = openshell.StatusSkip, "running; sandboxes are unavailable (see Sandbox runtime)"
 			}
 		case st.DockerGroupMissing && managed:
 			// The account's user services started before the group was

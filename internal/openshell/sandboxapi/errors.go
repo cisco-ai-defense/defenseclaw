@@ -136,9 +136,14 @@ const (
 )
 
 // ManagedOff is the one decision of why sandboxes are off for the caller on a
-// managed computer. The order is the organization's switch (it holds for
-// every account, and another account's gateway changes nothing about it),
-// then the caller's profile, then another account's gateway.
+// managed computer, and the only place that orders the reasons: the
+// organization's switch (it holds for every account, and nothing below
+// changes it), then the caller's profile, then the install itself (OpenShell
+// missing, or a release that runs no sandbox: no account can use the
+// computer's gateway then), and last another account's gateway. Every caller
+// reads it (the Sandboxes and OpenShell rows of `sandbox status`, the doctor's
+// rows and the refusal `sandbox run` ends with), so no path can name a later
+// reason while an earlier one holds.
 func (st *Status) ManagedOff() ManagedOffKind {
 	if st == nil || st.Managed == nil {
 		return ManagedOffNone
@@ -149,14 +154,21 @@ func (st *Status) ManagedOff() ManagedOffKind {
 		return ManagedOffOrganization
 	case m.AccountDenied:
 		return ManagedOffProfile
-	case st.Enabled:
-		return ManagedOffNone
-	case st.GatewayElsewhere != "":
-		return ManagedOffElsewhere
 	case m.Unavailable != "":
 		return ManagedOffUnavailable
+	case st.GatewayElsewhere != "" && (!st.Enabled || !st.Available):
+		return ManagedOffElsewhere
+	case st.Enabled:
+		return ManagedOffNone
 	}
 	return ManagedOffSetting
+}
+
+// OrganizationOffMessage is what the caller is told while the organization
+// has turned sandboxes off, whatever else would refuse them (a profile that
+// denies them, another account's gateway): the reason, then who to ask.
+func OrganizationOffMessage(requestAccess string) string {
+	return UnavailableSentence(OrganizationOffReason) + " " + AccessContact(requestAccess)
 }
 
 // managedOffMessage is OffMessage for a managed computer.
@@ -164,6 +176,8 @@ func (st *Status) managedOffMessage() string {
 	m := st.Managed
 	var msg string
 	switch kind := st.ManagedOff(); {
+	case kind == ManagedOffOrganization:
+		return OrganizationOffMessage(m.RequestAccess)
 	case kind == ManagedOffProfile:
 		msg = AccountNotAllowedMessage
 	case kind == ManagedOffElsewhere:
