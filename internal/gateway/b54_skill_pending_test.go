@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -255,4 +256,17 @@ func (st *substrateState) inFlightScans() int {
 	st.scanMu.Lock()
 	defer st.scanMu.Unlock()
 	return len(st.scans)
+}
+
+// The Python mirror of the skill audit actions (alert_semantics.py).
+func TestB54SkillAuditActionsMirroredInPython(t *testing.T) {
+	raw, err := os.ReadFile("../../cli/defenseclaw/alert_semantics.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{AuditSkillScanned, AuditSkillBlocked, AuditSkillUnscanned, AuditSkillPending} {
+		if !strings.Contains(string(raw), `"`+a+`"`) {
+			t.Errorf("%s is not in SUBSTRATE_SKILL_AUDIT_ACTIONS", a)
+		}
+	}
 }
