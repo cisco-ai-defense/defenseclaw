@@ -163,3 +163,50 @@ func withoutEffectsFoldedInto(findings, other []RuleFinding) []RuleFinding {
 	}
 	return kept
 }
+
+// readingRuleSlot is where a 1.0.10 reading's finding of ruleID goes in
+// findings. held reports that a finding of a 1.0.10 reading (not the effect
+// lane's) already carries the rule: the reading adds nothing. Otherwise
+// index is the effects-lane finding of the same rule, or -1 when none.
+//
+// A Known protected write finding names the plain spelling's rule
+// (decide.RuleFor, GAP-1478). A reading that dedups by rule id (the agent
+// hook config guard, the non-shell tool effects, a link or CMD twin)
+// dropped its own 1.0.10 finding beside it, so
+// the effect lane had no 1.0.10 finding to fold into and the plain spelling
+// echo x > ~/.claude/settings.json carried effect.protected_target_restricted
+// beside its rule (GAP-1243, GAP-1308). The reading's finding takes the place
+// of the effects-lane finding of its rule instead: the call then holds the
+// finding the plain spelling held before the Known write finding existed,
+// and the effect lane folds into it as it does for the plain spelling
+// (decide.FoldsIntoLegacy, DET111 ruling A). Where no 1.0.10 reading fires,
+// the effects-lane findings stand (R-NOLOSS).
+func readingRuleSlot(findings []RuleFinding, ruleID string) (index int, held bool) {
+	index = -1
+	for i, f := range findings {
+		if f.RuleID != ruleID {
+			continue
+		}
+		if f.Proof.Source != decide.SourceEffects {
+			return -1, true
+		}
+		if index < 0 {
+			index = i
+		}
+	}
+	return index, false
+}
+
+// withReadingFinding is findings with f, the finding of a 1.0.10 reading,
+// in the slot readingRuleSlot gives it. findings is changed in place when f
+// takes an effects-lane finding's slot: callers pass their own copy.
+func withReadingFinding(findings []RuleFinding, f RuleFinding) []RuleFinding {
+	switch index, held := readingRuleSlot(findings, f.RuleID); {
+	case held:
+		return findings
+	case index >= 0:
+		findings[index] = f
+		return findings
+	}
+	return append(findings, f)
+}

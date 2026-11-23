@@ -292,18 +292,15 @@ func withOverLimitTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 		if finding.contributesToEnforcement() {
 			continue
 		}
-		if i := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }); i >= 0 {
-			// The 1.0.10 reading of the twin takes the place of the
-			// effects-lane finding of the same rule (a Known protected write
-			// names the plain spelling's rule, GAP-1478): the call holds the
-			// 1.0.10 finding, so the effect lane folds into it as it does for
-			// the plain spelling (GAP-1243, GAP-1308).
-			if findings[i].Proof.Source == decide.SourceEffects && finding.Proof.Source != decide.SourceEffects {
-				findings[i] = finding
-			}
+		if finding.Proof.Source != decide.SourceEffects {
+			// The twin's 1.0.10 reading takes the slot of the effects-lane
+			// finding of its rule (readingRuleSlot).
+			findings = withReadingFinding(findings, finding)
 			continue
 		}
-		findings = append(findings, finding)
+		if !slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }) {
+			findings = append(findings, finding)
+		}
 	}
 	return findings
 }
