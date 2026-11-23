@@ -26,6 +26,11 @@ import (
 // (substrate-1 GAP-0499).
 const maxSandboxGuestCandidateDirs = 64
 
+// maxSandboxGuestOwnShellFolders bounds the folders guestOwnShellFolders
+// follows at once: each cd that may fail can double them, as the laptop's
+// statement reader counts (cd .cache; $CMD; cd s0 .. s6; cd ../.ssh).
+const maxSandboxGuestOwnShellFolders = 256
+
 // maxSandboxGuestPlacements bounds the readings of one pass of the guest
 // placement: every statement the call's budget allows
 // (maxSandboxGuestPlacedChildren) in every candidate directory, so a call
@@ -531,8 +536,14 @@ func guestCallRunsUnreadCommand(command, home string) bool {
 	if err != nil {
 		return true
 	}
+	return guestNodeRunsUnreadCommand(file, home)
+}
+
+// guestNodeRunsUnreadCommand is guestCallRunsUnreadCommand over a parsed
+// node.
+func guestNodeRunsUnreadCommand(root syntax.Node, home string) bool {
 	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
+	syntax.Walk(root, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if found || !ok || len(call.Args) == 0 {
 			return !found
@@ -550,6 +561,159 @@ func guestCallRunsUnreadCommand(command, home string) bool {
 			if next, known := hookpaths.StaticWord(call.Args[index+1], home); known && strings.HasPrefix(next, "-") {
 				found = true // an option word: read it as unread rather than parse every wrapper option
 				break
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// guestOwnShellFolders returns, lexically, the folders the call's own shell
+// may stand in after a command the statement split cannot read ($CMD, eval,
+// source; guestCallRunsUnreadCommand): the folders a static cd or pushd
+// moves it to from cwd, when that cd runs in the shell itself, at top level
+// or on the path an && runs. The laptop keeps such a folder as one the later
+// commands run in, and so does sandboxGuestPlacedChildren (cd .cache; bash
+// <<< true; $CMD; cd s0; ...; cd ../.ssh; echo k >> authorized_keys blocks,
+// substrate-1 GAP-0628). As in the laptop's statement reader
+// (hookpaths.TopLevelStatements) a cd may fail: the shell then stays where
+// it was, so a statement after ; runs in both folders and one an && runs
+// after the cd only in the new one. A cd anywhere else never moves the
+// shell the later commands run in: a ( ... ) subshell, a function that is
+// never called, an & list ((cd ~/.defenseclaw || cd /tmp); $CMD; echo m >
+// config.yaml stays the laptop's allow). A directory change the walk cannot
+// follow (cd -, cd "$D", popd, CDPATH, a called function that cds, an
+// alternative of ||, one in a group, loop or pipeline) leaves the folder
+// unknown: no folder after it is kept until a static cd names one. At most
+// maxSandboxGuestOwnShellFolders folders are followed at once, those that
+// may hold protected files first (guestDirFirst). nil when the script does
+// not parse or runs no unread command.
+func guestOwnShellFolders(command, cwd, home string) map[string]bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil || !path.IsAbs(cwd) {
+		return nil
+	}
+	cdpath := strings.Contains(command, "CDPATH")
+	// Functions whose body changes the folder; a call of one leaves it unknown.
+	moving := map[string]bool{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil && guestNodeChangesDirectory(decl.Body, home, nil) {
+			moving[decl.Name.Value] = true
+		}
+		return true
+	})
+	text := func(node syntax.Node) string {
+		start, end := int(node.Pos().Offset()), int(node.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			return ""
+		}
+		return command[start:end]
+	}
+	join := func(sets ...[]string) []string {
+		var out []string
+		for _, set := range sets {
+			for _, dir := range set {
+				if dir = path.Clean(dir); path.IsAbs(dir) && !slices.Contains(out, dir) {
+					out = append(out, dir)
+				}
+			}
+		}
+		if len(out) > maxSandboxGuestOwnShellFolders {
+			slices.SortStableFunc(out, func(a, b string) int {
+				first := func(dir string) int {
+					if guestDirFirst(dir, home) {
+						return 0
+					}
+					return 1
+				}
+				return first(a) - first(b)
+			})
+			out = out[:maxSandboxGuestOwnShellFolders]
+		}
+		return out
+	}
+	unread := false
+	var folders map[string]bool
+	mark := func(in []string) {
+		if !unread {
+			return
+		}
+		for _, dir := range in {
+			if folders == nil {
+				folders = map[string]bool{}
+			}
+			folders[dir] = true
+		}
+	}
+	// step runs one statement from the folders in: the folders the shell
+	// stands in where it succeeded and where it failed.
+	var step func(*syntax.Stmt, []string) (succeeded, failed []string)
+	step = func(stmt *syntax.Stmt, in []string) (succeeded, failed []string) {
+		defer func() { unread = unread || guestNodeRunsUnreadCommand(stmt, home) }()
+		if stmt.Background {
+			return in, in // an & list runs in a subshell
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.CallExpr:
+			if len(cmd.Args) == 0 {
+				return in, in
+			}
+			program, static := hookpaths.StaticWord(cmd.Args[0], home)
+			switch {
+			case !static:
+			case moving[program] || program == "popd":
+				return nil, nil
+			case program == "cd" || program == "pushd":
+				if cdpath || len(cmd.Assigns) != 0 {
+					return nil, nil
+				}
+				moved := guestCDTargets(text(stmt), in, home)
+				if len(moved) == 0 {
+					return nil, nil
+				}
+				return join(moved), in
+			}
+			return in, in
+		case *syntax.BinaryCmd:
+			if cmd.Op == syntax.AndStmt && len(stmt.Redirs) == 0 {
+				leftOK, leftFailed := step(cmd.X, in)
+				mark(leftOK)
+				rightOK, rightFailed := step(cmd.Y, leftOK)
+				return rightOK, join(leftFailed, rightFailed)
+			}
+		case *syntax.Subshell, *syntax.FuncDecl:
+			return in, in
+		}
+		if guestNodeChangesDirectory(stmt.Cmd, home, moving) {
+			return nil, nil
+		}
+		return in, in
+	}
+	current := []string{path.Clean(cwd)}
+	for _, stmt := range file.Stmts {
+		mark(current)
+		succeeded, failed := step(stmt, current)
+		current = join(succeeded, failed)
+	}
+	return folders
+}
+
+// guestNodeChangesDirectory reports, lexically, a cd, pushd or popd, or a
+// call of one of moving (functions that change the folder), anywhere in node
+// outside a ( ... ) subshell.
+func guestNodeChangesDirectory(node syntax.Node, home string, moving map[string]bool) bool {
+	found := false
+	syntax.Walk(node, func(inner syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch inner := inner.(type) {
+		case *syntax.Subshell:
+			return false
+		case *syntax.CallExpr:
+			if len(inner.Args) != 0 {
+				program, static := hookpaths.StaticWord(inner.Args[0], home)
+				found = static && (program == "cd" || program == "pushd" || program == "popd" || moving[program])
 			}
 		}
 		return !found
