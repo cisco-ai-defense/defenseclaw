@@ -1933,6 +1933,46 @@ _CLAUDE_MISSING_HOOK_GUARD_MESSAGE = (
     "or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, "
     "or remove the DefenseClaw hooks from ~/.claude/settings.json."
 )
+# claudeCodeManagedMissingHookGuardMessage: the managed-install sentence, also
+# written by earlier per-user 1.0 builds.
+_CLAUDE_MANAGED_MISSING_HOOK_GUARD_MESSAGE = (
+    "DefenseClaw blocked this: its Claude Code hook could not start "
+    "(the script is missing; was this account renamed or its home moved?). "
+    "Rerun the DefenseClaw installer to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json."
+)
+
+
+def _claude_missing_hook_guard(command: str, message: str = _CLAUDE_MISSING_HOOK_GUARD_MESSAGE) -> str:
+    """claudeCodeMissingHookGuardWith (internal/gateway/connector/claudecode.go)."""
+
+    return (
+        command
+        + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
+        + '[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; '
+        + "echo '"
+        + message
+        + "' >&2; exit 2; }"
+    )
+
+
+def claude_unguarded_hook_command(command: str) -> str:
+    """*command* without Claude Code's exact generated missing-script guard.
+
+    Mirrors ``claudeCodeUnguardedHookCommand``: only the exact guard, with
+    either sentence, is removed, so a modified clause that turns a blocking
+    exit into success is not read as DefenseClaw's.
+    """
+
+    index = command.find(_CLAUDE_MISSING_HOOK_GUARD_SEPARATOR)
+    if index <= 0:
+        return command
+    head = command[:index]
+    if command in (
+        _claude_missing_hook_guard(head),
+        _claude_missing_hook_guard(head, _CLAUDE_MANAGED_MISSING_HOOK_GUARD_MESSAGE),
+    ):
+        return head
+    return command
 
 
 def _claude_posix_word(value: str) -> str:
@@ -1946,14 +1986,8 @@ def _claude_posix_word(value: str) -> str:
 def _claude_native_shell_command(expected: _ClaudeNativeRegistration) -> str:
     """The exact native launcher command Setup writes without a guard binary."""
 
-    command = " ".join(_claude_posix_word(word) for word in (expected.native, *expected.hook_args))
-    return (
-        command
-        + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
-        + '[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; '
-        + "echo '"
-        + _CLAUDE_MISSING_HOOK_GUARD_MESSAGE
-        + "' >&2; exit 2; }"
+    return _claude_missing_hook_guard(
+        " ".join(_claude_posix_word(word) for word in (expected.native, *expected.hook_args))
     )
 
 

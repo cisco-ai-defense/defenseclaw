@@ -713,12 +713,39 @@ def test_edited_hook_entries_match_the_go_hook_guard(tmp_path, case):
     # entry among intact ones included (internal/gateway/connector reads the same golden).
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
+    for marked in case.get("marked", []):
+        # A generated-hook copy at each marked path (writeEditedHookGoldenMarkers).
+        copy = Path(marked.replace("{data_dir}", str(data_dir)))
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text("#!/bin/sh\n# defenseclaw-managed-hook v9\nexit 0\n", encoding="utf-8")
+        copy.chmod(0o700)
     config = tmp_path / case["file"]
     config.write_text(case["document"].replace("{data_dir}", str(data_dir)), encoding="utf-8")
     connectors = {case["connector"]: {"locations": {"hook_config_paths": [str(config)]}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps({"version": 2, "connectors": connectors}))
     problems = edited_hook_problems(SimpleNamespace(data_dir=str(data_dir)), case["connector"])
     assert bool(problems) is case["edited"], problems
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads(_EDITED_ENTRIES_GOLDEN.read_text(encoding="utf-8")),
+    ids=lambda case: case["name"],
+)
+def test_edited_hook_entries_under_a_drive_path_data_dir(tmp_path, monkeypatch, case):
+    # GAP-1931: the doctor reads a script word named by a Windows path as
+    # Setup's repair does, so the golden's answer holds under a drive-path
+    # data directory too (TestEditedHookEntriesGolden runs the same). The
+    # paths are text; none is opened.
+    from defenseclaw import hook_integrity
+
+    data_dir = "C:/Users/u/.defenseclaw"
+    config = tmp_path / case["file"]
+    config.write_text(case["document"].replace("{data_dir}", data_dir), encoding="utf-8")
+    monkeypatch.setattr(hook_integrity, "_hook_config_paths", lambda _cfg, _connector: [config])
+    problems = edited_hook_problems(SimpleNamespace(data_dir=data_dir), case["connector"])
+    # drive_edited: Setup's hooks-dir claim is a POSIX prefix (TestEditedHookEntriesGolden).
+    assert bool(problems) is case.get("drive_edited", case["edited"]), problems
 
 
 @pytest.mark.parametrize("connector", ["copilot", "hermes", "claudecode"])
