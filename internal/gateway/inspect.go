@@ -1347,13 +1347,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			verdict = mergeWithAIDVerdict(nil, aid)
 		}
 	} else {
-		severity := HighestSeverity(ruleFindings)
-		enforceableSeverity := HighestSeverity(enforceableRuleFindings(ruleFindings))
-		severity, enforceableSeverity = aggregateCodeGuardSeverity(
-			cgFindings,
-			severity,
-			enforceableSeverity,
-		)
+		// The verdict's severity counts every finding. The action below takes
+		// only the enforceable ones: profileMeetActionForFindings filters them
+		// (guardrailActionForFindings), and CodeGuard's part is the enforceable
+		// severity aggregateCodeGuardSeverity returns.
+		severity, _ := aggregateCodeGuardSeverity(cgFindings, HighestSeverity(ruleFindings), "NONE")
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
 		runtimeAction := profileMeetActionForFindings(
