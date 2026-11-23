@@ -11,6 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -252,7 +253,7 @@ func TestOverlapUnionPriorityAndAdjacency(t *testing.T) {
 
 func TestEveryDetectorRegexSourceCompilesUnderGoRE2(t *testing.T) {
 	t.Parallel()
-	sources := map[string]*regexp.Regexp{
+	sources := map[string]*lazyregexp.Regexp{
 		"provider_token_v1":       providerTokenRE,
 		"authorization_header_v1": authorizationRE,
 		"assignment_key_v1":       assignmentKeyRE,

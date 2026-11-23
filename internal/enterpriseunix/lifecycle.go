@@ -791,6 +791,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// missing hook binary refused it with payload_invalid (GAP-1217).
 		l.restoreTamperedHookBinary(ctx, record)
 		code := l.settleInputChanges(ctx, l.apply(ctx, record))
+		l.requireRepairedMachinePolicy()
 		l.summarizeRepair()
 		return l.requireProtectedTargets(code)
 	case ActionEnsure:

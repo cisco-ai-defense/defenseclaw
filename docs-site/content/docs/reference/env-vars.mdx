@@ -369,7 +369,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 178 test-only variables">
+<Accordion title="Show the 179 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -497,6 +497,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_TEST_GAP1733_LOCALSYSTEM_CHILD`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks the LocalSystem child run that the elevated Windows test TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped starts, so the child runs the per-user install folder checks as LocalSystem.<br/>**Read by:** `internal/enterprisehooks/target_runtime_peruser_dacl_gap1733_windows_test.go` |
 | `DEFENSECLAW_TEST_GAP1885_CHILD_DATA_DIR`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | Data folder of the second guardian state writer that the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst starts as a child process; the child writes the guardian state of that folder.<br/>**Read by:** `internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go` |
 | `DEFENSECLAW_TEST_GAP1885_CHILD_STARTED`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | File the child guardian state writer of the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst writes its process id to, so the parent knows the child has started.<br/>**Read by:** `internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go` |
+| `DEFENSECLAW_TEST_GAP1911_FOLDER`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | Folder of the Administrators-owned plugin tree that the elevated Windows test TestGAP1911AdministratorsOwnedFolderInTheProfileKeepsItsCommandWhenNotElevated hands to the filtered-token child process it starts, so the child judges that folder without elevation.<br/>**Read by:** `internal/gateway/connector/plugin_custody_admin_scope_windows_test.go` |
 | `DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the marker used by the authenticated graceful-stop daemon fixture.<br/>**Read by:** `internal/daemon/daemon_test.go` |
 | `DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the observation marker used to prove the daemon graceful-stop fixture received its shutdown request.<br/>**Read by:** `internal/daemon/daemon_test.go` |
 | `DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the release marker used to let the daemon graceful-stop fixture finish after observing shutdown.<br/>**Read by:** `internal/daemon/daemon_test.go` |

@@ -49,16 +49,17 @@ func (i staleSizeInfo) Size() int64 { return i.size }
 // with the given size, as a stale folder listing does.
 func staleListingSizes(t *testing.T, size int64) {
 	t.Helper()
-	walk := skillWalkDir
-	skillWalkDir = func(root string, fn fs.WalkDirFunc) error {
-		return walk(root, func(path string, entry fs.DirEntry, err error) error {
-			if err == nil && entry.Type().IsRegular() {
-				entry = staleSizeEntry{DirEntry: entry, size: size}
+	read := skillReadDir
+	skillReadDir = func(dir *os.File, n int) ([]fs.DirEntry, error) {
+		entries, err := read(dir, n)
+		for i, entry := range entries {
+			if entry.Type().IsRegular() {
+				entries[i] = staleSizeEntry{DirEntry: entry, size: size}
 			}
-			return fn(path, entry, err)
-		})
+		}
+		return entries, err
 	}
-	t.Cleanup(func() { skillWalkDir = walk })
+	t.Cleanup(func() { skillReadDir = read })
 }
 
 // GAP-1901: hashSkillFolder takes a file's size from the file's own record
@@ -68,12 +69,12 @@ func staleListingSizes(t *testing.T, size int64) {
 func TestGAP1901HashSkillFolderIgnoresStaleListingSize(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "pdf")
 	writeSkillFiles(t, dir, map[string]string{"SKILL.md": "---\nname: pdf\n---\n", "run.py": "print('a')\n"})
-	want, status, _, _ := hashSkillFolder(dir, maxSkillBytes)
+	want, status, _ := hashSkillFolder(dir, maxSkillBytes)
 	if status != SkillContentOK {
 		t.Fatalf("hashSkillFolder = %q, %q", want, status)
 	}
 	staleListingSizes(t, maxSkillBytes+1)
-	if got, status, _, _ := hashSkillFolder(dir, maxSkillBytes); status != SkillContentOK || got != want {
+	if got, status, _ := hashSkillFolder(dir, maxSkillBytes); status != SkillContentOK || got != want {
 		t.Fatalf("a stale listing size changed the hash of an unchanged folder: %q, %q (want %q)", got, status, want)
 	}
 }
@@ -172,7 +173,7 @@ func TestGAP1901ShrunkFileWithOpenHandleIsHashed(t *testing.T) {
 			if err := os.Truncate(big, maxSkillBytes+1024); err != nil {
 				t.Fatal(err)
 			}
-			if _, status, _, _ := hashSkillFolder(dir, maxSkillBytes); status != SkillContentTooLarge {
+			if _, status, _ := hashSkillFolder(dir, maxSkillBytes); status != SkillContentTooLarge {
 				t.Fatalf("the oversized folder is %q, want too large", status)
 			}
 			f := shrink(t, big)
@@ -195,12 +196,12 @@ func TestGAP1901ShrunkFileWithOpenHandleIsHashed(t *testing.T) {
 				own = info.Size()
 			}
 			t.Logf("GAP1901DIAG %s listing size=%d, own size=%d (limit %d)", name, listed, own, int64(maxSkillBytes))
-			open, openStatus, _, _ := hashSkillFolder(dir, maxSkillBytes)
+			open, openStatus, _ := hashSkillFolder(dir, maxSkillBytes)
 			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
 			closed = true
-			after, afterStatus, _, _ := hashSkillFolder(dir, maxSkillBytes)
+			after, afterStatus, _ := hashSkillFolder(dir, maxSkillBytes)
 			if afterStatus != SkillContentOK {
 				t.Fatalf("the closed folder is %q, want ok", afterStatus)
 			}
@@ -254,7 +255,7 @@ func TestGAP1901ShrunkByAHandleHeldAcrossAScan(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = f.Close() })
-			if _, status, _, _ := hashSkillFolder(dir, maxSkillBytes); status != SkillContentTooLarge {
+			if _, status, _ := hashSkillFolder(dir, maxSkillBytes); status != SkillContentTooLarge {
 				t.Fatalf("the oversized folder is %q, want too large", status)
 			}
 			if err := shrink(f); err != nil {
@@ -272,11 +273,11 @@ func TestGAP1901ShrunkByAHandleHeldAcrossAScan(t *testing.T) {
 				own = info.Size()
 			}
 			t.Logf("GAP1901DIAG held-handle %s listing size=%d, own size=%d (limit %d)", name, listed, own, int64(maxSkillBytes))
-			open, openStatus, _, _ := hashSkillFolder(dir, maxSkillBytes)
+			open, openStatus, _ := hashSkillFolder(dir, maxSkillBytes)
 			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
-			after, afterStatus, _, _ := hashSkillFolder(dir, maxSkillBytes)
+			after, afterStatus, _ := hashSkillFolder(dir, maxSkillBytes)
 			if afterStatus != SkillContentOK {
 				t.Fatalf("the closed folder is %q, want ok", afterStatus)
 			}

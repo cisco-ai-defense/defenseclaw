@@ -56,5 +56,8 @@ func (s *ContinuousDiscoveryService) installLocation(path string) string {
 			return ""
 		}
 	}
-	return path
+	if systemAgentInstallLocation(path) {
+		return filepath.Clean(path)
+	}
+	return ""
 }

@@ -365,7 +365,7 @@ func NewCopilotConnector() *hookOnlyConnector {
 		name:        "copilot",
 		description: "user-global Copilot CLI hooks, with optional workspace .github/hooks override",
 		apiPath:     "/api/v1/copilot/hook",
-		scriptName:  "copilot-hook.sh",
+		scriptName:  copilotHookScriptName,
 		configPath:  copilotHooksPath,
 		capability: func(opts SetupOpts) HookCapability {
 			caps := HookCapability{
@@ -5169,6 +5169,9 @@ func hermesHookEntry(hookCommand, event, matcher string, opts SetupOpts) map[str
 }
 
 // hermesHookScriptName is the Hermes hook script Setup generates on Unix.
+// The removal passes match an edited or copied entry by this name on every
+// OS: on Windows the hook command is the native launcher, which names no
+// script (GAP-1942).
 const hermesHookScriptName = "hermes-hook.sh"
 
 // hermesHookEntryOwned is the one ownership predicate Setup, repair, teardown
@@ -5204,11 +5207,11 @@ func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedComman
 		return true
 	}
 	// The generated script at an edited path, or a copy named by a Windows
-	// path (GAP-1923). Its matchers trim blanks, which would claim a command
-	// Setup did not write, so a command with a blank at either end is the
-	// user's.
+	// path (GAP-1923), on every OS: the name is the script's, not hookScript's
+	// (GAP-1942). Its matchers trim blanks, which would claim a command Setup
+	// did not write, so a command with a blank at either end is the user's.
 	return command == strings.TrimSpace(command) &&
-		editedDefenseClawHookCommandByAnyPath(command, hookScriptBaseName(hookScript))
+		editedDefenseClawHookCommandByAnyPath(command, hermesHookScriptName)
 }
 
 // hermesCommandSpellsTheHookScript reports whether command runs the generated
@@ -6001,7 +6004,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 	// A copy named by a Windows path, on every OS (GAP-1923), read as
 	// written first: the POSIX split undoes the escapes of a double-quoted
 	// word, which drops a Windows path's backslashes.
-	if bound, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(command), "copilot-hook.sh"); owned &&
+	if bound, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(command), copilotHookScriptName); owned &&
 		(bound == "" || copilotBoundEventArgument(bound)) {
 		return true
 	}
@@ -6010,7 +6013,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 		return false
 	}
 	// A copy named by a Windows path after a shell or env wrapper (GAP-1923).
-	if _, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(posixHookCommandWord(word)+rest), "copilot-hook.sh"); owned {
+	if _, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(posixHookCommandWord(word)+rest), copilotHookScriptName); owned {
 		return true
 	}
 	if !filepath.IsAbs(word) || filepath.Clean(word) != word {
@@ -6026,7 +6029,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 			return true
 		}
 	}
-	_, owned := editedDefenseClawHookScript(word+rest, "copilot-hook.sh")
+	_, owned := editedDefenseClawHookScript(word+rest, copilotHookScriptName)
 	return owned
 }
 
@@ -6067,11 +6070,16 @@ func copilotBoundEventArgument(rest string) bool {
 	return false
 }
 
+// copilotHookScriptName is the Copilot hook script Setup generates on Unix.
+// The removal passes match an edited or copied entry by this name on every
+// OS: on Windows the hook command is the PowerShell adapter (GAP-1942).
+const copilotHookScriptName = "copilot-hook.sh"
+
 func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
 	if copilotLiveOperatorLookalike(raw, hookScript) {
 		return false
 	}
-	if copilotBoundEventOwnsHook(raw, hookScript) || containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) || copilotOldManagedCopyEntry(raw) {
+	if copilotBoundEventOwnsHook(raw, hookScript) || containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, copilotHookScriptName) || copilotOldManagedCopyEntry(raw) {
 		return true
 	}
 	if !isCopilotPowerShellAdapterCommand(hookScript) {
@@ -6952,7 +6960,7 @@ func isCopilotNativeHookCommand(command string) bool {
 
 func isCopilotShellHookScript(command string) bool {
 	command = strings.Trim(strings.TrimSpace(command), `"'`)
-	return filepath.Base(filepath.FromSlash(command)) == "copilot-hook.sh"
+	return filepath.Base(filepath.FromSlash(command)) == copilotHookScriptName
 }
 
 func isCopilotEventBoundShellCommand(command, hookScript string) bool {

@@ -146,6 +146,14 @@ type Options struct {
 	CursorFailOpen bool
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
+	// AdoptAdministratorEdits makes a publish take an edit made to the
+	// shared Codex requirements.toml since DefenseClaw last wrote it as the
+	// administrator's new text. Only the unix reconcile action sets it: it is
+	// the administrator's explicit acceptance of the edited file, after which
+	// reconcile re-pins the policy view. Every other publish (ensure, repair,
+	// upgrade and the restore the hook guardian starts) puts back the text
+	// DefenseClaw last published, so a heal never trusts an edit.
+	AdoptAdministratorEdits bool
 
 	// keptLinks are the policy paths on which RemoveWindowsGoOwned kept a link
 	// (lower-cased): the removal of the target skips those paths alone and

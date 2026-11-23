@@ -19,6 +19,7 @@ package gateway
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,6 +149,64 @@ func TestSkillInventoryIsSentOutsideSecureClient(t *testing.T) {
 			bodies = emit(skillProductsReport("scan-4", skillProductsPDF()))
 			if len(bodies) != 1 || bodies[0][observability.TelemetryAttributeDefenseClawInventorySkillManifest] != string(skillProductsManifest) {
 				t.Fatalf("include_skill_manifests on: %v", bodies)
+			}
+		})
+	}
+}
+
+// skillProductsNamed returns n skill folders named prefix-000 and up.
+func skillProductsNamed(prefix string, n int) []inventory.AIEvidence {
+	skills := make([]inventory.AIEvidence, n)
+	for i := range skills {
+		name := fmt.Sprintf("%s-%03d", prefix, i)
+		sum := sha256.Sum256([]byte(name))
+		skills[i] = inventory.AIEvidence{Type: "skill_entry", Basename: name, Skill: &inventory.AISkillFacts{
+			ContentHash: "sha256:" + hex.EncodeToString(sum[:]), ContentStatus: inventory.SkillContentOK,
+			Scope: inventory.SkillScopeUser, Location: "~/.agents/skills/" + name,
+		}}
+	}
+	return skills
+}
+
+// Outside Secure Client a skill turnover larger than the collection limit
+// also sends its removals first, in bounded batches under the operator
+// action, so the current collection still goes out whole and the next scan
+// finds nothing left to send.
+func TestSkillTurnoverOutsideSecureClientSendsRemovalsFirst(t *testing.T) {
+	for _, product := range []struct{ name, mode, profile string }{
+		{name: "oss per-user"},
+		{name: "managed standalone", mode: "managed_enterprise", profile: "standalone"},
+	} {
+		t.Run(product.name, func(t *testing.T) {
+			withManagedEnterprise(t, false)
+			testenv.SetHome(t, t.TempDir())
+			cfg := &config.Config{
+				DataDir: t.TempDir(), DeploymentMode: product.mode,
+				AIDiscovery: config.AIDiscoveryConfig{Enabled: true},
+			}
+			cfg.Enterprise.Profile = product.profile
+			gate := newManagedInventoryPublishState(cfg)
+			emit := func(report *inventory.AIDiscoveryReport) map[any]int {
+				t.Helper()
+				capture := &endpointInventoryCapture{}
+				if err := emitEndpointInventory(t.Context(), cfg, connector.NewDefaultRegistry(), capture, false, report, gate); err != nil {
+					t.Fatal(err)
+				}
+				states := map[any]int{}
+				for _, body := range skillProductsBodies(t, capture, skillInventoryActionName) {
+					states[body[observability.TelemetryAttributeDefenseClawInventorySkillState]]++
+				}
+				return states
+			}
+			if got := emit(skillProductsReport("scan-1", skillProductsNamed("old", 300)...)); got["new"] != 300 || len(got) != 1 {
+				t.Fatalf("first scan: %v", got)
+			}
+			// 300 removed plus 300 new is over the limit of 512 for one collection.
+			if got := emit(skillProductsReport("scan-2", skillProductsNamed("next", 300)...)); got["removed"] != 300 || got["new"] != 300 || len(got) != 2 {
+				t.Fatalf("turnover: %v, want 300 removed and 300 new", got)
+			}
+			if got := emit(skillProductsReport("scan-3", skillProductsNamed("next", 300)...)); len(got) != 0 {
+				t.Fatalf("an unchanged collection was sent again after the turnover: %v", got)
 			}
 		})
 	}

@@ -322,6 +322,11 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertTrue(cfg.ai_discovery.enabled)
         self.assertEqual(cfg.ai_discovery.mode, "enhanced")
         self.assertTrue(cfg.ai_discovery.include_shell_history)
+        self.assertTrue(cfg.ai_discovery.include_skill_content_hashes)
+        self.assertIs(
+            config_mod._config_to_dict(cfg)["ai_discovery"]["include_skill_content_hashes"],
+            True,
+        )
         self.assertFalse(cfg.ai_discovery.lookup_model_provenance_online)
         self.assertEqual(
             cfg.ai_discovery.confidence_policy_path,
@@ -340,6 +345,21 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
         )
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
+
+    def test_merge_skill_content_hashes_defaults_to_enabled(self):
+        for raw in (None, {}, {"enabled": True}):
+            with self.subTest(raw=raw):
+                self.assertTrue(
+                    config_mod._merge_ai_discovery(raw).include_skill_content_hashes
+                )
+
+    def test_merge_skill_content_hashes_preserves_explicit_values(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                cfg = config_mod._merge_ai_discovery(
+                    {"include_skill_content_hashes": value}
+                )
+                self.assertIs(cfg.include_skill_content_hashes, value)
 
     def test_merge_online_model_provenance_is_explicit_opt_in(self):
         disabled = config_mod._merge_ai_discovery({"enabled": True})

@@ -145,17 +145,25 @@ func stripCodexOwned(raw []byte) []byte {
 	return []byte(out.String())
 }
 
-// codexAdminText is the administrator text DefenseClaw merges into: the
-// recorded preimage while the file is exactly what DefenseClaw last wrote
-// (an earlier build separated its blocks with blank lines, which are not the
-// administrator's), else the file with DefenseClaw's lines removed.
-func codexAdminText(opts Options, path string, current []byte, exists bool) []byte {
+// codexAdminText is the administrator text DefenseClaw merges into. Once
+// DefenseClaw has published the file it is the recorded preimage: while the
+// file is exactly what DefenseClaw last wrote (an earlier build separated its
+// blocks with blank lines, which are not the administrator's), and also when
+// the file was edited, replaced or deleted since, unless adopt is set. So a
+// publish that heals (ensure, repair, upgrade, the guardian's restore) puts
+// back the published bytes, and a line someone added, changed or removed is
+// never folded into the file and then pinned as the trusted policy view
+// (GAP-1928). adopt (reconcile, the administrator's acceptance of an edit,
+// and export, which renders the administrator's current file) takes the
+// current file with DefenseClaw's lines removed.
+func codexAdminText(opts Options, path string, current []byte, exists, adopt bool) []byte {
+	record, err := loadRecord(opts, codexConnector)
+	if err == nil && publishedByRecord(record, path) &&
+		(!adopt || (exists && sha256Hex(current) == record.PostimageSHA256)) {
+		return stripCodexOwned(record.Preimage)
+	}
 	if !exists {
 		return nil
-	}
-	if record, err := loadRecord(opts, codexConnector); err == nil && record != nil &&
-		record.Path == path && sha256Hex(current) == record.PostimageSHA256 {
-		return stripCodexOwned(record.Preimage)
 	}
 	return stripCodexOwned(current)
 }
@@ -571,7 +579,7 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 		state.finish()
 		return state, nil
 	}
-	admin := codexAdminText(opts, path, current, exists)
+	admin := codexAdminText(opts, path, current, exists, opts.AdoptAdministratorEdits)
 	rendered, conflicts, err := renderCodex(opts, admin, policy)
 	if err != nil {
 		return state, codexParseError(path, current, err)
@@ -741,7 +749,7 @@ func (codexTarget) Export(opts Options, format string) ([]byte, error) {
 	var admin []byte
 	if path, err := CodexRequirementsPath(opts); err == nil {
 		if current, exists, readErr := readPolicyFile(opts, path); readErr == nil {
-			admin = codexAdminText(opts, path, current, exists)
+			admin = codexAdminText(opts, path, current, exists, true)
 		}
 	}
 	rendered, conflicts, err := renderCodex(opts, admin, opts.PolicyFor(codexConnector))

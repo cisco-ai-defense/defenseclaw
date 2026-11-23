@@ -563,3 +563,31 @@ func TestManifestRecoveryReceiptCommitPreservesInFlightSubmissionSnapshot(t *tes
 		t.Fatal("receipt-only acknowledgement did not publish replacement progress")
 	}
 }
+
+func TestManifestRecoveryStalePublishPreservesNewerAcknowledgement(t *testing.T) {
+	state, _, skill, _, _ := completedManifestFixture(t)
+	hash := skill.skillManifestHash
+	state.file.SkillManifests[hash] = managedSkillManifest{Sent: 1, Parts: 6}
+	stale := state.beginCycle("stale-publish", time.Now(), true)
+	stale.receiptEpoch = state.receiptEpoch
+	stale.skills = map[string]managedSkillState{skill.id: {Name: skill.itemName}}
+	stale.manifests = map[string]managedSkillManifest{hash: {Sent: 1, Parts: 6}}
+	stale.recordPublished(endpointSkillInventorySource, "current-rows", 1)
+
+	ack := state.beginCycle("ack", time.Now(), false)
+	ack.receiptEpoch = state.receiptEpoch
+	ack.receipts = map[string]managedManifestReceiptState{}
+	ack.receiptAcknowledged = map[string]managedSkillManifest{hash: {Sent: 6, Parts: 6}}
+	ack.receiptDirty = true
+	ack.commit()
+	stale.commit()
+	if got := state.file.SkillManifests[hash]; got != (managedSkillManifest{Sent: 6, Parts: 6}) {
+		t.Fatalf("stale publish regressed acknowledged progress: %+v", got)
+	}
+	if got := loadManagedInventoryPublishFile(state.path).SkillManifests[hash]; got != (managedSkillManifest{Sent: 6, Parts: 6}) {
+		t.Fatalf("durable progress regressed: %+v", got)
+	}
+	if stale.manifests[hash].Sent != 1 {
+		t.Fatal("commit mutated the stale cycle's retained snapshot")
+	}
+}

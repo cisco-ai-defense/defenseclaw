@@ -2755,6 +2755,10 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// discovery service may have been recreated above), and emit an
 	// immediate snapshot so AI Defense sees the change without waiting
 	// for the next scan tick.
+	s.observabilityV8Mu.Lock()
+	manifestRuntime, _ := s.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	s.observabilityV8Mu.Unlock()
+	s.bindManifestReceipts(ctx, manifestRuntime, &next, candidatePlan)
 	if nextManagedEnterprise {
 		var snapshotFn func() inventory.AIDiscoveryReport
 		svc := s.aiDiscoverySnapshot()

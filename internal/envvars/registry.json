@@ -530,6 +530,26 @@
       "since": "1.0.11"
     },
     {
+      "name": "DEFENSECLAW_TEST_GAP1911_FOLDER",
+      "category": "test_fixture",
+      "purpose": "Folder of the Administrators-owned plugin tree that the elevated Windows test TestGAP1911AdministratorsOwnedFolderInTheProfileKeepsItsCommandWhenNotElevated hands to the filtered-token child process it starts, so the child judges that folder without elevation.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/plugin_custody_admin_scope_windows_test.go",
+          "description": "TestGAP1911AdministratorsOwnedFolderInTheProfileKeepsItsCommandWhenNotElevated sets it on the filtered-token child it starts; the child reads it and judges the folder"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",

@@ -135,6 +135,7 @@ NEWER_CONFIG_KEYS = (
     ("openshell.admin.url_rules", (1, 0, 10)),
     ("substrate", (1, 0, 10)),
     ("enterprise.openshell.allow_downgrade", (1, 0, 11)),
+    ("ai_discovery.include_skill_content_hashes", (1, 0, 11)),
     ("ai_discovery.include_skill_manifests", (1, 0, 11)),
     ("notifications.substrate", (1, 0, 11)),
     ("notifications.substrate.asks", (1, 0, 11)),

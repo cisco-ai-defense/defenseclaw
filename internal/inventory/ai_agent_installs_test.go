@@ -48,14 +48,19 @@ func TestManagedScanReportsEveryAgentInstall(t *testing.T) {
 		locations = append(locations, signal.Location)
 	}
 	slices.Sort(locations)
-	// Another account's home is in the folder of the homes: no location.
-	if want := []string{"", filepath.Join(machine, "dc-test-agent"), "~/.local/bin/dc-test-agent"}; !slices.Equal(locations, want) {
+	// Neither another account nor an unknown machine prefix exports an
+	// absolute location. Both installs are still independently reported.
+	if want := []string{"", "", "~/.local/bin/dc-test-agent"}; !slices.Equal(locations, want) {
 		t.Fatalf("installs = %q, want %q", locations, want)
 	}
-	// A home at the top of the file system, such as /root, hides nothing.
+	// A home at the top of the file system, such as /root, does not hide a
+	// confirmed system binary location.
 	svc.opts.HomeDirs = append(svc.opts.HomeDirs, filepath.VolumeName(base)+string(filepath.Separator)+"root")
-	if location := svc.installLocation(filepath.Join(machine, "dc-test-agent")); location != filepath.Join(machine, "dc-test-agent") {
+	if location := svc.installLocation("/usr/local/bin/dc-test-agent"); location != "/usr/local/bin/dc-test-agent" {
 		t.Fatalf("with /root scanned, location = %q", location)
+	}
+	if location := svc.installLocation(filepath.Join(base, "unscanned-accounts", "carol", "bin", "dc-test-agent")); location != "" {
+		t.Fatalf("unscanned account location = %q", location)
 	}
 	// A per-user scan sends no location.
 	user := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data2"), HomeDir: home}, nil)
