@@ -280,36 +280,52 @@ func exactStructuredSQLMutationTarget(connection, database string) (string, stri
 }
 
 func exactSQLMutationCommand(command CommandFact) (exactSQLMutationInput, bool) {
+	inputs := exactSQLCLICommandInputs(command, false)
+	if len(inputs) != 1 {
+		return exactSQLMutationInput{}, false
+	}
+	return inputs[0], true
+}
+
+// exactSQLCLICommandInputs is the inline SQL of one SQL client command line:
+// its query option or its literal stdin, and with multi each -c of a psql
+// call (psql runs them in order). nil when command is no exact SQL client
+// call or names no query.
+func exactSQLCLICommandInputs(command CommandFact, multi bool) []exactSQLMutationInput {
 	if command.Kind != CommandKindProcess || command.Effect != EffectExecute ||
 		command.ControlFlowUncertain || !command.ArgvComplete || len(command.Wrappers) != 0 ||
 		len(command.Argv) < 1 {
-		return exactSQLMutationInput{}, false
+		return nil
 	}
 	engine, ok := sqlMutationEngine(command.Program)
 	if !ok {
-		return exactSQLMutationInput{}, false
+		return nil
 	}
-	parsed, ok := parseExactSQLCLI(command.Argv, engine)
+	parsed, ok := parseSQLCLI(command.Argv, engine, multi)
 	if !ok {
-		return exactSQLMutationInput{}, false
+		return nil
 	}
-	query, source := parsed.query, SQLMutationQueryArgv
+	queries, source := parsed.queries, SQLMutationQueryArgv
 	if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
-		if query != "" {
-			return exactSQLMutationInput{}, false
+		if len(queries) != 0 {
+			return nil
 		}
-		query, source = command.LiteralStdin, SQLMutationQueryLiteralStdin
+		queries, source = []string{command.LiteralStdin}, SQLMutationQueryLiteralStdin
 	}
-	if query == "" {
-		return exactSQLMutationInput{}, false
+	inputs := make([]exactSQLMutationInput, 0, len(queries))
+	for _, query := range queries {
+		if query == "" {
+			return nil
+		}
+		inputs = append(inputs, exactSQLMutationInput{
+			engine:             engine,
+			query:              query,
+			source:             source,
+			connectionIdentity: parsed.connectionIdentity(engine),
+			databaseIdentity:   strings.ToLower(parsed.database),
+		})
 	}
-	return exactSQLMutationInput{
-		engine:             engine,
-		query:              query,
-		source:             source,
-		connectionIdentity: parsed.connectionIdentity(engine),
-		databaseIdentity:   strings.ToLower(parsed.database),
-	}, true
+	return inputs
 }
 
 func sqlMutationEngine(program string) (string, bool) {
@@ -330,7 +346,7 @@ func sqlMutationEngine(program string) (string, bool) {
 }
 
 type exactSQLCLI struct {
-	query    string
+	queries  []string
 	database string
 	options  map[string]string
 }
@@ -355,14 +371,16 @@ func (parsed exactSQLCLI) connectionIdentity(engine string) string {
 	return strings.Join(parts, "\x00")
 }
 
-func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
+// parseSQLCLI reads a SQL client argv. With multi a psql call may repeat -c
+// (each query is kept, in order); every other repeated option is refused.
+func parseSQLCLI(argv []string, engine string, multi bool) (exactSQLCLI, bool) {
 	parsed := exactSQLCLI{options: make(map[string]string)}
 	for index := 1; index < len(argv); index++ {
 		argument := argv[index]
 		key, value, consumesNext, flag, ok := exactSQLCLIOption(engine, argument)
 		if ok {
 			previous, duplicate := parsed.options[key]
-			if duplicate && key != "option" {
+			if duplicate && key != "option" && !(multi && key == "query" && engine == "postgresql") {
 				return exactSQLCLI{}, false
 			}
 			if consumesNext {
@@ -385,7 +403,7 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 			}
 			parsed.options[key] = value
 			if key == "query" {
-				parsed.query = value
+				parsed.queries = append(parsed.queries, value)
 			}
 			if key == "database" {
 				parsed.database = value

@@ -231,8 +231,15 @@ func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords,
 			}
 		case len(value.Value) > maxScalarBytes:
 			// A stand-in with no dash and no space: it is an operand, never an
-			// option, wherever the grammar of the program puts it.
+			// option, wherever the grammar of the program puts it. A glued
+			// long option (--command=<text>) keeps its name after the mark,
+			// so the grammar of the program still sees which option the word
+			// sets (overLimitSQLQueryOperand).
 			argv[index] = "\x01"
+			if name, _, glued := strings.Cut(value.Value, "="); glued &&
+				strings.HasPrefix(name, "--") && len(name) <= stubKeepBytes {
+				argv[index] = "\x01" + name + "="
+			}
 			big[index] = true
 			any = true
 		default:
@@ -274,7 +281,7 @@ func nestedBodyTwin(word *syntax.Word) (string, OverLimitWordSplit, bool) {
 func overLimitShellBodyAt(argv []string, at int) bool {
 	start := 0
 	for range maxWrapperDepth + 1 {
-		if at <= start || argv[start] == "" || argv[start] == "\x01" {
+		if at <= start || argv[start] == "" || strings.HasPrefix(argv[start], "\x01") {
 			return false
 		}
 		program := overLimitProgram(argv[start])
@@ -324,7 +331,7 @@ func shellCommandBodyIndex(argv []string) (int, bool) {
 func overLimitOperandIsData(argv []string, at int) bool {
 	start := 0
 	for range maxWrapperDepth + 1 {
-		if at <= start || argv[start] == "" || argv[start] == "\x01" {
+		if at <= start || argv[start] == "" || strings.HasPrefix(argv[start], "\x01") {
 			return false
 		}
 		program := overLimitProgram(argv[start])
@@ -357,12 +364,18 @@ func overLimitOperandIsData(argv []string, at int) bool {
 // argv[at] as code in its own grammar, though no shell reads it: a sed script
 // (its e and w commands run a program and write a file), a make assignment or
 // target (the recipes read it), a tar option value (--checkpoint-action,
-// --to-command, -I), an rsync remote shell (-e, --rsh) and the value of a git
-// -c setting (an alias that starts with ! is a shell command). A word these
-// take that is past the string bound is no plain data, as the argument of a
-// program that passes it on (rel-1-0-10:GAP-0761); a commit message of git,
-// the destination of a copy and the like stay DATA.
+// --to-command, -I), an rsync remote shell (-e, --rsh), the value of a git
+// -c setting (an alias that starts with ! is a shell command) and the inline
+// query of a SQL client (psql -c, mysql -e: the SQL readers read it as the
+// statements the server runs, and COPY ... PROGRAM starts a program there).
+// A word these take that is past the string bound is no plain data, as the
+// argument of a program that passes it on (rel-1-0-10:GAP-0761, DET111 T20
+// review psql -c); a commit message of git, the destination of a copy, the
+// database operand of psql and the like stay DATA.
 func overLimitRunsOperand(program string, argv []string, start, at int) bool {
+	if engine, ok := sqlMutationEngine(program); ok {
+		return overLimitSQLQueryOperand(engine, argv[at-1], argv[at])
+	}
 	switch program {
 	case "sed", "gsed", "make", "gmake", "gnumake", "tar", "gtar", "bsdtar", "rsync":
 		return true
@@ -370,6 +383,19 @@ func overLimitRunsOperand(program string, argv []string, start, at int) bool {
 		return at-1 > start && argv[at-1] == "-c"
 	}
 	return false
+}
+
+// overLimitSQLQueryOperand reports the over-limit word of a SQL client of
+// engine that is its inline query: the value of its query option as the next
+// word (psql -c, mysql -e, sqlcmd -Q, snowsql -q) or glued to it
+// (--command=<SQL>, kept by markDataWords as the mark and the option name).
+func overLimitSQLQueryOperand(engine, previous, word string) bool {
+	if name, marked := strings.CutPrefix(word, "\x01"); marked && name != "" {
+		key, _, _, _, ok := exactSQLCLIOption(engine, name+"x")
+		return ok && key == "query"
+	}
+	key, _, consumesNext, _, ok := exactSQLCLIOption(engine, previous)
+	return ok && key == "query" && consumesNext
 }
 
 // overLimitProgram is the lower-case base name of a program word, with a

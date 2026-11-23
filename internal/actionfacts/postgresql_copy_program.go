@@ -38,17 +38,21 @@ func projectPostgreSQLCopyPrograms(input Input, facts Facts) []PostgreSQLCopyPro
 		if !exactPostgreSQLConnection(connection, database) || !exactPostgreSQLCopyProgramQuery(query) {
 			return nil
 		}
-	} else {
-		if input.Tool == "sql_query" || !facts.Authoritative() || len(facts.Commands) != 1 {
-			return nil
-		}
-		candidate, ok := exactSQLMutationCommand(facts.Commands[0])
-		if !ok || candidate.engine != "postgresql" || !exactPostgreSQLCopyProgramQuery(candidate.query) {
-			return nil
-		}
-		connection = candidate.connectionIdentity
-		database = candidate.databaseIdentity
+		return postgreSQLCopyProgramFacts(connection, database)
 	}
+	// A psql in any command of a shell call and each of its -c (DET111 T20
+	// review P3-3).
+	for _, candidate := range sqlCLIReadInputs(input, facts) {
+		if candidate.engine == "postgresql" && exactPostgreSQLCopyProgramQuery(candidate.query) {
+			return postgreSQLCopyProgramFacts(candidate.connectionIdentity, candidate.databaseIdentity)
+		}
+	}
+	return nil
+}
+
+// postgreSQLCopyProgramFacts is the one fact of a COPY ... PROGRAM on the
+// connection, nil when the connection has no digest.
+func postgreSQLCopyProgramFacts(connection, database string) []PostgreSQLCopyProgramFact {
 	digest := sqlConnectionIdentityDigest(
 		postgreSQLConnectionDigestDomain,
 		connection,
