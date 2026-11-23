@@ -41,6 +41,14 @@ type Scanner interface {
 // start the helpers it needs.
 var runScannerCommand func(*exec.Cmd) error = processutil.RunTracked
 
+// contain runs cmd with the scanner's own runner, or runScannerCommand.
+func contain(run func(*exec.Cmd) error, cmd *exec.Cmd) error {
+	if run != nil {
+		return run(cmd)
+	}
+	return runScannerCommand(cmd)
+}
+
 // keepFullFailureText is set by KeepFullFailureText.
 var keepFullFailureText atomic.Bool
 

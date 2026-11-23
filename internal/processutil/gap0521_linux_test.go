@@ -53,36 +53,7 @@ func TestRunTrackedNamespaceRefusedHelper(t *testing.T) {
 	if !ok || err != nil {
 		t.Fatalf("bad %s %q", namespaceRefusedEnv, spec)
 	}
-	arch, ok := seccompArch[runtime.GOARCH]
-	if !ok {
-		t.Skipf("no seccomp architecture for %s", runtime.GOARCH)
-	}
-	var a bpfAssembler
-	a.load(seccompArchOffset)
-	a.jeq(arch, "", "allow")
-	a.load(seccompNROffset)
-	a.jeq(unix.SYS_CLONE, "flags", "")
-	a.jeq(unix.SYS_UNSHARE, "flags", "allow")
-	a.label("flags")
-	a.load(seccompArg(0))
-	a.emit(unix.BPF_ALU|unix.BPF_AND|unix.BPF_K, unix.CLONE_NEWUSER)
-	a.jeq(0, "allow", "refuse")
-	a.label("allow")
-	a.ret(unix.SECCOMP_RET_ALLOW)
-	a.label("refuse")
-	a.ret(unix.SECCOMP_RET_ERRNO | uint32(errno))
-	filter, err := a.assemble()
-	if err != nil {
-		t.Fatal(err)
-	}
-	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
-	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&prog)), 0, 0); err != nil {
-		t.Fatal(err)
-	}
-	runtime.KeepAlive(filter)
+	refuseUserNamespaces(t, syscall.Errno(errno))
 	err = RunTracked(CommandContext(context.Background(), "/bin/sh", "-c", `: > "$1"`, "sh", out+".ran"))
 	report := fmt.Sprintf("not-contained=%t containment-unavailable=%t\n%v",
 		errors.Is(err, ErrNotContained), errors.Is(err, ErrContainmentUnavailable), err)
@@ -132,4 +103,44 @@ func TestRunTrackedReportsAHostThatRefusesTheScannerNamespaces(t *testing.T) {
 			}
 		})
 	}
+}
+
+// refuseUserNamespaces installs, on every thread, a seccomp filter that fails
+// every clone or unshare asking for a new user namespace with errno, as a container's
+// default profile does (EPERM) and as user.max_user_namespaces=0 does
+// (ENOSPC).
+func refuseUserNamespaces(t *testing.T, errno syscall.Errno) {
+	t.Helper()
+	arch, ok := seccompArch[runtime.GOARCH]
+	if !ok {
+		t.Skipf("no seccomp architecture for %s", runtime.GOARCH)
+	}
+	var a bpfAssembler
+	a.load(seccompArchOffset)
+	a.jeq(arch, "", "allow")
+	a.load(seccompNROffset)
+	a.jeq(unix.SYS_CLONE, "flags", "")
+	a.jeq(unix.SYS_UNSHARE, "flags", "allow")
+	a.label("flags")
+	a.load(seccompArg(0))
+	a.emit(unix.BPF_ALU|unix.BPF_AND|unix.BPF_K, unix.CLONE_NEWUSER)
+	a.jeq(0, "allow", "refuse")
+	a.label("allow")
+	a.ret(unix.SECCOMP_RET_ALLOW)
+	a.label("refuse")
+	a.ret(unix.SECCOMP_RET_ERRNO | uint32(errno))
+	filter, err := a.assemble()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Every thread: a child started from any goroutine meets the filter.
+	if _, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC,
+		uintptr(unsafe.Pointer(&prog))); errno != 0 {
+		t.Fatal(errno)
+	}
+	runtime.KeepAlive(filter)
 }

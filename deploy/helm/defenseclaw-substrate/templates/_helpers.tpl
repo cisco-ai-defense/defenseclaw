@@ -38,6 +38,33 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{/* The skill scanner sidecar's image (gateway.skillScanner.image). */}}
+{{- define "dc.scannerImage" -}}
+{{- $img := .Values.gateway.skillScanner.image -}}
+{{- if $img.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $img.digest) -}}
+{{- fail "gateway.skillScanner.image.digest must be sha256:<64 hex>" -}}
+{{- end -}}
+{{ $img.repository }}@{{ $img.digest }}
+{{- else -}}
+{{ $img.repository }}:{{ $img.tag | default .Chart.AppVersion }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The skill scanner sidecar's uid and gid: the gateway's, from
+podSecurityContext (GAP-0876). The jobs folder (0700) and the worker's
+socket (0600) belong to the one user both containers run as; a sidecar of
+another user could not read the gateway's jobs, and scanning would be off.
+*/}}
+{{- define "dc.scannerUser" -}}
+{{- $id := index .Values.podSecurityContext .field -}}
+{{- if or (not $id) (eq (int64 $id) 0) -}}
+{{- fail (printf "gateway.skillScanner needs podSecurityContext.%s set to a non-root id: the scanner sidecar runs as the gateway's user" .field) -}}
+{{- end -}}
+{{ int64 $id }}
+{{- end -}}
+
 {{/* The pod-identity SPIFFE ID of a component's ServiceAccount. */}}
 {{- define "dc.spiffe" -}}spiffe://cluster.local/ns/{{ .ctx.Release.Namespace }}/sa/defenseclaw-{{ .component }}{{- end -}}
 

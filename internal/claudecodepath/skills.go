@@ -178,6 +178,17 @@ func AgentFiles(root string) []string {
 	return uniquePaths(files)
 }
 
+// ProjectDirs returns launchDir and its ancestors up to the nearest
+// repository root (a .git folder or file), or launchDir alone outside a
+// repository. OpenCode resolves its project folders the same way.
+func ProjectDirs(launchDir string) []string {
+	start := absoluteClean(launchDir)
+	if start == "" {
+		return nil
+	}
+	return projectAncestorDirs(start)
+}
+
 func projectAncestorDirs(start string) []string {
 	repoRoot := repositoryRoot(start)
 	roots := make([]string, 0, 8)

@@ -533,6 +533,7 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		}
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
+		go runtimeScan.checkSidecar(context.Background(), os.Stderr, 12, 5*time.Second)
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,

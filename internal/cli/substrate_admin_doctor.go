@@ -652,8 +652,62 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags, tokenGroup
 			rows[i].Fix = fleet.CalloutFix(o)
 		}
 	}
-	return rows
+	return append(rows, doctorSkillScan(ctx, kf))
 }
+
+// doctorSkillScan is the substrate.skill_scan row (B5.4, GAP-0477): the
+// gateway pods' skill-scanner sidecar, from the pods' container status.
+func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCheck {
+	const id = "substrate.skill_scan"
+	raw, err := substrateKubectl(ctx, kf, "get", "pods", "-n", kf.namespace, "-l", "app.kubernetes.io/component=gateway", "-o", "json")
+	if err != nil {
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the skill scanner was not read: " + doctorFirstLine(err), Fix: "check your kubectl access, then run doctor again"}
+	}
+	var pods struct {
+		Items []struct {
+			Spec struct {
+				Containers []struct{ Name, Image string } `json:"containers"`
+			} `json:"spec"`
+			Status struct {
+				ContainerStatuses []struct {
+					Name  string `json:"name"`
+					Ready bool   `json:"ready"`
+				} `json:"containerStatuses"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &pods); err != nil {
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the skill scanner was not read: " + doctorFirstLine(err), Fix: "run doctor again"}
+	}
+	if len(pods.Items) == 0 {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "not checked: no gateway pod runs"}
+	}
+	version, with, down := "", 0, 0
+	for _, p := range pods.Items {
+		for _, c := range p.Spec.Containers {
+			if c.Name == skillScannerContainer {
+				with++
+				version = imageTag(c.Image)
+			}
+		}
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Name == skillScannerContainer && !cs.Ready {
+				down++
+			}
+		}
+	}
+	switch {
+	case with == 0:
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "Skill scanning is turned off (substrate.skills.scan.enabled: false)."}
+	case down > 0 || with < len(pods.Items):
+		return substrateCheck{ID: id, Status: doctorFail, Summary: fmt.Sprintf("Skill scanner is not running on %d of %d gateway pods. New skills follow the hook fail mode there (managed installs refuse them, others allow them with an alert).", down+len(pods.Items)-with, len(pods.Items)),
+			Fix: "kubectl -n " + kf.namespace + " logs deploy/defenseclaw-gateway -c " + skillScannerContainer}
+	}
+	return substrateCheck{ID: id, Status: doctorOK, Summary: "Skill scanner ready (skill-scanner image " + doctorWord(version, "untagged") + ")."}
+}
+
+// skillScannerContainer is the chart's scanner sidecar container name.
+const skillScannerContainer = "skill-scanner"
 
 func fleetCheckFix(id string) string {
 	switch id {

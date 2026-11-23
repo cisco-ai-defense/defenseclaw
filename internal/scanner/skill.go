@@ -128,6 +128,9 @@ type SkillScanner struct {
 	LLM            config.LLMConfig
 	CiscoAIDefense config.CiscoAIDefenseConfig
 	SecureClient   bool
+	// Contain runs the scanner command; nil is RunTracked's namespace
+	// containment. Only the pod's scan worker sets it (GAP-0828).
+	Contain func(*exec.Cmd) error
 }
 
 // NewSkillScannerFromLLM constructs a scanner from the resolved judge LLM
@@ -482,7 +485,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = runScannerCommand(cmd)
+	err = contain(s.Contain, cmd)
 	result.Duration = time.Since(start)
 	stderrStr := stderr.String()
 

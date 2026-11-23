@@ -1378,6 +1378,8 @@ spec:
         runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
+      # The scan worker must be PID 1 of its container (GAP-0828).
+      shareProcessNamespace: false
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -1512,6 +1514,47 @@ spec:
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
+        # Scan jobs for the skill scanner sidecar (GAP-0477).
+        - name: skill-scan
+          mountPath: /run/defenseclaw-scan
+      # The skill scanner sidecar (GAP-0477): no Secret mounts and no
+      # service-account token (the pod mounts none by default and this
+      # container lists only its two folders), no port.
+      - name: skill-scanner
+        image: ghcr.io/cisco-ai-defense/defenseclaw-scanner:1.0.11
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate
+        - scan-worker
+        - --dir=/run/defenseclaw-scan
+        # The container is the scanner's boundary (GAP-0828): RuntimeDefault
+        # refuses the namespaces the laptop's containment uses, so the worker
+        # is PID 1 of this container's own PID namespace (the pod does not
+        # share one), scans one job at a time and clears the container after
+        # each. Its security settings are fixed here; its uid and gid are the
+        # gateway's, from podSecurityContext (GAP-0876).
+        - --pod-contained
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: skill-scan
+          mountPath: /run/defenseclaw-scan
+        - name: skill-scan-tmp
+          mountPath: /tmp
       volumes:
       - name: config
         configMap:
@@ -1609,6 +1652,13 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
+      - name: skill-scan
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
+      - name: skill-scan-tmp
+        emptyDir:
+          sizeLimit: 512Mi
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 # The gateway leader: one replica holding the lease and the RWO store. Recreate,
