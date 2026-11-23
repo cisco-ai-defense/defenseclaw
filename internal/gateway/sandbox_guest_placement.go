@@ -985,14 +985,14 @@ func guestNamesCDPath(text string) bool {
 	const name = "CDPATH"
 	matched := 0
 	for index := 0; index < len(text); index++ {
-		switch c := text[index]; {
-		case c == '"' || c == '\'' || c == '\\':
-		case c == name[matched]:
+		switch text[index] {
+		case '"', '\'', '\\':
+		case name[matched]:
 			matched++
 			if matched == len(name) {
 				return true
 			}
-		case c == name[0]:
+		case name[0]:
 			matched = 1
 		default:
 			matched = 0
