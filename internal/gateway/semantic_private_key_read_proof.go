@@ -85,7 +85,9 @@ func appendTrustedPrivateKeyReaderFindingOf(
 		// places a relative find start: from the guest home, find . can
 		// hand the SSH folder to -exec just as the laptop can (GAP-1025).
 		keyCWD := request.Input.CWD
-		if keyCWD == "" && request.SandboxGuestCWD != "" && strings.Contains(command, "find") {
+		if keyCWD == "" && request.SandboxGuestCWD != "" &&
+			(strings.HasPrefix(command, "find ") || strings.HasPrefix(command, "gfind ") ||
+				strings.HasPrefix(command, "/usr/bin/find ")) {
 			keyCWD = request.SandboxGuestCWD
 		}
 		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBounded(command, keyCWD, request.Input.ActiveHome, dialect)
