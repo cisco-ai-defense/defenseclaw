@@ -4100,6 +4100,18 @@ func TestWindowsDeferredConfigInstallWaitsForConfigurationGAP1749(t *testing.T) 
 		switch warning.Code {
 		case "deferred_config_pending":
 			waitingWarnings++
+			// The completing repair is named in the forms that run on a
+			// managed computer, where Setup is not installed.
+			for _, want := range []string{
+				"`" + managed.WindowsSetupCommand("/repair") + " CONFIG=<config.yaml> MANIFEST=<targets.yaml>`",
+				windowsEnterpriseAdminCommand("repair", "--config", "<config.yaml>", "--manifest", "<targets.yaml>"),
+				managed.WindowsSetupSource,
+				"elevated PowerShell prompt",
+			} {
+				if !strings.Contains(warning.Message, want) {
+					t.Errorf("deferred_config_pending warning %q does not name %q", warning.Message, want)
+				}
+			}
 		case "not_started":
 			notStarted++
 		}
