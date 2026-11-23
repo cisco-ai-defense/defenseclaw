@@ -57,6 +57,9 @@ func init() {
 
 // Map sends a path under a mutable system root to the fixture tree.
 func Map(name string) string {
+	if Unreadable() {
+		return ""
+	}
 	observe(name)
 	if root == "" {
 		return name
