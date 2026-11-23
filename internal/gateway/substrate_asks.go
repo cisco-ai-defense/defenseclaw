@@ -118,14 +118,6 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "decision_is_approve_or_deny")
 			return
 		}
-		if c.admin && a.substrateBindingAskOrphaned(r.Context(), st, r.PathValue("id")) {
-			// The binding of this ask was removed: the ask is denied, no
-			// approval is recorded (RV4 F4).
-			_, _ = st.cfg.Asks.Resolve(r.Context(), asks.ResolveRequest{ID: r.PathValue("id"), Decision: "deny",
-				Note: "the binding was removed", CallerID: ownerOf(c.person).ID(), Admin: true})
-			writeSubstrateJSONError(w, http.StatusConflict, "ask_binding_gone")
-			return
-		}
 		got, err := st.cfg.Asks.Resolve(r.Context(), asks.ResolveRequest{
 			ID: r.PathValue("id"), Decision: in.Decision, Always: in.Always, Note: in.Reason,
 			CallerID: ownerOf(c.person).ID(), Admin: c.admin,
@@ -142,9 +134,7 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			switch {
 			case !ok:
 				writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
-			case errors.Is(berr, errSubstrateBindingGone):
-				writeSubstrateJSONError(w, http.StatusConflict, "ask_binding_gone")
-			case berr != nil:
+			case berr != nil && !errors.Is(berr, errSubstrateBindingGone):
 				fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", again.ID, berr)
 				writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
 			default:
@@ -159,12 +149,16 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			return
 		}
 		berr := a.substrateBindingDecided(r.Context(), st, got)
-		if errors.Is(berr, errSubstrateBindingGone) {
-			// Removed between the check above and the answer: no approval record.
-			writeSubstrateJSONError(w, http.StatusConflict, "ask_binding_gone")
-			return
-		}
 		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
+		if errors.Is(berr, errSubstrateBindingGone) {
+			// No binding names this ask. Either the add that opened it has
+			// not written the binding yet (the add applies this answer when
+			// it does, RV4 F2), or rm removed it (rm denies a waiting
+			// binding's ask; an answer that wins that race moves nothing).
+			// The answer stands and is recorded above (GAP-0903, GAP-0908).
+			fmt.Fprintf(os.Stderr, "[substrate] ask %s answered (%s); no binding names it now\n", got.ID, got.State)
+			berr = nil
+		}
 		if berr != nil {
 			// The ask is answered but the binding store refused the write:
 			// the binding stays waiting; the administrator is told.

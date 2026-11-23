@@ -459,20 +459,6 @@ func (a *APIServer) substrateFindAsk(ctx context.Context, st *substrateState, ow
 	return asks.Ask{}, false
 }
 
-// substrateBindingAskOrphaned reports a pending secret_binding ask whose
-// binding is no longer in the store (RV4 F4).
-func (a *APIServer) substrateBindingAskOrphaned(ctx context.Context, st *substrateState, id string) bool {
-	if st.cfg.Bindings == nil {
-		return false
-	}
-	got, ok := a.substrateFindAsk(ctx, st, "", id)
-	if !ok || got.Kind != asks.KindSecretBinding || got.State != asks.StatePending || got.BindingID() == "" {
-		return false
-	}
-	_, found := st.cfg.Bindings.ByID(got.BindingID())
-	return !found
-}
-
 // substrateReapplyBindingDecision handles an administrator's decision on a
 // binding ask that is already answered: when the ask was answered the same
 // way, it moves the binding again and reports ok (RV4 F2). A binding that

@@ -64,7 +64,8 @@ func TestRV4F4RmDeniesThePendingAsk(t *testing.T) {
 }
 
 // TestRV4F4DecideOnGoneBinding: an approval of an ask whose binding is gone
-// answers 409 ask_binding_gone and leaves the ask denied, not approved.
+// (rm's deny of it did not land) moves nothing: no binding comes back. The
+// answer stands and is recorded (GAP-0903, GAP-0908).
 func TestRV4F4DecideOnGoneBinding(t *testing.T) {
 	bf := newBindingFixture(t, nil)
 	_, out := bf.add(t, "p-alice", hardOutsideAdd)
@@ -77,11 +78,11 @@ func TestRV4F4DecideOnGoneBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, out := bf.decide(t, "p-admin", id, "approve")
-	if code != http.StatusConflict || (out["error"] != "ask_binding_gone" && out["reason"] != "ask_binding_gone") {
-		t.Fatalf("approve on a gone binding: %d %v, want 409 ask_binding_gone", code, out)
+	if code != http.StatusOK {
+		t.Fatalf("approve on a gone binding: %d %v, want 200", code, out)
 	}
-	if s := bf.askNamed(t, id).State; s == asks.StateApproved {
-		t.Errorf("the ask of a gone binding stays approved")
+	if n := len(bf.store.ForOwner(owner)); n != 0 {
+		t.Errorf("approve on a gone binding left %d bindings, want none", n)
 	}
 }
 
