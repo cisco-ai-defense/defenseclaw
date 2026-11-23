@@ -46,8 +46,6 @@ import (
 // (openshell.vault.auto_capture, on by default).
 
 const (
-	vaultCaptureEventPrompt = "UserPromptSubmit"
-	vaultCaptureEventTool   = "PreToolUse"
 	// maxVaultCaptureHeaderEntries bounds the relay header's entries.
 	maxVaultCaptureHeaderEntries = 16
 )
@@ -177,7 +175,9 @@ func validVaultCaptureEventName(event string) bool {
 		return false
 	}
 	for _, r := range event {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
 			return false
 		}
 	}

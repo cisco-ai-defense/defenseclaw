@@ -155,11 +155,11 @@ func TestCaptureSandboxVaultScope(t *testing.T) {
 }
 
 func TestSandboxVaultCaptureMessageNamesTheBind(t *testing.T) {
-	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "GOOGLE_API_KEY"}}}
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: "UserPromptSubmit", Entries: []vault.Entry{{Name: "GOOGLE_API_KEY"}}}
 	if m := c.message(); !strings.Contains(m, "vault bind GOOGLE_API_KEY --host HOST") || !strings.Contains(m, "before it reached the model") {
 		t.Fatalf("message = %s", m)
 	}
-	c = &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventTool, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443}}}
+	c = &sandboxVaultCapture{Connector: "claudecode", Event: "PreToolUse", Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443}}}
 	if m := c.message(); !strings.Contains(m, "vault replace STRIPE_API_KEY") || !strings.Contains(m, "rotate") || strings.Contains(m, "--vault") {
 		t.Fatalf("message = %s", m)
 	}

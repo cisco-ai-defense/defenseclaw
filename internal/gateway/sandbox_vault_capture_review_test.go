@@ -42,15 +42,15 @@ func TestSandboxVaultCapturesAfterAnEscapedNewline(t *testing.T) {
 // The relay header round-trips names and hosts, never values, and anything
 // malformed is ignored.
 func TestVaultCaptureHeaderRoundTrip(t *testing.T) {
-	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventTool, Entries: []vault.Entry{
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: "PreToolUse", Entries: []vault.Entry{
 		{Name: "GITHUB_TOKEN", Host: "api.github.com", Port: 443}, {Name: "GOOGLE_API_KEY"},
 	}}
 	got := vaultCaptureFromHeader("claudecode", c.header())
-	if got == nil || got.Event != vaultCaptureEventTool || len(got.Entries) != 2 || got.Entries[0].Target() != "api.github.com" ||
+	if got == nil || got.Event != "PreToolUse" || len(got.Entries) != 2 || got.Entries[0].Target() != "api.github.com" ||
 		got.Entries[1].Target() != "" || !got.Entries[0].Exposed {
 		t.Fatalf("round trip = %+v", got)
 	}
-	failed := vaultCaptureFromHeader("claudecode", (&sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt}).header())
+	failed := vaultCaptureFromHeader("claudecode", (&sandboxVaultCapture{Connector: "claudecode", Event: "UserPromptSubmit"}).header())
 	if failed == nil || failed.Err == nil || len(failed.Entries) != 0 {
 		t.Fatalf("failed capture header = %+v", failed)
 	}
@@ -92,7 +92,7 @@ func TestSandboxSentVaultCaptureHeaderIsDropped(t *testing.T) {
 }
 
 func TestVaultCaptureErrorsNameNoPath(t *testing.T) {
-	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt, Err: errors.New("read the vault /home/dev/.defenseclaw/vault/vault.json: boom")}
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: "UserPromptSubmit", Err: errors.New("read the vault /home/dev/.defenseclaw/vault/vault.json: boom")}
 	if m := c.message(); strings.Contains(m, "/home/dev") || !strings.Contains(m, "not sent on") {
 		t.Fatalf("message = %s", m)
 	}
@@ -136,7 +136,7 @@ func TestSandboxVaultCapturesASecretInAKey(t *testing.T) {
 // A prompt whose secret the vault already holds as exposed does not point
 // the person at --vault for it.
 func TestPromptWithAnExposedSecretNamesTheReplace(t *testing.T) {
-	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443, Exposed: true}}}
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: "UserPromptSubmit", Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443, Exposed: true}}}
 	m := c.message()
 	if strings.Contains(m, "--vault") || !strings.Contains(m, "vault replace STRIPE_API_KEY") {
 		t.Fatalf("message = %s", m)
