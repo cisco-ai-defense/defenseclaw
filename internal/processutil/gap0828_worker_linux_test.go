@@ -35,7 +35,8 @@ const gap0828Job = "0123456789abcdef0123456789abcdef"
 // seccomp profile (user namespaces refused with EPERM), with the worker's
 // default containment (tracked) or the chart's pod-contained mode (pod, as
 // PID 1 of its own PID namespace, not root, without capabilities).
-// It sends one skill job and writes the answer to <folder>/answer.json.
+// It sends one skill job from its own PID namespace and writes the answer
+// to <folder>/answer.json. Pod mode must refuse that peer (GAP-0873).
 func TestGAP0828WorkerHelper(t *testing.T) {
 	spec := os.Getenv(workerHelperEnv)
 	if spec == "" {
@@ -85,7 +86,8 @@ func TestGAP0828WorkerHelper(t *testing.T) {
 // GAP-0828: under the chart's RuntimeDefault seccomp the scanner sidecar
 // answered every scan "unavailable", as the scanner's namespaces are refused
 // there and that containment fails closed (GAP-0521). The pod-contained mode
-// the chart selects scans; a worker without it still fails closed.
+// the chart selects scans; a worker without it still fails closed. A
+// same-namespace request cannot impersonate the separate gateway container.
 func TestGAP0828WorkerRuntimeDefault(t *testing.T) {
 	for _, mode := range []string{"tracked", "pod"} {
 		t.Run(mode, func(t *testing.T) {
@@ -128,8 +130,8 @@ func TestGAP0828WorkerRuntimeDefault(t *testing.T) {
 					t.Fatalf("outside pod mode a refused namespace must fail closed: answer %s, scanner ran=%t", raw, ranErr == nil)
 				}
 			case "pod":
-				if a.Code != "" || a.Result == nil || ranErr == nil {
-					t.Fatalf("pod mode did not scan and clear scratch under RuntimeDefault: answer %s, marker left=%t", raw, ranErr == nil)
+				if a.Code != "refused" || !strings.Contains(a.Error, "gateway container") || ranErr == nil {
+					t.Fatalf("pod mode accepted its own same-namespace peer: answer %s, scanner ran=%t", raw, ranErr == nil)
 				}
 			}
 		})
