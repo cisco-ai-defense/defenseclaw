@@ -19,7 +19,9 @@ import (
 // enforcing effect proof held the rule id and the alert-only CRITICAL copy
 // finding was dropped: the copy fell to the read cell (alert MEDIUM, allow in
 // permissive). An effect finding no 1.0.10 finding of the other reading names
-// joins as before.
+// joins as before. A 1.0.10 finding of the same set that may not act on its
+// own (no proof that authorizes its rule) never takes the enforcing effect
+// read: folded into it, the call fell to allow (rel-1-0-10:GAP-1984).
 func TestEffectFindingNeverHoldsALegacyRuleAcrossReadings(t *testing.T) {
 	effect := func(set string) RuleFinding {
 		p := decide.Proof{Kind: decide.KindRead, Target: decide.TargetCredential, Certainty: decide.CertKnown,
@@ -31,6 +33,11 @@ func TestEffectFindingNeverHoldsALegacyRuleAcrossReadings(t *testing.T) {
 	copyAlert := RuleFinding{RuleID: "PATH-GIT-CREDS", Title: "Git credentials file", Severity: "CRITICAL",
 		Confidence: 0.9, Proof: decide.Proof{}.Advise()}
 	copyBlock := RuleFinding{RuleID: "PATH-GIT-CREDS", Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.9}
+	copyBlock.proof = newFindingProof(findingProofResolvedTarget, "PATH-GIT-CREDS", true)
+	// A copy finding with no proof that authorizes its rule: the proof
+	// boundary records it, so it cannot carry the block the effect read
+	// proves (rel-1-0-10:GAP-1984).
+	copyUnproven := RuleFinding{RuleID: "PATH-GIT-CREDS", Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.9}
 	check := func(name string, got []RuleFinding, want RuleFinding, extra int) {
 		t.Helper()
 		legacy, effects := 0, 0
@@ -53,6 +60,12 @@ func TestEffectFindingNeverHoldsALegacyRuleAcrossReadings(t *testing.T) {
 	check("enforcing twin finding", withTwinProvenBlocks([]RuleFinding{gitRead}, []RuleFinding{copyBlock}), copyBlock, 0)
 	check("effect finding of the twin", withTwinProvenBlocks([]RuleFinding{copyAlert}, []RuleFinding{gitRead}), copyAlert, 0)
 	check("simple-command pass", withSimpleCommandFindings([]RuleFinding{gitRead}, []RuleFinding{copyAlert}), copyAlert, 0)
+	// The fold never lowers the call (DET111 ruling on GAP-1984, owner
+	// R-NOLOSS): the enforcing effect read stays where the twin finding of
+	// the same set may not act on its own.
+	if got := withTwinProvenBlocks([]RuleFinding{gitRead}, []RuleFinding{copyUnproven}); !hasEffectFinding(got) {
+		t.Errorf("unproven twin finding: the effect read folded into a finding that cannot act: %+v", got)
+	}
 	// Another file class: the effect read stands beside the 1.0.10 finding.
 	awsRead := effect(decide.SetAWSCredentials)
 	check("other class", withHostTwinFindings([]RuleFinding{awsRead}, []RuleFinding{copyAlert}), copyAlert, 1)

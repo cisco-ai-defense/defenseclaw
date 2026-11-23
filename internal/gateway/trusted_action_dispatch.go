@@ -5945,16 +5945,7 @@ func withProvenFindingsBeforeUnprovenKeysBlock(findings []RuleFinding) []RuleFin
 // beside the whole action's result. An enforcing or alert-only proof replaces
 // a weaker finding for the same rule; a sibling removes nothing.
 func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
-	rank := func(finding RuleFinding) int {
-		switch {
-		case finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID):
-			return 3
-		case finding.contributesToAlertOnly():
-			return 2
-		default:
-			return 1
-		}
-	}
+	rank := findingEnforcementRank
 	findings, alone = withEffectsFoldedEitherWay(findings, alone)
 	for _, finding := range alone {
 		key := trustedActionFindingKey(finding.RuleID)
