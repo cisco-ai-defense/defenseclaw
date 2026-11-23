@@ -65,6 +65,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - Standalone Setup no longer takes over a user's own earlier per-user DefenseClaw folder; it leaves that account as it found it. One busy or unusable profile no longer stops the install for every other user.
 - Managed Claude Code enrollment accepts an existing ClaudeCode policy in the machine registry that merges managed sources, instead of failing on any such policy.
 - A standalone reinstall keeps the shared hook files' owner when Intune or an administrator edited `requirements.toml` or `90-defenseclaw.json`, instead of failing with error 1603.
+- Setup no longer fails with error 1603 when an administrator has already placed a Codex `requirements.toml` on the machine with no DefenseClaw settings in it. A DefenseClaw section without its lock is still refused.
 
 #### Routing, budgets and cost
 - A Claude stream that stops before its usage record is charged to budgets as unknown spend, not as its opening token count.
