@@ -5,7 +5,10 @@
 
 package gateway
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestGAP0883GuestReadsEachStatementWhereItRuns: the copy-mode guest
 // placement reads each statement only in the folders known at its own place.
@@ -110,6 +113,19 @@ func TestGAP0989GuestKnowsTheFolderWhereTheMoveRuns(t *testing.T) {
 		{name: "W04 fn CD var after decl", command: "$CMD; CD=cd; f() { echo k >> authorized_keys; }; $CD .ssh; f; cd ~/.ssh"},
 		{name: "W05 CD var before decl", command: "CD=cd; $CD .ssh; f() { echo k >> authorized_keys; }; f; cd ~/.ssh"},
 		{name: "W06 CMD fn cd ssh called", command: "$CMD; f() { cd ~/.ssh; }; f; echo k >> authorized_keys"},
+		// An unread command before the declaration in a loop that goes on past
+		// it may call the function only where the loop runs: before a cd after
+		// the loop, not after it (substrate-1 GAP-0991). A cd in the loop, or a
+		// call after the cd, still counts.
+		{name: "W18 loop CMD before decl", command: "for i in 1 2; do $CMD; g() { echo m > config.yaml; }; done; g; cd ~/.defenseclaw && ls", benign: true},
+		{name: "K01 loop CMD before decl no call", command: "for i in 1 2; do $CMD; g() { echo m > config.yaml; }; done; cd ~/.defenseclaw && ls", benign: true},
+		{name: "K02 while CMD before decl", command: "while read l; do $CMD; g() { echo m > config.yaml; }; done < /dev/null; g; cd ~/.defenseclaw && ls", benign: true},
+		{name: "K03 nested loop CMD before decl", command: "for j in 1; do for i in 1 2; do $CMD; g() { echo m > config.yaml; }; done; done; g; cd ~/.defenseclaw && ls", benign: true},
+		{name: "K04 loop CMD decl cd in loop", command: "for i in 1 2; do $CMD; g() { echo m > config.yaml; }; cd ~/.defenseclaw; done"},
+		{name: "K05 loop CMD decl call after cd", command: "for i in 1 2; do $CMD; g() { echo m > config.yaml; }; done; cd ~/.defenseclaw && g"},
+		{name: "K06 loop CMD decl cd ssh in loop", command: "for i in 1 2; do $CMD; f() { echo k >> authorized_keys; }; cd ~/.ssh; done"},
+		{name: "K07 loop CMD after decl", command: "for i in 1 2; do g() { echo m > config.yaml; }; $CMD; done; cd ~/.defenseclaw && ls"},
+		{name: "K08 decl then loop CMD", command: "g() { echo m > config.yaml; }; for i in 1 2; do $CMD; done; cd ~/.defenseclaw && ls"},
 	})
 }
 
@@ -144,4 +160,40 @@ func TestGAP0888GuestHookConfigCandidateWhereTheShellStands(t *testing.T) {
 		{name: "pushd dyn claude", command: "pushd .claude\n$CMD\necho '{}' > settings.json"},
 		{name: "cd dyn claude", command: "cd .claude\n$CMD\necho '{}' > settings.json"},
 	})
+}
+
+// TestGAP0991GuestLoopUnreadRunsTheFunctionWhereTheLoopRuns: the body of a
+// function an unread command in a loop may call on a later pass runs where
+// the loop may run, not at the end of the script; an unread command after
+// the declaration still runs it at the end (substrate-1 GAP-0991).
+func TestGAP0991GuestLoopUnreadRunsTheFunctionWhereTheLoopRuns(t *testing.T) {
+	for _, row := range []struct {
+		command string
+		after   bool // the write may run after the cd
+	}{
+		{"for i in 1 2; do $CMD; g() { echo m > config.yaml; }; done; g; cd ~/.defenseclaw && ls", false},
+		{"for i in 1 2; do $CMD; g() { echo m > config.yaml; }; done; cd ~/.defenseclaw && ls", false},
+		{"for i in 1 2; do $CMD; g() { echo m > config.yaml; }; cd ~/.defenseclaw; done", true},
+		{"for i in 1 2; do $CMD; g() { echo m > config.yaml; }; done; cd ~/.defenseclaw && g", true},
+		{"for i in 1 2; do g() { echo m > config.yaml; }; $CMD; done; cd ~/.defenseclaw && ls", true},
+		{"g() { echo m > config.yaml; }; for i in 1 2; do $CMD; done; cd ~/.defenseclaw && ls", true},
+		{"f() { $CMD; }; for i in 1 2; do f; g() { echo m > config.yaml; }; done; cd ~/.defenseclaw && ls", true},
+	} {
+		calls, _ := guestScriptCalls(row.command, "/home/alice")
+		write, cd := -1, -1
+		for _, call := range calls {
+			switch {
+			case strings.HasPrefix(call.text, "echo m"):
+				write = call.at
+			case strings.HasPrefix(call.text, "cd ~/.defenseclaw"):
+				cd = call.start
+			}
+		}
+		if write < 0 || cd < 0 {
+			t.Fatalf("%q: no write or cd in %+v", row.command, calls)
+		}
+		if got := write > cd; got != row.after {
+			t.Errorf("%q: write at %d, cd at %d: after = %v, want %v", row.command, write, cd, got, row.after)
+		}
+	}
 }

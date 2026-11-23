@@ -1242,29 +1242,34 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 			return true
 		})
 	}
-	mayRunFrom := func(pos, from int) bool {
-		if pos >= from {
-			return true
-		}
-		for _, loop := range loops {
-			if loop.start <= pos && pos < loop.end && loop.end > from {
-				return true
-			}
-		}
-		for _, body := range bodies {
-			if body.start <= pos && pos < body.end {
-				return true
-			}
-		}
-		return false
+	inBody := func(pos int) bool {
+		return slices.ContainsFunc(bodies, func(body span) bool { return body.start <= pos && pos < body.end })
+	}
+	inLoopPast := func(pos, from int) bool {
+		return slices.ContainsFunc(loops, func(loop span) bool { return loop.start <= pos && pos < loop.end && loop.end > from })
 	}
 	// open marks a function that may be called another way than where the
-	// text calls it: an unread command that may run after its declaration,
-	// or a word of its name that is neither a call nor the declaration.
+	// text calls it: an unread command after its declaration in the text or
+	// in a function body, or a word of its name that is neither a call nor
+	// the declaration. An unread command before the declaration in a loop
+	// that goes on past it may call the function only on a later pass, so it
+	// counts as a call site where the loop may run (passes, then place), not
+	// as the end of the script: for i in 1 2; do $CMD; g() { echo m >
+	// config.yaml; }; done; g; cd ~/.defenseclaw && ls was a strict block
+	// where the laptop and both rels allow (substrate-1 GAP-0991). A trap it
+	// may set on a later pass, the first pass may set too (GAP-0990).
 	open := make([]bool, len(bodies))
+	passes := make([][]int, len(bodies))
 	for at, body := range bodies {
-		open[at] = guestWordCount(command, body.name) != 1+len(sites[body.name]) ||
-			slices.ContainsFunc(unread, func(pos int) bool { return mayRunFrom(pos, body.start) })
+		open[at] = guestWordCount(command, body.name) != 1+len(sites[body.name])
+		for _, pos := range unread {
+			switch {
+			case pos >= body.start || inBody(pos):
+				open[at] = true
+			case inLoopPast(pos, body.start):
+				passes[at] = append(passes[at], pos)
+			}
+		}
 	}
 	runs := map[int]int{}
 	var place func(pos, depth int) int
@@ -1284,7 +1289,7 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 				from = len(command)
 				if !open[at] && depth < 8 {
 					from = body.start
-					for _, site := range sites[body.name] {
+					for _, site := range slices.Concat(sites[body.name], passes[at]) {
 						if site >= body.start && site < body.end {
 							from = len(command)
 							break
