@@ -114,14 +114,15 @@ func TestDeriveGeneratedInboundNativeCatalogClonesBaseInputs(t *testing.T) {
 }
 
 func generatedInboundNonNativeInputs() ([]generatedInboundMatch, []generatedInboundTarget) {
+	allMatches, allTargets := generatedInboundNativeCatalog()
 	matches := make([]generatedInboundMatch, 0)
-	for _, match := range generatedInboundMatches {
+	for _, match := range allMatches {
 		if !match.NativeRoundTrip {
 			matches = append(matches, match)
 		}
 	}
 	targets := make([]generatedInboundTarget, 0)
-	for _, target := range generatedInboundTargets {
+	for _, target := range allTargets {
 		if !isGeneratedInboundNativeClass(target.ClassID) {
 			targets = append(targets, target)
 		}
