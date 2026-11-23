@@ -1,6 +1,10 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// The actor kit runs in Linux actor images only (kit.Config refuses other systems); its tests render and
+// resolve paths for Linux.
+//go:build linux
+
 package kit
 
 import (
