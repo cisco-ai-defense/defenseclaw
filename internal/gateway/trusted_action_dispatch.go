@@ -502,10 +502,17 @@ func dispatchTrustedActionOnce(
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
 	// the record never stands in for it.
-	var unreadDataWord bool
+	var unreadDataWord, cutSQLQuery bool
+	var sqlASTCaps bounded.CapSet
 	defer func() {
 		if unreadDataWord {
 			findings = withPosixDataWordRecord(findings)
+		}
+		if cutSQLQuery {
+			findings = withSQLQueryCutRecord(findings)
+		}
+		if sqlASTCaps.Any() {
+			findings = withSQLASTCapRecord(findings, sqlASTCaps)
 		}
 	}()
 	// A DefenseClaw state write that only a partial reading proves is at
@@ -1093,6 +1100,8 @@ func dispatchTrustedActionOnce(
 	// A Kubernetes request cut that dropped a request a reader proves
 	// something from is TRUNCATED as well (DET111 T20 review P2-3).
 	set := semantic.FactOnlyCuts(facts)
+	// A SQL facts cap hit is recorded only (DET111 ruling on T20 review P3-1).
+	sqlASTCaps = facts.SQLASTCaps()
 	if kubeCut, lost := facts.KubeRequestCaps(); lost {
 		set = set.Union(kubeCut)
 	}
@@ -1166,10 +1175,11 @@ func dispatchTrustedActionOnce(
 	// handed to dcx or ssh) is data: the call is judged as its twin with the
 	// word shortened, and the word leaves a detection-only record
 	// (rel-1-0-10:GAP-0382).
-	if twin, ok := posixDataWordTwinRequest(request, facts); ok {
+	if twin, split, ok := posixDataWordTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
-			unreadDataWord = true
+			unreadDataWord = split.Data > 0
+			cutSQLQuery = split.Query > 0
 		}()
 	}
 	// The call is read once more where the agent's working directory is

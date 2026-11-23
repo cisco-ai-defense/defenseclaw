@@ -6,6 +6,8 @@ package actionfacts
 import (
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 const (
@@ -43,6 +45,9 @@ type sqlASTResult struct {
 	functions      []string
 	statementCount int
 	unknown        bool
+	// caps are the bounds the reading hit (bytes, depth, statements,
+	// tokens): the text past one is unknown, never a clean read.
+	caps bounded.CapSet
 }
 
 // parseSQLAST extracts bounded, value-free SQL facts. It recognizes lexical
@@ -50,12 +55,15 @@ type sqlASTResult struct {
 // unknown so callers can retain the existing verdict.
 func parseSQLAST(query string) sqlASTResult {
 	result := sqlASTResult{}
-	parseSQLASTInto(query, 0, &result)
+	var trunc bounded.Truncated
+	parseSQLASTInto(query, 0, &result, &trunc)
+	result.caps = trunc.Set()
 	return result
 }
 
-func parseSQLASTInto(query string, depth int, result *sqlASTResult) {
-	if depth > maxSQLASTDepth || len(query) > maxSQLASTBytes {
+func parseSQLASTInto(query string, depth int, result *sqlASTResult, trunc *bounded.Truncated) {
+	if !trunc.Within(bounded.Depth, depth, maxSQLASTDepth) ||
+		!trunc.Within(bounded.Bytes, len(query), maxSQLASTBytes) {
 		result.unknown = true
 		return
 	}
@@ -67,13 +75,13 @@ func parseSQLASTInto(query string, depth int, result *sqlASTResult) {
 	if depth == 0 {
 		result.statementCount += statements
 	}
-	if result.statementCount > maxSQLASTStatements {
+	if !trunc.Within(bounded.Items, result.statementCount, maxSQLASTStatements) {
 		result.unknown = true
 		return
 	}
 	result.tokens = append(result.tokens, tokens...)
 	result.mutations = append(result.mutations, extractSQLASTMutations(tokens)...)
-	if len(result.tokens) > maxSQLASTTokens {
+	if !trunc.Within(bounded.Items, len(result.tokens), maxSQLASTTokens) {
 		result.unknown = true
 		return
 	}
@@ -106,12 +114,13 @@ func parseSQLASTInto(query string, depth int, result *sqlASTResult) {
 			// Recurse only through a literal directly following DO or EXECUTE.
 			if (word == "DO" || word == "EXECUTE") && i+1 < len(tokens) &&
 				tokens[i+1].kind == sqlASTString {
-				parseSQLASTInto(tokens[i+1].text, depth+1, result)
+				parseSQLASTInto(tokens[i+1].text, depth+1, result, trunc)
 			}
 		}
 	}
-	if len(result.verbs) > maxSQLASTTokens || len(result.tables) > maxSQLASTTokens ||
-		len(result.functions) > maxSQLASTTokens {
+	if !trunc.Within(bounded.Items, len(result.verbs), maxSQLASTTokens) ||
+		!trunc.Within(bounded.Items, len(result.tables), maxSQLASTTokens) ||
+		!trunc.Within(bounded.Items, len(result.functions), maxSQLASTTokens) {
 		result.unknown = true
 	}
 }
@@ -320,12 +329,21 @@ func appendUniqueSQL(values []string, value string) []string {
 	return append(values, value)
 }
 
-func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact) {
+// SQLASTCaps are the bounds the SQL facts reader (parseSQLAST) hit on the
+// call's SQL. The text past one gets no SQLFact and no AST mutation, and the
+// legacy SQL readers judge it as at 1.0.10. The hit is recorded in the
+// decision and raises nothing by itself: a large benign SQL text must not
+// start alerting (DET111 ruling on T20 review P3-1).
+func (f Facts) SQLASTCaps() bounded.CapSet { return f.sqlASTCaps }
+
+func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact, bounded.CapSet) {
 	inputs := exactSQLMutationInputs(input, facts)
 	mutations := make([]SQLMutationFact, 0, len(inputs))
 	sqlFacts := make([]SQLFact, 0, len(inputs))
+	var caps bounded.CapSet
 	for _, candidate := range inputs {
 		parsed := parseSQLAST(candidate.query)
+		caps = caps.Union(parsed.caps)
 		if !parsed.unknown {
 			database := candidate.databaseIdentity
 			if !exactSQLIdentity(database) || unresolvedSQLMutationValue(database) {
@@ -355,7 +373,7 @@ func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact)
 			mutations = append(mutations, fact)
 		}
 	}
-	return mutations, sqlFacts
+	return mutations, sqlFacts, caps
 }
 
 func exactSQLASTMutationParsed(engine, query string, parsed sqlASTResult) (SQLMutationOperation, SQLMutationScope, string, bool) {

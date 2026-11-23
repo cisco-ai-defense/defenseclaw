@@ -39,30 +39,36 @@ func ExactSQLSensitiveServerFileRead(
 
 func projectSQLSensitiveServerFileReads(input Input, facts Facts) []SQLSensitiveServerFileReadFact {
 	connection, database, query, structured := exactSQLQueryInput(input)
-	if !structured {
-		if input.Tool == "sql_query" || !facts.Authoritative() || len(facts.Commands) != 1 {
+	if structured {
+		switch {
+		case exactMySQLConnection(connection, database):
+			return sqlSensitiveServerFileReadFacts("mysql", query)
+		case exactPostgreSQLConnection(connection, database):
+			return sqlSensitiveServerFileReadFacts("postgresql", query)
+		default:
 			return nil
 		}
-		candidate, ok := exactSQLMutationCommand(facts.Commands[0])
-		if !ok || candidate.engine != "postgresql" {
-			return nil
-		}
-		connection, database, query = candidate.connectionIdentity, candidate.databaseIdentity, candidate.query
 	}
-	engine := ""
-	functions := []string(nil)
-	switch {
-	case exactMySQLConnection(connection, database):
-		engine = "mysql"
+	// A psql, mysql or mariadb client in any command of a shell call and each
+	// -c of psql (DET111 T20 review P3-3).
+	for _, candidate := range sqlCLIReadInputs(input, facts) {
+		if candidate.engine != "postgresql" && candidate.engine != "mysql" {
+			continue
+		}
+		if read := sqlSensitiveServerFileReadFacts(candidate.engine, candidate.query); read != nil {
+			return read
+		}
+	}
+	return nil
+}
+
+// sqlSensitiveServerFileReadFacts is the one fact of query reading a
+// sensitive host file through a server-side file function of engine
+// (mysql or postgresql), nil when it reads none.
+func sqlSensitiveServerFileReadFacts(engine, query string) []SQLSensitiveServerFileReadFact {
+	functions := []string{"pg_read_file", "pg_read_binary_file"}
+	if engine == "mysql" {
 		functions = []string{"load_file"}
-	case exactPostgreSQLConnection(connection, database):
-		engine = "postgresql"
-		functions = []string{"pg_read_file", "pg_read_binary_file"}
-	case !structured && connection != "":
-		engine = "postgresql"
-		functions = []string{"pg_read_file", "pg_read_binary_file"}
-	default:
-		return nil
 	}
 	filePath, ok := exactSQLSensitiveFileReadQuery(query, functions)
 	if !ok {

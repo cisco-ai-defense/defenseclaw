@@ -79,8 +79,7 @@ func TestPackTiersYAMLCellsDecide(t *testing.T) {
 			t.Cleanup(func() {
 				pendingPackPostures.Delete(dir)
 				packPostures.Delete(dir)
-				pendingPackTables.Delete(dir)
-				packTables.Delete(dir)
+				packTableFallback.Delete(dir)
 			})
 			pack, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global")
 			if err != nil {

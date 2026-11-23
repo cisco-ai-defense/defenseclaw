@@ -111,7 +111,7 @@ func TestWindowsLauncherSpellingsPastTheBoundAreNeverACleanAllow(t *testing.T) {
 					// winrecall verdict, an allow with no alert, and carries at most
 					// the detection-only data-word record, which is no cap.
 					capped := slices.ContainsFunc(findings, func(f RuleFinding) bool {
-						return !f.dataWordRecord && canonicalTrustedRuleID(f.RuleID) == evaluationLimitRuleID
+						return !f.boundRecord && canonicalTrustedRuleID(f.RuleID) == evaluationLimitRuleID
 					})
 					if capped || !windowsBoundsAllowed(findings) {
 						t.Errorf("%s pad%d %s: the launcher word in another command's data is truncated: %v", tr.name, pad, sp.id, FindingStrings(findings))

@@ -154,7 +154,7 @@ func TestShellInputPastByteBoundIgnoresCounts(t *testing.T) {
 // another statement or behind a variable) from allow to the unknown tier.
 func TestPosixDataWordRecordIsNotACap(t *testing.T) {
 	record := withPosixDataWordRecord(nil)
-	if len(record) != 1 || !record[0].dataWordRecord || record[0].contributesToEnforcement() {
+	if len(record) != 1 || !record[0].boundRecord || record[0].contributesToEnforcement() {
 		t.Fatalf("want one detection-only data-word record, got %+v", record)
 	}
 	if guardrailSeverityRank(record[0].Severity) != severityNone {
@@ -173,7 +173,7 @@ func TestPosixDataWordRecordIsNotACap(t *testing.T) {
 		records, caps := 0, 0
 		for _, f := range capped {
 			switch {
-			case f.dataWordRecord:
+			case f.boundRecord:
 				records++
 				if f.contributesToEnforcement() || f.contributesToAlertOnly() || f.Title != posixDataWordTitle {
 					t.Errorf("%s: a real cap raised the record: %+v", tier.name, f)

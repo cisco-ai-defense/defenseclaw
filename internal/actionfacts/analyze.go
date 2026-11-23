@@ -328,7 +328,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	facts.StructuredLiteralPersistences =
 		projectStructuredLiteralPersistences(input)
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
-	facts.SQLMutations, facts.SQLFacts = projectSQLAnalysis(input, facts)
+	facts.SQLMutations, facts.SQLFacts, facts.sqlASTCaps = projectSQLAnalysis(input, facts)
 	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
 	facts.HTTPCommandInjections = projectHTTPCommandInjections(input)
 	facts.SQLClientShellEscapes = projectSQLClientShellEscapes(facts)

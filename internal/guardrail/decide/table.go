@@ -499,7 +499,10 @@ func ParseColumn(data []byte) (*Column, error) {
 // Column checks a decoded tiers.yaml: version 1, a known tier, every row id
 // a row of the built-in table and listed once, known actions and
 // severities, and a floor of allow only where the cell keeps the levels (a
-// cell that maps nothing would allow the finding silently).
+// cell that maps nothing would allow the finding silently). A cell must
+// also keep what the built-in table holds for every pack (packCellError):
+// its severity, a hard-floor row's floor, and whether its row is recorded
+// in every cell.
 func (raw ColumnYAML) Column() (*Column, error) {
 	if raw.Version != 1 {
 		return nil, fmt.Errorf("tiers.yaml: version %d, want 1", raw.Version)
@@ -526,9 +529,78 @@ func (raw ColumnYAML) Column() (*Column, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := packCellError(r.ID, tier, perUser, managed); err != nil {
+			return nil, err
+		}
 		col.Rows = append(col.Rows, ColumnRow{ID: r.ID, PerUser: perUser, Managed: managed})
 	}
 	return col, nil
+}
+
+// hardFloorRows are the rows whose built-in cells were code at 1.0.10, which
+// no pack file could change: an evaluation fault, a DefenseClaw state
+// write, a truncated reading, an unverified path and a shell command on a
+// protected file. A pack may raise them, never lower them (DET111 T19
+// review P3-2).
+var hardFloorRows = []string{RowEvaluationFault, RowStateWrite, RowTruncated, RowUnverifiedPath, RowProtectedFile}
+
+// packCellError refuses a pack cell for row id in tier that would make the
+// pack's table disagree with what every caller reads from the built-in
+// table, so the readers of the built-in table (ShadowOnly, the verdict
+// severity) and Decide on the pack table give one answer (DET111 T19 review
+// P3-1, P3-2):
+//   - a cell's severity is the built-in one: the verdict severity of a
+//     finding is the built-in table's (Table.Severity);
+//   - a row recorded in every cell of the built-in table stays so, and no
+//     row becomes so: the effect join keeps such a finding out of the call
+//     (ShadowOnly) before Decide sees it;
+//   - a hard-floor row (hardFloorRows) keeps at least its built-in floor,
+//     its levels and its ceiling.
+func packCellError(id string, tier Tier, perUser, managed Cell) error {
+	row := builtin.row(id)
+	cells := [deploymentCount]Cell{PerUser: perUser, Managed: managed}
+	names := [deploymentCount]string{PerUser: "per_user", Managed: "managed"}
+	for d, c := range cells {
+		b := row.Cells[d][tier]
+		if c.Severity != b.Severity {
+			return fmt.Errorf("tiers.yaml: row %q %s: severity %s, the built-in row has %s: a pack does not change a row's severity",
+				id, names[d], severityName(c.Severity), severityName(b.Severity))
+		}
+		if slices.Contains(hardFloorRows, id) &&
+			(c.Floor < b.Floor || c.Ceiling > b.Ceiling || (b.Levels && !c.Levels)) {
+			return fmt.Errorf("tiers.yaml: row %q %s: lowers the built-in cell (floor %s): a pack may raise this row, never lower it",
+				id, names[d], b.Floor)
+		}
+	}
+	recordedOnly := func(cell func(d Deployment, t Tier) Cell) bool {
+		for d := range Deployment(deploymentCount) {
+			for t := range Tier(tierCount) {
+				if cell(d, t).Ceiling != CeilingRecord {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	builtinRecorded := recordedOnly(func(d Deployment, t Tier) Cell { return row.Cells[d][t] })
+	packRecorded := recordedOnly(func(d Deployment, t Tier) Cell {
+		if t == tier {
+			return cells[d]
+		}
+		return row.Cells[d][t]
+	})
+	if builtinRecorded != packRecorded {
+		return fmt.Errorf("tiers.yaml: row %q: the built-in row is recorded in every cell=%v, the pack's=%v: a pack does not turn a row's recording in every cell on or off",
+			id, builtinRecorded, packRecorded)
+	}
+	return nil
+}
+
+func severityName(s Severity) string {
+	if s == SevNone {
+		return "none"
+	}
+	return s.String()
 }
 
 func (c CellYAML) cell(row, deployment string) (Cell, error) {
