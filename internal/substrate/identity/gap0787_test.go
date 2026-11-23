@@ -103,6 +103,13 @@ func TestGAP0787ReencodedOIDCTokenNeverFallsToKube(t *testing.T) {
 				variants[name+" spare bit and padding"] = with(flipSpareBit(t, parts[i]) + gap0787Pad(parts[i]))
 			}
 		}
+		// go-jose strips every Unicode white-space rune, not only the
+		// ASCII ones (RV4-02).
+		for _, ws := range []rune{'\u00a0', '\u0085', '\u2028', '\v', '\f'} {
+			q := append([]string{}, parts...)
+			q[1] = parts[1][:4] + string(ws) + parts[1][4:]
+			variants[fmt.Sprintf("claims %U", ws)] = strings.Join(q, ".")
+		}
 		variants["leading space"] = " " + tok
 		variants["trailing newline"] = tok + "\n"
 		if len(parts[2])%4 == 0 {

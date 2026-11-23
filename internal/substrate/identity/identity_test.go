@@ -451,7 +451,7 @@ func TestSessionSignerRoundTripAndRefusals(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	s.SetClock(func() time.Time { return now })
 	act := SessionActor{Atespace: "eng-web", Name: "alice-1", UID: "u-1"}
-	tok, exp, err := s.Issue(SessionSignIn{Person: "oidc|alice"}, act, 0)
+	tok, exp, err := s.Issue(SessionSignIn{Person: "oidc|alice", TokenKey: "jti:a"}, act, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func TestSessionSignerRoundTripAndRefusals(t *testing.T) {
 	wantReason(t, err, ReasonExpired)
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	o, _ := NewSessionSigner(other, s.Issuer())
-	otok, _, _ := o.Issue(SessionSignIn{Person: "alice"}, act, 0)
+	otok, _, _ := o.Issue(SessionSignIn{Person: "alice", TokenKey: "jti:a"}, act, 0)
 	_, err = s.Verify(otok)
 	wantReason(t, err, ReasonUnknownKey)
 }

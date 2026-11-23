@@ -77,8 +77,9 @@ type Session struct {
 	// TaskDigest is the SessionTaskClaim ("" when the token has none).
 	TaskDigest string `json:"task_digest,omitempty"`
 	// SignInIssuedAt and SignInKey are the issue time and token key of the
-	// sign-in the session was handed out for (zero and "" in a session
-	// from a build before 1.0.11, which lives at most MaxSessionLifetime).
+	// sign-in the session was handed out for (zero and "" in a session a
+	// released 1.0.10 gateway minted, which lives at most MaxSessionLifetime;
+	// Issue never writes one).
 	// Relay verify checks that sign-in too, so a session of an ended
 	// sign-in is refused (GAP-0744).
 	SignInIssuedAt time.Time `json:"-"`
@@ -202,6 +203,11 @@ func (s *SessionSigner) Issue(signIn SessionSignIn, actor SessionActor, ttl time
 	person := strings.TrimSpace(signIn.Person)
 	if person == "" || strings.HasPrefix(person, ActorSubjectPrefix) || strings.HasPrefix(person, WorkerSubjectPrefix) {
 		return "", time.Time{}, errors.New("identity: a session token names a person")
+	}
+	// A session with no sign-in key would pass relay verify as one a 1.0.10
+	// gateway minted, unchecked against its sign-in (RV4-03).
+	if strings.TrimSpace(signIn.TokenKey) == "" {
+		return "", time.Time{}, errors.New("identity: a session token names the sign-in it is handed out for")
 	}
 	if !nameRE.MatchString(actor.Atespace) || !nameRE.MatchString(actor.Name) || !validUID(actor.UID) {
 		return "", time.Time{}, errors.New("identity: a session token names one actor incarnation")

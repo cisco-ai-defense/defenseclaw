@@ -37,7 +37,6 @@ func TestGAP0744SessionNamesItsSignIn(t *testing.T) {
 	for _, in := range []SessionSignIn{
 		{Person: "https://idp#alice", IssuedAt: iat, TokenKey: "jti:0123456789abcdef0123456789abcdef"},
 		{Person: "kubernetes#alice", TokenKey: "tok:0123456789abcdef0123456789abcdef"},
-		{Person: "https://idp#alice"},
 	} {
 		tok, _, err := s.Issue(in, act, 0)
 		if err != nil {

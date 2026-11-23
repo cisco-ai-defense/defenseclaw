@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Person kinds.
@@ -103,10 +104,10 @@ func claimsTokenKey(issuer, jti string, claims []byte) string {
 
 // jwtClaims is the decoded claims of a token shaped like a compact JWS, ok
 // false when it is not one. It decodes at least as leniently as any
-// verifier in front of DefenseClaw (the kube-apiserver's go-jose trims '='
-// and ignores spare bits and line breaks; this also drops '=' and white
-// space anywhere and reads the standard alphabet), so every encoding such
-// a verifier accepts gives the same bytes. It checks no signature: callers
+// verifier in front of DefenseClaw (go-jose, which the kube-apiserver
+// uses, trims '=', ignores spare bits and strips every Unicode white-space
+// rune; this also drops '=' anywhere and reads the standard alphabet), so
+// every encoding such a verifier accepts gives the same bytes (RV4-02). It checks no signature: callers
 // key only a token a verifier or a TokenReview has already accepted, or
 // read only its issuer (tokenIssuer).
 func jwtClaims(token string) ([]byte, bool) {
@@ -115,12 +116,12 @@ func jwtClaims(token string) ([]byte, bool) {
 		return nil, false
 	}
 	part := strings.Map(func(r rune) rune {
-		switch r {
-		case '=', ' ', '\t', '\r', '\n':
+		switch {
+		case r == '=' || unicode.IsSpace(r):
 			return -1
-		case '+':
+		case r == '+':
 			return '-'
-		case '/':
+		case r == '/':
 			return '_'
 		}
 		return r
