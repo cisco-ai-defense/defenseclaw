@@ -208,6 +208,11 @@ type walker struct {
 	cdUnreliable bool
 	// lastpipe: shopt -s lastpipe is in effect (see command).
 	lastpipe bool
+	// pwdFunc is what a pwd function defined earlier in this shell prints,
+	// when its definition ran on every path and its body is one echo of a
+	// static word; nil when no such definition is the current one
+	// (rel-1-0-10:GAP-1043).
+	pwdFunc *string
 	// pwdOwn: the call assigned PWD after its last cd, so $PWD is that value
 	// and not the tracked folder.
 	pwdOwn bool
@@ -775,10 +780,14 @@ func (w *walker) resolveWord(wd Word) Word {
 	for i, s := range wd.Segs {
 		if s.Subst == "pwd" {
 			// $(pwd) prints the working folder unless pwd is a function, an
-			// alias or disabled.
+			// alias or disabled; a pwd function whose definition the walk read
+			// prints its static word (rel-1-0-10:GAP-1043).
 			v, ok := "", false
-			if w.isBuiltin("pwd", DialectPOSIX) {
+			switch {
+			case w.isBuiltin("pwd", DialectPOSIX):
 				v, ok = w.cwdWord(i == 0)
+			case w.pwdFunc != nil && w.aliases["pwd"] == "" && w.isBuiltin("echo", DialectPOSIX):
+				v, ok = *w.pwdFunc, true
 			}
 			if !ok {
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: segTail(wd.Segs[i+1:])}
@@ -1100,6 +1109,16 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if c.Pipeline || c.Async || c.ChildList {
 		w.childDepth++
 		defer func() { w.childDepth-- }()
+	}
+	// A pwd function definition: $(pwd) after it prints the function's static
+	// word when the definition runs on every path; any other definition
+	// leaves $(pwd) unknown (rel-1-0-10:GAP-1043).
+	if d := c.Defines; d != nil && d.Name == "pwd" && dialect == DialectPOSIX {
+		w.pwdFunc = nil
+		if d.Static && !d.Cond {
+			out := d.Out
+			w.pwdFunc = &out
+		}
 	}
 	// Subshell: runs in a child shell; save/restore cwd/home/env.
 	if c.Sub != nil {
@@ -4085,6 +4104,7 @@ type scopeState struct {
 	execState bool
 	debugTrap bool
 	pwdOwn    bool
+	pwdFunc   *string
 }
 
 // saveScope returns the current state and installs private copies of the
@@ -4093,7 +4113,7 @@ type scopeState struct {
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
 		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther,
-		execState: w.execState, debugTrap: w.debugTrap, pwdOwn: w.pwdOwn}
+		execState: w.execState, debugTrap: w.debugTrap, pwdOwn: w.pwdOwn, pwdFunc: w.pwdFunc}
 	w.debugTrap = false // a subshell does not inherit a DEBUG trap
 	// The env and exported maps are shared with the saved state until the child
 	// first writes one (ownVars): most scopes (a command substitution, a pipeline
@@ -4124,6 +4144,7 @@ func (w *walker) restoreScope(s scopeState) {
 	w.execState = s.execState
 	w.debugTrap = s.debugTrap
 	w.pwdOwn = s.pwdOwn
+	w.pwdFunc = s.pwdFunc
 }
 
 func cloneBools(in map[string]bool) map[string]bool {
@@ -4210,6 +4231,9 @@ func (w *walker) unbindReader(program string, inner []Word) (opaque bool) {
 	case "unset":
 		// unset does not evaluate a subscript; a non-identifier name is ignored.
 		for _, wd := range args {
+			if !wd.Static || wd.Value == "pwd" {
+				w.pwdFunc = nil // unset may remove the pwd function (GAP-1043)
+			}
 			if wd.Static && plainIdent(wd.Value) {
 				w.unsetVar(wd.Value)
 			} else if !wd.Static {
