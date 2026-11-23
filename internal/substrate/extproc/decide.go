@@ -893,6 +893,18 @@ func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, 
 // the egress filter's buffer and then by the cap in DecideBody. A stated
 // length over the cap, and event-stream, gRPC and multipart bodies (never
 // buffered, D9), can't be inspected.
+//
+// A stated length over the cap is refused (closed) on its headers only
+// where the egress filter is known to send bodies: body_inspection on, or
+// auto once a body has reached the callout, and with body_inspection off,
+// as before. Under auto with no body seen yet the filter may be stock
+// Agent Substrate v1.0.0, which forwards every body unread and only the
+// smaller ones with an alert (GAP-0516): such a request asks for its body
+// like one without a length. A filter that sends bodies then buffers it
+// up to its own limit (over it, a local 413) and DecideBody refuses it
+// over the cap; a stock filter forwards it with body_not_received, as it
+// does every body. A managed closed callout still refuses an MCP request
+// until a body has come (GAP-0146).
 func (e *Engine) wantBody(req *Request) (bool, string) {
 	_, mcp := e.mcpHosts.match(req.Host)
 	_, listed := e.bodyHosts.match(req.Host)
@@ -906,7 +918,7 @@ func (e *Engine) wantBody(req *Request) (bool, string) {
 		strings.HasPrefix(ct, "multipart/") {
 		return false, whyStreaming
 	}
-	if req.ContentLength > e.cfg.BodyMaxBytes {
+	if req.ContentLength > e.cfg.BodyMaxBytes && (e.cfg.BodyInspection != BodyAuto || e.body.confirmed()) {
 		return false, whyOverCap
 	}
 	if !e.body.want() {
