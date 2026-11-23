@@ -11,8 +11,33 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// skipSidecarClientOnWindows skips a test of the Linux-only scanner sidecar's
+// client. Off Linux the client refuses before it asks a worker, so the test
+// would pass or fail for another reason than the one it pins
+// (TestRemoteScannerRefusesEveryScanOnWindows pins the Windows refusal).
+func skipSidecarClientOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the scanner sidecar client is Linux only: it refuses every folder on Windows (GAP-1050)")
+	}
+}
+
+// shortSocketDir is a new folder with a short path for a unix socket: a
+// socket path over 108 characters fails to bind on Windows, and t.TempDir
+// under a standard user's TMP is longer.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dcrs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
 
 func forgedRemoteServer(t *testing.T, dir string) {
 	t.Helper()
@@ -37,6 +62,7 @@ func remoteTarget(t *testing.T) string {
 }
 
 func TestRemoteScannerRefusesAnswerWithoutJob(t *testing.T) {
+	skipSidecarClientOnWindows(t)
 	dir := t.TempDir()
 	forgedRemoteServer(t, dir)
 	res, err := (&RemoteScanner{Kind: RemoteKindSkill, Dir: dir}).Scan(context.Background(), remoteTarget(t))
@@ -46,6 +72,7 @@ func TestRemoteScannerRefusesAnswerWithoutJob(t *testing.T) {
 }
 
 func TestRemoteScannerRefusesLinkedJobsFolder(t *testing.T) {
+	skipSidecarClientOnWindows(t)
 	dir := t.TempDir()
 	forgedRemoteServer(t, dir)
 	outside := t.TempDir()

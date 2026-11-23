@@ -18,7 +18,7 @@ import (
 // a result: the fail mode decides. The scanworker and cli sidecar tests skip
 // on Windows for this reason (GAP-1050).
 func TestRemoteScannerRefusesEveryScanOnWindows(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	forgedRemoteServer(t, dir)
 	res, err := (&RemoteScanner{Kind: RemoteKindSkill, Dir: dir}).Scan(context.Background(), remoteTarget(t))
 	if res != nil || err == nil || !strings.Contains(err.Error(), "is not a private folder of this user") {

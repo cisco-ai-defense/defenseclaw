@@ -48,8 +48,8 @@ func startWorker(t *testing.T, w *Worker) string {
 // container; processutil.PodRunner refuses everywhere else, see
 // TestGAP1035PodRunnerRefusesOffLinux), and the client refuses every Windows
 // folder because Windows reports mode 0777 for all of them
-// (scanner.TestRemoteScannerRefusesEveryScanOnWindows). The worker's own
-// handler tests above and below run on Windows.
+// (scanner.TestRemoteScannerRefusesEveryScanOnWindows). The tests that post to
+// the worker's handler directly still run on Windows.
 func skipSidecarClientOnWindows(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -82,6 +82,9 @@ func TestScanWorkerRefusesLinkInJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("/etc/passwd", filepath.Join(jd, "SKILL.md")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("a standard Windows user holds no symbolic-link privilege: %v", err)
+		}
 		t.Fatal(err)
 	}
 	ans := post(t, dir, scanner.RemoteScanRequest{Job: job, Kind: "skill"})
