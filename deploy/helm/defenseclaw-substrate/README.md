@@ -176,8 +176,10 @@ Known limits in 1.0.10:
   rollback as a revision in status pending-rollback (it writes the revision before it runs the hook), and every later
   `helm upgrade` fails with another operation in progress. Clear it with `helm -n NAMESPACE rollback RELEASE N`, where N is the
   revision `helm -n NAMESPACE history RELEASE` shows as deployed: that release passes the check and nothing changes. Every failed
-  pre-rollback hook says this too. helm prints only that the hook failed; the refusal, with these steps, is in
-  `kubectl logs job/defenseclaw-pre-rollback`.
+  pre-rollback hook says this too. If the store-state ConfigMap itself cannot be parsed, every rollback fails the same
+  way, so repair it first (`kubectl -n NAMESPACE edit configmap defenseclaw-store-state`: set `schema_version` to the
+  schema the store is at, or delete the ConfigMap and the leader writes a new one), then clear the revision. helm prints only that the hook failed; the refusal, with these steps, is in
+  `kubectl -n NAMESPACE logs job/defenseclaw-pre-rollback`.
 - Outside managed mode every pod (gateway, leader, controller, callout) runs a root init container, `substrate-datadir`,
   with only `CHOWN` and `FOWNER`. A namespace that enforces the Pod Security `restricted` level, or OpenShift's
   `restricted` SCC, refuses those pods: on an upgrade from a chart without it, `helm upgrade` stalls with the old pods

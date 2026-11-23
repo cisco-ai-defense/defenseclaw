@@ -34,8 +34,8 @@ import (
 // the host and maps to the reviewed 3000.11.3 hook surface in a sandbox
 // (substrateReviewedBuilds). Move this pin, the kit pin (internal/substrate/kit
 // agentpin.go) and substrateReviewedBuilds together when Devin retires it;
-// TestDevinPinReachable (DEFENSECLAW_PIN_REACHABILITY=1) catches that before a
-// release.
+// TestPinnedArchivesAreReachable (DEFENSECLAW_PIN_REACHABILITY=1) catches that
+// before a release.
 var devinPin = tarballPin{
 	Version: "3000.14.30821",
 	Archives: map[string]tarballArchive{

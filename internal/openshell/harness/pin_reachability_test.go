@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -25,8 +26,10 @@ const pinReachabilityEnv = "DEFENSECLAW_PIN_REACHABILITY"
 // kit pin 3000.12.57 both answered 403 while every unit test passed, so no
 // sandbox or actor base image could be built (GAP-0651, GAP-0462). The check
 // skips when DEFENSECLAW_PIN_REACHABILITY is not 1 and when the vendor host
-// cannot be reached at all (an offline runner), and fails on any answer other
-// than 200.
+// cannot be reached at all (an offline runner: the name does not resolve, the
+// network or host is unreachable, or the connection never opens before the
+// timeout), printing the reason, and fails on any other error (a refused
+// connection, a reset, a TLS failure) and on any answer other than 200.
 func TestPinnedArchivesAreReachable(t *testing.T) {
 	if os.Getenv(pinReachabilityEnv) != "1" {
 		t.Skipf("set %s=1 to check that every pinned vendor archive is still served", pinReachabilityEnv)
@@ -53,10 +56,8 @@ func TestPinnedArchivesAreReachable(t *testing.T) {
 					}
 					resp, err := client.Do(req)
 					if err != nil {
-						var netErr net.Error
-						var dnsErr *net.DNSError
-						if errors.As(err, &dnsErr) || (errors.As(err, &netErr) && !netErr.Timeout()) {
-							t.Skipf("vendor host not reachable from this runner: %v", err)
+						if networkUnreachable(err) {
+							t.Skipf("no network path to the vendor host from this runner: %v", err)
 						}
 						t.Fatalf("HEAD %s: %v", url, err)
 					}
@@ -68,4 +69,21 @@ func TestPinnedArchivesAreReachable(t *testing.T) {
 			}
 		}
 	}
+}
+
+// networkUnreachable is true only for an error that says this runner has no
+// network path to the vendor: the name does not resolve, the network or the host
+// is unreachable, or the connection never opened before the timeout. A refused
+// connection, a reset or a TLS failure means the vendor answered badly, which
+// is what this check exists to catch, so those are not unreachable (GAP-0915).
+func networkUnreachable(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial" && opErr.Timeout()
 }
