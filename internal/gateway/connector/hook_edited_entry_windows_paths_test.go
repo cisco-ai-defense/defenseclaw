@@ -183,8 +183,11 @@ func TestGAP1923KiroSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 			if len(removeKiroOwnedV2Hooks([]interface{}{map[string]interface{}{"command": command}}, hookScript)) != 1 {
 				t.Errorf("%s %s: the Kiro agent removal pass claimed %q", surface, name, command)
 			}
+			// A v3 command that names kiro-hook.sh anywhere is DefenseClaw's
+			// already (kiroCommandOwned, as in rel/1.0.10), so only the kept
+			// commands without that name apply to the v3 pass.
 			v3 := map[string]interface{}{"name": "user", "action": map[string]interface{}{"type": "command", "command": command}}
-			if kiroOwnedV3Hook(v3, hookScript) {
+			if !strings.Contains(command, kiroHookScriptName) && kiroOwnedV3Hook(v3, hookScript) {
 				t.Errorf("%s %s: the Kiro v3 removal pass claimed %q", surface, name, command)
 			}
 		}
