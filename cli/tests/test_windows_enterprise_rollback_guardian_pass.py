@@ -44,7 +44,8 @@ $real = @('Repair-DefenseClawRecoveredCodexRequirements', 'Read-DefenseClawSmall
     'Get-DefenseClawPlainFileSha256', 'Get-DefenseClawOptionalLayoutValue',
     'Restore-DefenseClawSnapshotHookAfterActivation', 'Get-DefenseClawEarlyHookField')
 # Present only with the fix; the cases judge behavior, not names.
-$optional = @('Test-DefenseClawCodexRequirementsOwnPublication', 'Complete-DefenseClawRestoredHookGuardianPass')
+$optional = @('Test-DefenseClawCodexRequirementsOwnPublication', 'Complete-DefenseClawRestoredHookGuardianPass',
+    'Invoke-DefenseClawRestoredHookGuardianReconcile', 'Start-DefenseClawRestoredGuardianAgain')
 foreach ($name in @($real + $optional)) {
     $definition = $ast.Find({
         param($node)
@@ -93,6 +94,9 @@ function Wait-DefenseClawFreshGuardianReconcile {
     $script:calls.Add("guardian-wait-$GuardianServiceName-$([bool]$AllowFailedTargets)")
 }
 function Start-DefenseClawService { param($Name) $script:calls.Add("start-$Name") }
+# GAP-2017: the pass restarts only a running guardian that can start again.
+function Get-DefenseClawServiceChecked { param($Name) [pscustomobject]@{ Name = $Name; Status = 'Running' } }
+function Get-DefenseClawServiceStartMode { param($Name) 2 }
 function Test-DefenseClawRollbackHeldMessage { param($Message) $false }
 function Add-DefenseClawRollbackDeferredHold { param($Message) $script:calls.Add('held') }
 

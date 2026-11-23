@@ -30019,27 +30019,10 @@ function Complete-DefenseClawRestoredHookGuardianPass {
     }
     $gatewayServiceName = [string]$Snapshot.gateway_service
     $guardianServiceName = [string]$Snapshot.guardian_service
-    Write-DefenseClawLifecyclePhase -Stage 'guardian reconcile with the restored hook'
-    try {
-        [void](Wait-DefenseClawFreshGuardianReconcile `
-            -Layout $Layout `
-            -GatewayServiceName $gatewayServiceName `
-            -GuardianServiceName $guardianServiceName `
-            -AllowFailedTargets)
-    }
-    catch {
-        $reason = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$_.Exception.Message) -MaxLength 512
-        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
-            subsystem = 'guardian'
-            reason    = "the restored guardian did not finish a reconcile with the restored hook, so coverage is reported as it last published it: $reason"
-        }
-        try {
-            Start-DefenseClawService -Name $guardianServiceName
-        }
-        catch {
-            $null = $_
-        }
-    }
+    Invoke-DefenseClawRestoredHookGuardianReconcile `
+        -Layout $Layout `
+        -GatewayServiceName $gatewayServiceName `
+        -GuardianServiceName $guardianServiceName
     if (-not $script:DefenseClawRollbackCodexVerifyDeferred) {
         return
     }
@@ -30060,6 +30043,93 @@ function Complete-DefenseClawRestoredHookGuardianPass {
         Add-DefenseClawRollbackDeferredHold -Message ([string]$_.Exception.Message)
     }
 }
+
+function Invoke-DefenseClawRestoredHookGuardianReconcile {
+    <#
+        GAP-2017: the GAP-2012 pass restarts only a guardian that is running
+        and can be started again. One the rollback left stopped (its recorded
+        state) stays stopped, and one that runs with a disabled start mode
+        keeps running: its own next pass picks up the restored hook. A pass
+        that fails leaves the guardian running
+        (Start-DefenseClawRestoredGuardianAgain) or fails the rollback; it
+        never ends with the guardian it stopped still down.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $guardian = Get-DefenseClawServiceChecked -Name $GuardianServiceName
+    if ($null -eq $guardian -or
+        $guardian.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+        Write-DefenseClawLifecyclePhase -Stage 'guardian reconcile with the restored hook skipped (the guardian is stopped as recorded)'
+    }
+    elseif ((Get-DefenseClawServiceStartMode -Name $GuardianServiceName) -eq 4) {
+        # A disabled service cannot be started again once stopped.
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'guardian'
+            reason    = 'the restored guardian runs with a disabled start mode, so it is not restarted for the restored hook; coverage is reported as it last published it until its next pass'
+        }
+    }
+    else {
+        Write-DefenseClawLifecyclePhase -Stage 'guardian reconcile with the restored hook'
+        try {
+            [void](Wait-DefenseClawFreshGuardianReconcile `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -AllowFailedTargets)
+        }
+        catch {
+            $reason = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$_.Exception.Message) -MaxLength 512
+            Start-DefenseClawRestoredGuardianAgain -Name $GuardianServiceName -PassFailure $reason
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'guardian'
+                reason    = "the restored guardian did not finish a reconcile with the restored hook, so coverage is reported as it last published it: $reason"
+            }
+        }
+    }
+}
+
+function Start-DefenseClawRestoredGuardianAgain {
+    <#
+        GAP-2017: the restored guardian was running before its reconcile with
+        the restored hook stopped it, and that pass failed. The guardian is
+        started again, up to $script:RestoredGuardianStartAttempts times, and
+        must still be running a moment later. If it is not, the rollback fails
+        here, naming both failures, so the run reports the deployment as not
+        protected instead of ending with the guardian stopped.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PassFailure
+    )
+    $startFailure = ''
+    for ($attempt = 1; $attempt -le $script:RestoredGuardianStartAttempts; $attempt++) {
+        try {
+            Start-DefenseClawService -Name $Name
+            $startFailure = ''
+        }
+        catch {
+            $startFailure = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$_.Exception.Message) -MaxLength 512
+        }
+        if ($startFailure -ceq '') {
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:RestoredGuardianSettleMilliseconds
+            $service = Get-DefenseClawServiceChecked -Name $Name
+            if ($null -ne $service -and
+                $service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running) {
+                return
+            }
+            $startFailure = 'it started and then stopped'
+        }
+    }
+    throw "the rollback stopped the restored guardian $Name for its reconcile with the restored hook ($PassFailure) and it did not start again after $($script:RestoredGuardianStartAttempts) attempts ($startFailure). The deployment is not protected; inspect the guardian log, then run $(Format-DefenseClawSetupAction -Action '/ensure')."
+}
+
+# GAP-2017: starts of a restored guardian whose reconcile with the restored
+# hook failed, and how long each must stay running.
+$script:RestoredGuardianStartAttempts = 3
+$script:RestoredGuardianSettleMilliseconds = 2000
 
 function Recover-DefenseClawQuiescingIntent {
     param(
