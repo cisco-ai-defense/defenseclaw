@@ -17,6 +17,7 @@
 package config
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -83,7 +84,7 @@ func TestGAP0437SubstrateBundlesOCIValidate(t *testing.T) {
 		t.Fatalf("SubstrateBundleOCIConfig yaml keys = %v, schema = %v", got, want)
 	}
 	ref := "registry.example.com/policy/prod@sha256:" + strings.Repeat("ab", 32)
-	good := SubstrateBundleOCIConfig{Enabled: true, CAFile: "/etc/ca.pem", Timeout: "45s",
+	good := SubstrateBundleOCIConfig{Enabled: true, CAFile: filepath.Join(t.TempDir(), "ca.pem"), Timeout: "45s",
 		Stages: []SubstrateBundleOCIStage{{Stage: "prod", Ref: ref, Atespaces: []string{"team-a"}}}}
 	s := SubstrateConfig{Bundles: SubstrateBundlesConfig{OCI: good}}
 	if err := s.Validate(); err != nil {
