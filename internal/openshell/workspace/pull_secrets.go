@@ -356,7 +356,6 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 	return nil
 }
 
-// lsTree lists the entries of paths in commit.
 // streamHasPlaceholder reports whether the blob holds DC_SECRET_, read in
 // pieces so a file over the scan cap is not held in memory.
 func streamHasPlaceholder(ctx context.Context, g gitCmd, oid string) (bool, error) {
@@ -402,6 +401,7 @@ func streamHasPlaceholder(ctx context.Context, g gitCmd, oid string) (bool, erro
 	return false, werr
 }
 
+// lsTree lists the entries of paths in commit.
 func lsTree(ctx context.Context, g gitCmd, commit string, paths []string) (map[string]idxEntry, error) {
 	out := map[string]idxEntry{}
 	if len(paths) == 0 {

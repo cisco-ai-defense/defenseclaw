@@ -740,6 +740,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             ),
             _Flag("ref", "string", "with --clone, the branch, tag or commit", metavar="REF"),
             _Flag(
+                "remote-dir",
+                "string",
+                "where in the agent to put the copy (default: the image's working folder)",
+                hidden=True,
+            ),
+            _Flag(
                 "secret",
                 "stringArray",
                 "a secret name the agent may use, as listed by secrets list (repeatable)",
@@ -844,6 +850,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true", hidden=True),
             _Flag("yes", "bool", "do not ask", short="y"),
         ),
     ),
@@ -873,6 +880,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("from-keychain", "string", "read the value from this macOS keychain item (its service name)"),
             _Flag("from-op", "string", "read the value from 1Password (op://vault/item/field)"),
             _Flag("gh-host", "string", "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true", hidden=True),
             _Flag("stdin", "bool", "read the value from standard input"),
         ),
     ),
@@ -897,6 +905,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("agent", "string", "also say whether this agent's policy carries the secret"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true", hidden=True),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
         ),
     ),
@@ -1406,6 +1415,7 @@ def _option(flag: _Flag) -> GatewayOption:
         type=click.STRING,
         metavar=flag.metavar or None,
         help=flag.help,
+        hidden=flag.hidden,
     )
 
 

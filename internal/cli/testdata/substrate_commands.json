@@ -1092,6 +1092,12 @@
         "metavar": "REF"
       },
       {
+        "name": "remote-dir",
+        "type": "string",
+        "usage": "where in the agent to put the copy (default: the image's working folder)",
+        "hidden": true
+      },
+      {
         "name": "secret",
         "type": "stringArray",
         "default": "[]",
@@ -1293,6 +1299,13 @@
         "metavar": "NAME"
       },
       {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)",
+        "hidden": true
+      },
+      {
         "name": "yes",
         "shorthand": "y",
         "type": "bool",
@@ -1357,6 +1370,13 @@
         "usage": "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"
       },
       {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)",
+        "hidden": true
+      },
+      {
         "name": "stdin",
         "type": "bool",
         "default": "false",
@@ -1419,6 +1439,13 @@
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
+      },
+      {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)",
+        "hidden": true
       },
       {
         "name": "output",

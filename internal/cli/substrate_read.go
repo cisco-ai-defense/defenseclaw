@@ -799,8 +799,9 @@ func newSubstrateSecretsSetCmd() *cobra.Command {
 	}
 	com.add(cmd)
 	src.add(cmd)
-	// A no-op kept so older scripts that pass it still run; hidden from help,
-	// docs and the TUI (GAP-0786), and the stub manifest skips hidden flags.
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
@@ -841,8 +842,9 @@ func newSubstrateSecretsRmCmd() *cobra.Command {
 	}
 	com.add(cmd)
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
-	// A no-op kept so older scripts that pass it still run; hidden from help,
-	// docs and the TUI (GAP-0786), and the stub manifest skips hidden flags.
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
@@ -891,8 +893,9 @@ func newSubstrateSecretsTestCmd() *cobra.Command {
 	out.add(cmd)
 	com.add(cmd)
 	cmd.Flags().StringVar(&agent, "agent", "", "also say whether this agent's policy carries the secret")
-	// A no-op kept so older scripts that pass it still run; hidden from help,
-	// docs and the TUI (GAP-0786), and the stub manifest skips hidden flags.
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	_ = cmd.Flags().MarkHidden("mine")
 	return cmd

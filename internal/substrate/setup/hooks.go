@@ -71,9 +71,11 @@ type ConfigMap struct {
 	Name            string
 	ResourceVersion string
 	Data            map[string]string
-	// Annotations are carried through an update, so a write keeps what
-	// other tools (and GrantedUserSecretsAnnotation) recorded on the object.
+	// Annotations and Labels are carried through an update, so a write keeps
+	// what other tools (and GrantedUserSecretsAnnotation) recorded on the
+	// object (GAP-0909 added the labels: the PUT replaces the whole object).
 	Annotations map[string]string
+	Labels      map[string]string
 }
 
 // GrantedUserSecretsAnnotation records, on the credential provider policy

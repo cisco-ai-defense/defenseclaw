@@ -62,6 +62,8 @@ def render_flag(flag: dict, indent: int) -> str:
         parts.append("default=" + repr(default))
     if flag.get("metavar"):
         parts.append("metavar=" + repr(flag["metavar"]))
+    if flag.get("hidden"):
+        parts.append("hidden=True")
     return " " * indent + "_Flag(" + ", ".join(parts) + "),"
 
 
@@ -194,6 +196,7 @@ def _option(flag: _Flag) -> GatewayOption:
         type=click.STRING,
         metavar=flag.metavar or None,
         help=flag.help,
+        hidden=flag.hidden,
     )
 
 

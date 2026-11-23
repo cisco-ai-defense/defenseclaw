@@ -58,6 +58,9 @@ type substrateManifestFlagJ struct {
 	Default   string `json:"default,omitempty"`
 	Usage     string `json:"usage"`
 	Metavar   string `json:"metavar,omitempty"`
+	// Hidden flags are kept out of help and docs but still accepted; the stubs
+	// declare them hidden (GAP-0904).
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 // substrateUseArgs reads the positional arguments from a Use line:
@@ -100,12 +103,12 @@ func substrateManifest(root *cobra.Command) []substrateManifestCommand {
 				Args:        substrateUseArgs(sub.Use),
 			}
 			sub.Flags().VisitAll(func(f *pflag.Flag) {
-				if f.Name == "help" || f.Hidden {
+				if f.Name == "help" {
 					return
 				}
 				m.Flags = append(m.Flags, substrateManifestFlagJ{
 					Name: f.Name, Shorthand: f.Shorthand, Type: f.Value.Type(), Default: f.DefValue, Usage: f.Usage,
-					Metavar: flagMetavar(f.Name),
+					Metavar: flagMetavar(f.Name), Hidden: f.Hidden,
 				})
 			})
 			sort.Slice(m.Flags, func(i, j int) bool { return m.Flags[i].Name < m.Flags[j].Name })
