@@ -35,3 +35,27 @@ func TestRedactURLQueryCredentialsForCompatibilityJSONEscapedSeparators(t *testi
 		t.Fatalf("JSON-escaped signed URL credential remained in compatibility projection: %q", got)
 	}
 }
+func TestRedactURLQueryCredentialsForCompatibilityJSONEscapedSlashes(t *testing.T) {
+	const signature = "fixture-signature-value"
+	input := `{"detail":"https:\/\/example.test\/a?sig=` + signature + `"}`
+	got := RedactURLQueryCredentialsForCompatibility(input)
+	want := `{"detail":"https:\/\/example.test\/a?sig=<redacted len=23 prefix="f" sha=b27f9371>"}`
+	if got != want {
+		t.Fatalf("JSON compatibility projection = %q, want %q", got, want)
+	}
+	if strings.Contains(got, signature) {
+		t.Fatalf("JSON-escaped signed URL credential remained in compatibility projection: %q", got)
+	}
+}
+
+func TestRedactURLQueryCredentialsForCompatibilityJSONEscapedBackslashPair(t *testing.T) {
+	input := `{"detail":"https://example.test/a?password=prefix\\u0026safe=private-password-suffix"}`
+	got := RedactURLQueryCredentialsForCompatibility(input)
+	want := `{"detail":"https://example.test/a?password=<redacted len=41 prefix="p" sha=712b842a>"}`
+	if got != want {
+		t.Fatalf("JSON compatibility projection = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "private-password-suffix") {
+		t.Fatalf("escaped backslash pair left a credential suffix in compatibility projection: %q", got)
+	}
+}

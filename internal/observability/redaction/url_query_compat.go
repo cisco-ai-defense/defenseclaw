@@ -16,7 +16,7 @@ import (
 // the observability detector's key allowlist so signed-URL handling cannot
 // drift. Recognition failures fail closed by redacting the whole content.
 func RedactURLQueryCredentialsForCompatibility(input string) string {
-	recognized, boundaries := normalizeJSONEscapedQuerySeparators(input)
+	recognized, boundaries := normalizeJSONEscapedURLSyntax(input)
 	candidates, err := recognize("secrets.url_query", recognized, observability.FieldClassContent, nil)
 	if err != nil {
 		return legacyredaction.ForSinkMessageContent(input)
@@ -49,15 +49,27 @@ func RedactURLQueryCredentialsForCompatibility(input string) string {
 	return output.String()
 }
 
-// normalizeJSONEscapedQuerySeparators exposes ampersand and semicolon query
-// separators encoded inside JSON string values to the canonical recognizer.
+// normalizeJSONEscapedURLSyntax exposes slash, ampersand, and semicolon
+// URL syntax encoded inside JSON string values to the canonical recognizer.
 // boundaries maps every normalized byte boundary back to its original input
 // boundary so only credential values are replaced in the source text.
-func normalizeJSONEscapedQuerySeparators(input string) (string, []int) {
+func normalizeJSONEscapedURLSyntax(input string) (string, []int) {
 	var normalized strings.Builder
 	normalized.Grow(len(input))
 	boundaries := make([]int, 1, len(input)+1)
 	for index := 0; index < len(input); {
+		if index+2 <= len(input) && input[index] == '\\' && input[index+1] == '\\' {
+			normalized.WriteString(input[index : index+2])
+			index += 2
+			boundaries = append(boundaries, index-1, index)
+			continue
+		}
+		if index+2 <= len(input) && input[index] == '\\' && input[index+1] == '/' {
+			normalized.WriteByte('/')
+			index += 2
+			boundaries = append(boundaries, index)
+			continue
+		}
 		if index+6 <= len(input) && input[index] == '\\' && input[index+1] == 'u' {
 			escape := strings.ToLower(input[index+2 : index+6])
 			if escape == "0026" || escape == "003b" {
