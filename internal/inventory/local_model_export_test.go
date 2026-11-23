@@ -57,6 +57,21 @@ func TestLocalModelExportIDCapsAtRuneBoundary(t *testing.T) {
 	}
 }
 
+func TestLocalModelKeyHashesTheCompleteID(t *testing.T) {
+	prefix := strings.Repeat("a", 512)
+	first, second := LocalModelKey("huggingface", prefix+"-one"), LocalModelKey("huggingface", prefix+"-two")
+	if first == "" || first == second {
+		t.Fatalf("IDs that differ past the export cap share key %q", first)
+	}
+	if LocalModelExportID(prefix+"-one") != LocalModelExportID(prefix+"-two") {
+		t.Fatal("the exported ID is still capped at 512 bytes")
+	}
+	sum := sha256.Sum256([]byte("ai-discovery/model-key/v1\x00huggingface\x00" + prefix + "-one"))
+	if want := "mdl_" + hex.EncodeToString(sum[:]); first != want {
+		t.Fatalf("LocalModelKey=%q want the hash of the complete ID %q", first, want)
+	}
+}
+
 func TestNormalizeLocalModelProvider(t *testing.T) {
 	cases := map[string]string{
 		"":                "",

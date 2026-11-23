@@ -254,27 +254,19 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	managedSnapshot := ManagedEnterpriseActive()
-	// The publish decision is computed before the summary so the Secure Client
-	// summary can state whether this scan's snapshot ships and how many
-	// local_model records it carries. Resolving it has no emission side effect.
 	signalsPublish, signalsCycle, signalsDigest := adapter.resolveSignalsPublish(managedSnapshot, report)
-	var snapshot *aiDiscoveryV8SnapshotSummary
-	if adapter.secureClient {
-		snapshot = &aiDiscoveryV8SnapshotSummary{published: managedSnapshot && signalsPublish}
-		for _, signal := range report.Signals {
-			if signal.Category == inventory.SignalLocalModel &&
-				aiDiscoveryV8EmitsSignal(signal, managedSnapshot, signalsPublish) {
-				snapshot.localModelSignals++
-			}
-		}
-		if !snapshot.published {
-			snapshot.localModelSignals = 0
-		}
-	}
 	// The per-scan summary is the liveness signal ("device alive, inventory
 	// unchanged, total = N") and stays unconditional in every mode, including a
-	// fully suppressed managed cycle.
-	logErr := adapter.emitSummaryLog(ctx, report.Summary, snapshot)
+	// fully suppressed managed cycle. Other modes emit it first, as before.
+	// Secure Client emits it after the signal loop: its snapshot fields state
+	// whether every signal of this scan reached the managed destination and how
+	// many local_model records did, and AI Defense removes models only after a
+	// complete, published scan, so the fields must come from record outcomes.
+	var logErr error
+	if !adapter.secureClient {
+		logErr = adapter.emitSummaryLog(ctx, report.Summary, nil)
+	}
+	var acceptedLocalModels int64
 	signalsErr := false
 	ownerEmails := standaloneOwnerEmailObservations(report.Signals)
 	for i, signal := range report.Signals {
@@ -291,7 +283,8 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 			// so the outcome — not the error — is what says whether the managed
 			// destination actually received this record. See
 			// managedInventoryPublishRejected.
-			if managedInventoryPublishRejected(outcome) {
+			rejected := managedInventoryPublishRejected(outcome)
+			if rejected {
 				signalsErr = true
 			}
 			if err != nil {
@@ -300,6 +293,9 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 					logErr = err
 				}
 			}
+			if !rejected && err == nil && signal.Category == inventory.SignalLocalModel {
+				acceptedLocalModels++
+			}
 		}
 		if ownerEmails[i] {
 			observed := signal
@@ -307,6 +303,17 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 			if _, err := adapter.emitSignalLog(ctx, report.Summary, observed); err != nil && logErr == nil {
 				logErr = err
 			}
+		}
+	}
+	if adapter.secureClient {
+		// A rejected or failed record means this scan did not send every current
+		// signal: the snapshot is not published and no removals may follow.
+		snapshot := &aiDiscoveryV8SnapshotSummary{published: managedSnapshot && signalsPublish && !signalsErr}
+		if snapshot.published {
+			snapshot.localModelSignals = acceptedLocalModels
+		}
+		if err := adapter.emitSummaryLog(ctx, report.Summary, snapshot); err != nil && logErr == nil {
+			logErr = err
 		}
 	}
 	if signalsPublish && signalsCycle != nil {

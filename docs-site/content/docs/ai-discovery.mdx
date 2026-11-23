@@ -1148,12 +1148,19 @@ OSS per-user and standalone managed (including MDM) records are unchanged.
 | `defenseclaw.ai.model.relevance` | `primary`, `supporting`, `embedded` (inside a browser, conferencing app, app bundle or cache) or `unknown` |
 
 The Secure Client `ai.discovery.completed` summary also carries
-`defenseclaw.ai.discovery.snapshot_published` (this scan sent every current
-signal as `ai_component.observed`) and
-`defenseclaw.ai.discovery.local_model_signals` (how many `local_model` records
-it sent, `0` when the snapshot was not published). Together with `scan_id` and
-`result`, AI Defense uses them to remove a model only after a complete,
-published snapshot no longer contains it.
+`defenseclaw.ai.discovery.snapshot_published` and
+`defenseclaw.ai.discovery.local_model_signals`. Secure Client emits this summary
+after the scan's records, and both fields come from what was actually sent:
+`snapshot_published` is `true` only when the scan published its snapshot and the
+managed destination accepted every current signal as `ai_component.observed`. A
+rejected or failed record makes it `false`. `local_model_signals` counts the
+accepted `local_model` records and is `0` when the snapshot was not published.
+Together with `scan_id` and `result`, AI Defense uses them to remove a model
+only after a complete, published snapshot no longer contains it.
+
+The model key hashes the complete model ID. Only the exported
+`defenseclaw.ai.model.id` is capped at 512 bytes, so two IDs that differ only
+past the cap keep different keys.
 
 ### Splunk: AI Discovery Inventory
 

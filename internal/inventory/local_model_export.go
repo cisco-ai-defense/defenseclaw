@@ -156,10 +156,9 @@ func NormalizeLocalModelStatus(status string) string {
 	}
 }
 
-// normalizeLocalModelExportID trims the model ID, rejects control characters
-// and caps it at 512 bytes on a rune boundary. It returns empty when nothing
-// usable remains.
-func normalizeLocalModelExportID(id string) string {
+// validLocalModelID trims the model ID and rejects invalid UTF-8 and control
+// characters. It returns the complete ID, uncapped, or empty.
+func validLocalModelID(id string) string {
 	value := strings.TrimSpace(id)
 	if value == "" || !utf8.ValidString(value) {
 		return ""
@@ -169,7 +168,13 @@ func normalizeLocalModelExportID(id string) string {
 			return ""
 		}
 	}
-	return truncateUTF8(value, maxExportedModelIDBytes)
+	return value
+}
+
+// normalizeLocalModelExportID returns the valid model ID capped at 512 bytes
+// on a rune boundary for export, or empty when nothing usable remains.
+func normalizeLocalModelExportID(id string) string {
+	return truncateUTF8(validLocalModelID(id), maxExportedModelIDBytes)
 }
 
 // LocalModelExportID returns the model ID as it is exported, or empty.
@@ -194,9 +199,11 @@ func LocalModelExportOwner(owner string) string {
 // of a versioned label, the normalized provider and the model ID. It depends
 // on neither a path nor the gateway token, so a moved model, a reinstall or a
 // purge keeps the key, and the same model found by a file and by a loopback
-// API gets one key. It returns empty when the model ID is empty.
+// API gets one key. The hash covers the complete ID, not the 512-byte export
+// cap, so IDs that differ only past the cap get different keys. It returns
+// empty when the model ID is empty.
 func LocalModelKey(provider, id string) string {
-	modelID := normalizeLocalModelExportID(id)
+	modelID := validLocalModelID(id)
 	if modelID == "" {
 		return ""
 	}

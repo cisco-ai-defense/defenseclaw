@@ -4,13 +4,18 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 )
 
 // Spec 016: only the Secure Client profile exports local model identity and
@@ -197,6 +202,55 @@ func TestSecureClientSuppressedSnapshotReportsZero(t *testing.T) {
 	_, summary := localModelRecordsByComponent(t, capture.snapshot())
 	if counts := managedGateScanCounts(capture.snapshot()); counts["ai_component.observed"] != 0 {
 		t.Fatalf("steady state republished: %v", counts)
+	}
+	if summary[observability.TelemetryAttributeDefenseClawAIDiscoverySnapshotPublished] != false {
+		t.Errorf("snapshot_published=%v want false", summary[observability.TelemetryAttributeDefenseClawAIDiscoverySnapshotPublished])
+	}
+	if got := numberValue(summary[observability.TelemetryAttributeDefenseClawAIDiscoveryLocalModelSignals]); got != 0 {
+		t.Errorf("local_model_signals=%v want 0", got)
+	}
+}
+
+// failingFirstEmitCapture fails the first record it is asked to emit and
+// captures the rest, standing in for a managed destination that rejects one
+// record of the snapshot.
+type failingFirstEmitCapture struct {
+	*endpointInventoryCapture
+	calls int
+}
+
+func (capture *failingFirstEmitCapture) Emit(
+	ctx context.Context,
+	metadata router.Metadata,
+	build observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	capture.calls++
+	if capture.calls == 1 {
+		return pipeline.LocalLogOutcome{}, errors.New("managed destination rejected the record")
+	}
+	return capture.endpointInventoryCapture.Emit(ctx, metadata, build)
+}
+
+// TestSecureClientRejectedRecordUnpublishesSnapshot: the Secure Client summary
+// is emitted after the records and reflects their outcomes, so a scan in which
+// one record was not sent never claims a complete, published snapshot.
+func TestSecureClientRejectedRecordUnpublishesSnapshot(t *testing.T) {
+	withManagedEnterprise(t, true)
+	capture := &failingFirstEmitCapture{endpointInventoryCapture: &endpointInventoryCapture{}}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture, publishGate: managedPublishTestState(t), secureClient: true}
+	if err := adapter.EmitReport(t.Context(), localModelExportReport("scan-sc-reject", inventory.AIStateNew), nil); err == nil {
+		t.Fatal("EmitReport returned nil after a record failed")
+	}
+	records := capture.snapshot()
+	byID, summary := localModelRecordsByComponent(t, records)
+	if summary == nil {
+		t.Fatal("summary was not emitted after a failed record")
+	}
+	if _, ok := byID["model_file_ollama"]; ok {
+		t.Fatal("the failed record was captured")
+	}
+	if records[len(records)-1].EventName() != "ai.discovery.completed" {
+		t.Errorf("Secure Client summary is not the last record: %s", records[len(records)-1].EventName())
 	}
 	if summary[observability.TelemetryAttributeDefenseClawAIDiscoverySnapshotPublished] != false {
 		t.Errorf("snapshot_published=%v want false", summary[observability.TelemetryAttributeDefenseClawAIDiscoverySnapshotPublished])
