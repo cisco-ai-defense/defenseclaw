@@ -13,6 +13,7 @@ apply-target
 approvals
 approve
 aside
+bind
 block
 block-at
 block-message
@@ -179,6 +180,8 @@ registry
 reject
 rejected
 remove
+rename
+replace
 require
 reset
 resolve-writes
@@ -248,6 +251,7 @@ validate-pack
 validate-service-config
 value
 variable
+vault
 versions
 watch
 watch-transaction
