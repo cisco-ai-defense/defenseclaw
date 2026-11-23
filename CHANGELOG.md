@@ -67,6 +67,8 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - A standalone reinstall keeps the shared hook files' owner when Intune or an administrator edited `requirements.toml` or `90-defenseclaw.json`, instead of failing with error 1603.
 - Setup no longer fails with error 1603 when an administrator has already placed a Codex `requirements.toml` on the machine with no DefenseClaw settings in it. A DefenseClaw section without its lock is still refused.
 - On a managed standalone Windows install, upgrading an older config that names the strict or permissive rule pack DefenseClaw ships keeps that pack as the preset, instead of treating it as a custom pack that needs a digest.
+- On a managed Windows machine the Hook Guardian no longer keeps about one CPU core busy while idle: a check that finds nothing changed renders the Claude Code machine settings once, not once per earlier hook contract.
+- On a managed Windows machine the hook release protection record is written before a new hook generation is published, so a failed write leaves the previous generation in place instead of one the record does not cover.
 
 #### Routing, budgets and cost
 - A Claude stream that stops before its usage record is charged to budgets as unknown spend, not as its opening token count.
