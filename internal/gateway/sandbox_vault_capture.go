@@ -100,10 +100,14 @@ type sandboxVaultCapture struct {
 	// mode), so its secrets were marked exposed.
 	NotStopped bool
 	// markExposed marks this call's values exposed in the vault, waiting at
-	// most wait for its lock, and writes the vault's pending exposures. Set
-	// only where the vault is owned (never from a relay header); it holds
-	// the values, so it is never logged.
-	markExposed func(wait time.Duration) error
+	// most wait for its lock; applyPending writes the vault's pending
+	// exposures (the retries only). Set only where the vault is owned
+	// (never from a relay header); markExposed holds the values, so it is
+	// never logged.
+	markExposed  func(wait time.Duration) error
+	applyPending func(wait time.Duration) error
+	// retrying: followVaultExposure started this capture's retries.
+	retrying bool
 	// exposeErr: the capture exposed values and could not write the vault
 	// (vault.ErrExposurePending or vault.ErrExposureNotRecorded).
 	exposeErr error
@@ -185,11 +189,10 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 			in.Exposed, in.KnownOnly = true, true
 			again[i] = in
 		}
-		if _, err := store.CaptureAll(again, wait); err != nil {
-			return err
-		}
-		return store.ApplyPendingExposures(wait)
+		_, err := store.CaptureAll(again, wait)
+		return err
 	}
+	out.applyPending = store.ApplyPendingExposures
 	names := map[string]string{}
 	// A store error still returns the values the vault holds (their
 	// exposure is written whatever else failed). When nothing could be
@@ -551,7 +554,7 @@ func (a *APIServer) afterSandboxVaultCapture(ctx context.Context, connectorName 
 // When the exposure could not be recorded, or the retries give up, it is
 // logged and audited.
 func (a *APIServer) followVaultExposure(c *sandboxVaultCapture, cause error) {
-	if c == nil || c.markExposed == nil {
+	if c == nil || c.markExposed == nil || c.retrying {
 		return
 	}
 	pending := errors.Is(cause, vault.ErrExposurePending)
@@ -568,7 +571,8 @@ func (a *APIServer) followVaultExposure(c *sandboxVaultCapture, cause error) {
 		a.alertVaultExposure(ctx, c, exposureGiveUpReason(pending, "retries_busy"))
 		return
 	}
-	mark, delays := c.markExposed, vaultExposureRetryDelays
+	c.retrying = true
+	mark, apply, delays := c.markExposed, c.applyPending, vaultExposureRetryDelays
 	go func() {
 		defer func() { <-vaultExposureRetrySlots }()
 		for _, d := range delays {
@@ -582,6 +586,9 @@ func (a *APIServer) followVaultExposure(c *sandboxVaultCapture, cause error) {
 			case <-t.C:
 			}
 			err := mark(vaultCaptureRetryWait)
+			if err == nil && apply != nil {
+				err = apply(vaultCaptureRetryWait)
+			}
 			if err == nil {
 				return
 			}

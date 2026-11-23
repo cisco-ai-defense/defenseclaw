@@ -42,11 +42,17 @@ import (
 
 const (
 	pendingDirName = "exposed-pending"
-	// MaxPendingExposures bounds the pending exposures waiting for a write.
+	// MaxPendingExposures bounds the pending exposures a capture adds;
+	// maxPendingPerCall bounds what one call writes on the hook path.
 	MaxPendingExposures = 64
-	maxPendingBytes     = 4 << 10
-	pendingVersion      = 1
-	pendingDomain       = "defenseclaw-vault-pending-exposure-v1"
+	maxPendingPerCall   = 16
+	// maxPendingRead: past this many records (concurrent writers can pass
+	// MaxPendingExposures a little) the vault is not read at all: a record
+	// is never skipped.
+	maxPendingRead  = 1024
+	maxPendingBytes = 4 << 10
+	pendingVersion  = 1
+	pendingDomain   = "defenseclaw-vault-pending-exposure-v1"
 	// pendingKeep is how long a record that names no entry is kept for a
 	// value a later capture may store.
 	pendingKeep = 30 * 24 * time.Hour
@@ -106,8 +112,11 @@ func (p *pendingRecord) matches(r *record) bool {
 
 func (s *Store) pendingDir() string { return filepath.Join(s.dir, pendingDirName) }
 
-// readPending returns the pending exposures, oldest first. A record that
-// does not parse is skipped. At most 2*MaxPendingExposures are read.
+// readPending returns the pending exposures, oldest first. It fails
+// closed: a record that cannot be read or does not parse, or more than
+// maxPendingRead of them, is an error (every read of the vault then
+// fails, so no value is handed out past an exposure it skipped). Only a
+// record removed meanwhile is skipped.
 func (s *Store) readPending() ([]*pendingRecord, error) {
 	ents, err := os.ReadDir(s.pendingDir())
 	if errors.Is(err, fs.ErrNotExist) {
@@ -116,27 +125,38 @@ func (s *Store) readPending() ([]*pendingRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the vault's pending exposures: %w", err)
 	}
+	if len(ents) > maxPendingRead {
+		return nil, fmt.Errorf("the vault's pending exposures (%s) hold %d files, more than DefenseClaw reads; "+
+			"rotate the secrets your sandboxes captured, then remove that folder", s.pendingDir(), len(ents))
+	}
 	var out []*pendingRecord
 	for _, e := range ents {
-		if len(out) == 2*MaxPendingExposures {
-			break
-		}
 		name := e.Name()
-		if !strings.HasSuffix(name, ".json") || !e.Type().IsRegular() {
+		if strings.HasPrefix(name, ".") {
+			// safefile's temporary file of a record being written.
 			continue
 		}
 		path := filepath.Join(s.pendingDir(), name)
+		bad := func(why string) error {
+			return fmt.Errorf("the vault's pending exposure %s %s; rotate the secrets your sandboxes captured, then remove it", path, why)
+		}
+		if !strings.HasSuffix(name, ".json") || !e.Type().IsRegular() {
+			return nil, bad("is not a record")
+		}
 		b, err := safefile.ReadRegularFileBounded(path, maxPendingBytes)
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
+		}
+		if err != nil {
+			return nil, bad("cannot be read: " + err.Error())
 		}
 		var p pendingRecord
 		if json.Unmarshal(b, &p) != nil || p.Version != pendingVersion || p.MAC == "" {
-			continue
+			return nil, bad("is not valid")
 		}
 		salt, err := base64.RawStdEncoding.DecodeString(p.Salt)
 		if err != nil || len(salt) < 16 {
-			continue
+			return nil, bad("is not valid")
 		}
 		p.salt, p.path = salt, path
 		out = append(out, &p)
@@ -150,6 +170,9 @@ func (s *Store) readPending() ([]*pendingRecord, error) {
 // the vault as last read (nil when unread): in a sealed vault the record
 // also holds the value's fingerprint.
 func (s *Store) recordPending(f *file, values []string) error {
+	if len(values) > maxPendingPerCall {
+		return fmt.Errorf("%d exposed values in one call; at most %d are recorded", len(values), maxPendingPerCall)
+	}
 	have, err := s.readPending()
 	if err != nil {
 		return err
@@ -163,7 +186,9 @@ func (s *Store) recordPending(f *file, values []string) error {
 next:
 	for _, v := range values {
 		for _, p := range have {
-			if p.matchesValue(v) {
+			// A record past half its keep is written again, so a value
+			// exposed again is kept for the full time.
+			if p.matchesValue(v) && s.now().Sub(p.At) < pendingKeep/2 {
 				continue next
 			}
 		}
@@ -219,7 +244,9 @@ func (s *Store) applyPending(f *file) error {
 		switch {
 		case hit:
 			f.pending.done = append(f.pending.done, p.path)
-		case now.Sub(p.At) > pendingKeep:
+		case now.Sub(p.At) > pendingKeep && (p.FP != "" || f.sealer == nil):
+			// Expired. A record without a fingerprint in a sealed vault is
+			// kept: only a reader that opens the values can match it.
 			f.pending.done = append(f.pending.done, p.path)
 		default:
 			f.pending.open = append(f.pending.open, p)
@@ -271,17 +298,15 @@ func (s *Store) dropPending(f *file) {
 	f.pending.done = nil
 }
 
-// HasPendingExposures reports whether pending exposures wait for a write.
-func (s *Store) HasPendingExposures() bool {
-	recs, err := s.readPending()
-	return err != nil || len(recs) > 0
-}
-
-// ApplyPendingExposures writes the pending exposures into the vault (and
-// removes their records) when there are any, waiting at most wait for the
-// vault lock.
+// ApplyPendingExposures writes the pending exposures that name an entry
+// into the vault (and removes their records, and expired ones), waiting at
+// most wait for the vault lock. With none, it neither locks nor writes.
 func (s *Store) ApplyPendingExposures(wait time.Duration) error {
-	if !s.HasPendingExposures() {
+	f, err := s.read()
+	if err != nil {
+		return err
+	}
+	if !f.pending.changed && len(f.pending.done) == 0 {
 		return nil
 	}
 	return s.updateWait(wait, needNothing, func(*file) error { return errUnchanged })

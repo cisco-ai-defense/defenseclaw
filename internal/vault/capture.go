@@ -162,6 +162,9 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 		}
 	}
 	held, readErr := s.read()
+	// seen is the vault as read, pinned or not: its seal header gives a
+	// pending exposure the value's fingerprint.
+	seen := held
 	if readErr == nil {
 		// The answer from a read is the vault's only while it is the
 		// pinned one: a swapped or unsealed file goes to the locked path,
@@ -186,34 +189,53 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 		return nil
 	})
 	if err != nil {
-		err = s.recordExposures(held, ins, err)
+		// Nothing was written: every exposed value the vault holds, or
+		// would store, is recorded pending (a reply's value the vault does
+		// not hold is only removed from the body, as when it is written).
+		var exposed []string
+		for _, in := range ins {
+			if in.Exposed && (!in.KnownOnly || seen == nil || seen.indexValue(in.Value) >= 0) {
+				exposed = append(exposed, in.Value)
+			}
+		}
+		err = s.recordExposures(seen, exposed, err, true)
 		if errors.Is(err, ErrBusy) && readErr == nil {
 			out, _ = heldCaptures(held, ins)
 			return out, err
 		}
 		return nil, err
 	}
+	if partial != nil {
+		// A value the vault refused to store (a limit) that the model saw
+		// is recorded pending, so a later capture of it is stored exposed.
+		var exposed []string
+		for i, in := range ins {
+			if in.Exposed && !in.KnownOnly && out[i].Entry.Name == "" {
+				exposed = append(exposed, in.Value)
+			}
+		}
+		partial = s.recordExposures(seen, exposed, partial, false)
+	}
 	return out, partial
 }
 
-// recordExposures records the exposed values of a capture that wrote
-// nothing as pending exposures and returns cause joined with what became
-// of them; cause alone when the call exposed nothing. f is the vault as
-// last read (nil when it could not be read).
-func (s *Store) recordExposures(f *file, ins []CaptureInput, cause error) error {
-	var values []string
-	for _, in := range ins {
-		if in.Exposed {
-			values = append(values, in.Value)
-		}
-	}
+// recordExposures records values as pending exposures and returns cause
+// joined with what became of them: ErrExposureNotRecorded when they could
+// not be recorded, ErrExposurePending when they were and wrote is false
+// (nothing was written, so a retry should write them); cause alone when
+// there is nothing to record. f is the vault as last read (nil when it
+// could not be read).
+func (s *Store) recordExposures(f *file, values []string, cause error, nothingWritten bool) error {
 	if len(values) == 0 {
 		return cause
 	}
 	if err := s.recordPending(f, values); err != nil {
 		return errors.Join(cause, fmt.Errorf("%w: %v", ErrExposureNotRecorded, err))
 	}
-	return errors.Join(cause, ErrExposurePending)
+	if nothingWritten {
+		return errors.Join(cause, ErrExposurePending)
+	}
+	return cause
 }
 
 // heldCaptures answers ins from f without changing it; changes reports

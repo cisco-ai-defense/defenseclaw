@@ -76,8 +76,9 @@ func TestSandboxVaultPromptThenOutputExposesTheEntry(t *testing.T) {
 }
 
 // At a tool's output with the model-side room used up, a held ready value
-// is still marked exposed, the new value is removed and not stored, and a
-// prompt's secret is still captured afterwards.
+// is still marked exposed, the new value is removed and not stored (its
+// exposure is recorded pending), and the same secret pasted in a prompt
+// afterwards is captured exposed: the model saw it in the output.
 func TestSandboxVaultFullVaultAtOutput(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
 	ready := vaultTestStripeKey()
@@ -111,7 +112,7 @@ func TestSandboxVaultFullVaultAtOutput(t *testing.T) {
 	if rec.Code != http.StatusOK || decodeVaultAnswer(t, rec.Body.Bytes())["action"] != "block" {
 		t.Fatalf("prompt: %d %s", rec.Code, rec.Body.String())
 	}
-	if e, err := st.Get("ANTHROPIC_API_KEY"); err != nil || e.Exposed || e.FromModel {
+	if e, err := st.Get("ANTHROPIC_API_KEY"); err != nil || !e.Exposed || e.FromModel {
 		t.Fatalf("prompt entry with the model-side room full = %+v (%v)", e, err)
 	}
 }

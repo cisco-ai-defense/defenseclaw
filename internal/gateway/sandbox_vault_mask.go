@@ -6,10 +6,13 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -86,6 +89,11 @@ func (a *APIServer) sandboxVaultMaskMiddleware(st *sandboxIngressState, next htt
 		}
 		if rec.status >= 200 && rec.status <= 299 {
 			answer = maskedInspectAnswer(kind, answer)
+		}
+		if string(answer) != rec.body.String() {
+			// The handler audited the answer it chose: record what the
+			// agent was answered.
+			a.auditMaskedInspect(r.Context(), kind, answer)
 		}
 		for k, v := range rec.header {
 			w.Header()[k] = v
@@ -172,6 +180,31 @@ func maskedInspectAnswer(kind string, body []byte) []byte {
 		return body
 	}
 	return append(out, '\n')
+}
+
+// sandboxVaultInspectRuleID is the alert of an inspect call that carried a
+// secret the sandbox ingress masked.
+const sandboxVaultInspectRuleID = "sandbox_vault_inspect"
+
+// auditMaskedInspect records an inspect answer the mask raised: the route,
+// the connector and the answer sent, never the value.
+func (a *APIServer) auditMaskedInspect(ctx context.Context, kind string, answer []byte) {
+	if a == nil || a.logger == nil {
+		return
+	}
+	var wire map[string]interface{}
+	_ = json.Unmarshal(answer, &wire)
+	action, _ := wire["action"].(string)
+	connectorName := ""
+	if b, ok := sandboxauth.FromContext(ctx); ok {
+		connectorName = b.Connector
+	}
+	if err := a.logger.LogAlertCtx(ctx, sandboxVaultInspectRuleID, "HIGH",
+		"Sandbox inspect call carried a secret: masked before it was evaluated, recorded or relayed", map[string]any{
+			"route": kind, "connector": connectorName, "action": action, "rule_id": sandboxVaultInspectRuleID,
+		}); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] sandbox vault inspect alert failed route=%s: %v\n", kind, err)
+	}
 }
 
 func inspectKindWhere(kind string) string {

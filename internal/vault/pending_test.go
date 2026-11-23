@@ -195,3 +195,69 @@ func TestPromptCapturesFromOneSandboxAreBounded(t *testing.T) {
 		t.Fatalf("model capture = %v", err)
 	}
 }
+
+// A pending exposure that cannot be read fails every read closed: an
+// exposure is never skipped, so no value is handed out past it.
+func TestUnreadablePendingExposureFailsClosed(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Add(AddInput{Name: "STRIPE_LIVE", Value: fakeStripe(), Host: "api.stripe.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(s.pendingDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.pendingDir(), "broken.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Resolve("STRIPE_LIVE"); err == nil || !strings.Contains(err.Error(), "pending exposure") {
+		t.Fatalf("resolve with an unreadable record = %v", err)
+	}
+	if _, err := s.List(); err == nil {
+		t.Fatal("list read past an unreadable record")
+	}
+	// A record being written (safefile's temporary file) is not read.
+	if err := os.Remove(filepath.Join(s.pendingDir(), "broken.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.pendingDir(), ".safefile-x.json-123"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Resolve("STRIPE_LIVE"); err != nil {
+		t.Fatalf("resolve beside a temporary file = %v", err)
+	}
+}
+
+// A value the model saw that the vault refused to store (its limit for
+// tool calls and output is reached) is recorded pending, so a later
+// capture of it from a prompt is stored exposed.
+func TestRefusedExposedValueIsStoredExposedLater(t *testing.T) {
+	s := newStore(t)
+	for i := 0; i < MaxCapturedFromModel; i++ {
+		if _, err := s.Capture(CaptureInput{Value: fmt.Sprintf("%s%04d", fakeGitHub(), i), Kind: "github-token", Exposed: true, FromModel: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v := fakeStripe()
+	if _, err := s.Capture(CaptureInput{Value: v, Kind: "stripe-secret-key", Exposed: true, FromModel: true}); !errors.Is(err, ErrModelCaptureFull) {
+		t.Fatalf("capture past the model bound = %v", err)
+	}
+	if pendingFiles(t, s) != 1 {
+		t.Fatalf("pending records = %d, want 1", pendingFiles(t, s))
+	}
+	c, err := s.Capture(CaptureInput{Value: v, Kind: "stripe-secret-key"})
+	if err != nil || !c.Entry.Exposed {
+		t.Fatalf("later prompt capture = %+v (%v)", c.Entry, err)
+	}
+}
+
+// One call records at most a bounded number of pending exposures.
+func TestPendingExposuresPerCallAreBounded(t *testing.T) {
+	s := newStore(t)
+	var values []string
+	for i := 0; i <= maxPendingPerCall; i++ {
+		values = append(values, fmt.Sprintf("%s%04d", fakeGitHub(), i))
+	}
+	if err := s.recordPending(nil, values); err == nil || pendingFiles(t, s) != 0 {
+		t.Fatalf("an oversized call recorded %d (%v)", pendingFiles(t, s), err)
+	}
+}
