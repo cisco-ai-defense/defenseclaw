@@ -18,7 +18,9 @@ func TestGAP0928ClaimCompareAndSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, now := t.Context(), time.Now()
-	c := func(serial string) RelayCert { return RelayCert{Serial: serial, NotAfter: now.Add(time.Hour), CA: "fp"} }
+	c := func(serial string) RelayCert {
+		return RelayCert{Serial: serial, NotAfter: now.Add(time.Hour), CA: "fp"}
+	}
 	claim := func(cl RelayCertClaim) RelayCertClaimed {
 		t.Helper()
 		cl.Atespace, cl.UID, cl.Now = "eng-web", gap0861UID, now
