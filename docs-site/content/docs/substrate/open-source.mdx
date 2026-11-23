@@ -258,6 +258,15 @@ DefenseClaw ask 4c1f from dc-eng/claude-b66c97d1: POST api.example.test /v1/char
 
 Press `Ctrl-\`. The line becomes `... -- [o]nce [a]lways [d]eny [Esc] cancel`. One key answers; `a` asks you to press `y` to confirm, because it covers every later identical ask. Typing and pasting never answer by accident: only a single key pressed after the prompt appears does. After you approve, the held request goes through within about ten seconds, once Substrate has applied the new allow list.
 
+**Preview.** When the agent runs a dev server, open it in your browser from a second terminal:
+
+```text
+$ defenseclaw substrate port claude-b66c97d1 3000
+Forwarding http://127.0.0.1:3000 -> claude-b66c97d1 port 3000 (only you, only this computer). Ctrl-C to stop.
+```
+
+The forward listens on `127.0.0.1` only and only you can open it. See [Forward a port](/docs/substrate/reference#forward-a-port).
+
 </Step>
 
 <Step>

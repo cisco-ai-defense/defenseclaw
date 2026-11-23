@@ -27,7 +27,7 @@ import (
 )
 
 // SubstrateLauncherSignatureID names the DefenseClaw Agent Substrate
-// launcher in discovery (PLAN E26): `defenseclaw substrate run|connect|logs`
+// launcher in discovery (PLAN E26): `defenseclaw substrate run|connect|logs|port`
 // puts a coding agent that runs in the organization's cluster on this
 // terminal. It is DefenseClaw itself, guarded by the cluster, so discovery
 // labels it instead of listing an unknown AI process. The signature is

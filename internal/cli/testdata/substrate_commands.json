@@ -781,6 +781,46 @@
     ]
   },
   {
+    "path": "substrate port",
+    "use": "port \u003cname\u003e \u003cport[:local]\u003e...",
+    "short": "Open an agent's dev server in your browser (port forward)",
+    "long": "Forwards a port the agent's app listens on (127.0.0.1:PORT inside the agent) to 127.0.0.1:LOCAL on this\ncomputer, so you can open http://127.0.0.1:LOCAL in your browser. LOCAL is PORT unless you give PORT:LOCAL; when PORT\nis taken here, the next free port is used. The forward listens on 127.0.0.1 only and only you can open it. It stays\nin the foreground until you press Ctrl-C.\n\nPorts 1024-65535 can be forwarded, except the relay's own port; your administrator can allow fewer or turn port\nforwarding off. Every forward is recorded in the cluster's audit log. The forwarded app runs as \"localhost\" in your\nbrowser, like any local dev server: open only apps you trust there.",
+    "example": "defenseclaw substrate port web-3f2a 3000\ndefenseclaw substrate port web-3f2a 3000:8000 5173",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "port[:local]\u003e",
+        "required": true,
+        "many": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      }
+    ]
+  },
+  {
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",

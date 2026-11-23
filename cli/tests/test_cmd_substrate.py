@@ -199,6 +199,7 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["pull", "fix-tests-7f3a", "--branch", "agent/fix", "--yes"],
         ["pull", "fix-tests-7f3a", "--patch-out", "fix.patch", "--timeout", "5m"],
         ["checkpoint", "fix-tests-7f3a", "--every", "1h"],
+        ["port", "web-3f2a", "3000", "5173:8000", "--json"],
         ["undo", "fix-tests-7f3a", "--to", "dc-checkpoint-2", "-y"],
         ["delete", "one", "two", "-y"],
         ["delete", "--batch", "b1", "--yes"],

@@ -530,6 +530,32 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("port",),
+        "Open an agent's dev server in your browser (port forward)",
+        long=(
+            "Forwards a port the agent's app listens on (127.0.0.1:PORT inside the agent) to 127.0.0.1:LOCAL on "
+            "this\n"
+            "computer, so you can open http://127.0.0.1:LOCAL in your browser. LOCAL is PORT unless you give "
+            "PORT:LOCAL; when PORT\n"
+            "is taken here, the next free port is used. The forward listens on 127.0.0.1 only and only you can "
+            "open it. It stays\n"
+            "in the foreground until you press Ctrl-C.\n"
+            "\n"
+            "Ports 1024-65535 can be forwarded, except the relay's own port; your administrator can allow fewer "
+            "or turn port\n"
+            "forwarding off. Every forward is recorded in the cluster's audit log. The forwarded app runs as "
+            '"localhost" in your\n'
+            "browser, like any local dev server: open only apps you trust there."
+        ),
+        example="defenseclaw substrate port web-3f2a 3000\ndefenseclaw substrate port web-3f2a 3000:8000 5173",
+        args=(_Arg("name"), _Arg("port[:local]>", many=True)),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
         ("pull",),
         "Review what the agent changed and bring it home",
         long=(

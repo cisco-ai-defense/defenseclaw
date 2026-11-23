@@ -15,8 +15,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package launcherpresence lets AI discovery label a running Agent Substrate
-// launcher (PLAN E26). While `defenseclaw substrate run|connect|logs` is
-// attached to an agent, the launcher keeps a small record of itself under
+// launcher (PLAN E26). While `defenseclaw substrate run|connect|logs|port`
+// is attached to an agent, the launcher keeps a small record of itself under
 // the person's DefenseClaw data directory; discovery sees a process named
 // defenseclaw whose PID and start time match a record and labels it the
 // DefenseClaw Agent Substrate launcher, not an unknown AI process. The agent
@@ -53,7 +53,7 @@ type Record struct {
 	PID int `json:"pid"`
 	// Started is the launcher's own start time.
 	Started time.Time `json:"started"`
-	// Command is run, connect or logs.
+	// Command is run, connect, logs or port.
 	Command string `json:"command"`
 	// Connector is the coding agent (claudecode, codex, ...), "" if not known.
 	Connector string `json:"connector,omitempty"`
@@ -69,7 +69,7 @@ func (r Record) Valid() bool {
 		return false
 	}
 	switch r.Command {
-	case "run", "connect", "logs":
+	case "run", "connect", "logs", "port":
 	default:
 		return false
 	}

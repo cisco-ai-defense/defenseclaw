@@ -23,6 +23,7 @@ keywords:
 | `pull <name>` | See the changed files, flagged for risk, then `--diff` prints the diff, `--apply` writes the changes into the folder, `--branch NAME` puts them on a new branch, `--patch-out FILE` writes a patch. Flagged files reach the folder only on a yes to the question or with `--allow-flagged`; `--yes` takes the safe answer (no). `--timeout`, `--yes`, `--allow-flagged` |
 | `checkpoint <name> [--every D]` | Save a restore point of the agent's folder, inside the agent. With `--every` it saves on that schedule for as long as the command runs |
 | `undo <name> [--to ID]` | Put the agent's folder back to its last restore point, or to a given one, and discard what the agent changed since. It asks first |
+| `port <name> <port[:local]>...` | **Preview.** Open the agent's dev server in your browser: forwards `127.0.0.1:PORT` in the agent to `127.0.0.1:LOCAL` on this computer (LOCAL is PORT, or the next free port). It listens on `127.0.0.1` only, only you can open it, and it stays in the foreground until Ctrl-C. `--json` prints `{"local":"127.0.0.1:3000","remote":3000}` per port. See [Forward a port](#forward-a-port) |
 | `delete <name>... \| --batch ID` | Delete actors, their allow lists and their snapshots. Pull first |
 | `migrate <name>` | Move an actor with an old kit to the current kit |
 | `approvals`, `approve <id> [--always] [--reason]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. `approvals` lists `ID`, `AGENT`, `WHAT`, `SEVERITY`, `AGE` and `RUN`; an ask an unattended run queued shows `unattended` and the time left in `RUN` |
@@ -46,6 +47,26 @@ Every read command has `--output text|json` and `--json`, and every command take
 There is no `--api`: the cluster checks come from `kubectl` with `--install-file`, and the bucket check is skipped when the file names no `storage.snapshotLocation`. [Troubleshooting](/docs/substrate/troubleshooting#verify-cannot-read-the-snapshot-bucket) lists each warning.
 
 Two warnings are in the text output of `verify` and `status --cluster`, and in `doctor` and `doctor --json` (rows `cluster.atespace_globs` and `group_forms`), but not in `verify --json`: an atespace that holds actors, that DefenseClaw did not create and that a `match.substrate` glob meets (the profile does not apply there; list the atespace by name), and a profile assignment whose groups are in another form than the sign-in server sends. The `verify --json` management contract is version 1, with exactly ten checks, and stays as it is in 1.0.10; the two warnings are planned for its version 2 (`schema_version` 2). `doctor --json` is not a management contract.
+
+### Forward a port
+
+**Preview.** `defenseclaw substrate port web-3f2a 3000` prints:
+
+```text
+Forwarding http://127.0.0.1:3000 -> web-3f2a port 3000 (only you, only this computer). Ctrl-C to stop.
+```
+
+Each browser connection opens its own stream through the cluster gateway to `127.0.0.1:3000` inside the agent, and the gateway writes an audit row for each one. Ports 1024-65535 can be forwarded, except the relay's own port. Templates built before this release don't serve forwards: rebuild the template and start a new agent.
+
+| Message | Why | What to do |
+|---|---|---|
+| Port forwarding is turned off on this cluster | An administrator set `substrate.interactive.port_forward.enabled: off` | Ask your administrator |
+| Port N can't be forwarded | The port is below 1024, is the relay's own port, or is outside `substrate.interactive.port_forward.ports` | Forward another port |
+| This agent's image is too old for port forwarding | The template was built before forwards existed | Rebuild the template (`template build`) and start a new agent |
+| Nothing in the agent listens on port N yet | The dev server isn't up. Shown per connection; the forward stays open | Start the dev server, then reload the page |
+| This agent has too many open forwards | More than `substrate.interactive.port_forward.max_streams` streams are open to the agent | Close tabs or other forwards |
+
+The forwarded app runs as `localhost` in your browser, so it shares cookies with other local dev servers. Open only apps you trust there. It can't change anything on your own DefenseClaw gateway: that gateway refuses requests from other local pages.
 
 ### Template flags
 
@@ -93,6 +114,9 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 |---|---|---|
 | `substrate.enabled` | `false` (the chart sets `true`) | Turns the Substrate components on |
 | `substrate.api.address`, `.server_name`, `.ca_file`, `.auth` | `api.ate-system.svc:443`, none, in-cluster CA, `serviceaccount` | How DefenseClaw reaches the Substrate control API (`.auth` is `serviceaccount` or `mtls`) |
+| `substrate.interactive.port_forward.enabled` | `auto` (on, also on managed installs) | **Preview.** `on`, `off` or `auto`. `off` turns `substrate port` off for the cluster |
+| `substrate.interactive.port_forward.ports`, `.max_streams` | `1024-65535`, `32` | **Preview.** The agent ports a forward may reach (ports and `lo-hi` ranges, comma-separated; below 1024 and the relay's own port are always refused) and the most open streams per agent |
+| `substrate.interactive.idle_close` | `30m` | **Preview.** A forward stream with no traffic for this long is closed |
 | `substrate.supported_versions` | `>=1.0.0 <1.1.0` | The Substrate versions `verify` accepts |
 | `substrate.identity.issuer` | `https://idp.ate-system.svc` | Issuer of the actor tokens. Make it unique per cluster. The gateway compares `iss` with it as a string; it need not resolve |
 | `substrate.identity.keys_url` | `https://idp.<substrate namespace>.svc/openid/v1/jwks` | Where the gateway reads the keys that sign actor tokens. The namespace comes from `substrate.api.address`. The token's `iss` is still compared with `substrate.identity.issuer` exactly |
