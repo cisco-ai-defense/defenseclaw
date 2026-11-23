@@ -450,6 +450,9 @@ type guestReadingMemo struct {
 	mu     sync.Mutex
 	splits []guestSplitEntry
 	plans  []guestPlanEntry
+	// relative keeps the relative-operand answers of every split of the
+	// hook (actionfacts.RelativeOperandMemo).
+	relative actionfacts.RelativeOperandMemo
 }
 
 type guestSplitEntry struct {
@@ -482,7 +485,7 @@ func (memo *guestReadingMemo) simpleCommands(input actionfacts.Input, facts acti
 		}
 	}
 	memo.mu.Unlock()
-	simples := actionfacts.SimpleCommands(input, facts)
+	simples := actionfacts.SimpleCommandsWith(input, facts, &memo.relative)
 	memo.mu.Lock()
 	if len(memo.splits) == guestReadingMemoEntries {
 		memo.splits = slices.Delete(memo.splits, 0, 1)

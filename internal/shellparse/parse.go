@@ -83,16 +83,17 @@ var parseVariants = [...]syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX}
 // GAP-0923). A parser is reused only once it is done working, as
 // syntax.Parser.Parse allows: Parse resets its state and allocates every
 // node of the new tree anew, so a tree never shares a node with another.
-var parserPools = func() (pools [len(parseVariants)][2]sync.Pool) {
+var parserPools [len(parseVariants)][2]sync.Pool
+
+func init() {
 	for at, variant := range parseVariants {
 		for kept, comments := range []bool{false, true} {
-			pools[at][kept].New = func() any {
+			parserPools[at][kept].New = func() any {
 				return syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments))
 			}
 		}
 	}
-	return pools
-}()
+}
 
 // parseWith parses command in parseVariants[at] with a pooled parser. A
 // parser whose parse panicked is not reused.
