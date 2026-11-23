@@ -140,6 +140,19 @@ type PolicyConflict struct {
 	Reverts int `json:"reverts"`
 }
 
+// olderLeaderForm is r without the fields a leader older than 1.0.11 does
+// not decode (its RegistrationWrite refuses unknown fields), and whether r
+// set any. Person.EmailUnverified (GAP-0640) is the only one; such a leader
+// keeps the record without the lower-assurance mark, as 1.0.10 did. Kept
+// while a rolling upgrade from a 1.0.10 leader is supported (GAP-0943).
+func (r Registration) olderLeaderForm() (Registration, bool) {
+	if !r.Person.EmailUnverified {
+		return r, false
+	}
+	r.Person.EmailUnverified = false
+	return r, true
+}
+
 // Version is the record version.
 const Version = 1
 
