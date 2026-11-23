@@ -2895,7 +2895,9 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildrenIdentity(sig AIS
 	if identityPath != path {
 		// Preserve change detection for updated content while the fingerprint
 		// remains tied to the stable install and its child identities.
-		out.EvidenceHash = hashEvidence(evidence)
+		// hashEvidence leaves the facts out (GAP-1819); the id still does.
+		raw, _ := json.Marshal(evidence)
+		out.EvidenceHash = hashValue(string(raw))
 	}
 	s.stampHomeOwner(&out, path)
 	out.Partial = partial

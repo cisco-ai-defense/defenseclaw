@@ -277,15 +277,8 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int) (ha
 		return "", SkillContentTooLarge, nil, "", 0
 	}
 	walk := skillHashWalk{limit: limit, captureLimit: captureLimit}
+	walk.rootInfo, _ = dir.Stat()
 	err = walk.readDir(dir, "", 0)
-	if walk.manifest != nil {
-		// The SKILL.md text is kept only when the owner of the skill folder
-		// owns it as a single-link regular file (skillManifestOwned, GAP-1811).
-		if rootInfo, statErr := dir.Stat(); statErr != nil ||
-			!skillManifestOwned(filepath.Join(root, walk.manifestName), rootInfo, walk.manifest) {
-			walk.manifest, walk.manifestName = nil, ""
-		}
-	}
 	switch {
 	case errors.Is(err, errSkillTooLarge), errors.Is(err, safefile.ErrReadLimit):
 		return "", SkillContentTooLarge, walk.manifest, walk.manifestName, walk.consumed
@@ -302,6 +295,7 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int) (ha
 
 type skillHashWalk struct {
 	captureLimit int
+	rootInfo     fs.FileInfo // the opened skill folder, for skillManifestOwned
 	manifest     []byte
 	manifestName string
 	limit        int64
@@ -401,7 +395,9 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 		if !sameOpenedSkillFile(file, current) {
 			return errors.New("skill file was replaced while reading")
 		}
-		if captureLimit > 0 {
+		// The SKILL.md text is kept only when the owner of the skill folder owns
+		// it as a single-link regular file (GAP-1811), checked on this handle.
+		if captureLimit > 0 && skillManifestOwned(file, walk.rootInfo) {
 			walk.manifest, walk.manifestName = retained, rel
 		}
 		kind, sum = "file", digest
