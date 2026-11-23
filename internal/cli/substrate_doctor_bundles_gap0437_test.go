@@ -39,7 +39,7 @@ func TestGAP0437DoctorBundlesOCIStages(t *testing.T) {
 			want: []string{"fail  policy_bundles", "refused for stage(s) prod (key_unknown)", "keep their last verified bundle"}},
 		{name: "pending",
 			body: `{"stages":{},"oci":[{"stage":"prod",` + ref + `,"state":"pending"}]}`,
-			want: []string{"warn  policy_bundles", "stage(s) prod is not pulled yet", "ready for agents"}},
+			want: []string{"warn  policy_bundles", "stage(s) prod is not pulled yet", "the cluster components were not checked"}},
 		{name: "applied",
 			body: `{"stages":{"prod":{}},"oci":[{"stage":"prod",` + ref + `,"state":"processed","result":"applied"}]}`,
 			want: []string{"ok    policy_bundles", "the active bundle of each of 1 stage(s) verifies"}},
