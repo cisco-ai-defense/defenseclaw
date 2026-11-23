@@ -163,14 +163,16 @@ a key the model typed into a `printf` command is stopped and marked exposed:
   caption="Codex in an OpenShell sandbox on Linux: the demo API call with a vault placeholder, a GitHub token in a prompt moved into the vault, a key the model typed into a tool call stopped and marked exposed, and a sandbox refused that exposed secret until it is rotated and replaced. The keys shown are made up for the recording."
 />
 
-Capture keeps at most 16 secrets from prompts that you have not confirmed yet,
-and, separately, at most 8 from tool calls and tool output that you have not
-replaced yet, so tools that keep printing key-shaped test values never use up
-the room a prompt's secret needs. Past either limit a call is still answered
-and the value still removed, but nothing more of that kind is stored until you
-confirm, replace or remove some. One sandbox can hold at most 8 of the 16
-unconfirmed prompt secrets, so a program inside one sandbox cannot fill the
-room the others need. When a limit is reached, the prompt is still stopped and
+Each sandbox keeps at most 8 secrets from its prompts that you have not
+confirmed yet and, separately, at most 8 from its tool calls and tool output
+that you have not replaced yet, so tools that keep printing key-shaped test
+values never use up the room a prompt's secret needs. A program inside a
+sandbox can send hook events that look like its agent's, so each sandbox only
+ever fills its own room: it cannot fill the room another sandbox needs, the
+room left for your own secrets, or the names the vault gives captured secrets.
+Past a limit a call is still answered and the value still removed, but
+nothing more of that kind is stored for that sandbox until you confirm,
+replace or remove some. When a limit is reached, the prompt is still stopped and
 you are told to review the captures: `defenseclaw sandbox vault list` shows
 which sandbox each one came from, and you confirm the ones that are yours and
 remove the others. A secret the vault already holds is still

@@ -280,23 +280,26 @@ func TestCaptureAllIsBounded(t *testing.T) {
 	if _, err := s.CaptureAll(ins[:9], CaptureWait); err != nil {
 		t.Fatal(err)
 	}
-	// STRIPE_API_KEY.._9 are taken: the tenth and eleventh stripe keys have
-	// no name left.
-	if out, err := s.CaptureAll(ins[9:11], CaptureWait); err == nil || out[0].Entry.Name != "" || out[1].Entry.Name != "" {
-		t.Fatalf("a tenth key of one kind was stored: %+v (%v)", out, err)
-	}
-	if list, _ := s.List(); len(list) != 9 {
-		t.Fatalf("entries after a failed call = %d", len(list))
+	// Names of a kind run past _9 (GAP-1979): the tenth and eleventh stripe
+	// keys are STRIPE_API_KEY_10 and _11.
+	if out, err := s.CaptureAll(ins[9:11], CaptureWait); err != nil || out[0].Entry.Name != "STRIPE_API_KEY_10" || out[1].Entry.Name != "STRIPE_API_KEY_11" {
+		t.Fatalf("tenth and eleventh keys of one kind: %+v (%v)", out, err)
 	}
 	other := []CaptureInput{}
 	for i := 0; i < MaxCaptured; i++ {
 		other = append(other, CaptureInput{Value: "gh" + "p_" + strings.Repeat("Ww", 16) + fmt.Sprintf("%04d", i), Kind: "github-token"})
 	}
-	if _, err := s.CaptureAll(other[:7], CaptureWait); err != nil {
+	if _, err := s.CaptureAll(other[:4], CaptureWait); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CaptureAll(other[7:8], CaptureWait); !errors.Is(err, ErrCaptureFull) {
-		t.Fatalf("capture past the cap = %v", err)
+	// The sixteenth fits and the seventeenth does not: one write, the
+	// stored value kept and the refused one named in the error.
+	out, err := s.CaptureAll(other[4:6], CaptureWait)
+	if !errors.Is(err, ErrCaptureFull) || out[0].Entry.Name == "" || out[1].Entry.Name != "" {
+		t.Fatalf("capture past the cap = %+v (%v)", out, err)
+	}
+	if list, _ := s.List(); len(list) != MaxCaptured {
+		t.Fatalf("entries after a partial call = %d", len(list))
 	}
 }
 

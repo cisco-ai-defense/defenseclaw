@@ -196,6 +196,50 @@ func TestPromptCapturesFromOneSandboxAreBounded(t *testing.T) {
 	}
 }
 
+// GAP-1979: nothing tells a sandbox's forged hook events from its
+// harness's, so each sandbox fills only its own room. Two sandboxes that
+// fill all of theirs, prompt and model side, with values of one kind leave
+// a third sandbox, captures with no sandbox, and the person's own adds
+// untouched, and the third sandbox's value of that kind still gets a name.
+func TestOneSandboxCannotFillAnotherSandboxsRoom(t *testing.T) {
+	s := newStore(t)
+	value := func(sb string, i int) string { return fmt.Sprintf("%s%s%04d", fakeStripe(), sb, i) }
+	for _, sb := range []string{"a", "b"} {
+		name := "dc-" + sb
+		for i := 0; i < MaxCapturedPerSandbox; i++ {
+			if _, err := s.Capture(CaptureInput{Value: value(sb, i), Kind: "stripe-secret-key", Sandbox: name}); err != nil {
+				t.Fatalf("%s prompt %d: %v", name, i, err)
+			}
+		}
+		for i := 0; i < MaxCapturedFromModelPerSandbox; i++ {
+			if _, err := s.Capture(CaptureInput{Value: value(sb, 100+i), Kind: "stripe-secret-key", Sandbox: name, FromModel: true, Exposed: true}); err != nil {
+				t.Fatalf("%s model %d: %v", name, i, err)
+			}
+		}
+		_, err := s.Capture(CaptureInput{Value: value(sb, 200), Kind: "stripe-secret-key", Sandbox: name})
+		if !errors.Is(err, ErrSandboxCaptureFull) || !errors.Is(err, ErrCaptureFull) || !strings.Contains(err.Error(), "this sandbox") {
+			t.Fatalf("%s prompt past its room = %v", name, err)
+		}
+		_, err = s.Capture(CaptureInput{Value: value(sb, 201), Kind: "stripe-secret-key", Sandbox: name, FromModel: true, Exposed: true})
+		if !errors.Is(err, ErrSandboxModelCaptureFull) || !errors.Is(err, ErrModelCaptureFull) || !strings.Contains(err.Error(), "this sandbox") {
+			t.Fatalf("%s model past its room = %v", name, err)
+		}
+	}
+	c, err := s.Capture(CaptureInput{Value: value("c", 0), Kind: "stripe-secret-key", Sandbox: "dc-c"})
+	if err != nil || c.Entry.Name != fmt.Sprintf("STRIPE_API_KEY_%d", 2*(MaxCapturedPerSandbox+MaxCapturedFromModelPerSandbox)+1) {
+		t.Fatalf("third sandbox's prompt = %+v (%v)", c.Entry, err)
+	}
+	if _, err := s.Capture(CaptureInput{Value: value("c", 1), Kind: "stripe-secret-key", Sandbox: "dc-c", FromModel: true, Exposed: true}); err != nil {
+		t.Fatalf("third sandbox's tool call = %v", err)
+	}
+	if _, err := s.Capture(CaptureInput{Value: value("n", 0), Kind: "stripe-secret-key"}); err != nil {
+		t.Fatalf("capture with no sandbox = %v", err)
+	}
+	if _, err := s.Add(AddInput{Name: "MY_STRIPE", Value: value("p", 0), Host: "api.stripe.com"}); err != nil {
+		t.Fatalf("the person's own add = %v", err)
+	}
+}
+
 // A pending exposure that cannot be read fails every read closed: an
 // exposure is never skipped, so no value is handed out past it.
 func TestUnreadablePendingExposureFailsClosed(t *testing.T) {

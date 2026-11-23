@@ -131,7 +131,8 @@ type Entry struct {
 	Confirmed bool `json:"confirmed,omitempty"`
 	// FromModel: captured where an agent's model wrote or read the value (a
 	// tool call, a tool's output), not from a person's prompt; until the
-	// person replaces the value it counts toward MaxCapturedFromModel.
+	// person replaces the value it counts toward the model-side bound
+	// (its sandbox's, or MaxCapturedFromModel when no sandbox is named).
 	FromModel bool `json:"from_model,omitempty"`
 	// Sandbox is the sandbox a captured entry came from, when known.
 	Sandbox string `json:"sandbox,omitempty"`

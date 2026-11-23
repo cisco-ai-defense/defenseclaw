@@ -85,8 +85,9 @@ func TestSandboxVaultFullVaultAtOutput(t *testing.T) {
 	if _, err := st.Add(vault.AddInput{Name: "STRIPE_LIVE", Value: ready, Host: "api.stripe.com"}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < vault.MaxCapturedFromModel; i++ {
-		if _, err := st.Capture(vault.CaptureInput{Value: vaultTestGitHubToken(i), Kind: "github-token", Exposed: true, FromModel: true}); err != nil {
+	// The fixture's Claude Code sandbox fills its own model-side room.
+	for i := 0; i < vault.MaxCapturedFromModelPerSandbox; i++ {
+		if _, err := st.Capture(vault.CaptureInput{Value: vaultTestGitHubToken(i), Kind: "github-token", Exposed: true, FromModel: true, Sandbox: "dc-claude-app"}); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
