@@ -9,18 +9,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/vault"
 )
 
 // Vault capture: a secret with a well-known issuer shape (vault.FindCapturable)
-// that a sandboxed agent is given in a prompt, or writes into a tool call, is
-// stored in the account's vault, replaced in the hook body by its tag
-// ([vault:NAME]) before anything evaluates, audits or relays the body, and
-// the call is answered block. Claude Code and Codex hooks cannot edit a
+// in any hook body of a sandboxed harness (a prompt, a tool call, a tool's
+// output, the agent's reply) is stored in the account's vault and replaced
+// in the body by its tag ([vault:NAME]) before anything evaluates, audits or
+// relays the body. connector.SandboxVaultCaptureEventFor places the event:
+// a prompt the hook stops keeps the secret unconfirmed; everywhere else the
+// model has seen (or wrote) it, so it is stored exposed. The call gets the
+// strongest answer the event has (block, or alert where the event cannot
+// stop anything or a block would restart the agent's turn). Claude Code and Codex hooks cannot edit a
 // prompt (they can block it or add context), so the prompt is stopped and
 // the person sends it again without the value; a sandbox then uses the
 // secret through `sandbox run --vault NAME`, as a placeholder OpenShell swaps
@@ -35,13 +41,9 @@ import (
 // managed gateway only ever sees the redacted body. The daemon tells the
 // managed gateway what it captured (names and hosts, never values) in
 // sandboxrelay.VaultCaptureHeader, so the managed gateway answers and audits
-// the call as the block it is. It runs only for sandbox hook calls of the
-// connectors whose hook body it reads, and only when the ingress has a vault
+// the call as the capture it is. It runs only for sandbox hook calls of the
+// harnesses that run in a sandbox, and only when the ingress has a vault
 // (openshell.vault.auto_capture, on by default).
-
-// sandboxVaultCaptureConnectors are the connectors whose prompt and
-// pre-tool hook bodies capture reads.
-var sandboxVaultCaptureConnectors = map[string]bool{"claudecode": true, "codex": true}
 
 const (
 	vaultCaptureEventPrompt = "UserPromptSubmit"
@@ -52,7 +54,9 @@ const (
 
 // sandboxVaultCapture is what one hook call's capture did.
 type sandboxVaultCapture struct {
-	Event string
+	// Connector and Event place the call (connector.SandboxVaultCaptureEventFor).
+	Connector string
+	Event     string
 	// Sandbox names the sandbox, when known, for the message.
 	Sandbox string
 	// Entries are the vault entries the call's secrets are kept as, in
@@ -67,7 +71,7 @@ type sandboxVaultCapture struct {
 // their vault tags, and what it captured (nil: nothing to capture, body
 // unchanged). The body is decoded and every string value is scanned, so a
 // secret after an escaped newline or a \u escape is found.
-func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName string, body []byte) ([]byte, *sandboxVaultCapture) {
+func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName string, header http.Header, body []byte) ([]byte, *sandboxVaultCapture) {
 	if store == nil || len(body) == 0 || !mayHoldCapturable(body) {
 		return body, nil
 	}
@@ -76,7 +80,7 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 		return body, nil
 	}
 	name := sandboxauth.CanonicalConnector(connectorName)
-	if !sandboxVaultCaptureConnectors[name] {
+	if _, reads := connector.SandboxVaultCaptureEventFor(name, ""); !reads {
 		return body, nil
 	}
 	if !hookToolCallJSONUnambiguous(name, body) {
@@ -90,10 +94,8 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 	if dec.Decode(&doc) != nil {
 		return body, nil
 	}
-	event, _ := doc["hook_event_name"].(string)
-	if event != vaultCaptureEventPrompt && event != vaultCaptureEventTool {
-		return body, nil
-	}
+	event := sandboxVaultCaptureEventName(name, header, doc)
+	point, _ := connector.SandboxVaultCaptureEventFor(name, event)
 	type hit struct{ value, kind string }
 	var hits []hit
 	seen := map[string]bool{}
@@ -109,17 +111,12 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 	if len(hits) == 0 {
 		return body, nil
 	}
-	exposed := event == vaultCaptureEventTool
-	where := "prompt"
-	if exposed {
-		where = "tool call"
-	}
-	from := strings.TrimSpace(fmt.Sprintf("%s %s in sandbox %s", name, where, binding.SandboxName))
+	from := strings.TrimSpace(fmt.Sprintf("%s %s (%s) in sandbox %s", name, point.Where(), event, binding.SandboxName))
 	ins := make([]vault.CaptureInput, 0, len(hits))
 	for _, h := range hits {
-		ins = append(ins, vault.CaptureInput{Value: h.value, Kind: h.kind, Exposed: exposed, From: from})
+		ins = append(ins, vault.CaptureInput{Value: h.value, Kind: h.kind, Exposed: point.Exposed(), From: from})
 	}
-	out := &sandboxVaultCapture{Event: event, Sandbox: binding.SandboxName}
+	out := &sandboxVaultCapture{Connector: name, Event: event, Sandbox: binding.SandboxName}
 	names := map[string]string{}
 	if res, err := store.CaptureAll(ins, vault.CaptureWait); err != nil {
 		out.Err = err
@@ -148,6 +145,50 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 		return []byte(`{"hook_event_name":"` + event + `"}`), out
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), out
+}
+
+// sandboxVaultCaptureEventName is the hook event a sandbox call names, as
+// handleAgentHook reads it: Copilot and Antigravity name it in the hook
+// command's header, the others in the body. A name that is not a plain
+// token is "hook" (placed VaultCaptureOther: stored exposed, alerted).
+func sandboxVaultCaptureEventName(name string, header http.Header, doc map[string]interface{}) string {
+	event := ""
+	switch name {
+	case "copilot":
+		if e := strings.TrimSpace(header.Get("X-DefenseClaw-Copilot-Event")); e != "" {
+			event, _ = copilotargs.LocalDialect(copilotHookDialectFromHeaders(header), e)
+		}
+	case "antigravity":
+		event = strings.TrimSpace(header.Get("X-DefenseClaw-Antigravity-Event"))
+	}
+	if event == "" {
+		event = firstString(doc, "hook_event_name", "hookEventName", "event_type", "eventType",
+			"event_name", "eventName", "agent_action_name", "event")
+	}
+	if !validVaultCaptureEventName(event) {
+		return "hook"
+	}
+	return event
+}
+
+// validVaultCaptureEventName: 1 to 64 letters, digits, '.', '_' or '-'.
+func validVaultCaptureEventName(event string) bool {
+	if event == "" || len(event) > 64 {
+		return false
+	}
+	for _, r := range event {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// point places the call; a connector capture does not read is
+// VaultCaptureOther.
+func (c *sandboxVaultCapture) point() connector.VaultCaptureEvent {
+	p, _ := connector.SandboxVaultCaptureEventFor(c.Connector, c.Event)
+	return p
 }
 
 // mayHoldCapturable is the cheap first screen: no issuer prefix, nothing
@@ -213,14 +254,23 @@ func (c *sandboxVaultCapture) errorText() string {
 
 // message is what the agent (and, for a prompt, the person) is told.
 func (c *sandboxVaultCapture) message() string {
+	point := c.point()
 	if len(c.Entries) == 0 {
+		if point.Point != connector.VaultCapturePrompt && point.Point != connector.VaultCaptureToolCall {
+			return "DefenseClaw found a secret in this " + point.Where() + ", and your vault could not keep it (" + c.errorText() +
+				"). The model may have seen it: rotate it with its issuer. Do not use or repeat the value."
+		}
 		return "DefenseClaw stopped this call: it carried a secret, and your vault could not keep it (" + c.errorText() +
 			"). The secret was not sent on. Send it again without the value."
 	}
 	first := c.Entries[0].Name
+	prompt := point.Point == connector.VaultCapturePrompt
+	if !prompt && point.Point != connector.VaultCaptureToolCall {
+		return c.exposedMessage(point)
+	}
 	var kept, flags, unbound, exposed []string
 	for _, e := range c.Entries {
-		if e.Exposed && c.Event == vaultCaptureEventPrompt {
+		if e.Exposed && prompt {
 			exposed = append(exposed, e.Name)
 			continue
 		}
@@ -232,12 +282,12 @@ func (c *sandboxVaultCapture) message() string {
 		}
 		flags = append(flags, "--vault "+e.Name)
 	}
-	if c.Event == vaultCaptureEventPrompt && len(flags) == 0 {
+	if prompt && len(flags) == 0 {
 		return fmt.Sprintf("DefenseClaw stopped the prompt before it reached the model: it carried a secret your vault "+
 			"already holds as %s, marked exposed (an agent's model may have seen it). Rotate it with its issuer and run "+
 			"`defenseclaw sandbox vault replace %s` before a sandbox can use it.", strings.Join(exposed, ", "), exposed[0])
 	}
-	if c.Event == vaultCaptureEventPrompt {
+	if prompt {
 		bind := ""
 		if len(unbound) > 0 {
 			bind = " First give it a host: " + strings.Join(unbound, "; ") + "."
@@ -268,6 +318,26 @@ func (c *sandboxVaultCapture) message() string {
 		"or files; ask the user to give the sandbox the credential through the vault.", strings.Join(names, ", "), first)
 }
 
+// exposedMessage is the answer where the model has seen the secret: a
+// prompt the hook could not stop, a tool's output, the agent's reply.
+func (c *sandboxVaultCapture) exposedMessage(point connector.VaultCaptureEvent) string {
+	var names []string
+	for _, e := range c.Entries {
+		names = append(names, e.Name)
+	}
+	held, first := strings.Join(names, ", "), names[0]
+	if point.Point == connector.VaultCapturePromptSeen {
+		return fmt.Sprintf("DefenseClaw found a secret in this prompt and moved it into the user's vault as %s, marked exposed: "+
+			"this agent's hooks cannot keep a prompt from the model, so the model may have seen it. Do not carry out the prompt "+
+			"with this value and never repeat or write it. The user must rotate it with its issuer and replace it "+
+			"(`defenseclaw sandbox vault replace %s`) before any sandbox can use it, and send the prompt again without the value.", held, first)
+	}
+	return fmt.Sprintf("DefenseClaw found a secret in this %s and moved it into the user's vault as %s, marked exposed, because "+
+		"the model has seen it. Do not use, repeat or write the value. The user must rotate it with its issuer and replace it "+
+		"(`defenseclaw sandbox vault replace %s`) before any sandbox can use it; ask the user to give the sandbox the credential "+
+		"through the vault.", point.Where(), held, first)
+}
+
 // header encodes the capture for the managed gateway: the event and each
 // entry's name and target, never a value ("-" when nothing was kept).
 func (c *sandboxVaultCapture) header() string {
@@ -284,17 +354,18 @@ func (c *sandboxVaultCapture) header() string {
 	return strings.Join(parts, " ")
 }
 
-// vaultCaptureFromHeader reads a relay header the daemon set; anything
-// that does not parse strictly is ignored (nil).
-func vaultCaptureFromHeader(v string) *sandboxVaultCapture {
+// vaultCaptureFromHeader reads a relay header the daemon set for a call of
+// connectorName; anything that does not parse strictly is ignored (nil).
+func vaultCaptureFromHeader(connectorName, v string) *sandboxVaultCapture {
 	fields := strings.Fields(v)
 	if len(fields) < 2 || len(fields) > maxVaultCaptureHeaderEntries+1 {
 		return nil
 	}
-	c := &sandboxVaultCapture{Event: fields[0]}
-	if c.Event != vaultCaptureEventPrompt && c.Event != vaultCaptureEventTool {
+	name := sandboxauth.CanonicalConnector(connectorName)
+	if _, reads := connector.SandboxVaultCaptureEventFor(name, ""); !reads || !validVaultCaptureEventName(fields[0]) {
 		return nil
 	}
+	c := &sandboxVaultCapture{Connector: name, Event: fields[0]}
 	if len(fields) == 2 && fields[1] == "-" {
 		c.Err = errors.New("the sandbox daemon could not keep it")
 		return c
@@ -304,7 +375,7 @@ func vaultCaptureFromHeader(v string) *sandboxVaultCapture {
 		if !ok || vault.ValidName(name) != nil {
 			return nil
 		}
-		e := vault.Entry{Name: name, Exposed: c.Event == vaultCaptureEventTool}
+		e := vault.Entry{Name: name, Exposed: c.point().Exposed()}
 		if target != "" {
 			host, port, err := vault.ParseHost(target)
 			if err != nil {
@@ -317,7 +388,12 @@ func vaultCaptureFromHeader(v string) *sandboxVaultCapture {
 	return c
 }
 
-// applySandboxVaultCapture turns a verdict into the capture's block.
+// stops reports whether the call is answered block.
+func (c *sandboxVaultCapture) stops() bool { return c.point().Stop }
+
+// applySandboxVaultCapture turns a verdict into the capture's answer: block
+// where the event can stop (or the verdict blocked already), otherwise an
+// alert that still carries the capture's message.
 func (a *APIServer) applySandboxVaultCapture(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -327,7 +403,11 @@ func (a *APIServer) applySandboxVaultCapture(
 	resp agentHookResponse,
 	c *sandboxVaultCapture,
 ) agentHookResponse {
-	resp.Action, resp.RawAction, resp.Mode, resp.WouldBlock = "block", "block", "action", true
+	if c.stops() || resp.Action == "block" {
+		resp.Action, resp.RawAction, resp.Mode, resp.WouldBlock = "block", "block", "action", true
+	} else {
+		resp.Action, resp.RawAction, resp.Mode, resp.WouldBlock = "alert", "alert", "action", false
+	}
 	if resp.Severity != "CRITICAL" {
 		resp.Severity = "HIGH"
 	}
@@ -350,7 +430,8 @@ func (a *APIServer) sandboxVaultStore() *vault.Store {
 
 // relayedVaultCaptureAnswer rewrites the managed gateway's answer to a
 // relayed call whose secret the daemon captured: the call is stopped with
-// the capture's message whatever the gateway answered (a managed gateway
+// the capture's message whatever the gateway answered (alerted where the
+// event cannot stop) (a managed gateway
 // that reads VaultCaptureHeader answers block already; an older one does
 // not). The answer's other fields (delivery receipt, evaluation and agent
 // ids) are kept.

@@ -446,11 +446,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		// A sandboxed agent's secret goes into the account's vault and out
 		// of the body before anything evaluates or records it.
-		rawBody, vaultCapture := captureSandboxVault(r.Context(), a.sandboxVaultStore(), connectorName, rawBody)
+		rawBody, vaultCapture := captureSandboxVault(r.Context(), a.sandboxVaultStore(), connectorName, r.Header, rawBody)
 		if vaultCapture == nil && relayedSandboxRequest(r.Context()) {
 			// A managed host's sandbox daemon captured before it relayed:
 			// answer and record the call as the block it is.
-			vaultCapture = vaultCaptureFromHeader(r.Header.Get(sandboxrelay.VaultCaptureHeader))
+			vaultCapture = vaultCaptureFromHeader(connectorName, r.Header.Get(sandboxrelay.VaultCaptureHeader))
 		}
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
 		if err != nil {

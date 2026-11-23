@@ -1176,7 +1176,7 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		// body before the call is relayed, so the managed gateway never sees it.
 		var captured *sandboxVaultCapture
 		if route == sandboxauth.RouteHook {
-			body, captured = captureSandboxVault(ctx, st.vault, binding.Connector, body)
+			body, captured = captureSandboxVault(ctx, st.vault, binding.Connector, r.Header, body)
 		}
 		// Only the daemon says what it captured: a header the sandbox sent
 		// is dropped.
@@ -1207,7 +1207,11 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			resp.Body = a.relayedVaultCaptureAnswer(ctx, binding.Connector, body, resp.Body, captured)
 			if resp.Decision != nil {
 				d := *resp.Decision
-				d.Action, d.WouldBlock = "block", true
+				if captured.stops() || d.Action == "block" {
+					d.Action, d.WouldBlock = "block", true
+				} else {
+					d.Action, d.WouldBlock = "alert", false
+				}
 				if d.Severity != "CRITICAL" {
 					d.Severity = "HIGH"
 				}

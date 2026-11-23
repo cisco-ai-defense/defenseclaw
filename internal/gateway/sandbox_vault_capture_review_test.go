@@ -29,7 +29,7 @@ func TestSandboxVaultCapturesAfterAnEscapedNewline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, c := captureSandboxVault(ctx, st, "claudecode", body)
+	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body)
 	if c == nil || len(c.Entries) != 1 || strings.Contains(string(out), vaultTestAnthropicKey()) {
 		t.Fatalf("capture = %+v body %s", c, out)
 	}
@@ -42,23 +42,31 @@ func TestSandboxVaultCapturesAfterAnEscapedNewline(t *testing.T) {
 // The relay header round-trips names and hosts, never values, and anything
 // malformed is ignored.
 func TestVaultCaptureHeaderRoundTrip(t *testing.T) {
-	c := &sandboxVaultCapture{Event: vaultCaptureEventTool, Entries: []vault.Entry{
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventTool, Entries: []vault.Entry{
 		{Name: "GITHUB_TOKEN", Host: "api.github.com", Port: 443}, {Name: "GOOGLE_API_KEY"},
 	}}
-	got := vaultCaptureFromHeader(c.header())
+	got := vaultCaptureFromHeader("claudecode", c.header())
 	if got == nil || got.Event != vaultCaptureEventTool || len(got.Entries) != 2 || got.Entries[0].Target() != "api.github.com" ||
 		got.Entries[1].Target() != "" || !got.Entries[0].Exposed {
 		t.Fatalf("round trip = %+v", got)
 	}
-	failed := vaultCaptureFromHeader((&sandboxVaultCapture{Event: vaultCaptureEventPrompt}).header())
+	failed := vaultCaptureFromHeader("claudecode", (&sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt}).header())
 	if failed == nil || failed.Err == nil || len(failed.Entries) != 0 {
 		t.Fatalf("failed capture header = %+v", failed)
 	}
-	for _, bad := range []string{"", "UserPromptSubmit", "Stop A=x.example.com", "UserPromptSubmit 1BAD=x.example.com",
+	for _, bad := range []string{"", "UserPromptSubmit", "Stop/x A=x.example.com", "UserPromptSubmit 1BAD=x.example.com",
 		"UserPromptSubmit A=https://x.example.com", "UserPromptSubmit A"} {
-		if vaultCaptureFromHeader(bad) != nil {
+		if vaultCaptureFromHeader("claudecode", bad) != nil {
 			t.Fatalf("header %q was accepted", bad)
 		}
+	}
+	// Any event of a sandbox harness is read; a reply is stored exposed and
+	// alerted, a connector that runs in no sandbox is ignored.
+	if stop := vaultCaptureFromHeader("claudecode", "Stop A=x.example.com"); stop == nil || !stop.Entries[0].Exposed || stop.stops() {
+		t.Fatalf("Stop header = %+v", stop)
+	}
+	if vaultCaptureFromHeader("openclaw", "PreToolUse A=x.example.com") != nil {
+		t.Fatal("a header for a connector capture does not read was accepted")
 	}
 }
 
@@ -84,7 +92,7 @@ func TestSandboxSentVaultCaptureHeaderIsDropped(t *testing.T) {
 }
 
 func TestVaultCaptureErrorsNameNoPath(t *testing.T) {
-	c := &sandboxVaultCapture{Event: vaultCaptureEventPrompt, Err: errors.New("read the vault /home/dev/.defenseclaw/vault/vault.json: boom")}
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt, Err: errors.New("read the vault /home/dev/.defenseclaw/vault/vault.json: boom")}
 	if m := c.message(); strings.Contains(m, "/home/dev") || !strings.Contains(m, "not sent on") {
 		t.Fatalf("message = %s", m)
 	}
@@ -112,14 +120,14 @@ func TestSandboxVaultCapturesASecretInAKey(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
 	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
 	body := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"headers":{"` + vaultTestAnthropicKey() + `":"x"}}}`)
-	out, c := captureSandboxVault(ctx, st, "claudecode", body)
+	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body)
 	if c == nil || len(c.Entries) != 1 || strings.Contains(string(out), vaultTestAnthropicKey()) || !strings.Contains(string(out), "[vault:ANTHROPIC_API_KEY]") {
 		t.Fatalf("capture = %+v body %s", c, out)
 	}
 	// Two keys that redact to one tag: the body is replaced, never a value forwarded.
 	k2 := "sk-" + "ant-api03-" + strings.Repeat("Zy7Xw6", 8)
 	body = []byte(`{"hook_event_name":"PreToolUse","tool_input":{"[vault:ANTHROPIC_API_KEY]":"a","` + k2 + `":"b"}}`)
-	out, c = captureSandboxVault(ctx, vault.Open(filepath.Join(t.TempDir(), "other")), "claudecode", body)
+	out, c = captureSandboxVault(ctx, vault.Open(filepath.Join(t.TempDir(), "other")), "claudecode", nil, body)
 	if c == nil || string(out) != `{"hook_event_name":"PreToolUse"}` {
 		t.Fatalf("collision capture = %+v body %s", c, out)
 	}
@@ -128,7 +136,7 @@ func TestSandboxVaultCapturesASecretInAKey(t *testing.T) {
 // A prompt whose secret the vault already holds as exposed does not point
 // the person at --vault for it.
 func TestPromptWithAnExposedSecretNamesTheReplace(t *testing.T) {
-	c := &sandboxVaultCapture{Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443, Exposed: true}}}
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443, Exposed: true}}}
 	m := c.message()
 	if strings.Contains(m, "--vault") || !strings.Contains(m, "vault replace STRIPE_API_KEY") {
 		t.Fatalf("message = %s", m)
@@ -140,7 +148,7 @@ func TestCaptureSkipsAmbiguousJSON(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
 	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
 	body := []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"` + vaultTestAnthropicKey() + `","prompt":"x"}`)
-	if _, c := captureSandboxVault(ctx, st, "claudecode", body); c != nil {
+	if _, c := captureSandboxVault(ctx, st, "claudecode", nil, body); c != nil {
 		t.Fatal("an ambiguous body was captured")
 	}
 }

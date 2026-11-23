@@ -123,27 +123,28 @@ func TestSandboxVaultCaptureOffWritesNothing(t *testing.T) {
 	}
 }
 
-// Only sandbox calls of the connectors whose body capture reads, and only
-// their prompt and pre-tool events, are captured.
+// Only sandbox calls of the harnesses that run in a sandbox are captured;
+// every event of theirs is read, a tool's output stored exposed.
 func TestCaptureSandboxVaultScope(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
 	body := []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"` + vaultTestAnthropicKey() + `"}`)
-	if out, c := captureSandboxVault(context.Background(), st, "claudecode", body); c != nil || string(out) != string(body) {
+	if out, c := captureSandboxVault(context.Background(), st, "claudecode", nil, body); c != nil || string(out) != string(body) {
 		t.Fatal("a host call (no sandbox binding) was captured")
 	}
-	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "hermes"}, nil)
-	if _, c := captureSandboxVault(ctx, st, "hermes", body); c != nil {
-		t.Fatal("a connector capture does not read was captured")
+	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "openclaw"}, nil)
+	if _, c := captureSandboxVault(ctx, st, "openclaw", nil, body); c != nil {
+		t.Fatal("a connector that runs in no sandbox was captured")
 	}
 	ctx = sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
-	post := []byte(`{"hook_event_name":"PostToolUse","tool_response":"` + vaultTestAnthropicKey() + `"}`)
-	if _, c := captureSandboxVault(ctx, st, "claudecode", post); c != nil {
-		t.Fatal("a post-tool event was captured")
+	post := []byte(`{"hook_event_name":"PostToolUse","tool_response":"` + vaultTestStripeKey() + `"}`)
+	if out, c := captureSandboxVault(ctx, st, "claudecode", nil, post); c == nil || len(c.Entries) != 1 || !c.Entries[0].Exposed ||
+		!c.stops() || strings.Contains(string(out), vaultTestStripeKey()) {
+		t.Fatalf("a post-tool event was not captured exposed: %+v", c)
 	}
-	if _, c := captureSandboxVault(ctx, nil, "claudecode", body); c != nil {
+	if _, c := captureSandboxVault(ctx, nil, "claudecode", nil, body); c != nil {
 		t.Fatal("captured with no vault")
 	}
-	out, c := captureSandboxVault(ctx, st, "claudecode", body)
+	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body)
 	if c == nil || len(c.Entries) != 1 || strings.Contains(string(out), vaultTestAnthropicKey()) || !strings.Contains(string(out), "[vault:ANTHROPIC_API_KEY]") {
 		t.Fatalf("capture = %+v body %s", c, out)
 	}
@@ -154,11 +155,11 @@ func TestCaptureSandboxVaultScope(t *testing.T) {
 }
 
 func TestSandboxVaultCaptureMessageNamesTheBind(t *testing.T) {
-	c := &sandboxVaultCapture{Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "GOOGLE_API_KEY"}}}
+	c := &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "GOOGLE_API_KEY"}}}
 	if m := c.message(); !strings.Contains(m, "vault bind GOOGLE_API_KEY --host HOST") || !strings.Contains(m, "before it reached the model") {
 		t.Fatalf("message = %s", m)
 	}
-	c = &sandboxVaultCapture{Event: vaultCaptureEventTool, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443}}}
+	c = &sandboxVaultCapture{Connector: "claudecode", Event: vaultCaptureEventTool, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443}}}
 	if m := c.message(); !strings.Contains(m, "vault replace STRIPE_API_KEY") || !strings.Contains(m, "rotate") || strings.Contains(m, "--vault") {
 		t.Fatalf("message = %s", m)
 	}
@@ -230,5 +231,46 @@ func TestSandboxVaultCaptureBeforeRelay(t *testing.T) {
 	}
 	if _, err := st.Get("ANTHROPIC_API_KEY"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A relayed reply event the daemon captured is alerted, not blocked (a
+// Claude Code Stop answered block would restart the turn), and the value
+// is stored exposed.
+func TestSandboxVaultCaptureBeforeRelayAlertsAReply(t *testing.T) {
+	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
+	relay := &vaultRelay{fakeRelay: &fakeRelay{}}
+	var obs sandboxObserver
+	f := newSandboxIngressFixture(t, obs.observe, withTestVault(st), func(c *SandboxIngressConfig) {
+		c.Relay = relay
+		c.Registration = func(sandboxauth.Binding) (string, bool) { return "reg-1", true }
+	})
+	key := vaultTestStripeKey()
+	rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok,
+		`{"hook_event_name":"Stop","session_id":"sess-v5","stop_hook_active":false,"last_assistant_message":"wrote `+key+`","cwd":"/work/app"}`)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), key) {
+		t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
+	}
+	relay.mu.Lock()
+	calls := relay.calls
+	relay.mu.Unlock()
+	if len(calls) != 1 || strings.Contains(string(calls[0].Body), key) ||
+		calls[0].Header.Get(sandboxrelay.VaultCaptureHeader) != "Stop STRIPE_API_KEY=api.stripe.com" {
+		t.Fatalf("relayed calls = %+v", calls)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := resp["claude_code_output"].(map[string]interface{})
+	if resp["action"] != "alert" || out["decision"] == "block" || resp["delivery_receipt"] != "rcpt-1" {
+		t.Fatalf("answer = %v", resp)
+	}
+	decisions, _ := obs.take()
+	if len(decisions) != 1 || decisions[0].Action != "alert" || decisions[0].WouldBlock {
+		t.Fatalf("decisions = %+v", decisions)
+	}
+	if e, err := st.Get("STRIPE_API_KEY"); err != nil || !e.Exposed {
+		t.Fatalf("entry = %+v (%v)", e, err)
 	}
 }
