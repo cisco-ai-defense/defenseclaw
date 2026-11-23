@@ -37,3 +37,24 @@ func TestReadingFindingTakesTheEffectsSlotOfItsRule(t *testing.T) {
 		t.Fatalf("empty: got %d %v", i, held)
 	}
 }
+
+// TestFloorRaiseOnlyReadingKeepsItsMarkInAnEffectsSlot (rel-1-0-10:GAP-1984
+// with the GAP-1478 Known write finding): a finding of a reading 1.0.10 did
+// not have stays floorRaiseOnly when it takes the slot of an effects-lane
+// finding, and so is no fold target for the effect lane; in the slot of a
+// 1.0.10 reading's finding it takes that finding's standing.
+func TestFloorRaiseOnlyReadingKeepsItsMarkInAnEffectsSlot(t *testing.T) {
+	newReading := RuleFinding{RuleID: "tamper.detector_state_write", floorRaiseOnly: true}
+	known := RuleFinding{RuleID: decide.RuleStateWrite, Proof: decide.Proof{Source: decide.SourceEffects}}
+	if got := withFloorRaiseOnlyOf(newReading, known); !got.floorRaiseOnly {
+		t.Fatal("a new reading in an effects-lane slot lost its floorRaiseOnly mark")
+	}
+	old := RuleFinding{RuleID: "tamper.detector_state_write"}
+	if got := withFloorRaiseOnlyOf(newReading, old); got.floorRaiseOnly {
+		t.Fatal("a new reading in a 1.0.10 reading's slot kept floorRaiseOnly")
+	}
+	effect := RuleFinding{RuleID: decide.RuleEffectRestricted, Proof: decide.Proof{Source: decide.SourceEffects}}
+	if got := foldTargetsFor(effect, []RuleFinding{withFloorRaiseOnlyOf(newReading, known)}); len(got) != 0 {
+		t.Fatalf("fold targets %v: a floorRaiseOnly finding is a fold target", got)
+	}
+}

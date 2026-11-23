@@ -105,7 +105,17 @@ func withFloorRaiseOnlyMark(request trustedActionRequest, findings []RuleFinding
 // the same rule: it is floorRaiseOnly only when both are, so a 1.0.10
 // reading's finding stays a fold target when a new reading proves its rule
 // more strongly.
+//
+// An effects-lane finding is no 1.0.10 reading's finding: a reading 1.0.10
+// did not have that takes its slot (the GAP-1550 foreach header's
+// tamper.detector_state_write in the place of the Known state write finding
+// of the same rule, GAP-1478) stays floorRaiseOnly. Made a fold target, it
+// took the effect finding of the call: the CRITICAL
+// effect.protected_target_restricted fell to its HIGH (rel-1-0-10:GAP-1984).
 func withFloorRaiseOnlyOf(replacement, replaced RuleFinding) RuleFinding {
+	if replaced.Proof.Source == decide.SourceEffects {
+		return replacement
+	}
 	replacement.floorRaiseOnly = replacement.floorRaiseOnly && replaced.floorRaiseOnly
 	return replacement
 }
