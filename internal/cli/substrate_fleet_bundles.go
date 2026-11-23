@@ -21,16 +21,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	eb "github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
-	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/bundle"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
@@ -161,33 +158,4 @@ func readBundles(ctx context.Context, f *substrateClusterFlags, o *fleet.Observe
 		}
 		b.Stages = append(b.Stages, bs)
 	}
-}
-
-// substrateBundleCheck is the gateway doctor's substrate.bundles row
-// (GAP-0429): every stage's bundle verifies against the trust anchors the
-// gateway reads now, as the controller checks on every pass; a stage that
-// no longer does is named with its code and the fix.
-func substrateBundleCheck(ctx context.Context, s *bundle.Store, managedMode bool) gateway.SubstrateCheck {
-	const id = "substrate.bundles"
-	fix := "apply a bundle signed with a key in the current trust anchors (defenseclaw substrate bundle apply FILE), " +
-		"or put the trust anchors Secret back"
-	_, problems, err := s.Load(ctx)
-	if err != nil {
-		return gateway.SubstrateCheck{ID: id, Status: "warn", Detail: "the bundle state could not be read: " + firstLineOf(err.Error()),
-			Fix: "check the gateway's access to the " + bundle.StateConfigMap + " ConfigMap (helm status)"}
-	}
-	if len(problems) == 0 {
-		return gateway.SubstrateCheck{ID: id, Status: "pass", Detail: "every stage's bundle verifies against the trust anchors"}
-	}
-	parts := make([]string, 0, len(problems))
-	for _, p := range problems {
-		parts = append(parts, "stage "+p.Stage+" ("+p.Code+")")
-	}
-	then := "their atespaces fall back to config.yaml"
-	if managedMode {
-		then = "their atespaces keep only the DefenseClaw rule (deny-only)"
-	}
-	return gateway.SubstrateCheck{ID: id, Status: "fail", Fix: fix,
-		Detail: fmt.Sprintf("%d stage bundle(s) no longer verify against the trust anchors, so %s until a trusted bundle is applied: %s",
-			len(problems), then, strings.Join(parts, ", "))}
 }

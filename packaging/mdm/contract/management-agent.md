@@ -135,8 +135,8 @@ with only the members that are safe to send off the device:
 | `bundle-status-forward.schema.json` | `bundle status --json` |
 | `bundle-receipt-forward.schema.json` | receipt files (4.9) |
 | `identity-refresh-forward.schema.json` | `enterprise identity refresh --json` (from 1.0.6) |
-| `substrate-status-forward.schema.json` | `substrate status --json` (from 1.0.10): all but the check messages |
-| `substrate-verify-forward.schema.json` | `substrate verify --json` (from 1.0.10): all but the check messages |
+| `substrate-status-forward.schema.json` | `substrate status --json` (from 1.0.10): all but the check messages and `bundles[].key_id` |
+| `substrate-verify-forward.schema.json` | `substrate verify --json` (from 1.0.10): all but the check messages and `bundles[].key_id` |
 
 They list only DefenseClaw ids, bundle and receipt ids, the agent's own
 `delivery_id`, digests, counts, codes, booleans, enums, versions and times.

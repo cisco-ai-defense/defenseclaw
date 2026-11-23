@@ -220,6 +220,8 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["verify", "--install-file", "install.yaml", "--json"],
         ["status", "--cluster", "--install-file", "install.yaml", "--json"],
         ["setup", "--remove", "--dry-run"],
+        ["setup", "--install-file", "install.yaml", "--no-chart", "--dry-run"],
+        ["setup", "--install-file", "install.yaml", "--overlay-only", "--yes"],
         ["bundle", "apply", "bundle.dcbundle", "--atespaces", "eng,ops"],
         ["bundle", "status"],
         ["template", "build", "--connector", "claude", "--from", "img:1", "--to", "reg/img:1", "--json"],
@@ -244,3 +246,14 @@ def test_substrate_runs_without_a_defenseclaw_config() -> None:
 
     assert "substrate" in main_module.SKIP_LOAD_COMMANDS
     assert "substrate" in main_module.ALLOW_MISSING_V8_PREFLIGHT
+
+
+def test_setup_no_chart_is_a_hidden_flag_the_stub_accepts() -> None:
+    """--no-chart is --overlay-only under a second name: help shows the first and the stub accepts both."""
+    setup = _python_tree()["substrate setup"]
+    options = {opt: param for param in setup.params if isinstance(param, GatewayOption) for opt in param.opts}
+    assert "--no-chart" in options and options["--no-chart"].hidden
+    assert not options["--overlay-only"].hidden
+    help_text = CliRunner().invoke(substrate, ["setup", "--help"], obj=AppContext()).output
+    assert "--overlay-only" in help_text
+    assert "--no-chart" not in help_text.replace("(also spelled --no-chart)", "")
