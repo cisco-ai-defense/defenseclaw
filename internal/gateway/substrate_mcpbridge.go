@@ -9,12 +9,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 
@@ -36,10 +39,14 @@ import (
 // error mcp_call_denied instead.
 //
 // What the laptop server receives is the gateway's own re-encoding of the
-// message it judged (exact keys, no duplicates, numbers kept), so a parser
-// on the laptop cannot read a different method or tool name than the one
-// that was judged. A message that does not parse, a batch, or one over
-// mcp_bridge.message_max_bytes is refused, never forwarded or cut.
+// message it judged (numbers kept), and the parse is strict: a message with
+// a duplicate key, or a key that only folds to method, params, name or
+// arguments, in the envelope or in params is refused (substrateMCPStrictKeys),
+// so a case-insensitive parser on the laptop cannot read a different method,
+// tool name or arguments than the ones that were judged. A message that does
+// not parse, a batch, or one over mcp_bridge.message_max_bytes is refused,
+// never forwarded or cut; an oversize answer from the laptop also answers the
+// agent's pending request (substrateMCPBridge.tooLarge).
 //
 // No keepalive pings are sent on either socket: idle_close counts bytes on
 // the relay connection, and pings would keep an idle bridge open (S2B-6).
@@ -151,7 +158,7 @@ func (b *substrateMCPBridge) pump(ctx context.Context, src *websocket.Conn, from
 			if _, err := io.Copy(io.Discard, rd); err != nil {
 				return
 			}
-			b.refuse(ctx, fromAgent, nil, "message_too_large", "the MCP message is larger than mcp_bridge.message_max_bytes")
+			b.tooLarge(ctx, fromAgent, msg)
 			continue
 		}
 		if !fromAgent {
@@ -169,6 +176,11 @@ func (b *substrateMCPBridge) pump(ctx context.Context, src *websocket.Conn, from
 // form, or refuses it.
 func (b *substrateMCPBridge) fromAgent(ctx context.Context, raw []byte) {
 	canon, v, err := substrateMCPCanonical(raw)
+	if errors.Is(err, errSubstrateMCPAmbiguous) {
+		m, _ := v.(map[string]any)
+		b.refuse(ctx, true, substrateMCPID(m), "invalid_message", "the MCP message has a duplicate or case-folded JSON-RPC key")
+		return
+	}
 	if err != nil {
 		b.refuse(ctx, true, nil, "invalid_message", "the MCP message is not one JSON-RPC object")
 		return
@@ -185,18 +197,17 @@ func (b *substrateMCPBridge) fromAgent(ctx context.Context, raw []byte) {
 		return
 	}
 	if method != "tools/call" {
+		if strings.EqualFold(strings.TrimSpace(method), "tools/call") {
+			b.refuse(ctx, true, id, "invalid_message", "the JSON-RPC method is not exactly tools/call")
+			return
+		}
 		b.write(false, websocket.BinaryMessage, canon)
 		return
 	}
-	params, _ := m["params"].(map[string]any)
-	tool, _ := params["name"].(string)
-	if tool == "" {
-		b.refuse(ctx, true, id, "invalid_message", "tools/call has no tool name")
+	tool, args, why := substrateMCPCall(m)
+	if why != "" {
+		b.refuse(ctx, true, id, "invalid_message", why)
 		return
-	}
-	var args json.RawMessage
-	if a, has := params["arguments"]; has {
-		args, _ = substrateMCPEncode(a)
 	}
 	req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: tool, Transport: "stdio", Method: method}, Args: args}
 	req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
@@ -287,6 +298,32 @@ func (b *substrateMCPBridge) deny(ctx context.Context, id any, tool, source, rea
 	b.writeErr(true, id, substrateMCPDeniedCode, "mcp_call_denied", "The guard denied tool "+b.s.target+"."+tool+": "+reason)
 }
 
+// substrateMCPTooLargeControl tells the agent's shim that a laptop message
+// was dropped when there is no request id to answer.
+var substrateMCPTooLargeControl = []byte(`{"type":"error","code":"message_too_large"}`)
+
+// tooLarge refuses a message over mcp_bridge.message_max_bytes; prefix is
+// the bounded part the bridge read. The sender gets the error, with its
+// request's id when the prefix shows one. When the message was an answer,
+// the other side's pending request gets the error with that id, so the
+// agent never waits for a laptop answer that was dropped (GAP-0839). A laptop
+// message that is neither gives the agent a control error frame.
+func (b *substrateMCPBridge) tooLarge(ctx context.Context, fromAgent bool, prefix []byte) {
+	const code, why = "message_too_large", "the MCP message is larger than mcp_bridge.message_max_bytes"
+	id, response, request := substrateMCPPrefixID(prefix)
+	var senderID any
+	if request {
+		senderID = id
+	}
+	b.refuse(ctx, fromAgent, senderID, code, why)
+	switch {
+	case response && id != nil:
+		b.writeErr(!fromAgent, id, -32600, code, why)
+	case !fromAgent && !request:
+		b.write(true, websocket.TextMessage, substrateMCPTooLargeControl)
+	}
+}
+
 // refuse answers a message the bridge does not carry. toAgent says which
 // side sent it; that side gets the error.
 func (b *substrateMCPBridge) refuse(ctx context.Context, toAgent bool, id any, code, why string) {
@@ -325,9 +362,28 @@ func substrateMCPID(m map[string]any) any {
 	return nil
 }
 
+// substrateMCPCall is a tools/call's tool name and encoded arguments, or the
+// reason it is refused. An arguments value that does not encode is refused,
+// never judged as a call without arguments.
+func substrateMCPCall(m map[string]any) (tool string, args json.RawMessage, why string) {
+	params, _ := m["params"].(map[string]any)
+	tool, _ = params["name"].(string)
+	if tool == "" {
+		return "", nil, "tools/call has no tool name"
+	}
+	if a, has := params["arguments"]; has {
+		var err error
+		if args, err = substrateMCPEncode(a); err != nil {
+			return "", nil, "the tools/call arguments do not encode"
+		}
+	}
+	return tool, args, ""
+}
+
 // substrateMCPCanonical parses exactly one JSON value and re-encodes it.
-// Duplicate keys collapse to the one Go judged (the last), numbers stay as
-// written, and no trailing data survives.
+// Numbers stay as written and no trailing data survives. A message that
+// fails substrateMCPStrictKeys returns errSubstrateMCPAmbiguous (with the
+// decoded value, for its id); it is refused, never re-encoded.
 func substrateMCPCanonical(raw []byte) ([]byte, any, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -338,8 +394,137 @@ func substrateMCPCanonical(raw []byte) ([]byte, any, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, nil, errors.New("trailing data after the JSON-RPC message")
 	}
+	if err := substrateMCPStrictKeys(raw); err != nil {
+		return nil, v, err
+	}
 	out, err := substrateMCPEncode(v)
 	return out, v, err
+}
+
+// errSubstrateMCPAmbiguous marks a message that a parser on the laptop
+// could read differently from the bridge.
+var errSubstrateMCPAmbiguous = errors.New("ambiguous JSON-RPC keys")
+
+// substrateMCPJudgedKeys maps the folded form of each key the verdict reads
+// to its only accepted spelling.
+var substrateMCPJudgedKeys = func() map[string]string {
+	m := map[string]string{}
+	for _, k := range []string{"method", "params", "name", "arguments"} {
+		m[substrateMCPFold(k)] = k
+	}
+	return m
+}()
+
+// substrateMCPStrictKeys refuses an envelope or params object that a laptop
+// parser could read differently from the bridge (GAP-0838). Go's
+// encoding/json, and so mark3labs/mcp-go, matches struct keys with simple
+// Unicode case folding and keeps the last duplicate. So at those two levels
+// it refuses any two keys equal under strings.EqualFold (exact duplicates
+// too), and any key that folds to method, params, name or arguments but is
+// not byte-exact: Method, paramſ (U+017F), a Kelvin sign (U+212A) and so on.
+// Keys deeper down, inside arguments, are part of the arguments the verdict
+// reads, so they need no rule here.
+func substrateMCPStrictKeys(raw []byte) error {
+	params, err := substrateMCPCheckKeys(raw)
+	if err != nil || params == nil {
+		return err
+	}
+	_, err = substrateMCPCheckKeys(params)
+	return err
+}
+
+// substrateMCPCheckKeys checks one object's keys and returns its params
+// value. A value that is not an object has no keys to check.
+func substrateMCPCheckKeys(raw []byte) (json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, nil
+	}
+	var params json.RawMessage
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		k, _ := t.(string)
+		f := substrateMCPFold(k)
+		if seen[f] {
+			return nil, fmt.Errorf("%w: duplicate key %q", errSubstrateMCPAmbiguous, k)
+		}
+		seen[f] = true
+		if exact, judged := substrateMCPJudgedKeys[f]; judged && k != exact {
+			return nil, fmt.Errorf("%w: key %q is not %q", errSubstrateMCPAmbiguous, k, exact)
+		}
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return nil, err
+		}
+		if k == "params" {
+			params = val
+		}
+	}
+	return params, nil
+}
+
+// substrateMCPFold gives one spelling per strings.EqualFold class: each rune
+// becomes the smallest rune of its unicode.SimpleFold orbit.
+func substrateMCPFold(k string) string {
+	var sb strings.Builder
+	for _, r := range k {
+		low := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			low = min(low, f)
+		}
+		sb.WriteRune(low)
+	}
+	return sb.String()
+}
+
+// substrateMCPPrefixID reads an oversize message's id from its bounded
+// prefix: a string or number id, nil when it is not in the prefix or is
+// given twice, and whether the prefix shows a response (result or error) or
+// a request (method). A prefix that shows both is neither.
+func substrateMCPPrefixID(prefix []byte) (id any, response, request bool) {
+	dec := json.NewDecoder(bytes.NewReader(prefix))
+	dec.UseNumber()
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, false, false
+	}
+	var found any
+	ids := 0
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch k, _ := t.(string); k {
+		case "id":
+			ids++
+			if dec.Decode(&found) != nil {
+				ids = 0
+			}
+			continue
+		case "result", "error":
+			response = true
+		case "method":
+			request = true
+		}
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			break
+		}
+	}
+	if response && request {
+		return nil, false, false
+	}
+	if ids == 1 {
+		switch found.(type) {
+		case string, json.Number:
+			id = found
+		}
+	}
+	return id, response, request
 }
 
 func substrateMCPEncode(v any) ([]byte, error) {
