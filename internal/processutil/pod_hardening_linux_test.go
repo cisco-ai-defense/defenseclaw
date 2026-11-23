@@ -31,6 +31,9 @@ func TestPodWriteRightsAreBoundedByABI(t *testing.T) {
 	if got := podWriteAccess(3); got != base|unix.LANDLOCK_ACCESS_FS_REFER|unix.LANDLOCK_ACCESS_FS_TRUNCATE {
 		t.Fatalf("ABI 3 write rights: %#x", got)
 	}
+	if got := podWriteAccess(5); got != base|unix.LANDLOCK_ACCESS_FS_REFER|unix.LANDLOCK_ACCESS_FS_TRUNCATE|unix.LANDLOCK_ACCESS_FS_IOCTL_DEV {
+		t.Fatalf("ABI 5 write rights: %#x", got)
+	}
 }
 
 func TestPodResetClearsReadOnlyFoldersWithoutFollowingLinks(t *testing.T) {

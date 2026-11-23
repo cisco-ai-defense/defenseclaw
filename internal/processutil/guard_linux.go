@@ -212,6 +212,10 @@ func podWriteAccess(abi int) uint64 {
 	if abi >= 3 {
 		access |= unix.LANDLOCK_ACCESS_FS_TRUNCATE
 	}
+	if abi >= 5 {
+		// IOCTL_DEV can mutate device state without a file write.
+		access |= unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
+	}
 	return access
 }
 
