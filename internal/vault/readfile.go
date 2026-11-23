@@ -22,8 +22,9 @@ var (
 	readBounded     = safefile.ReadRegularFileBounded
 )
 
-// readStable reads one of the vault's files (the vault, its pin, a pending
-// exposure) without the writer lock. Its writers replace it whole, by an
+// readStable reads the vault or its pin, which some readers do without the
+// writer lock. (A pending exposure is written once, under a new name, and
+// is never replaced, so it is read once.) Its writers replace it whole, by an
 // atomic rename, so a read that overlaps a write sees the file change under
 // it and safefile returns none of its bytes. The file at the path is then a
 // whole new one, so the read is repeated. A file that keeps changing for

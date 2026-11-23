@@ -39,7 +39,9 @@ func TestVaultReadsAgainWhenAWriterReplacedTheVault(t *testing.T) {
 	real := readBounded
 	calls := 0
 	slept := stubReads(t, func(path string, max int64) ([]byte, error) {
-		calls++
+		if path == s.Path() {
+			calls++
+		}
 		if path == s.Path() && calls <= 2 {
 			return nil, changed(path)
 		}
@@ -88,7 +90,7 @@ func TestVaultDoesNotRepeatOtherReadErrors(t *testing.T) {
 // stores write it.
 func TestVaultReadsDuringConcurrentWritesSucceed(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows replaces a file by a swap that has its own retry; this checks the POSIX rename")
+		t.Skip("this checks readers against the POSIX rename; Windows readers during a swap are not covered here")
 	}
 	dir := newStore(t).dir
 	if _, err := Open(dir).Add(AddInput{Name: "BASE", Value: "value-base", Host: "api.example.com"}); err != nil {

@@ -314,7 +314,8 @@ const readStabilityMetadataRetries = 3
 // file at path was replaced or rewritten while it was opened or read. None
 // of the bytes are returned. A reader that does not hold the lock of the
 // file's writers can read again: a writer that replaces a file by an
-// atomic rename leaves a whole new file at path.
+// atomic rename leaves a whole new file at path. It is not
+// ErrReadIdentityChanged: RetryTransientRead does not repeat these reads.
 var ErrFileChanged = errors.New("safefile: file changed while reading")
 
 type fileChangedError struct{ msg string }

@@ -143,7 +143,7 @@ func (s *Store) readPending() ([]*pendingRecord, error) {
 		if !strings.HasSuffix(name, ".json") || !e.Type().IsRegular() {
 			return nil, bad("is not a record")
 		}
-		b, err := readStable(path, maxPendingBytes)
+		b, err := safefile.ReadRegularFileBounded(path, maxPendingBytes)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
