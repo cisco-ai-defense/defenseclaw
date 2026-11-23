@@ -177,6 +177,20 @@ func TestDefenseClawInspect_WireShape(t *testing.T) {
 	}
 }
 
+// Count only connector lookups, leaving unrelated inspection context values alone.
+type agentClassLookupContext struct {
+	context.Context
+	lookups atomic.Int64
+}
+
+func (c *agentClassLookupContext) Value(key any) any {
+	switch key.(type) {
+	case authenticatedHookConnectorContextKey, authenticatedInspectConnectorKey:
+		c.lookups.Add(1)
+	}
+	return c.Context.Value(key)
+}
+
 // TestDefenseClawInspect_AgentClass checks the policy-class field on the
 // managed wire without allowing an unverified connector to choose it.
 func TestDefenseClawInspect_AgentClass(t *testing.T) {
@@ -203,8 +217,12 @@ func TestDefenseClawInspect_AgentClass(t *testing.T) {
 		{"conflicting trusted contexts", withAuthenticatedInspectConnector(withAuthenticatedHookConnector(t.Context(), "codex"), "cursor"), ""},
 	}
 	defaultOff := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000}, newFakeCloudProvider("token"))
-	if defaultOff.Inspect(withAuthenticatedHookConnector(t.Context(), "copilot"), []ChatMessage{{Role: "user", Content: "hello"}}) == nil {
+	offCtx := &agentClassLookupContext{Context: withAuthenticatedHookConnector(t.Context(), "copilot")}
+	if defaultOff.Inspect(offCtx, []ChatMessage{{Role: "user", Content: "hello"}}) == nil {
 		t.Fatal("expected default-off inspection response")
+	}
+	if got := offCtx.lookups.Load(); got != 0 {
+		t.Fatalf("default-off client performed %d connector lookups", got)
 	}
 	var offBody map[string]json.RawMessage
 	if err := json.Unmarshal(gotBody, &offBody); err != nil {

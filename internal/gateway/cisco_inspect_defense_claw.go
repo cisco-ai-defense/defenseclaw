@@ -338,8 +338,10 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// cisco_ai_defense.enabled_rules is set; otherwise it omits config
 	// too and the tenant's own rules apply.
 	payload := map[string]interface{}{"messages": chatMsgs}
-	if agentClass := managedInspectAgentClass(ctx); c.reportAgentClass && agentClass != "" {
-		payload["agent_class"] = agentClass
+	if c.reportAgentClass {
+		if agentClass := managedInspectAgentClass(ctx); agentClass != "" {
+			payload["agent_class"] = agentClass
+		}
 	}
 	// Under the Secure Client integration the request names its end user,
 	// so AI Defense can attribute the inspection and choose that person's
