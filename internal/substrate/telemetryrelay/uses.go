@@ -33,9 +33,15 @@ const (
 	// DefaultMaxHostUses bounds the map in (actor, host) entries; past it
 	// the oldest eighth goes.
 	DefaultMaxHostUses = 20000
-	// maxHostUseActors and maxHostUseAnswer bound one read.
+	// DefaultMaxHostUsesPerActor bounds one actor's hosts; past it the
+	// actor's own oldest entry goes, so one agent that calls many hosts
+	// cannot push out another person's last use (RV7-2).
+	DefaultMaxHostUsesPerActor = 256
+	// maxHostUseActors bounds the actors of one read (the reader sends
+	// more in batches); maxHostUseAnswer bounds its uses: the most a full
+	// map holds.
 	maxHostUseActors = 256
-	maxHostUseAnswer = 10000
+	maxHostUseAnswer = DefaultMaxHostUses
 )
 
 // ActorRef names one registered actor.
@@ -57,7 +63,7 @@ type HostUse struct {
 	At       time.Time `json:"at"`
 }
 
-// HostUsesResponse is the newest uses first, at most 10,000.
+// HostUsesResponse is the newest uses first, at most maxHostUseAnswer.
 type HostUsesResponse struct {
 	Uses []HostUse `json:"uses,omitempty"`
 }
@@ -88,6 +94,14 @@ func (s *Store) noteUsesLocked(recs []Record, now time.Time) {
 			s.uses[a] = hosts
 		}
 		if old, ok := hosts[r.Host]; !ok {
+			if len(hosts) >= DefaultMaxHostUsesPerActor {
+				oh, ot := oldestUse(hosts)
+				if !at.After(ot) {
+					continue
+				}
+				delete(hosts, oh)
+				s.useCount--
+			}
 			s.useCount++
 		} else if !at.After(old) {
 			continue
@@ -101,6 +115,16 @@ func (s *Store) noteUsesLocked(recs []Record, now time.Time) {
 	if s.useCount > maxN {
 		s.trimUsesLocked(maxN - maxN/8)
 	}
+}
+
+// oldestUse is the host of an actor's oldest entry, and its time.
+func oldestUse(hosts map[string]time.Time) (host string, at time.Time) {
+	for h, t := range hosts {
+		if host == "" || t.Before(at) || (t.Equal(at) && h < host) {
+			host, at = h, t
+		}
+	}
+	return host, at
 }
 
 // trimUsesLocked keeps the keep newest entries.
@@ -140,7 +164,7 @@ func (s *Store) allUsesLocked(want func(ActorRef) bool) []HostUse {
 }
 
 // HostUses implements MethodHostUses: the host uses of the named actors
-// (the first 256), newest first, at most 10,000.
+// (the first 256), newest first, at most maxHostUseAnswer.
 func (s *Store) HostUses(_ context.Context, in HostUsesRequest) (HostUsesResponse, error) {
 	actors := in.Actors
 	if len(actors) > maxHostUseActors {
@@ -164,14 +188,21 @@ type UseReader struct {
 	Leader *leader.Client
 }
 
-// HostUses reads the host uses of actors from the leader.
+// HostUses reads the host uses of actors from the leader, maxHostUseActors
+// actors per call, so a person with more agents sees all of them (RV7-3).
 func (u *UseReader) HostUses(ctx context.Context, actors []ActorRef) ([]HostUse, error) {
 	if u == nil || u.Leader == nil || len(actors) == 0 {
 		return nil, nil
 	}
-	var out HostUsesResponse
-	if err := u.Leader.Call(ctx, MethodHostUses, leader.NewRequestID(), HostUsesRequest{Actors: actors}, &out); err != nil {
-		return nil, err
+	var all []HostUse
+	for len(actors) > 0 {
+		batch := actors[:min(maxHostUseActors, len(actors))]
+		actors = actors[len(batch):]
+		var out HostUsesResponse
+		if err := u.Leader.Call(ctx, MethodHostUses, leader.NewRequestID(), HostUsesRequest{Actors: batch}, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.Uses...)
 	}
-	return out.Uses, nil
+	return all, nil
 }
