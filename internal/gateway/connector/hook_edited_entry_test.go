@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,6 +76,9 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 			// run below covers a real Windows data directory.
 			dataDir = "/home/u/.defenseclaw"
 		}
+		if runtime.GOOS != "windows" {
+			writeEditedHookGoldenMarkers(t, tc, dataDir)
+		}
 		path := filepath.Join(t.TempDir(), tc.File)
 		document := strings.ReplaceAll(tc.Document, "{data_dir}", filepath.ToSlash(dataDir))
 		if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
@@ -110,9 +114,9 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s (drive path): %v", tc.Name, err)
 		}
-		if got := hookDocumentHoldsEditedEntry(driveDecoded, tc.Connector, driveDir, tc.Script); got != tc.Edited {
+		if got := hookDocumentHoldsEditedEntry(driveDecoded, tc.Connector, driveDir, tc.Script); got != tc.driveEdited() {
 			t.Errorf("%s (drive-path data dir %s): hookDocumentHoldsEditedEntry = %v, want %v",
-				tc.Name, driveDir, got, tc.Edited)
+				tc.Name, driveDir, got, tc.driveEdited())
 		}
 	}
 }
@@ -187,19 +191,20 @@ func TestEditedHookGoldenReportedExactlyWhenSetupRemoves(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
+			writeEditedHookGoldenMarkers(t, tc, dataDir)
 			document := strings.ReplaceAll(tc.Document, "{data_dir}", filepath.ToSlash(dataDir))
 			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			before := decode(t, path)
-			reported := hookDocumentHoldsEditedEntry(before, tc.Connector, dataDir, tc.Script)
+			reportedCommand, reported := hookDocumentEditedEntry(before, tc.Connector, dataDir, tc.Script)
 
 			drivePath := filepath.Join(root, "drive-"+tc.File)
 			driveDocument := strings.ReplaceAll(tc.Document, "{data_dir}", "C:/Users/u/.defenseclaw")
 			if err := os.WriteFile(drivePath, []byte(driveDocument), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			driveReported := hookDocumentHoldsEditedEntry(decode(t, drivePath), tc.Connector, "C:/Users/u/.defenseclaw", tc.Script)
+			driveCommand, driveReported := hookDocumentEditedEntry(decode(t, drivePath), tc.Connector, "C:/Users/u/.defenseclaw", tc.Script)
 
 			if err := run(t, root, path, hookScript); err != nil {
 				// A refused repair (Copilot's independent handler) removes nothing.
@@ -215,15 +220,25 @@ func TestEditedHookGoldenReportedExactlyWhenSetupRemoves(t *testing.T) {
 					removed = append(removed, command)
 				}
 			}
-			// Reported is a subset of removed: a few golden copies Setup
-			// removes stay unreported by design (another account's copy with
-			// no binding, a shell wrapper), which leaves the hook guard idle,
-			// never looping.
-			if reported != tc.Edited || (reported && len(removed) == 0) {
+			// Reported is a subset of removed, command by command: the very
+			// command the doctor names is gone after Setup's repair. A few
+			// golden copies Setup removes stay unreported by design (another
+			// account's copy with no binding, a shell wrapper), which leaves
+			// the hook guard idle, never looping.
+			if reported != tc.Edited {
 				t.Errorf("reported %v (golden %v), Setup removed %q", reported, tc.Edited, removed)
 			}
-			if driveReported && len(removed) == 0 {
-				t.Errorf("reported under a drive-path data dir, but Setup removes nothing")
+			if reported && after[reportedCommand] {
+				t.Errorf("reported %q, which Setup keeps (removed %q)", reportedCommand, removed)
+			}
+			// The drive-path document is never repaired: the same command
+			// under the POSIX data directory must be one Setup removes.
+			if driveReported {
+				posixCommand := strings.ReplaceAll(driveCommand, "C:/Users/u/.defenseclaw", filepath.ToSlash(dataDir))
+				if !slices.Contains(hookCommandStrings(before), posixCommand) || after[posixCommand] {
+					t.Errorf("reported %q under a drive-path data dir, but Setup keeps %q (removed %q)",
+						driveCommand, posixCommand, removed)
+				}
 			}
 		})
 	}
@@ -260,6 +275,34 @@ type editedHookGoldenCase struct {
 	File      string `json:"file"`
 	Document  string `json:"document"`
 	Edited    bool   `json:"edited"`
+	// Marked paths ({data_dir} replaced) get a generated-hook copy in the
+	// POSIX runs. DriveEdited, when set, is the answer under a drive-path
+	// data directory, where nothing is opened and Setup's hooks-dir claim
+	// (a POSIX prefix) never matches.
+	Marked      []string `json:"marked"`
+	DriveEdited *bool    `json:"drive_edited"`
+}
+
+func (tc editedHookGoldenCase) driveEdited() bool {
+	if tc.DriveEdited != nil {
+		return *tc.DriveEdited
+	}
+	return tc.Edited
+}
+
+// writeEditedHookGoldenMarkers writes a generated-hook copy at each of the
+// case's marked paths under dataDir.
+func writeEditedHookGoldenMarkers(t *testing.T, tc editedHookGoldenCase, dataDir string) {
+	t.Helper()
+	for _, marked := range tc.Marked {
+		file := filepath.FromSlash(strings.ReplaceAll(marked, "{data_dir}", filepath.ToSlash(dataDir)))
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("#!/bin/sh\n# defenseclaw-managed-hook v9\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // GAP-0906, GAP-0907: after a DefenseClaw hook entry's script name, hook

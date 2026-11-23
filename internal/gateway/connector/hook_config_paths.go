@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -879,7 +880,18 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 // final check failed, the hook guard repaired in a loop, a managed Windows
 // install rolled back and the doctor's "doctor --fix replaces it" was wrong
 // (GAP-1951).
+//
+// For Copilot, the events DefenseClaw binds and the other events are read
+// apart (copilotHookDocumentParts), as Setup repairs them (GAP-1958).
 func hookDocumentHoldsEditedEntry(document interface{}, connector, dataDir, scriptName string) bool {
+	_, found := hookDocumentEditedEntry(document, connector, dataDir, scriptName)
+	return found
+}
+
+// hookDocumentEditedEntry is hookDocumentHoldsEditedEntry that also returns
+// the reported command as written, so a test can check that Setup's repair
+// removes that very command (TestEditedHookGoldenReportedExactlyWhenSetupRemoves).
+func hookDocumentEditedEntry(document interface{}, connector, dataDir, scriptName string) (string, bool) {
 	dataDir = filepath.ToSlash(filepath.Clean(dataDir))
 	current := path.Join(dataDir, "hooks", scriptName)
 	home := strings.TrimSuffix(path.Dir(dataDir), "/") + "/"
@@ -891,60 +903,116 @@ func hookDocumentHoldsEditedEntry(document interface{}, connector, dataDir, scri
 	if connector == "antigravity" {
 		document = antigravityOwnedHookSections(document)
 	}
-	for _, written := range hookCommandStrings(document) {
-		written = strings.TrimSpace(written)
-		command := claudeCodeUnguardedHookCommand(written)
-		guarded := command != written
-		if editedDefenseClawHookCommand(command, scriptName) {
-			word, first, ok := posixHookCommandSplit(command)
-			_, rest, _ := hookScriptWordAfterWrapper(command)
-			if ok && word != current &&
-				(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) &&
-				editedHookEntryClaimed(connector, command, current, first, rest, guarded) {
-				return true
+	parts := []hookDocumentPart{{document: document}}
+	if connector == "copilot" {
+		parts = copilotHookDocumentParts(document)
+	}
+	for _, part := range parts {
+		for _, entry := range hookCommandStrings(part.document) {
+			written := strings.TrimSpace(entry)
+			command := claudeCodeUnguardedHookCommand(written)
+			guarded := command != written
+			if editedDefenseClawHookCommand(command, scriptName) {
+				word, first, ok := posixHookCommandSplit(command)
+				_, rest, _ := hookScriptWordAfterWrapper(command)
+				if ok && word != current &&
+					(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) &&
+					editedHookEntryClaimed(connector, command, current, word, first, rest, guarded, part.unboundEvent) {
+					return entry, true
+				}
+				continue
 			}
-			continue
-		}
-		windows := windowsHookScriptCommandAsPOSIX(command)
-		rest, ok := editedDefenseClawHookScript(windows, scriptName)
-		if !ok || (rest != "" && !defenseClawHookBinding(rest)) ||
-			!editedHookEntryClaimed(connector, command, current, rest, rest, guarded) {
-			continue
-		}
-		if word, _, ok := posixHookCommandSplit(windows); ok && word != windowsCurrent &&
-			((windowsHome != "" && strings.HasPrefix(word, windowsHome)) ||
-				(defenseClawHookBinding(rest) && path.Base(word) == scriptName)) {
-			return true
+			windows := windowsHookScriptCommandAsPOSIX(command)
+			rest, ok := editedDefenseClawHookScript(windows, scriptName)
+			// No POSIX word: Setup's hooks-dir claim never matches a Windows path.
+			if !ok || (rest != "" && !defenseClawHookBinding(rest)) ||
+				!editedHookEntryClaimed(connector, command, current, "", rest, rest, guarded, part.unboundEvent) {
+				continue
+			}
+			if word, _, ok := posixHookCommandSplit(windows); ok && word != windowsCurrent &&
+				((windowsHome != "" && strings.HasPrefix(word, windowsHome)) ||
+					(defenseClawHookBinding(rest) && path.Base(word) == scriptName)) {
+				return entry, true
+			}
 		}
 	}
-	return false
+	return "", false
+}
+
+// hookDocumentPart is a section of a decoded hook config, with whether it
+// holds Copilot events DefenseClaw does not bind.
+type hookDocumentPart struct {
+	document     interface{}
+	unboundEvent bool
+}
+
+// copilotHookDocumentParts splits a decoded Copilot hook file into the
+// events DefenseClaw binds (copilotCurrentHookEvents), with the rest of the
+// file, and the other events under hooks. Setup replaces a bound event only
+// when it owns every entry there (copilotIndependentHandlerIn) and strips its
+// own entries from any other event (stripCopilotOwnedEntry), so each part has
+// its own claim (GAP-1958).
+func copilotHookDocumentParts(document interface{}) []hookDocumentPart {
+	cfg, ok := document.(map[string]interface{})
+	if !ok {
+		return []hookDocumentPart{{document: document}}
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return []hookDocumentPart{{document: document}}
+	}
+	bound := make(map[string]interface{}, len(cfg))
+	for key, value := range cfg {
+		if key != "hooks" {
+			bound[key] = value
+		}
+	}
+	boundHooks := map[string]interface{}{}
+	unbound := map[string]interface{}{}
+	for event, value := range hooks {
+		if slices.Contains(copilotCurrentHookEvents, event) {
+			boundHooks[event] = value
+		} else {
+			unbound[event] = value
+		}
+	}
+	bound["hooks"] = boundHooks
+	return []hookDocumentPart{{document: bound}, {document: unbound, unboundEvent: true}}
 }
 
 // editedHookEntryClaimed reports whether connector's Setup repair removes a
-// hook command that hookDocumentHoldsEditedEntry's shape rule matched, so the
+// hook command that hookDocumentEditedEntry's shape rule matched, so the
 // doctor and the presence check report only what Setup heals (GAP-1951).
-// first is the text after the command's first word, rest the text after its
-// script word (past a shell or env wrapper), and guarded marks Claude Code's
-// missing-script guard. cli/defenseclaw/hook_integrity.py
-// (_setup_claims_edited_entry) applies the same rule, and
-// TestEditedHookGoldenReportedExactlyWhenSetupRemoves runs every golden case
-// through the connector's repair.
-func editedHookEntryClaimed(connector, command, current, first, rest string, guarded bool) bool {
+// word is the command's first word when it is a POSIX path ("" on the
+// Windows-path leg), first the text after that word, rest the text after its
+// script word (past a shell or env wrapper), guarded marks Claude Code's
+// missing-script guard, and unboundEvent a Copilot event DefenseClaw does not
+// bind. cli/defenseclaw/hook_integrity.py (_setup_claims_edited_entry)
+// applies the same rule, and TestEditedHookGoldenReportedExactlyWhenSetupRemoves
+// runs every golden case through the connector's repair.
+func editedHookEntryClaimed(connector, command, current, word, first, rest string, guarded, unboundEvent bool) bool {
 	switch connector {
 	case "claudecode":
-		// removeOwnedClaudeCodeHooks claims a guarded handler, and otherwise
-		// the script word alone (hookUsesForeignDefenseClawClaudeCodeScript,
+		// removeOwnedClaudeCodeHooks claims a guarded handler, any handler
+		// whose command starts in this install's hooks dir, whatever
+		// follows (isOwnedHookHandler, GAP-1957), and otherwise the script
+		// word alone (hookUsesForeignDefenseClawClaudeCodeScript,
 		// scriptHasMarker). Claude Code never registered an argument: a copy
-		// followed by --event, or run through a wrapper, is the user's.
-		return guarded || first == ""
+		// elsewhere followed by --event, or run through a wrapper, is the
+		// user's.
+		return guarded || first == "" || (word != "" && strings.HasPrefix(word, path.Dir(current)+"/"))
 	case "copilot":
+		// A live script of that name without DefenseClaw's marker is the
+		// operator's on any event (copilotLiveOperatorLookalike). On another
+		// event Setup strips any DefenseClaw entry
+		// (copilotUnexpectedEventOwnsHook, GAP-1958). On a bound event
 		// copilotBoundEventOwnsCommand claims the script alone or with the
 		// exact --event of a Copilot event; any other argument makes Setup
-		// refuse a bound event (copilotIndependentHandlerIn), and a live
-		// script of that name without DefenseClaw's marker is the operator's
-		// (copilotLiveOperatorLookalike).
-		return (rest == "" || copilotBoundEventArgument(rest)) &&
-			!copilotLiveOperatorLookalike(map[string]interface{}{"bash": command}, current)
+		// refuse it (copilotIndependentHandlerIn).
+		if copilotLiveOperatorLookalike(map[string]interface{}{"bash": command}, current) {
+			return false
+		}
+		return unboundEvent || rest == "" || copilotBoundEventArgument(rest)
 	}
 	return true
 }

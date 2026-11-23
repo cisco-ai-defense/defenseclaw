@@ -2858,7 +2858,8 @@ def _copilot_live_lookalike(command: str, current: str) -> bool:
     if split is None:
         return False
     word, rest = split
-    if word == current or posixpath.basename(word.strip("\"'")) != "copilot-hook.sh":
+    # Either separator, as isCopilotShellHookScript reads it on Windows.
+    if word == current or posixpath.basename(word.strip("\"'").replace("\\", "/")) != "copilot-hook.sh":
         return False
     if rest not in _COPILOT_BOUND_EVENT_ARGUMENTS:
         return False
@@ -2869,25 +2870,57 @@ def _copilot_live_lookalike(command: str, current: str) -> bool:
     return stat.S_ISREG(info.st_mode) and not _is_defenseclaw_hook_file(word)
 
 
-def _setup_claims_edited_entry(connector: str, command: str, current: str, first_rest: str, rest: str) -> bool:
+def _setup_claims_edited_entry(
+    connector: str,
+    command: str,
+    current: str,
+    word: str,
+    first_rest: str,
+    rest: str,
+    guarded: bool,
+    unbound_event: bool,
+) -> bool:
     """Whether *connector*'s Setup repair removes an entry the edited-hook shape rule matched.
 
     Mirrors ``editedHookEntryClaimed`` (internal/gateway/connector): the doctor
     reports only what ``doctor --fix`` heals, or the hook guard repaired in a
-    loop and Setup's final check failed (GAP-1951). *first_rest* is the text
-    after the command's first word, *rest* the text after its script word
-    (past a wrapper). Claude Code's repair claims the script word alone, and
-    Copilot's the script alone or with the exact ``--event`` of an event,
-    except a live script of that name without DefenseClaw's marker.
+    loop and Setup's final check failed (GAP-1951). *word* is the command's
+    first word when it is a POSIX path ("" for a Windows path), *first_rest*
+    the text after it, *rest* the text after its script word (past a
+    wrapper), *guarded* marks Claude Code's missing-script guard and
+    *unbound_event* a Copilot event DefenseClaw does not bind. Claude Code's
+    repair claims a guarded handler, any command that starts in this
+    install's hooks dir (GAP-1957) and otherwise the script word alone.
+    Copilot's claims any DefenseClaw entry on an unbound event (GAP-1958) and
+    on a bound one the script alone or with the exact ``--event`` of an
+    event, never a live script of that name without DefenseClaw's marker.
     """
 
     if connector == "claudecode":
-        return first_rest == ""
+        return guarded or first_rest == "" or (bool(word) and word.startswith(os.path.dirname(current) + "/"))
     if connector == "copilot":
-        return (rest == "" or rest in _COPILOT_BOUND_EVENT_ARGUMENTS) and not _copilot_live_lookalike(
-            command, current
-        )
+        if _copilot_live_lookalike(command, current):
+            return False
+        return unbound_event or rest == "" or rest in _COPILOT_BOUND_EVENT_ARGUMENTS
     return True
+
+
+def _copilot_document_parts(document: Any) -> list[tuple[Any, bool]]:
+    """A Copilot hook file's bound events (with the rest of the file), then its other events.
+
+    Mirrors ``copilotHookDocumentParts``: Setup replaces a bound event only
+    when it owns every entry there and strips its own entries from any other
+    event, so each part has its own claim (GAP-1958). The flag marks the
+    unbound part.
+    """
+
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return [(document, False)]
+    bound = {key: value for key, value in document.items() if key != "hooks"}
+    bound["hooks"] = {event: value for event, value in hooks.items() if event in _COPILOT_HOOK_EVENTS}
+    unbound = {event: value for event, value in hooks.items() if event not in _COPILOT_HOOK_EVENTS}
+    return [(bound, False), (unbound, True)]
 
 
 def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
@@ -2910,6 +2943,8 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     script_name = HOOK_SCRIPT_NAMES.get(connector)
     if not script_name:
         return []
+    from defenseclaw.fail_mode import claude_unguarded_hook_command
+
     data_dir = os.path.normpath(str(getattr(cfg, "data_dir", "") or ""))
     current = os.path.join(data_dir, "hooks", script_name)
     # Reported: an edited path under this install's home, and a command that
@@ -2947,30 +2982,39 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
                 for key, value in document.items()
                 if isinstance(key, str) and key.startswith(_ANTIGRAVITY_HOOK_KEY_PREFIX)
             }
-        for command in _hook_command_strings(document):
-            if written is not None and not written(command):
-                continue
-            word = edited_hook_script(command, script_name)
-            first, first_rest = _split_hook_command(command.strip()) or ("", "")
-            rest = (_split_after_wrapper(command.strip()) or ("", ""))[1]
-            if (
-                word
-                and first != current
-                and (first.startswith(owner) or copied_hook_script(command, script_name))
-                and _setup_claims_edited_entry(connector, command, current, first_rest, rest)
-            ):
-                return [
-                    _edited_hook_problem(connector, path, word if first == word else repr(command.strip()), current)
-                ]
-            windows = None if word else edited_windows_hook_script(command, script_name)
-            if windows is None:
-                continue
-            windows_word, windows_rest = windows
-            if not _setup_claims_edited_entry(connector, command, current, windows_rest, windows_rest):
-                continue
-            if windows_word != windows_current and (
-                (windows_owner and windows_word.startswith(windows_owner))
-                or (windows_rest.startswith(_HOOK_BINDINGS) and posixpath.basename(windows_word) == script_name)
-            ):
-                return [_edited_hook_problem(connector, path, repr(command.strip()), current)]
+        parts = _copilot_document_parts(document) if connector == "copilot" else [(document, False)]
+        for part, unbound_event in parts:
+            for entry in _hook_command_strings(part):
+                if written is not None and not written(entry):
+                    continue
+                # Claude Code's exact missing-script guard is unwrapped first, as
+                # hookDocumentEditedEntry does: Unix Setup writes that form (GAP-1956).
+                runs = entry.strip()
+                command = claude_unguarded_hook_command(runs)
+                guarded = command != runs
+                word = edited_hook_script(command, script_name)
+                first, first_rest = _split_hook_command(command) or ("", "")
+                rest = (_split_after_wrapper(command) or ("", ""))[1]
+                if (
+                    word
+                    and first != current
+                    and (first.startswith(owner) or copied_hook_script(command, script_name))
+                    and _setup_claims_edited_entry(
+                        connector, command, current, first, first_rest, rest, guarded, unbound_event
+                    )
+                ):
+                    return [_edited_hook_problem(connector, path, word if first == word else repr(runs), current)]
+                windows = None if word else edited_windows_hook_script(command, script_name)
+                if windows is None:
+                    continue
+                windows_word, windows_rest = windows
+                if not _setup_claims_edited_entry(
+                    connector, command, current, "", windows_rest, windows_rest, guarded, unbound_event
+                ):
+                    continue
+                if windows_word != windows_current and (
+                    (windows_owner and windows_word.startswith(windows_owner))
+                    or (windows_rest.startswith(_HOOK_BINDINGS) and posixpath.basename(windows_word) == script_name)
+                ):
+                    return [_edited_hook_problem(connector, path, repr(runs), current)]
     return []
