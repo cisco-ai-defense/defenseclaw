@@ -191,3 +191,123 @@ func TestGAP0922PersistenceRulesActorNeverWeakerThanLaptop(t *testing.T) {
 		})
 	}
 }
+
+// gap0922FolderRows are own SSH folder reads in the spellings the laptop
+// decides by name, home-relative so that every cwd variant reads the same
+// place, and the ordinary calls beside them (substrate-1 GAP-0993, GAP-0996,
+// GAP-0999). An attack row is never weaker in the actor than on the laptop;
+// a benign row is never stronger.
+var gap0922FolderRows = []struct {
+	command string
+	attack  bool
+}{
+	{"tar cz ~/.ssh", true},
+	{"cp -r ~/.ssh /tmp/x", true},
+	{"cd ~/.ssh && tar cz .", true},
+	{"cd ~ && tar cz .ssh", true},
+	{"tar cz ~/.ss?", true},
+	{"tar cz ~/.s*", true},
+	{"tar cz ~/.[s]sh", true},
+	{"tar cz ~/'.ssh'", true},
+	{"tar cz ~/.s\"sh\"", true},
+	{"zip -r /tmp/k.zip $HOME/.ssh", true},
+	{"rsync -a ${HOME}/.ssh/ /tmp/b/", true},
+	{"D=~/.ssh; tar cz $D", true},
+	{"pushd ~/.ssh && tar cz .", true},
+	{"bash -c 'tar cz ~/.ssh'", true},
+	// Whole-home archives: the laptop does not decide them by the SSH
+	// folder's name, so the by-name gate leaves them alone.
+	{"tar cz ~", false},
+	{"cd ~ && tar cz .", false},
+	{"cp -r ~/src /tmp/x", false},
+	{"tar czf /tmp/p.tgz src", false},
+	{"ls -la ~/.ssh", false},
+	{"git status && cd src && ls", false},
+	{"grep -rn TODO .", false},
+}
+
+// TestGAP0922SSHFolderReadsEveryConnectorShape: the by-name reading runs for
+// every copy-mode hook path, not only Claude Code and Codex
+// (substrate-1 GAP-0993): an Amp, OpenCode or Cursor actor judged by the
+// gateway alone answers an own SSH folder read as the laptop does, in each
+// tool folder variant. A call with no absolute guest folder (none, or a
+// relative one) is read in the guest home (GAP-0996).
+func TestGAP0922SSHFolderReadsEveryConnectorShape(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX gateway")
+	}
+	for _, pack := range []string{"default", "strict"} {
+		for _, s := range gap0545Shapes() {
+			t.Run(pack+"/"+s.name, func(t *testing.T) {
+				api, actor, home, _ := gap0545API(t, s.connector, pack)
+				gap0922Layout(t, home)
+				// variant: "=" the shape's own body, "-" no tool folder,
+				// "src" a relative tool folder; "no-cwd" and "rel-cwd" give
+				// the actor no absolute reported folder (GAP-0996), where
+				// the laptop is in its home.
+				for _, variant := range []string{"=", "-", "src", "no-cwd", "rel-cwd"} {
+					for _, row := range gap0922FolderRows {
+						mk := func(cwd string, guest bool) []byte {
+							reported := cwd
+							if guest && variant == "no-cwd" {
+								reported = ""
+							} else if guest && variant == "rel-cwd" {
+								reported = "work"
+							}
+							m := s.body(row.command, reported)
+							if ti, ok := m["tool_input"].(map[string]any); ok {
+								for _, k := range []string{"workdir", "cwd"} {
+									if _, has := ti[k]; !has {
+										continue
+									}
+									switch variant {
+									case "-", "no-cwd", "rel-cwd":
+										delete(ti, k)
+									case "src":
+										ti[k] = "src"
+									}
+								}
+							}
+							b, _ := json.Marshal(m)
+							return b
+						}
+						la, lr := gap0545Verdict(t, api, context.Background(), s, mk(home, false))
+						ca, cr := gap0545Verdict(t, api, actor, s, mk(sandboxauth.SandboxHome, true))
+						where := fmt.Sprintf("%s %q (gateway alone)", variant, row.command)
+						if row.attack && gap0545Rank(ca, cr) < gap0545Rank(la, lr) {
+							t.Errorf("%s: actor %s %v is weaker than the laptop's %s %v", where, ca, cr, la, lr)
+						}
+						if !row.attack && gap0545Rank(ca, cr) > gap0545Rank(la, lr) {
+							t.Errorf("%s: benign: actor %s %v is stronger than the laptop's %s %v", where, ca, cr, la, lr)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestGAP0999ByNameGate: the lexical gate on the by-name reading holds for
+// every spelling of the SSH folder the laptop decides by name, and not for
+// ordinary calls, which kept the actor's cost (substrate-1 GAP-0999).
+func TestGAP0999ByNameGate(t *testing.T) {
+	home := sandboxauth.SandboxHome
+	for _, row := range gap0922FolderRows {
+		if row.attack && !copyModeCallMayNameSSHFolder(row.command, home, home) {
+			t.Errorf("%q: the gate skips an SSH folder read", row.command)
+		}
+	}
+	for _, command := range []string{"tar cz .", "zip -r /tmp/k.zip ."} {
+		if !copyModeCallMayNameSSHFolder(command, home+"/.ssh", home) {
+			t.Errorf("%q in the SSH folder: the gate skips it", command)
+		}
+	}
+	for _, command := range []string{
+		"grep -rn TODO src/", "cd src && go test ./...", "rg -t py \"import os\" .", "make -j4",
+		"git status && git diff --stat", "find . -name '*.json' -print", "cat README.md",
+	} {
+		if copyModeCallMayNameSSHFolder(command, home, home) {
+			t.Errorf("%q: an ordinary call takes the by-name reading", command)
+		}
+	}
+}

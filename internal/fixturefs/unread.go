@@ -22,12 +22,15 @@ import (
 //
 // The scope is the goroutine: the readers of one decision call Map in the
 // goroutine that runs it, or in one started through Go. The check costs one
-// atomic load while no Unread runs anywhere in the process.
+// atomic load while no Unread runs anywhere in the process; while one runs,
+// a check reads the goroutine's number and a lock-free map, and takes no
+// lock that other goroutines' reads wait on (substrate-1 GAP-0997).
 
 var (
 	unreadActive atomic.Int64
-	unreadMu     sync.Mutex
-	unreadIDs    = map[uint64]int{}
+	// unreadIDs counts, by goroutine number, the Unread calls that goroutine
+	// is inside. Only the goroutine itself changes its entry.
+	unreadIDs sync.Map // uint64 -> int
 )
 
 // Unread runs fn with no file system for the goroutine that runs it.
@@ -42,10 +45,9 @@ func Unreadable() bool {
 	if unreadActive.Load() == 0 {
 		return false
 	}
-	id := goroutineID()
-	unreadMu.Lock()
-	defer unreadMu.Unlock()
-	return unreadIDs[id] > 0
+	depth, _ := unreadIDs.Load(goroutineID())
+	n, _ := depth.(int)
+	return n > 0
 }
 
 // Go starts fn in a new goroutine that reads as its caller does: inside
@@ -59,16 +61,16 @@ func Go(fn func()) {
 }
 
 func enterUnread(id uint64) (leave func()) {
-	unreadMu.Lock()
-	unreadIDs[id]++
-	unreadMu.Unlock()
+	depth, _ := unreadIDs.Load(id)
+	n, _ := depth.(int)
+	unreadIDs.Store(id, n+1)
 	unreadActive.Add(1)
 	return func() {
-		unreadMu.Lock()
-		if unreadIDs[id]--; unreadIDs[id] <= 0 {
-			delete(unreadIDs, id)
+		if n <= 0 {
+			unreadIDs.Delete(id)
+		} else {
+			unreadIDs.Store(id, n)
 		}
-		unreadMu.Unlock()
 		unreadActive.Add(-1)
 	}
 }

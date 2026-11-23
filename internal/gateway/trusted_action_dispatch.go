@@ -375,6 +375,11 @@ type trustedActionRequest struct {
 	// copy-mode actor's call in its guest folder (copyModeWholeCallByName)
 	// found the protected target (substrate-1 GAP-0922).
 	guestByNameOnly *bool
+	// byNameGuestCWD is the guest folder of a copy-mode actor's call, for
+	// the by-name reading (copyModeByNameGuestCWD); "" for every other call.
+	// The outermost dispatch sets it, so every hook path (Claude Code,
+	// Codex and the shared agent hook) gets it (substrate-1 GAP-0993).
+	byNameGuestCWD string
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
@@ -552,6 +557,9 @@ func dispatchTrustedActionOnce(
 		}()
 	}
 	request.posixReadingTwin = false
+	if request.byNameGuestCWD == "" {
+		request.byNameGuestCWD = copyModeByNameGuestCWD(parent, request)
+	}
 	if claims := substrateGuestClaimsFrom(parent); claims != nil {
 		// A Substrate actor's kit proved, in the actor's file system, what the
 		// laptop's gateway proves in its own (substrate-1 GAP-0471): a

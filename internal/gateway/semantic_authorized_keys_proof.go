@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"maps"
@@ -20,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -1067,10 +1069,76 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 // that this gateway judges in no folder (substrate-1 GAP-0922). A statement
 // after a cd keeps the call's guest folder, not its own, and the whole
 // call's decision already follows the cd.
-func copyModeWholeCallByName(request trustedActionRequest, input actionfacts.Input) bool {
-	return request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook &&
+//
+// The reading is a second decision, so it runs only for a call whose words
+// may name the guest's SSH folder (copyModeCallMayNameSSHFolder): the other
+// calls kept their cost (substrate-1 GAP-0999).
+func copyModeWholeCallByName(request trustedActionRequest, input actionfacts.Input, home string) bool {
+	return request.byNameGuestCWD != "" && !request.ProtectedHomeHook &&
 		!request.simpleCommandPass && !request.readingTwin && request.hostTwinDepth == 0 &&
-		input.Command != "" && !filepath.IsAbs(input.CWD) && filepath.IsAbs(request.SandboxGuestCWD)
+		input.Command != "" && !filepath.IsAbs(input.CWD) &&
+		copyModeCallMayNameSSHFolder(input.Command, request.byNameGuestCWD, home)
+}
+
+// copyModeByNameGuestCWD is the folder the by-name reading judges a
+// copy-mode actor's call in: a sandbox hook request with no folder on this
+// host (its Input.CWD is no host path). It is the call's guest folder
+// (SandboxGuestCWD), or the guest home when the hook client sent no
+// absolute folder, as the actor's shell starts there (substrate-1
+// GAP-0996). Every hook path sets SandboxGuestCWD; only Claude Code and
+// Codex also set SkipLocalFilesystemResolution, which the reading needed
+// before, so Amp, OpenCode and Cursor actors never had it (GAP-0993).
+func copyModeByNameGuestCWD(ctx context.Context, request trustedActionRequest) string {
+	if !isSandboxHookRequest(ctx) || request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return ""
+	}
+	if cwd := request.SandboxGuestCWD; path.IsAbs(cwd) {
+		return cwd
+	}
+	if home := request.Input.ActiveHome; path.IsAbs(home) && !strings.ContainsAny(home, "\\\x00") {
+		return path.Clean(home)
+	}
+	return sandboxauth.SandboxHome
+}
+
+// copyModeCallMayNameSSHFolder is a lexical gate on the by-name reading
+// (GAP-0999): it holds for a call that may name home's SSH folder or a place
+// in it, the only target whose finding the reading adds
+// (appendTrustedHomeResolvedSSHKeyWriteFinding). Quotes and backslashes are
+// dropped first, so ~/'.ssh', ~/.s"sh" and .\ssh still name it; a pattern in
+// the folder's name (~/.ss?, ~/.s*, ~/.[s]sh, ~/.{ssh,aws}, ~/.*, ~/*) and a call
+// in the folder itself also hold. A call that builds the name at run time
+// (ANSI-C quoting, printf, a decoder) holds too. Anything else names no
+// such place by its words alone, so the reading would find nothing.
+func copyModeCallMayNameSSHFolder(command, cwd, home string) bool {
+	if pathWithin(cwd, path.Join(home, ".ssh")) {
+		return true
+	}
+	text := strings.ToLower(strings.Map(func(r rune) rune {
+		switch r {
+		case '\'', '"', '\\':
+			return -1
+		}
+		return r
+	}, command))
+	if strings.Contains(text, "ssh") || strings.Contains(text, "$'") || strings.Contains(text, "$(") ||
+		strings.Contains(text, "`") || strings.Contains(text, "printf") || strings.Contains(text, "eval") ||
+		strings.Contains(text, "base64") || strings.Contains(text, "xxd") {
+		return true
+	}
+	for i := 0; i+1 < len(text); i++ {
+		if text[i] != '.' && text[i] != '/' {
+			continue
+		}
+		j := i + 1
+		for text[i] == '.' && j < len(text) && j < i+3 && text[j] == 's' {
+			j++
+		}
+		if j < len(text) && strings.IndexByte("?*[{", text[j]) >= 0 {
+			return true
+		}
+	}
+	return strings.Contains(text, "authorized")
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
@@ -1149,7 +1217,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// sees no more of the actor than the claim does: it cannot place
 			// the copy's destination either, so the kit's places still decide
 			// (substrate-1 GAP-0922).
-			own.SandboxGuestCWD, own.guestByNameOnly = "", nil
+			own.SandboxGuestCWD, own.byNameGuestCWD, own.guestByNameOnly = "", "", nil
 			own.resolvedTarget, own.unprovenTarget, own.unresolvedTarget, own.overBudgetOmission, own.nonWriteMention =
 				nil, nil, nil, nil, nil
 			*request.guestWriteClaimOnly = !trustedExistingAuthorizedKeysSymlinkWrite(own, facts)
@@ -1594,7 +1662,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// mentionCWD and readMentions are the folder and the reads of the
 	// mention checks below: the decision's own.
 	mentionCWD, readMentions := input.CWD, func(read func()) { read() }
-	if decision == "" && copyModeWholeCallByName(request, input) {
+	if decision == "" && copyModeWholeCallByName(request, input, facts.ActiveHome) {
 		// A copy-mode actor's call has no folder on this host: its files
 		// stay in the actor. The laptop's decision reads the call's words
 		// by name in the hook's folder and says protected for tar cz
@@ -1606,7 +1674,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// (fixturefs.Unread), and the rest of the call stays in no folder.
 		// The first fix moved the whole proof to the guest folder: it
 		// opened host files and blocked calls the laptop allows.
-		guestCWD := request.SandboxGuestCWD
+		guestCWD := request.byNameGuestCWD
 		posixShell := trustedPOSIXShellCall(input, facts)
 		readMentions = fixturefs.Unread
 		readMentions(func() {
