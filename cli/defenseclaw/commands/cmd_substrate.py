@@ -107,6 +107,39 @@ PASSTHROUGH: frozenset[tuple[str, ...]] = frozenset(
 
 SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
+        ("admin",),
+        "Administer people's access to the cluster (administrators)",
+    ),
+    _Cmd(
+        ("admin", "revoke"),
+        "End every sign-in of a person, list the ended ones, or lift an end",
+        long=(
+            "--user PERSON ends every token of that person issued before now, on every device, and closes their "
+            "open\n"
+            "terminals (PERSON is a principal such as bob@example.com, or issuer#subject to end the sign-ins of "
+            "a person who\n"
+            "has not signed in yet). A refresh token the person holds can still get new tokens from the sign-in "
+            "server: to\n"
+            "lock someone out, also end their sessions there. --list shows the people whose sign-ins are ended. "
+            "--lift --user\n"
+            "PERSON removes an end early; it is audited."
+        ),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("lift", "bool", "remove the end of --user's sign-ins early"),
+            _Flag("list", "bool", "list the people whose sign-ins are ended"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag(
+                "reason",
+                "string",
+                "why (one line, up to 256 characters; kept with the end and audited)",
+                metavar="TEXT",
+            ),
+            _Flag("user", "string", "the person: a principal (bob@example.com) or issuer#subject"),
+        ),
+    ),
+    _Cmd(
         ("approvals",),
         "List what your agents are waiting for you to approve",
         long=(
@@ -293,10 +326,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "answers\n"
             "over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through "
             "the gateway works and\n"
-            "you have what it asks for, your sign-in can be kept safely, and (for administrators, when the "
-            "cluster uses signed policy\n"
-            "bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in "
-            "the\n"
+            "you have what it asks for, your sign-in can be kept safely, the cluster can check ended sign-ins "
+            "(for administrators: whether\n"
+            "it ends them at all), and (for administrators, when the cluster uses signed policy bundles) every "
+            "stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\n"
             "cluster changes.\n"
             "\n"
             "Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, "
@@ -450,12 +483,22 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("logout",),
-        "Sign out of a cluster and forget the stored sign-in",
+        "Sign out of a cluster: end the sign-in there and forget it",
         long=(
-            "Removes your stored sign-in for the cluster and, where the sign-in server supports it, ends it "
-            "there too. Your agents keep running; sign in again to reach them."
+            "Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the "
+            "sign-in server\n"
+            "where that server supports it, and removes the stored sign-in. --all ends every token of yours "
+            "issued before now, on\n"
+            "every device, and closes their open terminals. An end covers tokens already issued: a refresh token "
+            "held on another\n"
+            "device or in a copied store can still get new ones, so also end your sessions at the sign-in server "
+            "(ask your\n"
+            "administrator). Your agents keep running; sign in again to reach them."
         ),
-        flags=(_Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),),
+        flags=(
+            _Flag("all", "bool", "end every token of yours issued before now, on every device"),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+        ),
     ),
     _Cmd(
         ("logs",),

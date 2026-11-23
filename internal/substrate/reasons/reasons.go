@@ -56,7 +56,7 @@ type Reason struct {
 	Audience Audience
 }
 
-// Table is every secret reason code. Keep it sorted by where, then code
+// Table is every secret and sign-in reason code. Keep it sorted by where, then code
 // meaning; the docs table follows this order.
 var Table = []Reason{
 	{"shared_secret_admin_only", 403, API, "A shared secret is set by an administrator, in the store its source names.", "Ask your administrator to change it.", Person},
@@ -76,6 +76,10 @@ var Table = []Reason{
 	{"secret_template_unknown", 400, API, "No approved template by that name is open to your profile.", "See the templates you can use with: defenseclaw substrate secrets templates", Person},
 	{"secret_binding_limit", 409, API, "You have the most bindings allowed.", "Remove one with: defenseclaw substrate secrets rm NAME", Person},
 	{"secret_name_taken", 409, API, "You or your administrator already have a secret by that name.", "Pick another name.", Person},
+	{"signin_ended", 401, API, "This sign-in was ended on the cluster: you signed out, or an administrator ended it.", "Sign in again: defenseclaw substrate login", Person},
+	{"revocation_unavailable", 503, API, "The cluster can't check ended sign-ins right now.", "Try again in a minute; if it stays, run defenseclaw substrate doctor.", Person},
+	{"signin_no_issue_time", 400, API, "This sign-in has no issue time the cluster can use (a static Kubernetes token, a legacy Secret-based ServiceAccount token, or a token whose issue time is ahead of the cluster's clock), so the cluster can't tell your later sign-ins from it.", "To stop the token everywhere, remove it at the cluster; to end only this sign-in, run defenseclaw substrate logout.", Person},
+	{"person_unknown", 404, API, "No sign-in of that person has been seen.", "Use issuer#subject to end the sign-ins of a person before a first sign-in.", Admin},
 
 	{"secret_on_passthrough", 0, Render, "That host is not inspected (it is in allow_passthrough_for), so no secret is added there.", "An administrator can remove the host from allow_passthrough_for.", Admin},
 	{"secret_not_for_profile", 0, Render, "The agent's profile is not one this secret is for.", "Run the agent with one of the secret's profiles.", Person},

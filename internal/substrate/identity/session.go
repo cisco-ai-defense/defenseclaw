@@ -71,8 +71,35 @@ type Session struct {
 	ActorUID string       `json:"actor_uid"`
 	TokenID  string       `json:"jti,omitempty"`
 	Expires  time.Time    `json:"expires"`
+	// IssuedAt is the token's iat: a person-wide revocation after it ends
+	// the session (B5.1).
+	IssuedAt time.Time `json:"-"`
 	// TaskDigest is the SessionTaskClaim ("" when the token has none).
 	TaskDigest string `json:"task_digest,omitempty"`
+	// SignInIssuedAt and SignInKey are the issue time and token key of the
+	// sign-in the session was handed out for (zero and "" in a session a
+	// released 1.0.10 gateway minted, which lives at most MaxSessionLifetime;
+	// Issue never writes one).
+	// Relay verify checks that sign-in too, so a session of an ended
+	// sign-in is refused (GAP-0744).
+	SignInIssuedAt time.Time `json:"-"`
+	SignInKey      string    `json:"-"`
+}
+
+// SessionSignIn is the sign-in a session token is handed out for.
+type SessionSignIn struct {
+	// Person is the person's ID (issuer#subject).
+	Person string
+	// IssuedAt is the sign-in token's iat, zero when it has none (a
+	// static Kubernetes token).
+	IssuedAt time.Time
+	// TokenKey is the sign-in token's revocation key (Person.TokenKey).
+	TokenKey string
+}
+
+// SignInOf is the sign-in of a verified person.
+func SignInOf(p Person) SessionSignIn {
+	return SessionSignIn{Person: p.ID(), IssuedAt: p.IssuedAt, TokenKey: p.TokenKey}
 }
 
 type sessionClaims struct {
@@ -85,6 +112,8 @@ type sessionClaims struct {
 	ID        string        `json:"jti"`
 	Actor     *SessionActor `json:"dc.actor"`
 	Task      string        `json:"dc.task_sha256,omitempty"`
+	SignInIAT *int64        `json:"dc.signin_iat,omitempty"`
+	SignInKey string        `json:"dc.signin_key,omitempty"`
 }
 
 // validTaskDigest reports an empty digest or 64 lowercase hex digits.
@@ -167,10 +196,11 @@ func (s *SessionSigner) PublicKeyPEM() []byte {
 // SetClock replaces the clock (tests).
 func (s *SessionSigner) SetClock(now func() time.Time) { s.now = now }
 
-// Issue signs a token for person to attach to actor for ttl (default
-// DefaultSessionLifetime, at most MaxSessionLifetime).
-func (s *SessionSigner) Issue(person string, actor SessionActor, ttl time.Duration) (string, time.Time, error) {
-	return s.IssueUntil(person, actor, ttl, time.Time{})
+// Issue signs a token for the person of signIn to attach to actor for ttl
+// (default DefaultSessionLifetime, at most MaxSessionLifetime). The token
+// names the sign-in, so ending that sign-in ends the session (GAP-0744).
+func (s *SessionSigner) Issue(signIn SessionSignIn, actor SessionActor, ttl time.Duration) (string, time.Time, error) {
+	return s.IssueUntil(signIn, actor, ttl, time.Time{})
 }
 
 // ErrSessionBound refuses a session token whose bound has passed: the
@@ -182,10 +212,15 @@ var ErrSessionBound = errors.New("identity: the sign-in ends before a session to
 // bound). A session token never outlives the sign-in it came from
 // (GAP-0588): the relay ends an attachment at its token's exp, and the
 // launcher reconnects with a fresh sign-in.
-func (s *SessionSigner) IssueUntil(person string, actor SessionActor, ttl time.Duration, notAfter time.Time) (string, time.Time, error) {
-	person = strings.TrimSpace(person)
+func (s *SessionSigner) IssueUntil(signIn SessionSignIn, actor SessionActor, ttl time.Duration, notAfter time.Time) (string, time.Time, error) {
+	person := strings.TrimSpace(signIn.Person)
 	if person == "" || strings.HasPrefix(person, ActorSubjectPrefix) || strings.HasPrefix(person, WorkerSubjectPrefix) {
 		return "", time.Time{}, errors.New("identity: a session token names a person")
+	}
+	// A session with no sign-in key would pass relay verify as one a 1.0.10
+	// gateway minted, unchecked against its sign-in (RV4-03).
+	if strings.TrimSpace(signIn.TokenKey) == "" {
+		return "", time.Time{}, errors.New("identity: a session token names the sign-in it is handed out for")
 	}
 	if !nameRE.MatchString(actor.Atespace) || !nameRE.MatchString(actor.Name) || !validUID(actor.UID) {
 		return "", time.Time{}, errors.New("identity: a session token names one actor incarnation")
@@ -220,6 +255,11 @@ func (s *SessionSigner) IssueUntil(person string, actor SessionActor, ttl time.D
 		Issuer: s.issuer, Subject: person, Audience: audience{SessionAudience},
 		Expiry: &ex, NotBefore: &nbf, IssuedAt: &iat,
 		ID: base64.RawURLEncoding.EncodeToString(jti), Actor: &actor, Task: actor.TaskDigest,
+		SignInKey: signIn.TokenKey,
+	}
+	if !signIn.IssuedAt.IsZero() {
+		at := signIn.IssuedAt.Unix()
+		claims.SignInIAT = &at
 	}
 	hb, _ := json.Marshal(jwsHeader{Alg: "ES256", Kid: s.kid, Typ: SessionTokenType})
 	cb, err := json.Marshal(claims)
@@ -278,10 +318,18 @@ func (s *SessionSigner) Verify(token string) (Session, error) {
 	if !validTaskDigest(c.Task) {
 		return Session{}, reasonf(ReasonClaims, "session token task digest is not a SHA-256")
 	}
+	if c.SignInIAT != nil && (c.SignInKey == "" || *c.SignInIAT <= 0) {
+		return Session{}, reasonf(ReasonClaims, "session token names its sign-in in the wrong form")
+	}
 	actor := *c.Actor
 	actor.TaskDigest = c.Task
-	return Session{
+	out := Session{
 		Person: c.Subject, Actor: actor, ActorRef: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID,
-		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0), TaskDigest: c.Task,
-	}, nil
+		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0), IssuedAt: time.Unix(*c.IssuedAt, 0), TaskDigest: c.Task,
+		SignInKey: c.SignInKey,
+	}
+	if c.SignInIAT != nil {
+		out.SignInIssuedAt = time.Unix(*c.SignInIAT, 0)
+	}
+	return out, nil
 }

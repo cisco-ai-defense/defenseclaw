@@ -6,6 +6,62 @@
     "long": "Run Claude Code, Codex and other coding agents in a Kubernetes cluster that runs\nAgent Substrate, with DefenseClaw guarding every tool call, model call and network\nrequest the same way it does on a laptop. The agent works on a copy of your folder\ninside a sandbox in the cluster; no keys are in it. It keeps running when you\ndetach, and you can come back from any machine.\n\nSign in once with \"defenseclaw substrate login\", then run \"defenseclaw substrate run claude\"\nin a project folder. These commands need no local DefenseClaw install."
   },
   {
+    "path": "substrate admin",
+    "use": "admin",
+    "short": "Administer people's access to the cluster (administrators)"
+  },
+  {
+    "path": "substrate admin revoke",
+    "use": "revoke",
+    "short": "End every sign-in of a person, list the ended ones, or lift an end",
+    "long": "--user PERSON ends every token of that person issued before now, on every device, and closes their open\nterminals (PERSON is a principal such as bob@example.com, or issuer#subject to end the sign-ins of a person who\nhas not signed in yet). A refresh token the person holds can still get new tokens from the sign-in server: to\nlock someone out, also end their sessions there. --list shows the people whose sign-ins are ended. --lift --user\nPERSON removes an end early; it is audited.",
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "lift",
+        "type": "bool",
+        "default": "false",
+        "usage": "remove the end of --user's sign-ins early"
+      },
+      {
+        "name": "list",
+        "type": "bool",
+        "default": "false",
+        "usage": "list the people whose sign-ins are ended"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "reason",
+        "type": "string",
+        "usage": "why (one line, up to 256 characters; kept with the end and audited)",
+        "metavar": "TEXT"
+      },
+      {
+        "name": "user",
+        "type": "string",
+        "usage": "the person: a principal (bob@example.com) or issuer#subject"
+      }
+    ]
+  },
+  {
     "path": "substrate approvals",
     "use": "approvals",
     "short": "List what your agents are waiting for you to approve",
@@ -316,7 +372,7 @@
     "path": "substrate doctor",
     "use": "doctor",
     "short": "Check that this computer can run agents in the cluster",
-    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy\nbundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed and the cluster components (gateway, leader, controller,\ncallout) were checked, which needs --install-file. Without it the last line says that the checks on this computer pass\nand that the cluster components were not checked. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
+    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, your sign-in can be kept safely, the cluster can check ended sign-ins (for administrators: whether\nit ends them at all), and (for administrators, when the cluster uses signed policy bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed and the cluster components (gateway, leader, controller,\ncallout) were checked, which needs --install-file. Without it the last line says that the checks on this computer pass\nand that the cluster components were not checked. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
     "example": "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
     "flags": [
       {
@@ -569,9 +625,15 @@
   {
     "path": "substrate logout",
     "use": "logout",
-    "short": "Sign out of a cluster and forget the stored sign-in",
-    "long": "Removes your stored sign-in for the cluster and, where the sign-in server supports it, ends it there too. Your agents keep running; sign in again to reach them.",
+    "short": "Sign out of a cluster: end the sign-in there and forget it",
+    "long": "Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the sign-in server\nwhere that server supports it, and removes the stored sign-in. --all ends every token of yours issued before now, on\nevery device, and closes their open terminals. An end covers tokens already issued: a refresh token held on another\ndevice or in a copied store can still get new ones, so also end your sessions at the sign-in server (ask your\nadministrator). Your agents keep running; sign in again to reach them.",
     "flags": [
+      {
+        "name": "all",
+        "type": "bool",
+        "default": "false",
+        "usage": "end every token of yours issued before now, on every device"
+      },
       {
         "name": "context",
         "type": "string",

@@ -46,7 +46,7 @@ func TestSubstrateSessionsAreTheOwnersOnlyGAP0435(t *testing.T) {
 
 	// A token for alice's actor that names bob, minted with the gateway's
 	// own key: the relay check refuses it.
-	tok, _, err := f.sessions.Issue(bob.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
+	tok, _, err := f.sessions.Issue(identity.SignInOf(bob), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

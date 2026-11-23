@@ -56,6 +56,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
@@ -537,6 +538,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
 		bindingStore := substrateBindingStore(c)
+		// B5.1: the ended sign-ins list, pulled from the leader (nil: off).
+		revs := newSubstrateRevocation(context.Background(), c.Substrate.Identity.Revocation, &revocation.Client{Leader: toLeader})
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
@@ -582,15 +585,17 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			// B1: the upload scan, read live; hold_back is its admin-off switch.
 			UploadScan: func() config.SubstrateUploadScanConfig { return live().Substrate.Launcher.UploadScan },
 			// B2: the admin-off switches of push and sync, read live.
-			FilesPush: func() bool { return live().Substrate.Files.PushAllowed() },
-			FilesSync: func() bool { return live().Substrate.Files.SyncAllowed() },
+			FilesPush:   func() bool { return live().Substrate.Files.PushAllowed() },
+			FilesSync:   func() bool { return live().Substrate.Files.SyncAllowed() },
+			Revocations: revs.snap, RevocationSource: revs.src, Streams: revs.streams,
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks),
 					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor()),
 					gateway.SubstrateSecretEchoHostCheck(live().Substrate.Secrets, live().Substrate.Egress.NoSwapHosts),
-					gateway.SubstrateSecretBindingStoreCheck(bindingStore)}
+					gateway.SubstrateSecretBindingStoreCheck(bindingStore),
+					gateway.SubstrateRevocationCheck(revs.snap, time.Now())}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -720,6 +725,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	srv := &leader.Server{IsLeader: el.IsLeader}
 	registry.Serve(srv, store)
+	if err := serveSubstrateRevocations(srv, cfg, serveFlags.storeDir); err != nil {
+		return err
+	}
 	askStore, err := asks.Open(filepath.Join(serveFlags.storeDir, "asks"))
 	if err != nil {
 		return err

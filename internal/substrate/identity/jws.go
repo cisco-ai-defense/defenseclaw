@@ -53,11 +53,25 @@ type parsedJWS struct {
 	signature []byte
 }
 
+// b64url decodes a JWK member (n, e, x, y): base64url without padding.
 func b64url(s string) ([]byte, error) {
 	if strings.ContainsAny(s, "=+/") {
 		return nil, errors.New("not base64url without padding")
 	}
 	return base64.RawURLEncoding.DecodeString(s)
+}
+
+// jwsPart decodes one part of a compact JWS strictly: base64url without
+// padding, no line breaks, no spare bits set, so one signed token has one
+// text (RV2-01, GAP-0759). An ES256 signature can still be written as
+// (r, s) or (r, n-s); refusing high s would refuse the valid tokens of
+// every issuer that does not normalise s (Go's crypto/ecdsa among them),
+// so TokenKey keys a token by its claims, which no encoding changes.
+func jwsPart(s string) ([]byte, error) {
+	if strings.ContainsAny(s, "=+/\r\n") {
+		return nil, errors.New("not base64url without padding")
+	}
+	return base64.RawURLEncoding.Strict().DecodeString(s)
 }
 
 // parseJWS splits a compact JWS. It decodes but verifies nothing.
@@ -72,7 +86,7 @@ func parseJWS(token string) (parsedJWS, error) {
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return parsedJWS{}, reasonf(ReasonMalformed, "token is not a compact JWS")
 	}
-	hb, err := b64url(parts[0])
+	hb, err := jwsPart(parts[0])
 	if err != nil {
 		return parsedJWS{}, reasonf(ReasonMalformed, "token header is not base64url")
 	}
@@ -83,11 +97,11 @@ func parseJWS(token string) (parsedJWS, error) {
 	if len(h.Crit) > 0 {
 		return parsedJWS{}, reasonf(ReasonMalformed, "token header lists critical extensions")
 	}
-	cb, err := b64url(parts[1])
+	cb, err := jwsPart(parts[1])
 	if err != nil {
 		return parsedJWS{}, reasonf(ReasonMalformed, "token claims are not base64url")
 	}
-	sig, err := b64url(parts[2])
+	sig, err := jwsPart(parts[2])
 	if err != nil {
 		return parsedJWS{}, reasonf(ReasonMalformed, "token signature is not base64url")
 	}

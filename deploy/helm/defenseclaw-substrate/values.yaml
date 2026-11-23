@@ -118,6 +118,14 @@ config:
       issuer: https://idp.ate-system.svc
       audience: defenseclaw
       token_lifetime_seconds: 300
+      # Ended sign-ins (logout, logout --all, admin revoke). enabled is read
+      # at gateway start; managed_enterprise may not turn it off. max_stale
+      # is at least 2 x sync_interval (the gateway refuses to start otherwise).
+      revocation:
+        enabled: true
+        sync_interval: 5s
+        max_stale: 60s
+        max_tokens_per_person: 64
     launcher_atespaces: {}
     require_attested_templates: true
     default_sandbox_class: gvisor

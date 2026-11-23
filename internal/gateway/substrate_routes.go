@@ -184,6 +184,8 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
 		})
 	})
+	mux.HandleFunc("POST /api/v1/substrate/signin/revoke", a.substrateSigninRevoke(st))
+	mux.HandleFunc("/api/v1/substrate/admin/revocations", a.substrateAdminRevocations(st))
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
 	mux.HandleFunc("GET /api/v1/substrate/approvals", a.substrateListApprovals(st))
@@ -316,6 +318,13 @@ func (a *APIServer) substrateAdminAuthenticate(st *substrateState, next http.Han
 					reason = cause
 				}
 			}
+			writeSubstrateJSONError(w, status, reason)
+			return
+		}
+		// An ended sign-in, or a list this replica cannot trust, is
+		// refused before any route (B5.1).
+		if status, reason := st.substrateRevocationRefusal(p.ID(), p.TokenKey, p.IssuedAt); status != 0 {
+			st.authRefused(r, substrateListenerAdmin, identity.Reason(reason))
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
@@ -598,7 +607,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			// The token ends with the caller's sign-in, at the latest
 			// (GAP-0588); with no time left the answer carries none and
 			// the launcher attaches through the attach route.
-			tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), 0, c.person.SessionBound())
+			tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), 0, c.person.SessionBound())
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -892,7 +901,7 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 		// The token names the person as issuer#subject: two issuers may
 		// use the same subject (GAP-0061). It ends with the caller's
 		// sign-in, at the latest (GAP-0588).
-		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), ttl, c.person.SessionBound())
+		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), ttl, c.person.SessionBound())
 		if errors.Is(err, identity.ErrSessionBound) {
 			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
 			return

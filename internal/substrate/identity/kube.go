@@ -140,7 +140,13 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	if hasExp && exp.Before(until) {
 		until = exp
 	}
-	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username, Expires: until}
+	// The token key and issue time let logout, logout --all and admin
+	// revoke end a Kubernetes sign-in like an OIDC one (RV1-01). A JWT is
+	// keyed by its jti, else by its claims, never by its text: the API
+	// server accepts other encodings of the same token (RV2-01).
+	iat, jti := kubeClaims(token, now)
+	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username,
+		Expires: until, IssuedAt: iat, TokenID: jti, TokenKey: TokenKey(KubeIssuer, jti, token)}
 	if hasExp {
 		p.TokenExpires = exp
 	}
@@ -197,6 +203,36 @@ func kubeTokenExpiry(token string) (exp time.Time, isJWT, ok bool) {
 	f = max(min(f, far), -far)
 	sec := math.Floor(f)
 	return time.Unix(int64(sec), int64((f-sec)*1e9)), true, true
+}
+
+// kubeClaims reads the iat and jti of a Kubernetes token that is a JWT (a
+// bound ServiceAccount token, or an OIDC token the API server accepts). It
+// is called only after the TokenReview authenticated the whole token, so
+// the claims are the issuer's. iat is zero when the token is opaque (a
+// static token), has no iat (a legacy Secret-based ServiceAccount token),
+// or names a time more than DefaultSkew ahead: such a sign-in can be ended
+// one token at a time, not by time. jti is "" when the token has none.
+func kubeClaims(token string, now time.Time) (time.Time, string) {
+	raw, ok := jwtClaims(token)
+	if !ok {
+		return time.Time{}, ""
+	}
+	var c struct {
+		IssuedAt *int64 `json:"iat"`
+		TokenID  any    `json:"jti"`
+	}
+	if json.Unmarshal(raw, &c) != nil {
+		return time.Time{}, ""
+	}
+	jti, _ := c.TokenID.(string)
+	if c.IssuedAt == nil || *c.IssuedAt <= 0 {
+		return time.Time{}, jti
+	}
+	iat := time.Unix(*c.IssuedAt, 0)
+	if iat.After(now.Add(DefaultSkew)) {
+		return time.Time{}, jti
+	}
+	return iat, jti
 }
 
 // kubeUser is the user of an authenticated TokenReview.
@@ -267,6 +303,8 @@ func (k *KubeTokenVerifier) review(ctx context.Context, token string, audiences 
 type PersonVerifiers struct {
 	OIDC interface {
 		Verify(ctx context.Context, token string) (Person, error)
+		// Trusts reports a configured OIDC issuer.
+		Trusts(issuer string) bool
 	}
 	Kube *KubeTokenVerifier
 }
@@ -280,6 +318,14 @@ func (v PersonVerifiers) Verify(ctx context.Context, token string) (Person, erro
 		}
 		var ie *Error
 		if !errors.As(err, &ie) || (ie.Reason != ReasonIssuer && ie.Reason != ReasonMalformed) {
+			return p, err
+		}
+		// A token whose claims name a configured issuer is that issuer's,
+		// however it is written. The strict parse refuses a copy with '='
+		// padding, spare bits, line breaks or spaces; the API server
+		// decodes leniently and could take the same copy as another person,
+		// with another token key and under no end (RV3-01, GAP-0787).
+		if iss := tokenIssuer(token); iss != "" && v.OIDC.Trusts(iss) {
 			return p, err
 		}
 	}

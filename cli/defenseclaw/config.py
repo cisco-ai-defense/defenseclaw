@@ -4631,6 +4631,22 @@ class SubstrateWorkloadOIDCConfig:
 
 
 @dataclass
+class SubstrateRevocationConfig:
+    """substrate.identity.revocation (mirror of Go SubstrateRevocationConfig).
+
+    enabled None is the default (on); managed_enterprise may not turn it
+    off. Durations are Go duration strings; "" is the default (5s, and for
+    max_stale 60s or 2 x sync_interval, whichever is longer). max_stale is
+    at least 2 x sync_interval; the Go config validation refuses it
+    otherwise. max_tokens_per_person None is the default (64)."""
+
+    enabled: bool | None = None
+    sync_interval: str = ""
+    max_stale: str = ""
+    max_tokens_per_person: int | None = None
+
+
+@dataclass
 class SubstrateIdentityConfig:
     issuer: str = ""
     audience: str = ""
@@ -4645,6 +4661,8 @@ class SubstrateIdentityConfig:
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
     # Groups whose members are Substrate administrators (GAP-0191).
     admin_groups: list[str] = field(default_factory=list)
+    # Ended sign-ins (B5.1): logout, logout --all, admin revoke.
+    revocation: SubstrateRevocationConfig = field(default_factory=SubstrateRevocationConfig)
 
 
 @dataclass
@@ -8257,6 +8275,14 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 for w in ident.get("workload_oidc") or []
             ],
             admin_groups=_string_list(ident.get("admin_groups")),
+            revocation=SubstrateRevocationConfig(
+                enabled=_optional_bool(_mapping(ident.get("revocation")).get("enabled")),
+                sync_interval=str(_mapping(ident.get("revocation")).get("sync_interval", "") or ""),
+                max_stale=str(_mapping(ident.get("revocation")).get("max_stale", "") or ""),
+                max_tokens_per_person=_optional_number(
+                    _mapping(ident.get("revocation")).get("max_tokens_per_person"), int
+                ),
+            ),
         ),
         services=SubstrateServicesConfig(
             actor=str(services.get("actor", "") or ""),

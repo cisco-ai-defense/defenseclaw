@@ -17,12 +17,17 @@
 package identity
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Person kinds.
@@ -63,6 +68,13 @@ type Person struct {
 	// API server again (the review cache), not the end of the token: that
 	// is TokenExpires.
 	Expires time.Time
+	// IssuedAt is the token's iat, TokenID its jti ("" when it has none)
+	// and TokenKey the deny-list key of this one token (TokenKey). They
+	// say which sign-in a request came with, for revocation (B5.1); they
+	// are never stored with a registration.
+	IssuedAt time.Time `json:"-"`
+	TokenID  string    `json:"-"`
+	TokenKey string    `json:"-"`
 	// TokenExpires is a Kubernetes caller's own token exp, zero for a
 	// token that carries none (a static or provider token). Only the
 	// Kubernetes verifier sets it (GAP-0588).
@@ -82,6 +94,94 @@ func (p Person) SessionBound() time.Time {
 		return p.TokenExpires
 	}
 	return p.Expires
+}
+
+// TokenKey is the revocation key of one person token, token as it was
+// presented. A deny list holds only this, never a token or a raw id:
+//   - "jti:" a hash of the issuer and the token's jti;
+//   - "clm:" a token with no jti that is a JWT: a hash of the issuer and
+//     its decoded claims. These are the signed bytes, the same for every
+//     encoding of one signed token a verifier accepts (spare base64 bits,
+//     '=' padding, line breaks, an ES256 (r, n-s) signature), so a copy
+//     that is re-encoded is still the token that was ended (RV2-01,
+//     GAP-0759);
+//   - "tok:" a hash of the whole token, only for an opaque token (a static
+//     Kubernetes token), which its server compares as it is.
+//
+// The "clm:" prefix is new in the build that keys by claims, so a raw-text
+// key an earlier build of the same release wrote can never be read as one;
+// no released version wrote a deny list before it.
+func TokenKey(issuer, jti, token string) string {
+	if jti != "" {
+		return claimsTokenKey(issuer, jti, nil)
+	}
+	if claims, ok := jwtClaims(token); ok {
+		return claimsTokenKey(issuer, "", claims)
+	}
+	s := sha256.Sum256([]byte(token))
+	return "tok:" + hex.EncodeToString(s[:16])
+}
+
+// claimsTokenKey is the key of a JWT: "jti:" when it has a jti, else
+// "clm:" over claims. The OIDC verifier passes the claims bytes it
+// verified, so the key never depends on how the token text is re-read
+// (RV3-02, GAP-0789).
+func claimsTokenKey(issuer, jti string, claims []byte) string {
+	if jti != "" {
+		s := sha256.Sum256([]byte(issuer + "\x00" + jti))
+		return "jti:" + hex.EncodeToString(s[:16])
+	}
+	s := sha256.Sum256([]byte(issuer + "\x00" + string(claims)))
+	return "clm:" + hex.EncodeToString(s[:16])
+}
+
+// jwtClaims is the decoded claims of a token shaped like a compact JWS, ok
+// false when it is not one. It decodes at least as leniently as any
+// verifier in front of DefenseClaw (go-jose, which the kube-apiserver
+// uses, trims '=', ignores spare bits and strips every Unicode white-space
+// rune; this also drops '=' anywhere and reads the standard alphabet), so
+// every encoding such a verifier accepts gives the same bytes (RV4-02). It checks no signature: callers
+// key only a token a verifier or a TokenReview has already accepted, or
+// read only its issuer (tokenIssuer).
+func jwtClaims(token string) ([]byte, bool) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return nil, false
+	}
+	part := strings.Map(func(r rune) rune {
+		switch {
+		case r == '=' || unicode.IsSpace(r):
+			return -1
+		case r == '+':
+			return '-'
+		case r == '/':
+			return '_'
+		}
+		return r
+	}, parts[1])
+	b, err := base64.RawURLEncoding.DecodeString(part)
+	// JSON white space may come before the object (RV3-02, GAP-0789).
+	if t := bytes.TrimLeft(b, " \t\r\n"); err != nil || len(t) == 0 || t[0] != '{' || !json.Valid(b) {
+		return nil, false
+	}
+	return b, true
+}
+
+// tokenIssuer is the iss a token shaped like a compact JWS names, decoded
+// leniently (jwtClaims), "" when it names none. It checks no signature: it
+// only says which verifier a token belongs to (RV3-01, GAP-0787).
+func tokenIssuer(token string) string {
+	b, ok := jwtClaims(token)
+	if !ok {
+		return ""
+	}
+	var c struct {
+		Issuer string `json:"iss"`
+	}
+	if json.Unmarshal(b, &c) != nil {
+		return ""
+	}
+	return c.Issuer
 }
 
 // ID is the stable owner key of a person: issuer and subject.
@@ -250,6 +350,7 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 		Expiry    *int64   `json:"exp"`
 		NotBefore *int64   `json:"nbf"`
 		IssuedAt  *int64   `json:"iat"`
+		TokenID   string   `json:"jti"`
 		Email     string   `json:"email"`
 		UPN       string   `json:"upn"`
 		Preferred string   `json:"preferred_username"`
@@ -304,7 +405,8 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 	if sub == "" || len(sub) > 255 || strings.HasPrefix(sub, ActorSubjectPrefix) || strings.HasPrefix(sub, WorkerSubjectPrefix) {
 		return Person{}, reasonf(ReasonSubject, "token subject is not a person")
 	}
-	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: expires}
+	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: expires,
+		IssuedAt: time.Unix(*c.IssuedAt, 0), TokenID: c.TokenID, TokenKey: claimsTokenKey(c.Issuer, c.TokenID, t.claims)}
 	email := c.Email
 	if emailUnverified(raw["email_verified"]) {
 		// The issuer says it has not checked the address (a local user
@@ -341,6 +443,11 @@ func emailUnverified(v json.RawMessage) bool {
 	}
 	var str string
 	return json.Unmarshal(v, &str) == nil && strings.EqualFold(strings.TrimSpace(str), "false")
+}
+
+// Trusts reports whether issuer is a configured person or workload issuer.
+func (v *PersonVerifier) Trusts(issuer string) bool {
+	return v != nil && len(v.issuers[issuer]) > 0
 }
 
 // SignInKeySet is the key set of the first person issuer (the OIDC issuer

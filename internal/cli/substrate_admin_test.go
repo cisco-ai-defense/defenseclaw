@@ -59,6 +59,12 @@ type subAdminFake struct {
 	actorsBody string
 	// infoBody is the /info answer ("" answers 404, an older gateway).
 	infoBody string
+	// actorsReason is the reason of a refused list (default token_invalid).
+	actorsReason string
+	// doctorStatus and doctorBody are the gateway doctor's answer (default:
+	// 200 with a passing substrate.signin_revocation row).
+	doctorStatus int
+	doctorBody   string
 
 	bundleBody     []byte
 	bundleQuery    url.Values
@@ -84,7 +90,11 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/substrate/actors", func(w http.ResponseWriter, r *http.Request) {
 		if f.actorsStatus != 200 {
-			writeJSONStatus(w, f.actorsStatus, `{"error":"x","reason":"token_invalid"}`)
+			reason := f.actorsReason
+			if reason == "" {
+				reason = "token_invalid"
+			}
+			writeJSONStatus(w, f.actorsStatus, `{"error":"x","reason":"`+reason+`"}`)
 			return
 		}
 		body := f.actorsBody
@@ -133,6 +143,16 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 			return
 		}
 		writeJSONStatus(w, 200, f.infoBody)
+	})
+	mux.HandleFunc("/api/v1/substrate/doctor", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case f.doctorStatus != 0 && f.doctorStatus != 200:
+			writeJSONStatus(w, f.doctorStatus, `{"error":"x","reason":"`+f.doctorBody+`"}`)
+		case f.doctorBody != "":
+			writeJSONStatus(w, 200, f.doctorBody)
+		default:
+			writeJSONStatus(w, 200, `{"checks":[{"id":"substrate.signin_revocation","status":"pass","detail":"on: 0 person-wide end(s) active, list read 2s ago"}]}`)
+		}
 	})
 	mux.HandleFunc("/realms/x/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, 200, `{"issuer":"`+f.issuerAnswer+`"}`)

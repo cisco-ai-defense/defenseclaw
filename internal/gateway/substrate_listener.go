@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -210,6 +211,13 @@ type SubstrateConfig struct {
 	// nil reports on.
 	FilesPush func() bool
 	FilesSync func() bool
+	// Revocations is this replica's copy of the ended sign-ins list,
+	// RevocationSource the leader it pulls from and writes revokes to, and
+	// Streams the open attach streams it closes on a revoke (B5.1). nil:
+	// revocation is off (substrate.identity.revocation.enabled: false).
+	Revocations      *revocation.Snapshot
+	RevocationSource revocation.Source
+	Streams          *revocation.Streams
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
@@ -378,6 +386,16 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {
 		st.audit(ctx, severity, summary, details)
 		st.logRefusal("%s: %v", summary, details["folder"])
+	}
+	if cfg.Revocations != nil {
+		// RV1-07: the leader's list of ended sign-ins was reset (its volume
+		// was recreated, or the file moved aside). Say so; the replica
+		// keeps what it knew until it lapses.
+		cfg.Revocations.OnReset(func(kept int) {
+			summary := fmt.Sprintf("the leader's list of ended sign-ins was reset: this replica keeps the %d end(s) it knew until they lapse; a replica that starts now does not know them", kept)
+			st.audit(context.Background(), "HIGH", summary, map[string]any{"event": "substrate.signin.list_reset", "kept": kept})
+			st.logRefusal("%s", summary)
+		})
 	}
 	a.substrateMu.Lock()
 	a.substrate = st

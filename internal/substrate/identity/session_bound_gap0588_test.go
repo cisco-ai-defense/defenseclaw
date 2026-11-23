@@ -40,7 +40,7 @@ func TestIssueUntilEndsAtTheBoundGAP0588(t *testing.T) {
 
 	// The RKAUTH69 shape: 3600 s asked, the bearer ends in 2.5 s. The
 	// bound rounds down to a whole second.
-	tok, exp, err := s.IssueUntil("oidc|alice", act, time.Hour, now.Add(2500*time.Millisecond))
+	tok, exp, err := s.IssueUntil(SessionSignIn{Person: "oidc|alice", TokenKey: "jti:a"}, act, time.Hour, now.Add(2500*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,18 +57,18 @@ func TestIssueUntilEndsAtTheBoundGAP0588(t *testing.T) {
 
 	// A bound later than the ttl, or none, keeps the ttl.
 	for _, bound := range []time.Time{{}, now.Add(2 * time.Hour)} {
-		_, exp, err := s.IssueUntil("oidc|alice", act, 10*time.Minute, bound)
+		_, exp, err := s.IssueUntil(SessionSignIn{Person: "oidc|alice", TokenKey: "jti:a"}, act, 10*time.Minute, bound)
 		if err != nil || !exp.Equal(now.Add(10*time.Minute)) {
 			t.Fatalf("bound %v: exp %v %v, want the 10 m ttl", bound, exp, err)
 		}
 	}
 	// ttl 0 is still the default, under the bound.
-	if _, exp, err := s.IssueUntil("oidc|alice", act, 0, now.Add(time.Hour)); err != nil || !exp.Equal(now.Add(DefaultSessionLifetime)) {
+	if _, exp, err := s.IssueUntil(SessionSignIn{Person: "oidc|alice", TokenKey: "jti:a"}, act, 0, now.Add(time.Hour)); err != nil || !exp.Equal(now.Add(DefaultSessionLifetime)) {
 		t.Fatalf("default ttl: %v %v", exp, err)
 	}
 	// No whole second left, or a bound already past: no token.
 	for _, bound := range []time.Time{now.Add(500 * time.Millisecond), now, now.Add(-time.Minute)} {
-		if tok, _, err := s.IssueUntil("oidc|alice", act, time.Hour, bound); !errors.Is(err, ErrSessionBound) || tok != "" {
+		if tok, _, err := s.IssueUntil(SessionSignIn{Person: "oidc|alice", TokenKey: "jti:a"}, act, time.Hour, bound); !errors.Is(err, ErrSessionBound) || tok != "" {
 			t.Fatalf("bound %v: token %q err %v, want ErrSessionBound", bound.Sub(now), tok, err)
 		}
 	}

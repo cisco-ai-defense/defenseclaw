@@ -75,6 +75,11 @@ const (
 	// replicas, which may not read the slot themselves (GAP-0505).
 	MethodCalloutPublish = "CalloutPublish"
 	MethodCalloutStatus  = "CalloutStatus"
+	// MethodRevocationPut adds an ended sign-in to the leader's list and
+	// MethodRevocationSince is a replica's pull of it
+	// (internal/substrate/revocation, B5.1).
+	MethodRevocationPut   = "RevocationPut"
+	MethodRevocationSince = "RevocationSince"
 )
 
 // Methods lists every method a leader serves.
@@ -84,6 +89,7 @@ var Methods = []string{
 	MethodRegistrationGet, MethodRegistrationList, MethodRegistrationLookup,
 	MethodActivityObserve, MethodActivitySnapshot,
 	MethodCalloutPublish, MethodCalloutStatus,
+	MethodRevocationPut, MethodRevocationSince,
 }
 
 // Error codes.

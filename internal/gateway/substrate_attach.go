@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
 // Attach through the admin listener (GAP-0085, GAP-0086; lead ruling
@@ -178,7 +179,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL, c.person.SessionBound())
+		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), substrateAttachSessionTTL, c.person.SessionBound())
 		if errors.Is(err, identity.ErrSessionBound) {
 			// The sign-in ends this second: the launcher asks for a new
 			// one (GAP-0588).
@@ -267,6 +268,15 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusBadGateway, "relay_unreachable")
 			},
 		}
-		proxy.ServeHTTP(w, r)
+		// The stream ends when its sign-in is ended (B5.1): the proxy closes
+		// the upgraded relay connection when the request context ends.
+		ctx, release := st.cfg.Streams.Open(r.Context(), revocation.Stream{Person: c.person.ID(), TokenKey: c.person.TokenKey, IssuedAt: c.person.IssuedAt})
+		defer release()
+		if ctx.Err() != nil && r.Context().Err() == nil {
+			// Ended while the request was on its way here (RV1-04).
+			writeSubstrateJSONError(w, http.StatusUnauthorized, substrateReasonSigninEnded)
+			return
+		}
+		proxy.ServeHTTP(w, r.WithContext(ctx))
 	}
 }

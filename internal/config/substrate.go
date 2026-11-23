@@ -338,6 +338,62 @@ type SubstrateIdentityConfig struct {
 	// administrators on the admin listener. The gateway's --admin-groups
 	// flag adds to them.
 	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
+	// Revocation is the list of ended sign-ins (B5.1): logout, logout
+	// --all and admin revoke.
+	Revocation SubstrateRevocationConfig `mapstructure:"revocation" yaml:"revocation,omitempty"`
+}
+
+// SubstrateRevocationConfig is the list of ended sign-ins the leader keeps
+// and every gateway replica pulls (B5.1). Enabled is read at start: turning
+// it on or off takes a gateway restart. Managed installs may not turn it
+// off.
+type SubstrateRevocationConfig struct {
+	// Enabled (default true). false: no list, no pull loop; a copied
+	// sign-in token works until it expires (doctor warns).
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// SyncInterval is how often a replica pulls from the leader (Go
+	// duration, 1s to 60s, default 5s).
+	SyncInterval string `mapstructure:"sync_interval" yaml:"sync_interval,omitempty"`
+	// MaxStale is how old a replica's copy may get before it refuses
+	// sign-ins with revocation_unavailable (default 60s or 2 x
+	// sync_interval, whichever is longer; at least 2 x sync_interval, so
+	// one slow pull does not make the replica refuse, at most 1h).
+	MaxStale string `mapstructure:"max_stale" yaml:"max_stale,omitempty"`
+	// MaxTokensPerPerson is how many single-token ends the leader keeps
+	// per person before it turns them into one person-wide end (default
+	// 64, 1 to 4096).
+	MaxTokensPerPerson int `mapstructure:"max_tokens_per_person" yaml:"max_tokens_per_person,omitempty"`
+}
+
+// Defaults of substrate.identity.revocation.
+const (
+	DefaultSubstrateRevocationSyncInterval = 5 * time.Second
+	DefaultSubstrateRevocationMaxStale     = 60 * time.Second
+	DefaultSubstrateRevocationMaxTokens    = 64
+)
+
+// EffectiveEnabled reports whether ended sign-ins are kept (default on).
+func (r SubstrateRevocationConfig) EffectiveEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+// EffectiveSyncInterval is the replica pull interval.
+func (r SubstrateRevocationConfig) EffectiveSyncInterval() time.Duration {
+	return durationOr(r.SyncInterval, DefaultSubstrateRevocationSyncInterval)
+}
+
+// EffectiveMaxStale is the age past which a replica refuses sign-ins:
+// max_stale, or 60s or 2 x sync_interval, whichever is longer (RV1-09).
+func (r SubstrateRevocationConfig) EffectiveMaxStale() time.Duration {
+	return durationOr(r.MaxStale, max(DefaultSubstrateRevocationMaxStale, 2*r.EffectiveSyncInterval()))
+}
+
+// EffectiveMaxTokensPerPerson is the per-person single-token cap.
+func (r SubstrateRevocationConfig) EffectiveMaxTokensPerPerson() int {
+	if r.MaxTokensPerPerson <= 0 {
+		return DefaultSubstrateRevocationMaxTokens
+	}
+	return r.MaxTokensPerPerson
 }
 
 // SubstrateOIDCConfig is the people's identity provider (launcher sign-in).
@@ -996,6 +1052,20 @@ func (s *SubstrateConfig) Validate() error {
 	default:
 		bad("default_sandbox_class", "%q must be gvisor or microvm", s.DefaultSandboxClass)
 	}
+	rv := s.Identity.Revocation
+	if v := rv.SyncInterval; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < time.Second || d > time.Minute {
+			bad("identity.revocation.sync_interval", "%q must be a Go duration from 1s to 60s", v)
+		}
+	}
+	if v := rv.MaxStale; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < 2*rv.EffectiveSyncInterval() || d > time.Hour {
+			bad("identity.revocation.max_stale", "%q must be a Go duration of at least 2 x sync_interval (%s) and at most 1h", v, 2*rv.EffectiveSyncInterval())
+		}
+	}
+	if n := rv.MaxTokensPerPerson; n < 0 || n > 4096 {
+		bad("identity.revocation.max_tokens_per_person", "%d must be from 1 to 4096 (0 = default 64)", n)
+	}
 	if v := s.IdleSuspendAfter; v != "" {
 		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < 0 || (d > 0 && d < time.Minute) {
 			bad("idle_suspend_after", "%q must be a Go duration of at least 1m, or 0s for off", v)
@@ -1273,6 +1343,9 @@ func (s *SubstrateConfig) ValidateManaged(deploymentMode string) error {
 	}
 	if s.Enabled && len(s.Templates.AllowedImages) == 0 {
 		errs = append(errs, errors.New("templates.allowed_images: managed_enterprise names the template registries and repositories"))
+	}
+	if !s.Identity.Revocation.EffectiveEnabled() {
+		errs = append(errs, errors.New("identity.revocation.enabled: false is not allowed in managed_enterprise (ended sign-ins are always refused)"))
 	}
 	return errors.Join(errs...)
 }

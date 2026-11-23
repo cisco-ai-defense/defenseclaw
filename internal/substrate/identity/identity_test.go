@@ -451,7 +451,7 @@ func TestSessionSignerRoundTripAndRefusals(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	s.SetClock(func() time.Time { return now })
 	act := SessionActor{Atespace: "eng-web", Name: "alice-1", UID: "u-1"}
-	tok, exp, err := s.Issue("oidc|alice", act, 0)
+	tok, exp, err := s.Issue(SessionSignIn{Person: "oidc|alice", TokenKey: "jti:a"}, act, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,10 +482,10 @@ func TestSessionSignerRoundTripAndRefusals(t *testing.T) {
 	if a, _ := c["dc.actor"].(map[string]any); a["actorUID"] != "u-1" || a["atespace"] != "eng-web" || a["actorName"] != "alice-1" {
 		t.Fatalf("dc.actor %v", c["dc.actor"])
 	}
-	if _, _, err := s.Issue("actor/eng-web/alice-1", act, 0); err == nil {
+	if _, _, err := s.Issue(SessionSignIn{Person: "actor/eng-web/alice-1"}, act, 0); err == nil {
 		t.Fatal("issued a session to an actor subject")
 	}
-	if _, _, err := s.Issue("alice", SessionActor{Atespace: "eng-web", Name: "alice-1"}, 0); err == nil {
+	if _, _, err := s.Issue(SessionSignIn{Person: "alice"}, SessionActor{Atespace: "eng-web", Name: "alice-1"}, 0); err == nil {
 		t.Fatal("issued a session without an actor UID")
 	}
 	now = now.Add(DefaultSessionLifetime + 2*time.Minute)
@@ -493,7 +493,7 @@ func TestSessionSignerRoundTripAndRefusals(t *testing.T) {
 	wantReason(t, err, ReasonExpired)
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	o, _ := NewSessionSigner(other, s.Issuer())
-	otok, _, _ := o.Issue("alice", act, 0)
+	otok, _, _ := o.Issue(SessionSignIn{Person: "alice", TokenKey: "jti:a"}, act, 0)
 	_, err = s.Verify(otok)
 	wantReason(t, err, ReasonUnknownKey)
 }

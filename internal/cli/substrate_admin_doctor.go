@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
 // The status of one doctor check.
@@ -105,8 +106,8 @@ func newSubstrateDoctorCmd() *cobra.Command {
 		Short: "Check that this computer can run agents in the cluster",
 		Long: `Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers
 over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and
-you have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy
-bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the
+you have what it asks for, your sign-in can be kept safely, the cluster can check ended sign-ins (for administrators: whether
+it ends them at all), and (for administrators, when the cluster uses signed policy bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the
 cluster changes.
 
 Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router
@@ -337,7 +338,7 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 
 	// 4. Signed in, and the cluster accepts the token.
 	var mine []api.Actor
-	signedIn := false
+	signedIn, listStale := false, false
 	if !adminOK {
 		d.add("sign_in", doctorSkip, "not checked: the admin address does not answer", "")
 	} else {
@@ -356,6 +357,11 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 		default:
 			if e, ok := api.AsError(err); ok {
 				switch {
+				case e.Status == http.StatusServiceUnavailable && e.Reason == revocation.ReasonUnavailable:
+					// B5.1: the signin_revocation row says why.
+					listStale = true
+					d.add("sign_in", doctorFail, "the cluster refused your sign-in because it can't check ended sign-ins right now (see signin_revocation)",
+						"run doctor again in a minute; if it stays, ask your administrator")
 				case e.Unauthorized():
 					d.add("sign_in", doctorFail, "the cluster did not accept your sign-in ("+doctorWord(e.Reason, "token refused")+")", "defenseclaw substrate login")
 				case e.NotImplemented():
@@ -376,7 +382,12 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 	// 6. Attach through the gateway.
 	d.checks = append(d.checks, doctorAttach(ctx, s, mine, signedIn))
 
-	// 7. Policy bundles (administrators, when the cluster has them on).
+	// 7. Ended sign-ins (B5.1).
+	if c, ok := doctorSignInRevocation(ctx, s, signedIn, listStale); ok {
+		d.checks = append(d.checks, c)
+	}
+
+	// 8. Policy bundles (administrators, when the cluster has them on).
 	if c, ok := doctorBundles(ctx, s, signedIn); ok {
 		d.checks = append(d.checks, c)
 	}
@@ -384,6 +395,66 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 	// 8. The egress callout: another one in Substrate's slot turns
 	// DefenseClaw's egress checks off (GAP-0497).
 	d.checks = append(d.checks, doctorEgressCallout(ctx, s, adminOK))
+}
+
+const (
+	doctorRevocationStaleFix = "run doctor again in a minute; if it stays, ask your administrator to check that the cluster's leader pod " +
+		"is running and reachable from the gateway"
+	doctorRevocationOldFix = "ask your administrator to upgrade DefenseClaw on the cluster to 1.0.11 or later"
+)
+
+// doctorSignInRevocation is the signin_revocation row (B5.1): can the
+// cluster end a sign-in, so that signing out (or an administrator's
+// revoke) stops a copy of the token? A gateway whose list of ended
+// sign-ins is too old refuses every sign-in, its own doctor route
+// included, so that case comes from the sign_in answer (listStale).
+// Otherwise an administrator gets the gateway's own
+// substrate.signin_revocation row; a gateway without that row is older
+// than 1.0.11 and does not end sign-ins. A non-administrator gets no row.
+func doctorSignInRevocation(ctx context.Context, s *substrateSession, signedIn, listStale bool) (substrateCheck, bool) {
+	const id = "signin_revocation"
+	stale := substrateCheck{ID: id, Status: doctorFail, Fix: doctorRevocationStaleFix,
+		Summary: "the cluster can't read its list of ended sign-ins right now, so it refuses every sign-in until it reads the list again"}
+	old := substrateCheck{ID: id, Status: doctorWarn, Fix: doctorRevocationOldFix,
+		Summary: "the cluster's gateway does not end sign-ins (it is older than 1.0.11): signing out does not stop a copy of " +
+			"your sign-in token, which keeps working until it expires (up to 24 h)"}
+	switch {
+	case listStale:
+		return stale, true
+	case !signedIn:
+		return substrateCheck{}, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	rows, err := s.Client.GatewayDoctor(cctx)
+	if err != nil {
+		if e, ok := api.AsError(err); ok {
+			switch {
+			case e.Status == http.StatusForbidden:
+				return substrateCheck{}, false
+			case e.Status == http.StatusNotFound || e.NotImplemented():
+				return old, true
+			case e.Status == http.StatusServiceUnavailable && e.Reason == revocation.ReasonUnavailable:
+				return stale, true
+			}
+		}
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "whether the cluster ends sign-ins could not be read: " + doctorFirstLine(err),
+			Fix: "run doctor again in a minute"}, true
+	}
+	for _, r := range rows {
+		if r.ID != "substrate.signin_revocation" {
+			continue
+		}
+		c := substrateCheck{ID: id, Status: doctorWarn, Summary: "the gateway says: " + safetext.Line(r.Detail), Fix: safetext.Line(r.Fix)}
+		switch r.Status {
+		case "pass":
+			c.Status = doctorOK
+		case "fail":
+			c.Status = doctorFail
+		}
+		return c, true
+	}
+	return old, true
 }
 
 const doctorBundleFix = "apply a bundle signed by a key of the bundle-anchors Secret (defenseclaw substrate bundle apply), " +

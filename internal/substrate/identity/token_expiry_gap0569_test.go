@@ -119,7 +119,7 @@ func TestSessionTokenRefusedTheSecondItExpiresGAP0569(t *testing.T) {
 	}
 	now := time.Unix(1_800_000_000, 0)
 	s.SetClock(func() time.Time { return now })
-	tok, exp, err := s.Issue("oidc|alice", SessionActor{Atespace: "eng-web", Name: "alice-1", UID: "u-1"}, 0)
+	tok, exp, err := s.Issue(SessionSignIn{Person: "oidc|alice", TokenKey: "jti:a"}, SessionActor{Atespace: "eng-web", Name: "alice-1", UID: "u-1"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
