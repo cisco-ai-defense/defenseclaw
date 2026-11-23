@@ -205,14 +205,13 @@ func TestProjectAcceptsRedirectOnlyEnforcementFact(t *testing.T) {
 	}
 }
 
-
 func TestProjectSQLFacts(t *testing.T) {
 	facts := validActionFacts()
 	facts.SQLFacts = []actionfacts.SQLFact{{
-		Verbs: []string{"delete", "select"},
-		Tables: []string{"users"},
-		Functions: []string{"pg_read_file"},
-		Database: "production",
+		Verbs:          []string{"delete", "select"},
+		Tables:         []string{"users"},
+		Functions:      []string{"pg_read_file"},
+		Database:       "production",
 		StatementCount: 1,
 	}}
 	projected, code := Project(facts)

@@ -195,10 +195,9 @@ func TestPostgreSQLCopyProgramIdentityDigestIsExact(t *testing.T) {
 	}
 }
 
-
 func TestPostgreSQLCopyProgramsPSQLCLI(t *testing.T) {
 	facts := Analyze(Input{
-		Tool: "shell",
+		Tool:    "shell",
 		Command: `psql -d production -c "COPY audit.events FROM PROGRAM 'printf data';"`,
 	})
 	if _, ok := ExactPostgreSQLCopyProgram(facts); !ok {
