@@ -28,12 +28,12 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 	for _, tc := range append(slices.Clone(gap0018RoutineRows), gap0018PendingGlobCopyRows...) {
 		for _, mode := range []string{"observe", "action"} {
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
-				if runtime.GOOS == "windows" && !tc.block {
-					// A place is private by its permission bits; a Windows path has
-					// none to read, so a copy of a key keeps the block of rel there
-					// (rel-1-0-10:GAP-0710).
-					t.Skip("no permission bits on Windows")
-				}
+				// A place is private by its permission bits; a Windows path has
+				// none to read, so a copy of an own key keeps the block of rel
+				// there (rel-1-0-10:GAP-0710): a block in action mode, allowed
+				// with the finding in observe mode. The other routine rows are
+				// allowed there too.
+				keepsRelBlock := runtime.GOOS == "windows" && !tc.block && strings.Contains(tc.command, "~/.ssh/id_")
 				if runtime.GOOS == "windows" && strings.HasPrefix(tc.command, "find / ") {
 					// In Git Bash / is the Git install folder, not a folder above
 					// a C:/Users home, so find / reaches no DefenseClaw state there
@@ -48,7 +48,7 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 					ToolName: "Bash", ToolInput: map[string]interface{}{"command": tc.command},
 					Payload: map[string]interface{}{"tool_name": "Bash"},
 				})
-				wantBlock := tc.block && (mode == "action" || tc.always)
+				wantBlock := (tc.block || keepsRelBlock) && (mode == "action" || tc.always)
 				if wantBlock && findingStringHasRuleID(resp.Findings, gap0747StateRule) && !gap0747OtherTamperFinding(resp.Findings) {
 					// A proven DefenseClaw state write is a HIGH alert on the
 					// default pack: an alert in action mode, allowed with the
