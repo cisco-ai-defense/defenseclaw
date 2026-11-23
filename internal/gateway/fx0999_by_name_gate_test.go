@@ -124,3 +124,29 @@ func TestGAP1022And1023ActorAnswersAsTheLaptop(t *testing.T) {
 		})
 	}
 }
+
+// TestFX0999GateInheritedDotglob keeps the speed gate aligned with the
+// by-name decision when shell options were inherited by the gateway.
+func TestFX0999GateInheritedDotglob(t *testing.T) {
+	home := sandboxauth.SandboxHome
+	command := strings.Join([]string{"tar", "cz", "*"}, " ")
+	for _, tc := range []struct{ name, bashopts, globignore string }{
+		{"BASHOPTS", "dotglob", ""},
+		{"GLOBIGNORE", "", "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BASHOPTS", tc.bashopts)
+			t.Setenv("GLOBIGNORE", tc.globignore)
+			if !copyModeCallMayNameSSHFolder(command, home, home) {
+				t.Fatal("the gate skipped an inherited dotglob pattern")
+			}
+			var decision string
+			fixturefs.Unread(func() {
+				decision = hookpaths.NewTargetMemo().ActionCommandDecisionInShell(command, home, home, nil, true)
+			})
+			if decision == "" {
+				t.Fatal("the by-name decision did not see an inherited dotglob pattern")
+			}
+		})
+	}
+}
