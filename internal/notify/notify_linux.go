@@ -27,6 +27,12 @@ var notifySendRun = func(path string, args ...string) error {
 	return exec.Command(path, args...).Run()
 }
 
+// toolCheck says whether notify-send, the tool desktop delivery needs, is on PATH.
+func toolCheck() error {
+	_, err := notifySendLookPath("notify-send")
+	return err
+}
+
 // sendPlatform delivers the notification via libnotify's notify-send
 // CLI. notify-send has no native subtitle field, so when one is set
 // it is folded into the body separated by an em-dash. The fallback

@@ -164,6 +164,9 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 		d.add("token_store", doctorOK, "your sign-in can be kept safely", "")
 	}
 
+	// 3. The desktop notifier `watch` uses (off by default; never a failure).
+	d.checks = append(d.checks, substrateNotifierCheck())
+
 	name := ""
 	if openErr != nil {
 		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "attach"} {
