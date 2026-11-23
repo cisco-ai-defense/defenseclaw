@@ -60,8 +60,42 @@ func TestChartSkillScannerSidecar(t *testing.T) {
 		if len(mounts) != 2 || !mounts["skill-scan"] || !mounts["skill-scan-tmp"] {
 			t.Fatalf("%s: the sidecar mounts %v, want only skill-scan and skill-scan-tmp", tc.values, mounts)
 		}
-		if dig(side, "securityContext", "readOnlyRootFilesystem") != true {
-			t.Fatalf("%s: the sidecar root file system is writable", tc.values)
+		// GAP-0828: the container is the scanner's boundary in the
+		// pod-contained mode the chart selects explicitly.
+		podMode := false
+		for _, a := range dig(side, "args").([]any) {
+			podMode = podMode || a == "--pod-contained"
+		}
+		if !podMode {
+			t.Fatalf("%s: the sidecar does not pass --pod-contained: %v", tc.values, dig(side, "args"))
+		}
+		if v := dig(pod, "shareProcessNamespace"); v != false {
+			t.Fatalf("%s: shareProcessNamespace=%v, the scan worker must be PID 1 of its own PID namespace", tc.values, v)
+		}
+		if v := dig(pod, "automountServiceAccountToken"); v != false {
+			t.Fatalf("%s: automountServiceAccountToken=%v", tc.values, v)
+		}
+		sc := dig(side, "securityContext")
+		for _, want := range []struct {
+			path []string
+			v    any
+		}{
+			{[]string{"runAsNonRoot"}, true},
+			{[]string{"runAsUser"}, 65532},
+			{[]string{"runAsGroup"}, 65532},
+			{[]string{"allowPrivilegeEscalation"}, false},
+			{[]string{"readOnlyRootFilesystem"}, true},
+			{[]string{"seccompProfile", "type"}, "RuntimeDefault"},
+		} {
+			if got := dig(sc, want.path...); got != want.v {
+				t.Fatalf("%s: sidecar securityContext %v=%v (%T), want %v", tc.values, want.path, got, got, want.v)
+			}
+		}
+		if drop, _ := dig(sc, "capabilities", "drop").([]any); len(drop) != 1 || drop[0] != "ALL" {
+			t.Fatalf("%s: sidecar capabilities drop=%v, want [ALL]", tc.values, drop)
+		}
+		if dig(sc, "capabilities", "add") != nil || dig(sc, "privileged") != nil {
+			t.Fatalf("%s: sidecar securityContext adds privilege: %v", tc.values, sc)
 		}
 	}
 }

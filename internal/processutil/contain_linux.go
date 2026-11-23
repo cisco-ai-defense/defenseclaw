@@ -120,6 +120,11 @@ func init() {
 			os.Exit(containExitNotContained)
 		}
 		os.Exit(execTracked(os.Args[4:]))
+	case containPodMode:
+		if os.Args[2] != "1" {
+			os.Exit(containExitNotContained)
+		}
+		os.Exit(execPodScanner(os.Args[4:]))
 	default:
 		os.Exit(containExitNotContained)
 	}

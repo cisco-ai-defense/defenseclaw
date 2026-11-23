@@ -9,6 +9,12 @@
 // runs skill-scanner and the plugin scanner from the release's scanner
 // runtime on job folders the gateway wrote, and answers the ScanResult; the
 // gateway decides with its own policy.
+//
+// In the chart's sidecar the worker runs in the pod-contained mode (Pod,
+// GAP-0828): a container's default seccomp profile refuses the namespaces the
+// scanner's usual containment needs, so the container is the boundary and the
+// worker, its PID 1, runs one scanner at a time and clears the container
+// after each job.
 package scanworker
 
 import (
@@ -23,10 +29,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -51,9 +59,17 @@ type Worker struct {
 	Slots   int
 	Queue   int
 	Scan    ScanFunc
+	// Launcher is the scanner runtime launcher RuntimeScanner runs (default
+	// RuntimeLauncher).
+	Launcher string
 	// Version reports the scanner runtime's version ("" and an error when
 	// it cannot run).
 	Version func(ctx context.Context) (string, error)
+	// Pod is the pod-contained mode (GAP-0828); nil keeps the scanner's
+	// namespace containment, which fails closed where namespaces are
+	// refused. With Pod the worker runs one job at a time, scans with
+	// Pod.Run, and Pod.Reset ends every job and health check.
+	Pod *processutil.PodRunner
 
 	admit chan struct{}
 	run   chan struct{}
@@ -67,13 +83,24 @@ func (w *Worker) init() {
 	if queue <= 0 {
 		queue = defaultQueue
 	}
+	if w.Pod != nil {
+		slots = 1
+	}
 	if w.Timeout <= 0 {
 		w.Timeout = 20 * time.Second
 	}
 	w.admit = make(chan struct{}, slots+queue)
 	w.run = make(chan struct{}, slots)
 	if w.Scan == nil {
-		w.Scan = RuntimeScan
+		var contain func(*exec.Cmd) error
+		if w.Pod != nil {
+			contain = w.Pod.Run
+		}
+		launcher := w.Launcher
+		if launcher == "" {
+			launcher = RuntimeLauncher
+		}
+		w.Scan = RuntimeScanner(launcher, contain)
 	}
 }
 
@@ -117,11 +144,30 @@ func answer(rw http.ResponseWriter, status int, a scanner.RemoteScanAnswer) {
 
 func (w *Worker) serveHealth(rw http.ResponseWriter, r *http.Request) {
 	h := scanner.RemoteHealth{}
+	if w.Pod != nil {
+		// The version check may start the runtime: it takes the job slot,
+		// and a worker that cannot contain a scan is not ready.
+		if !acquire(r.Context(), w.run) {
+			return
+		}
+		defer func() { <-w.run }()
+		if err := w.Pod.Check(); err != nil {
+			h.Error = err.Error()
+			rw.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(rw).Encode(h)
+			return
+		}
+	}
 	if w.Version != nil {
 		v, err := w.Version(r.Context())
 		h.Version, h.Ready = v, err == nil
 		if err != nil {
 			h.Error = err.Error()
+		}
+	}
+	if w.Pod != nil {
+		if err := w.Pod.Reset(); err != nil {
+			h.Ready, h.Error = false, err.Error()
 		}
 	}
 	rw.Header().Set("Content-Type", "application/json")
@@ -165,6 +211,14 @@ func (w *Worker) serveScan(rw http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { <-w.run }()
 	res, err := w.Scan(ctx, req.Kind, dir, req.Settings)
+	if w.Pod != nil {
+		// Nothing the scan started or wrote may reach the next job; a
+		// container that could not be cleared answers no result.
+		if rerr := w.Pod.Reset(); rerr != nil {
+			answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Code: "unavailable", Error: rerr.Error()})
+			return
+		}
+	}
 	switch {
 	case err == nil && res != nil:
 		answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Result: res})
@@ -215,13 +269,20 @@ func checkJob(dir string) error {
 	})
 }
 
-// RuntimeScan runs the release's scanner runtime: skill-scanner with the
-// gateway's static settings, or the plugin scanner.
-func RuntimeScan(ctx context.Context, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
-	if kind == scanner.RemoteKindPlugin {
-		return (&scanner.PluginScanner{BinaryPath: RuntimeLauncher}).Scan(ctx, dir)
+// RuntimeScanner runs the release's scanner runtime at launcher: skill-scanner
+// with the gateway's static settings, or the plugin scanner. contain runs
+// each scanner command (nil: the scanner's namespace containment).
+func RuntimeScanner(launcher string, contain func(*exec.Cmd) error) ScanFunc {
+	return func(ctx context.Context, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
+		return runtimeScan(ctx, launcher, contain, kind, dir, st)
 	}
-	cfg := config.SkillScannerConfig{Binary: RuntimeLauncher, Policy: st.Policy, Lenient: st.Lenient,
+}
+
+func runtimeScan(ctx context.Context, launcher string, contain func(*exec.Cmd) error, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
+	if kind == scanner.RemoteKindPlugin {
+		return (&scanner.PluginScanner{BinaryPath: launcher, Contain: contain}).Scan(ctx, dir)
+	}
+	cfg := config.SkillScannerConfig{Binary: launcher, Policy: st.Policy, Lenient: st.Lenient,
 		UseBehavioral: st.UseBehavioral, UseTrigger: st.UseTrigger}
 	if st.Policy == config.SkillScannerPolicyCustom {
 		f, err := os.CreateTemp("", "dc-scan-policy-*.yaml")
@@ -237,5 +298,5 @@ func RuntimeScan(ctx context.Context, kind, dir string, st scanner.RemoteSetting
 		sum := sha256.Sum256(st.CustomPolicy)
 		cfg.PolicyFile = config.AssetFileRef{Path: f.Name(), Digest: "sha256:" + hex.EncodeToString(sum[:])}
 	}
-	return (&scanner.SkillScanner{Config: cfg}).Scan(ctx, dir)
+	return (&scanner.SkillScanner{Config: cfg, Contain: contain}).Scan(ctx, dir)
 }

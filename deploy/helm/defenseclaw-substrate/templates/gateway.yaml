@@ -29,6 +29,10 @@ spec:
         {{- include "dc.podAnnotations" $sel | nindent 8 }}
     spec:
       {{- include "dc.podSpecCommon" (dict "ctx" . "sa" "gateway" "values" .Values.gateway) | nindent 6 }}
+      {{- if .Values.gateway.skillScanner.enabled }}
+      # The scan worker must be PID 1 of its container (GAP-0828).
+      shareProcessNamespace: false
+      {{- end }}
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -144,10 +148,24 @@ spec:
         - substrate
         - scan-worker
         - --dir=/run/defenseclaw-scan
+        # The container is the scanner's boundary (GAP-0828): RuntimeDefault
+        # refuses the namespaces the laptop's containment uses, so the worker
+        # is PID 1 of this container's own PID namespace (the pod does not
+        # share one), scans one job at a time and clears the container after
+        # each. Its security settings are fixed here, not taken from values.
+        - --pod-contained
         resources:
           {{- toYaml .Values.gateway.skillScanner.resources | nindent 10 }}
         securityContext:
-          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
         volumeMounts:
         - name: skill-scan
           mountPath: /run/defenseclaw-scan
