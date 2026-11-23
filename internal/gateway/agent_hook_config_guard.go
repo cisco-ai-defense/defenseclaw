@@ -1544,6 +1544,12 @@ var sandboxHookConfigNames = sync.OnceValue(func() []string {
 	return slices.Compact(names)
 })
 
+// sandboxHookConfigQuotes takes the quotes out of a placed statement. It is
+// built once: a replacer of one-byte strings allocates a 256-entry table on
+// its first use, ~6 KB for every placed statement when it was built per call
+// (substrate-1 GAP-1028).
+var sandboxHookConfigQuotes = strings.NewReplacer("'", "", "\"", "")
+
 // sandboxStatementMayNameHookConfig reports a placed statement that may
 // write a hook file: its text, with quotes taken out, names a hook file's
 // name, or it has an expansion, a pattern, a backslash or a line break that
@@ -1559,7 +1565,7 @@ func sandboxStatementMayNameHookConfig(statement string) bool {
 	if strings.ContainsAny(statement, "$`*?[{\\\r\n") {
 		return true
 	}
-	plain := strings.NewReplacer("'", "", "\"", "").Replace(statement)
+	plain := sandboxHookConfigQuotes.Replace(statement)
 	for _, name := range sandboxHookConfigNames() {
 		if strings.Contains(plain, name) {
 			return true
