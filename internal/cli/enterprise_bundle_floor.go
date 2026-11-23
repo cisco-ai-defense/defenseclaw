@@ -67,6 +67,12 @@ func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 			if err := env.BundleProductFloorRefusal(strings.TrimSpace(version)); err != nil {
 				return cliusage.WithExitCode(err, bundleFloorRefusedExit)
 			}
+			// An older release refuses a config.yaml that sets a key it
+			// does not have, after its files replaced these
+			// (rel-1-0-10 GAP-2035).
+			if err := newerConfigDowngradeRefusal(env, strings.TrimSpace(version)); err != nil {
+				return cliusage.WithExitCode(err, bundleFloorRefusedExit)
+			}
 			// A release before route-only would leave every routed
 			// account pointing at a listener it does not have
 			// (rel-1-0-10 GAP-0647).

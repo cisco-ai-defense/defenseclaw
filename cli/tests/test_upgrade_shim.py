@@ -1809,6 +1809,7 @@ def _schema_key_paths(schema: dict) -> set[str]:
 
 
 _SCHEMA_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.schema.json"
+_SCHEMA_1_0_10 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.10.schema.json"
 
 
 def _missing_from_newer_config_keys(new_paths: set[str], old_paths: set[str]) -> list[str]:
@@ -2501,10 +2502,11 @@ def _schema_key_paths_with_maps(schema: dict) -> set[str]:
     return out
 
 
-def _covered_by_newer_keys(path: str) -> bool:
+def _covered_by_newer_keys(path: str, older: tuple[int, int, int] = (1, 0, 9)) -> bool:
+    """A NEWER_CONFIG_KEYS or NEWER_CONFIG_SUBTREES entry newer than ``older`` is path or a block above it."""
     parts = path.split(".")
     for dotted, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES):
-        if since <= (1, 0, 9):
+        if since <= older:
             continue
         pattern = dotted.split(".")
         if len(parts) >= len(pattern) and all(p in ("*", k) for p, k in zip(pattern, parts)):
@@ -2525,6 +2527,34 @@ def test_every_scoped_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
     assert "guardrail.profiles.*.connectors.*.cascade" in new
     missing = sorted(p for p in new - old if not _covered_by_newer_keys(p))
     assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS or NEWER_CONFIG_SUBTREES: {missing}"
+
+
+def test_every_key_new_since_1_0_10_is_set_aside_on_a_downgrade_to_1_0_10() -> None:
+    # GAP-2035: the 1.0.9 guards pass a key this release adds under a block
+    # 1.0.10 already has (substrate.bundles.oci under substrate, 1.0.10), but
+    # a downgrade to 1.0.10 kept it and 1.0.10 refuses config.yaml. Every key
+    # of this release's schema that the frozen 1.0.10 schema lacks needs an
+    # entry newer than 1.0.10.
+    old = _schema_key_paths_with_maps(json.loads(_SCHEMA_1_0_10.read_text(encoding="utf-8")))
+    new = _schema_key_paths_with_maps(
+        json.loads((_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8"))
+    )
+    assert "substrate.enabled" in old and "ai_discovery.include_skill_manifests" not in old
+    missing = sorted(p for p in new - old if not _covered_by_newer_keys(p, (1, 0, 10)))
+    assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS with (1, 0, 11): {missing}"
+
+
+def test_the_managed_floor_check_lists_the_keys_the_shim_sets_aside() -> None:
+    # GAP-2035: a managed package downgrade cannot set keys aside (the config
+    # is the administrator's); floor-check refuses it before any file is
+    # replaced, from its own copy of these lists (internal/cli).
+    src = (_REPO_ROOT / "internal" / "cli" / "enterprise_bundle_floor_config.go").read_text(encoding="utf-8")
+    go = sorted(
+        (key, (int(a), int(b), int(c)))
+        for key, a, b, c in re.findall(r'\{"([^"]+)", \[3\]int\{(\d+), (\d+), (\d+)\}\}', src)
+    )
+    shim = sorted((*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES, *upgrade_shim.NEWER_ITEM_KEYS))
+    assert len(go) > 60 and go == shim
 
 
 def test_the_scoped_downgrade_guard_fails_on_an_uncovered_scoped_key() -> None:
