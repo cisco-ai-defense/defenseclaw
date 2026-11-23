@@ -1454,7 +1454,7 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 		// and in an Args-only call the POSIX reader rejects, the statement
 		// split declines and the settings write went unnamed where the
 		// laptop alerts (substrate-1 GAP-0378, GAP-0379).
-		placements, _ := sandboxGuestPlacements(input, whole, false)
+		placements, _ := request.guestMemo.plan(input, whole).placements(false)
 		dynamic := guestCallRunsUnreadCommand(command, input.ActiveHome)
 		for _, placement := range placements {
 			// A folder the call reaches only as a cd target no command runs

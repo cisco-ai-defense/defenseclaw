@@ -1173,6 +1173,11 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 }
 
 func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
+	if action.guestMemo == nil {
+		// The rule dispatch and the lanes below (the sandbox hook-config
+		// guard) share the guest placement of one input (guestReadingMemo).
+		action.guestMemo = &guestReadingMemo{}
+	}
 	return trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient)
 }
 
