@@ -3063,14 +3063,15 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 			return true
 		}
 	}
-	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
+	unguarded := claudeCodeUnguardedHookCommand(command)
+	command = posixHookCommandUnquoted(unguarded)
 	if _, ok := claudeCodePerUserNativeOwnerHome(hook, false); ok {
 		return true
 	}
 	if _, ok := claudeCodePerUserNativeOwnerHome(hook, true); ok {
 		return true
 	}
-	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
+	if hooksDir != "" && (strings.HasPrefix(command, hooksDir+"/") || hookCommandInWindowsDir(unguarded, hooksDir)) {
 		return true
 	}
 	// Native Go hook commands (Windows) are not a file path under hooksDir
