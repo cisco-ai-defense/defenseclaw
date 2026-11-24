@@ -22,7 +22,7 @@ import (
 func TestGAP0689HomeFolderSearchAfterAMoverIsWalked(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	proj := filepath.Join(home, "proj")
-	for name, text := range map[string]string{".env": "KEY=1\n", ".git/HEAD": "ref: x\n", "src/a.go": "package a\n", "deploy/id_ed25519": "k\n"} {
+	for name, text := range map[string]string{".env": "KEY=1\n", ".git/HEAD": "ref: x\n", "src/a.go": "package a\n", "deploy/id_ed25519": "k\n", "hid/.env": "KEY=1\n"} {
 		file := filepath.Join(proj, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 			t.Fatal(err)
@@ -44,7 +44,8 @@ func TestGAP0689HomeFolderSearchAfterAMoverIsWalked(t *testing.T) {
 		{"G cd /tmp; grep -r", proj, "cd /tmp; grep -r KEY ~/proj", true},
 		{"H the home itself", home, "cd /tmp; grep -r KEY ~", true},
 		{"C1 a folder with no credentials file", proj, "f(){ test -d .git && return; cd /; }; f && rg --hidden KEY ~/proj/src", false},
-		{"C2 rg skips hidden files", proj, "cd / && rg KEY ~/proj", false},
+		{"C2 rg skips hidden files", proj, "cd / && rg KEY ~/proj/hid", false},
+		{"I the same folder with --hidden", proj, "cd / && rg --hidden KEY ~/proj/hid", true},
 		{"C3 a glob that selects only Go files", proj, "cd / && rg -g '*.go' KEY ~/proj", false},
 		{"C4 the call may rebind HOME", proj, "HOME=/nonexistent; cd / && rg --hidden KEY ~/proj", false},
 	} {

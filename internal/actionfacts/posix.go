@@ -140,6 +140,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		for i := range out.commands {
 			for j := range out.commands[i].Arguments {
 				out.commands[i].Arguments[j].homeSpelling = ""
+				out.commands[i].Arguments[j].homeTilde = ""
 			}
 		}
 	}
@@ -615,6 +616,9 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	if result.Expands {
 		if !expands && unquotedExpansion && quote == QuoteNone {
 			result.StaticGlob = staticValue
+			if (staticValue == "~" || strings.HasPrefix(staticValue, "~/")) && !strings.ContainsAny(staticValue, "*?[\\") {
+				result.homeTilde = staticValue
+			}
 		}
 		result.Value = ""
 	} else {
