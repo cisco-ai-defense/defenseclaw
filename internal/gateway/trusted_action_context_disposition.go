@@ -126,14 +126,14 @@ func applyTrustedActionContextDisposition(
 					continue
 				}
 				if (finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY") &&
+					!finding.Proof.Recorded() &&
 					trustedActionOtherHomeSSHPrivateKeyContentRead(findingFacts) {
 					// A proven read of another account's private key alerts in
 					// every non-strict tier. Strict's separate key-read proof blocks.
-					if !finding.Proof.Recorded() {
-						finding.disposition = findingDispositionAdvisory
-						finding.Proof = finding.Proof.Advise()
-						finding.Severity = "HIGH"
-					}
+					// A detection-only finding keeps the previous advisory path.
+					finding.disposition = findingDispositionAdvisory
+					finding.Proof = finding.Proof.Advise()
+					finding.Severity = "HIGH"
 					adjusted[index] = finding
 					continue
 				}

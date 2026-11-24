@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
@@ -697,7 +698,9 @@ func effectKnownHookConfigWritePreservesRegistration(result effects.Result, f *s
 	}
 	guard := newAgentHookConfigGuard("", home)
 	format := guard.format(path)
-	if format == "" {
+	// Only Codex TOML is a mixed-purpose config with an observed 1.0.10
+	// benign-write cell. Other hook files keep their existing write grade.
+	if format != gatewayconnector.AgentHookConfigCodexTOML {
 		return false
 	}
 	before, exists := guard.read(path)
