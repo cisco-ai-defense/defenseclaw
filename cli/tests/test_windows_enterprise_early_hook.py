@@ -253,6 +253,12 @@ function Write-DefenseClawResilienceEvent {
     param([string]$Marker, [hashtable]$Fields)
     $script:events.Add('resilience:' + $Marker)
 }
+# GAP-2012: the guardian pass after the restored hook is back
+# (cli/tests/test_windows_enterprise_rollback_guardian_pass.py).
+function Complete-DefenseClawRestoredHookGuardianPass {
+    param($Snapshot, [hashtable]$Layout)
+    $script:events.Add('guardian-pass')
+}
 if ($Case -like 'drain*') {
     # The replaced release's hook process 4242 ends after two looks (drain),
     # or never (drain-timeout).
@@ -774,7 +780,7 @@ def test_recovery_republishes_closed_hook_until_restored_gateway_is_ready(tmp_pa
     assert result["threw"] == "", result
     assert result["during_restore"] == "hook-1.0.4", result
     assert result["restored"] == "hook-1.0.2", result
-    assert result["events"][-2:] == ["gateway-ready", "restore"], result
+    assert result["events"][-3:] == ["gateway-ready", "restore", "guardian-pass"], result
 
 
 def test_recovery_refuses_a_modified_closed_hook_copy(tmp_path: Path) -> None:

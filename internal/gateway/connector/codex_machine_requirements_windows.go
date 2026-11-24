@@ -1255,6 +1255,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		return result, err
 	}
 	result.Active = true
+	result.HookExecutable = state.HookExecutable
 	result.GatewayAddr = state.GatewayAddr
 	result.GatewayServiceName = state.GatewayServiceName
 	result.Targets = targets

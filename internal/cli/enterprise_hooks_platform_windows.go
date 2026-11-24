@@ -311,6 +311,27 @@ func syncEnterpriseHookManagedEnrollments(
 // is off the roster, so it never stays beside a policy that is being published
 // for the connector. A marker that cannot be removed is logged and the policy
 // is published anyway: the hook allows only while the policy is absent.
+// enterpriseHookCodexRequirementsNameAnotherImage reports active Codex
+// requirements that were published for another hook image of this install
+// than hook, the image the guardian resolves and publishes the targets for.
+// The registry read accepts such a file (GAP-0751: an agent session started
+// before an upgrade still runs the image it read), but the target
+// publication verifies the requirements against hook and refuses it. Without
+// a republish every pass failed there: a standalone rollback restores the
+// prior release's requirements, which name its launch folder, while the
+// transaction's guard is still the hook at the transition path, so the
+// restored guardian's startup reconcile failed with "windows_managed_dir does
+// not match protected managed directory", the rollback never got its fresh
+// reconcile and stayed pending (GAP-2056). The reconcile republishes for hook
+// and keeps the enrolled targets; the target publication stays exact.
+func enterpriseHookCodexRequirementsNameAnotherImage(
+	current connector.WindowsCodexManagedRuntimeRegistry,
+	hook string,
+) bool {
+	return current.Active && current.HookExecutable != "" &&
+		!sameWindowsEnterprisePathCLI(current.HookExecutable, hook)
+}
+
 func publishWindowsMachinePolicyClearingOffRoster(name string, publish func() error) error {
 	if err := enterpriseHookWindowsOffRosterPublisher(name, false); err != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
@@ -450,8 +471,13 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		// residual: a holder that denied read sharing left the file unreadable
 		// and every later pass stopped here until an administrator granted the
 		// read by hand).
+		// Requirements published for another image of this install's hook are
+		// published again for the image this pass publishes the targets for
+		// (GAP-2056, below).
 		if cfg.StandaloneEnterprise() && configured["codex"] &&
-			(err != nil || !currentCodex.Active || enterpriseHookCodexRequirementsUnreadable(codexOpts.RequirementsPath)) {
+			(err != nil || !currentCodex.Active ||
+				enterpriseHookCodexRequirementsNameAnotherImage(currentCodex, codexOpts.HookBinary) ||
+				enterpriseHookCodexRequirementsUnreadable(codexOpts.RequirementsPath)) {
 			// The reconcile validates the machine-policy folder and creates none of
 			// it, so a folder or vendor parent deleted after Setup made every pass
 			// fail the same way and nothing recreated it. A link on the path is

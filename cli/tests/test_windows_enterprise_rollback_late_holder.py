@@ -50,8 +50,9 @@ def test_every_deferral_is_standalone_only() -> None:
     # GAP-0977 added the eighth: a guardian state file a holder keeps the guardian from publishing.
     # GAP-0999 added the ninth to the eleventh: a stuck Codex writer (the state check of the readiness
     # check, the Codex verify of it, the guardian proof that cannot publish); the twelfth is the
-    # managed-hook teardown rollback that meets the same writer first.
-    assert len(sites) == 12, len(sites)
+    # managed-hook teardown rollback that meets the same writer first. GAP-2012 added the thirteenth:
+    # the Codex check a rollback defers until the restored hook is back.
+    assert len(sites) == 13, len(sites)
     for site in sites:
         window = text[max(0, site - 1700) : site]
         assert "Test-DefenseClawStandaloneProfile" in window, text[site - 200 : site + 100]
