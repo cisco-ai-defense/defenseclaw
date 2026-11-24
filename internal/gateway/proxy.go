@@ -6547,6 +6547,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	// client gets an SSE comment line every streamKeepAliveAfter (GAP-1307):
 	// heldAt is when the hold began, keepAt the last keep-alive.
 	var heldFrames [][]byte
+	maskedReasoning := map[int][2]int{} // unresolved reasoning bytes already sent masked (GAP-2170)
 	heldSize := 0
 	var heldAt, keepAt time.Time
 	flushHeldFrames := func() {
@@ -6577,11 +6578,25 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	}
 	// secretWait reports that the next frame (next bytes) must wait; ok is
 	// false when a bound blocked.
-	secretWait := func(next int) (wait, ok bool) {
+	secretWait := func(frame *[]byte) (wait, ok bool) {
+		next := len(*frame)
 		if mode != "action" {
 			return false, true
 		}
 		o := accumulated.OpenSecret()
+		if o.reasoningOnly {
+			runs := accumulated.ParkedReasoningRuns()
+			frames := append(append([][]byte(nil), heldFrames...), *frame)
+			if masked, ok := maskRawForwardReasoning(frames, runs, maskedReasoning); ok {
+				heldFrames = masked[:len(masked)-1]
+				heldSize = bufferedBytes(heldFrames)
+				*frame = masked[len(masked)-1]
+				for _, run := range runs {
+					maskedReasoning[run.lane] = [2]int{run.start, run.start + len(run.text)}
+				}
+				return false, true
+			}
+		}
 		switch {
 		case !o.open:
 			return false, true
@@ -6710,7 +6725,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				return true
 			}
 		}
-		if wait, ok := secretWait(len(frame)); !ok {
+		if wait, ok := secretWait(&frame); !ok {
 			return false
 		} else if wait {
 			if len(heldFrames) == 0 {

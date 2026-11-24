@@ -201,8 +201,8 @@ func (r *responseText) Add(p responsePiece) {
 // piece has been checked. Message ends close the run. Block ends park it
 // because the same lane can resume after an interleaved block (GAP-2162).
 // A switch to a tool call also parks it. A switch from reasoning to answer
-// parks it for a bounded answer span, allowing an interleaved text block
-// before more reasoning (GAP-2170). A refusal or code ends
+// parks its open run until reasoning resumes or the message ends, while
+// the answer can stream with that run masked (GAP-2170). A refusal or code ends
 // reasoning at once. Private-key blocks keep their own bounds.
 
 // streamRunParkMax is how much reply text may follow the end of a block
@@ -262,9 +262,9 @@ func (r *responseText) laneMoved(l responseLane) {
 }
 
 // parkLane parks the open token or digit run of lane i (GAP-2162).
-// The reasoning park covers a short interleaved answer while letting a
-// completed thinking block release a later, unrelated answer (GAP-2154).
-const streamReasoningAnswerParkMax = 1536
+// A zero limit keeps a reasoning run parked until it resumes or the message
+// ends. The wire release masks only that unresolved run (GAP-2170).
+const streamReasoningAnswerParkMax = 0
 
 func (r *responseText) parkLane(i, limit int) {
 	s := &r.secret[i]
@@ -293,7 +293,7 @@ func (r *responseText) endLane(i int) {
 // expireParked ends parked runs after their own bounded byte budget.
 func (r *responseText) expireParked() {
 	for i := range r.secret {
-		if r.secret[i].parked && r.n-r.secret[i].parkedAt > r.secret[i].parkLimit {
+		if r.secret[i].parked && r.secret[i].parkLimit > 0 && r.n-r.secret[i].parkedAt > r.secret[i].parkLimit {
 			r.endLane(i)
 		}
 	}

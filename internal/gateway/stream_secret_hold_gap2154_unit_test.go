@@ -52,14 +52,14 @@ func TestGAP2154LaneEnds(t *testing.T) {
 	}
 	r.Add(answerPiece(0, "The answer."))
 	r.Add(messageEndPiece(1))
-	// GAP-2170 parks the reasoning's open run for a short answer: it
-	// may resume after an interleaved text block. It expires at 512 bytes.
+	// GAP-2170 parks the reasoning run across an interleaved answer,
+	// while the wire layer masks that run and can release answer events.
 	if o := r.OpenSecret(); !o.open {
 		t.Fatal("short answer did not keep the reasoning run held")
 	}
-	r.Add(answerPiece(0, strings.Repeat("x", streamReasoningAnswerParkMax+1)))
-	if o := r.OpenSecret(); o.open {
-		t.Fatalf("reasoning stayed held past the block park bound: %+v", o)
+	r.Add(answerPiece(0, strings.Repeat("x", 9000)))
+	if o := r.OpenSecret(); !o.reasoningOnly {
+		t.Fatalf("reasoning run was released across the long answer: %+v", o)
 	}
 	r.Add(answerPiece(1, " and 4111"))
 	if !r.OpenSecret().open {

@@ -400,6 +400,27 @@ func (s *passthroughStream) run() {
 		secretOpen, secretKey = false, false
 		return boundHit(c, why)
 	}
+	// maskParkedReasoning preserves an unresolved reasoning run without
+	// holding unrelated answer events behind it (GAP-2170). The existing
+	// lane-aware mask validator refuses an event it cannot rewrite safely.
+	maskParkedReasoning := func() bool {
+		if relN == 0 {
+			return false
+		}
+		runs := accumulated.ParkedReasoningRuns()
+		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
+		if !ok {
+			return false
+		}
+		for i, ev := range masked {
+			queueBytes += len(ev) - len(queue[i])
+			queue[i] = ev
+		}
+		for _, run := range runs {
+			maskedRuns[run.lane] = [2]int{run.start, run.start + len(run.text)}
+		}
+		return true
+	}
 	// secretWait reports that nothing may be sent now: the text ends inside
 	// an open secret (rel-1-0-10:GAP-0429, stream_secret_hold.go). ok is
 	// false when a bound on it blocked.
@@ -409,6 +430,10 @@ func (s *passthroughStream) run() {
 		}
 		o := accumulated.OpenSecret()
 		secretOpen, secretKey = o.open, o.pem
+		if o.reasoningOnly && maskParkedReasoning() {
+			secretOpen = false
+			return false, true
+		}
 		switch {
 		case !o.open:
 			return false, true
@@ -454,7 +479,7 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		runs := accumulated.OpenRuns()
-		masked, ok := s.maskHeld(queue, relN, runs, maskedRuns)
+		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
 		if !ok {
 			return true // it cannot be masked: everything stays held
 		}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -58,18 +59,20 @@ func TestGAP2166BoundaryWindowKeepsUnbrokenSides(t *testing.T) {
 
 func TestGAP2170LongAnswerKeepsReasoningRun(t *testing.T) {
 	card := gap1091Group(gap1091Card(t, "4", 16), " ", 4, 4, 4, 4)
-	var r responseText
-	r.Add(reasoningPiece(0, "VALUE: "+card[:10]))
-	if !r.OpenSecret().open {
-		t.Fatal("split card prefix was not held")
-	}
-	r.Add(answerPiece(0, strings.Repeat("safe ", 130)))
-	if !r.OpenSecret().open {
-		t.Fatal("answer longer than 512 bytes released the reasoning prefix")
-	}
-	r.Add(reasoningPiece(0, card[10:]+" done"))
-	if !strings.Contains(r.CheckText(), card) {
-		t.Fatal("the resumed reasoning lane lost the card")
+	for _, n := range []int{650, 9000} {
+		var r responseText
+		r.Add(reasoningPiece(0, "VALUE: "+card[:10]))
+		if !r.OpenSecret().open {
+			t.Fatalf("split card prefix was not held at %d bytes", n)
+		}
+		r.Add(answerPiece(0, strings.Repeat("safe ", (n+4)/5)))
+		if !r.OpenSecret().reasoningOnly {
+			t.Fatalf("reasoning prefix was released after %d answer bytes", n)
+		}
+		r.Add(reasoningPiece(0, card[10:]+" done"))
+		if !strings.Contains(r.CheckText(), card) {
+			t.Fatalf("resumed reasoning lost the card after %d answer bytes", n)
+		}
 	}
 }
 
@@ -173,6 +176,67 @@ func TestGAP2177FirstAnswerLineStreamsLive(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// The answer is released while only the unresolved reasoning run stays masked.
+// The resumed reasoning card is still blocked with zero card bytes released.
+func TestGAP2170LongInterleavedAnswerStreamsLive(t *testing.T) {
+	for _, shape := range []string{"anthropic", "openai-chat", "openai-responses"} {
+		for _, n := range []int{650, 9000} {
+			for _, pack := range []string{"default", "strict"} {
+				t.Run(shape+"/"+pack+"/"+strconv.Itoa(n), func(t *testing.T) {
+					card := gap1091Group(gap1091Card(t, "4", 16), " ", 4, 4, 4, 4)
+					lead := retestFiller(2048)[:2048] + " VALUE: " + card[:10]
+					marker := "ANSWER-LIVE-MARK"
+					answer := strings.Repeat("safe ", (n+4)/5) + marker + ". "
+					pieces := []string{}
+					switch shape {
+					case "anthropic":
+						pieces = append(pieces, gap2162AnthropicDelta(0, "thinking_delta", lead), gap2162AnthropicStop(0), gap2162AnthropicStart(1, map[string]any{"type": "text", "text": ""}))
+						for len(answer) > 0 {
+							step := min(len(answer), 1800)
+							pieces = append(pieces, gap2162AnthropicDelta(1, "text_delta", answer[:step]))
+							answer = answer[step:]
+						}
+						pieces = append(pieces, gap2162AnthropicStop(1), gap2162AnthropicStart(2, map[string]any{"type": "thinking", "thinking": ""}), gap2162AnthropicDelta(2, "thinking_delta", card[10:]+" done.\n"))
+					case "openai-responses":
+						pieces = append(pieces, gap2162Event("response.reasoning_text.delta", map[string]any{"output_index": 0, "delta": lead}))
+						for len(answer) > 0 {
+							step := min(len(answer), 1800)
+							pieces = append(pieces, gap2162Event("response.output_text.delta", map[string]any{"output_index": 1, "delta": answer[:step]}))
+							answer = answer[step:]
+						}
+						pieces = append(pieces, gap2162Event("response.reasoning_text.delta", map[string]any{"output_index": 0, "delta": card[10:] + " done.\n"}))
+					default:
+						pieces = append(pieces, gap2166ChatDelta(0, "reasoning_content", lead))
+						for len(answer) > 0 {
+							step := min(len(answer), 1800)
+							pieces = append(pieces, gap2166ChatDelta(0, "content", answer[:step]))
+							answer = answer[step:]
+						}
+						pieces = append(pieces, gap2166ChatDelta(0, "reasoning_content", card[10:]+" done.\n"))
+					}
+					path := gap0429PathsNamed(t, "passthrough/"+shape)[0]
+					secret := gap0429Secret{name: "card", class: "boundary", text: "VALUE: " + card, body: len("VALUE: "), end: len("VALUE: ") + len(card)}
+					row := gap1265Row{name: "long-answer-live", tier: pack, pack: pack, pieces: pieces, at: len(pieces) - 1, pause: gap2162Pause, wantBlocked: true, secret: secret}
+					results, _ := gap1265Serve(t, path, []gap1265Row{row})
+					got := results[0]
+					if !bytes.Contains([]byte(got.snapRaw), []byte(marker)) {
+						t.Error("answer stayed held behind reasoning")
+					}
+					if !got.blocked {
+						t.Error("completed card was not blocked")
+					}
+					if leaked := gap0429Released(got.snapRaw, secret); leaked > 0 {
+						t.Errorf("%d card bytes reached client before verdict", leaked)
+					}
+					if leaked := gap0429Released(got.bodyRaw, secret); leaked > 0 {
+						t.Errorf("%d blocked card bytes reached client", leaked)
+					}
+				})
+			}
 		}
 	}
 }
