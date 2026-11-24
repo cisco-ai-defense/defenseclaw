@@ -170,6 +170,13 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		{gap: "GAP-1244 anchored suffix", command: `cat "${PWD/%\/proj/}/.ssh/id_rsa"`, want: "ctl:cat ~/.ssh/id_rsa"},
 		{gap: "GAP-1244 fp: ${PWD:0:-5} project file", command: `cat ${PWD:0:-5}/proj/notes.txt`, want: "allow"},
 		{gap: "GAP-1037 lastpipe cd", command: `shopt -s lastpipe; echo x | cd ~/.ssh; cat id_rsa`, want: "ctl:cat ~/.ssh/id_rsa"},
+		// GAP-1748: a cd in a middle pipeline stage runs in a subshell, so
+		// the later read is of the project file; the plain spelling allows.
+		// The last-stage cd and a keys write after a cd keep their control.
+		{gap: "GAP-1748 fp: lastpipe, cd in a middle stage", command: `shopt -s lastpipe; cd ~/.ssh | cat; cat notes.txt`, want: "allow"},
+		{gap: "GAP-1748 fp: set -euo pipefail, cd in a middle stage", command: `set -euo pipefail; cd ~/.ssh | cat; ls`, want: "allow"},
+		{gap: "GAP-1748 lastpipe cd, then a keys write", command: `shopt -s lastpipe; echo x | cd ~/.ssh; echo k >> authorized_keys`, want: "ctl:echo k >> ~/.ssh/authorized_keys"},
+		{gap: "GAP-1748 set -e, cd, then a keys write", command: `set -e; cd ~/.ssh; echo k >> authorized_keys`, want: "ctl:echo k >> ~/.ssh/authorized_keys"},
 		{gap: "GAP-1043 pwd function", command: `pwd() { echo /tmp; }; cat $(pwd)/.ssh/id_rsa`, cwd: ".", want: "maybe"},
 		{gap: "GAP-1608 $(pwd)/../ glob", command: `cat $(pwd)/../.ssh/id_*`, want: "maybe"},
 		{gap: "GAP-1573c fp: in-call link to a project folder", command: `ln -s ~/proj/src d && find d/ -name '*.pyc' -delete`, want: "allow"},

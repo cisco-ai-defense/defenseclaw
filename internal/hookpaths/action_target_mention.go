@@ -3505,6 +3505,69 @@ func actionWordHasUnquotedGlob(word *syntax.Word, command string) bool {
 		strings.ContainsAny(actionMaskLiteralMetacharacters(command[start:end]), "*?[]")
 }
 
+// actionInertSetOptions and actionInertShoptOptions are the shell options
+// that change neither pathname expansion, word expansion nor which command a
+// word runs: error, unset-name and pipeline exit handling, tracing and the
+// last pipeline stage of a non-interactive shell. One spec string each, not a
+// literal per name (the GAP-0749 bounded sweep reads every package string
+// literal as a word).
+var (
+	actionInertSetOptions   = strings.Fields("errexit nounset pipefail xtrace verbose")
+	actionInertShoptOptions = strings.Fields("lastpipe inherit_errexit checkwinsize histappend cmdhist lithist huponexit checkjobs")
+)
+
+// actionInertShellOptions reports a set or shopt call (its words after the
+// program) that only turns inert options on or off or prints them:
+// set -e, set -euo pipefail, set +x, shopt -s lastpipe, shopt -u checkjobs
+// (rel-1-0-10:GAP-1748). set with an operand (set -- a b) rebinds the
+// positional parameters and is not inert; an option outside the inert lists
+// (dotglob, noglob, nullglob, expand_aliases, ...) is not either.
+func actionInertShellOptions(program string, args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch program {
+	case "set":
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			if len(arg) < 2 || arg[0] != '-' && arg[0] != '+' {
+				return false
+			}
+			flags := arg[1:]
+			named := strings.HasSuffix(flags, "o")
+			if named {
+				flags = flags[:len(flags)-1]
+			}
+			if strings.Trim(flags, "euxv") != "" {
+				return false
+			}
+			if named {
+				if i+1 == len(args) || !slices.Contains(actionInertSetOptions, args[i+1]) {
+					return false
+				}
+				i++
+			}
+		}
+		return true
+	case "shopt":
+		names := 0
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") {
+				if names > 0 || len(arg) < 2 || strings.Trim(arg[1:], "supq") != "" {
+					return false
+				}
+				continue
+			}
+			if !slices.Contains(actionInertShoptOptions, arg) {
+				return false
+			}
+			names++
+		}
+		return names > 0
+	}
+	return false
+}
+
 func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 	return actionKnownReadOnlyShellDepth(file, home, 0)
 }
@@ -3639,6 +3702,15 @@ func actionKnownReadOnlyShellMode(file *syntax.File, home string, depth int, bod
 			}
 		case "dirs":
 			// dirs prints or clears the directory stack (GAP-2552).
+		case "set", "shopt":
+			// An option that changes neither what a later word expands to
+			// nor what runs (set -euo pipefail, shopt -s lastpipe) reads and
+			// writes nothing: shopt -s lastpipe; cd ~/.ssh | cat; cat notes.txt
+			// is the read-only call it is without the option
+			// (rel-1-0-10:GAP-1748). Any other option, or set with operands,
+			// keeps the call off the list.
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionInertShellOptions(programBase(program), words[1:])
 		case "less":
 			for _, arg := range call.Args[1:] {
 				option, known := StaticWord(arg, home)
