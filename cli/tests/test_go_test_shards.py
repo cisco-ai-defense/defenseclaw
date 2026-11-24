@@ -787,7 +787,10 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
     # The gateway (gwN) and connector (cnN) parts have their own runners
     # since one runner running both took 14 to 18 minutes (Windows Native CI
     # 44948629287): 32 gateway shards plan at most 419 s (its largest test,
-    # the floor) and 16 connector shards at most 375 s.
+    # the floor) and 18 connector shards at most 335 s (GAP-2145: three
+    # GAP-1923 tests of 85 to 156 s each had no recorded time and all landed
+    # in cn4, 650 s of its 660 s; 16 shards planned on the refreshed times
+    # left 35% at best, 18 leave 43%).
     import json
 
     root = Path(__file__).resolve().parents[2]
@@ -808,6 +811,12 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
         ]
         assert max(jobs) <= 480, (package, [round(seconds) for seconds in jobs])
         assert sum(jobs) / shard_count <= 420, (package, round(sum(jobs) / shard_count))
+        if kind == "connector":
+            # GAP-2145: each cnN runs its tests under go test -timeout=11m
+            # (660 s); the go test build and link take about 45 s more. Keep
+            # 35% of the timeout free, so a slow hosted runner (up to a third
+            # slower) still ends in time.
+            assert max(jobs) + 45 <= 0.65 * 11 * 60, [round(seconds) for seconds in jobs]
 
 
 def test_test_timing_files_have_no_duplicate_keys() -> None:
