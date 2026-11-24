@@ -95,6 +95,20 @@ func kiroPowerShellCommand(ctx context.Context, connectorName string, req *ToolI
 		!sandboxHookForConnector(ctx, connectorName)
 }
 
+// cursorPowerShellCommand reports a Cursor beforeShellExecution call on a
+// Windows host, where Cursor runs the command in PowerShell. The call is
+// judged as shell, in the dialect its text infers; a launcher line inferred
+// as POSIX lost the backslashes of an unquoted Windows path, so pwsh -wd
+// <folder> -Command "Set-Content config.yaml ..." and pwsh -Command '...'
+// 2>&1 >> <foreign authorized_keys> were allowed with no finding where the
+// same rows block on Claude Code, Codex and Copilot (rel-1-0-10:GAP-1576,
+// the GAP-0198 launcher reading). Its PowerShell reading is added, as Kiro's
+// execute_pwsh one is, never put in place of the shell reading.
+func cursorPowerShellCommand(ctx context.Context, connectorName, commandTool string) bool {
+	return commandTool == "shell" && windowsHookHost() && !isSandboxHookRequest(ctx) &&
+		strings.EqualFold(strings.TrimSpace(connectorName), "cursor")
+}
+
 // inspectSandboxShellToolPolicyCtx is inspectTrustedToolPolicyCtx for a
 // hook tool call, which for a shell tool call also judges the command on
 // its own. command is the call's command in the plain shell shape and
@@ -146,7 +160,13 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		}
 	}
 	verdict := a.inspectTrustedToolPolicyCtx(ctx, req, action)
-	if verdict == nil || !dispatched || primary.Authoritative() {
+	// Cursor runs a beforeShellExecution command in PowerShell on a Windows
+	// host: its PowerShell reading is added even to a complete reading of
+	// the dialect the text infers (cursorPowerShellCommand), unless that
+	// reading already was PowerShell.
+	cursorPowerShell := cursorPowerShellCommand(ctx, connectorName, commandTool) &&
+		primary.Parse.Dialect != actionfacts.DialectPowerShell
+	if verdict == nil || !dispatched || (primary.Authoritative() && !cursorPowerShell) {
 		return verdict
 	}
 	if unverified {
@@ -157,7 +177,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict,
 			[]RuleFinding{unverifiedShellCommandFinding(action.EnforcementCapable)})
 	}
-	powerShell := kiroPowerShellCommand(ctx, connectorName, req, commandTool)
+	powerShell := kiroPowerShellCommand(ctx, connectorName, req, commandTool) || cursorPowerShell
 	sameReading := commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args)
 	if sameReading && !powerShell {
 		return verdict
@@ -198,8 +218,9 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		findings = commandAlone(commandTool)
 	}
 	if powerShell {
-		// Kiro runs execute_pwsh in PowerShell here: the PowerShell reading
-		// of the command only adds findings (kiroPowerShellCommand).
+		// Kiro runs execute_pwsh, and Cursor its shell commands, in
+		// PowerShell here: the PowerShell reading of the command only adds
+		// findings (kiroPowerShellCommand, cursorPowerShellCommand).
 		findings = mergeBoundedFindings(findings, commandAlone("powershell"))
 	}
 	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {
