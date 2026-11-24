@@ -16,15 +16,20 @@
 
 package workspace
 
-// B2 2.4: pull NAME --push-branch BR pushes the actor's work to its
-// checkout's origin as a new branch, from inside the actor, with the
-// credential the cluster binds to the git host (the image's credential
-// helper answers with a placeholder that egress swaps). It never forces:
+// B2 2.4: pull NAME --push-branch BR pushes the actor's work as a new
+// branch, from inside the actor, to the origin this computer recorded for
+// the copy, with the credential the cluster binds to the git host (the
+// image's credential helper answers with a placeholder that egress swaps). It never forces:
 // BR is new on origin, or a branch this computer pushed before (then only
 // a fast-forward).
 //
 // The agent can write its checkout's git config and refs, so the review
-// and the push read neither (RV4): the review uses a scratch git directory,
+// and the push read neither (RV4). Where they go is the origin this
+// computer recorded when it made the copy (RecordedOrigin: the --clone
+// address, or the uploaded folder's origin from this computer's own git
+// config), never a remote the actor's config names: a second
+// remote.origin.url, pushurl, insteadOf, include or the agent's user config
+// would otherwise choose it (GAP-0768, TST-5887). The review uses a scratch git directory,
 // while the push builds a fresh bare repository from the reviewed commit's
 // content-addressed objects. Both disable system and global Git config and
 // explicitly use only the image-bound credential helper and CA bundle for
@@ -79,9 +84,10 @@ func (c *Client) BranchExec(ctx context.Context, argv []string, dir string, env 
 
 // BranchPush is what pull --push-branch would push.
 type BranchPush struct {
-	// Dir is the checkout in the actor; URL its origin as git reads it;
-	// Host and Repo the https host and path (team/app) it pushes to, and
-	// PushURL the exact address the review, the push and its checks use.
+	// Dir is the checkout in the actor; URL the origin this computer
+	// recorded for the copy (never the actor's git config); Host and Repo
+	// the https host and path (team/app) it pushes to, and PushURL the
+	// exact address the review, the push and its checks use.
 	Dir, URL, Host, Repo, PushURL string
 	// Commit is the agent's HEAD, or a commit of its uncommitted work
 	// on HEAD when Made.
@@ -125,8 +131,9 @@ type BranchPushError struct {
 func (e *BranchPushError) Error() string { return e.Msg }
 
 // pushPrepareScript finds the checkout and commits the agent's uncommitted
-// work with a private index. It prints NUL-ended key\tvalue records, so a
-// newline in a folder name or in the agent's remote cannot add a key.
+// work with a private index. It reads no remote: the origin comes from this
+// computer's record. It prints NUL-ended key\tvalue records, so a newline
+// in a folder name cannot add a key.
 const pushPrepareScript = `set -u
 root=$1 label=$2
 cd "$root" || exit 3
@@ -136,7 +143,6 @@ if [ ! -e .git ]; then
   [ "$n" -eq 1 ] || { echo "no single git checkout in $root" >&2; exit 3; }
   cd "$d" || exit 3
 fi
-url=$(git config --get remote.origin.url) || { echo "no origin remote" >&2; exit 4; }
 head=$(git rev-parse -q --verify HEAD) || { echo "no commit" >&2; exit 5; }
 objs=$(cd "$(git rev-parse --git-path objects)" && pwd -P) || exit 6
 commit=$head made=0
@@ -152,7 +158,7 @@ if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
   commit=$(git commit-tree "$tree" -p "$head" -m "defenseclaw: work of agent $label") || exit 6
   made=1
 fi
-printf 'dir\t%s\000url\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$url" "$commit" "$made" "$objs"
+printf 'dir\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$commit" "$made" "$objs"
 `
 
 // pushGit is the start of the review and push scripts: no repository or
@@ -266,12 +272,20 @@ const pushDiscardScript = `rm -rf -- "$1"`
 var pushEnv = map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true", "SSH_ASKPASS": "/bin/true"}
 
 // PrepareBranchPush reads, in the actor under root, the checkout pull
-// --push-branch pushes: its origin, what origin does not have yet, and the
-// flags of the review. The agent's uncommitted work is committed for the
+// --push-branch pushes: what origin does not have yet, and the flags of the
+// review. origin is the address this computer recorded for the copy
+// (RecordedOrigin); "" refuses, since the actor's own git config may name
+// any repository. The agent's uncommitted work is committed for the
 // push with a private index, so the agent's HEAD and index do not move.
 // Reading what origin has is a network read (ls-remote); nothing is
 // written anywhere.
-func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, rules []config.SubstrateGitRewrite) (*BranchPush, error) {
+func PrepareBranchPush(ctx context.Context, run BranchExec, root, label, origin string, rules []config.SubstrateGitRewrite) (*BranchPush, error) {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return nil, &BranchPushError{Kind: "no_origin", Msg: "this computer has no record of the agent's origin (the agent was not started here, " +
+			"or its folder had no origin remote), and the address the agent's checkout names is the agent's to change; " +
+			"bring the work home with --branch NAME and push it from your computer"}
+	}
 	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushPrepareScript, "sh", root, label}, root, pushEnv, 2*time.Minute)
 	if err != nil {
 		return nil, err
@@ -280,21 +294,19 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 	case 0:
 	case 3:
 		return nil, &BranchPushError{Kind: "no_checkout", Msg: "the agent's folder is not a git checkout (or holds more than one), so there is no origin to push to; bring the work home with --branch NAME instead"}
-	case 4:
-		return nil, &BranchPushError{Kind: "no_origin", Msg: "the agent's checkout has no origin remote; bring the work home with --branch NAME instead"}
 	case 5:
 		return nil, &BranchPushError{Kind: "no_commit", Msg: "the agent's checkout has no commit yet"}
 	default:
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's checkout: " + lastLine(stderr, out)}
 	}
 	kv := pushRecords(out)
-	p := &BranchPush{Dir: kv["dir"], URL: kv["url"], Commit: kv["commit"], Made: kv["made"] == "1", objects: kv["objects"]}
+	p := &BranchPush{Dir: kv["dir"], URL: origin, Commit: kv["commit"], Made: kv["made"] == "1", objects: kv["objects"]}
 	if p.Commit == "" || p.objects == "" {
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's checkout: " + lastLine(stderr, out)}
 	}
 	p.Host, p.Repo, p.PushURL = GitRemoteTarget(p.URL, rules)
 	if p.PushURL == "" {
-		return nil, &BranchPushError{Kind: "not_https", Msg: "the agent's origin " + safeRemote(p.URL) +
+		return nil, &BranchPushError{Kind: "not_https", Msg: "the origin " + safeRemote(p.URL) +
 			" is not an https address the cluster can add a credential for; ask your administrator to add it to substrate.git.https_rewrite, or bring the work home with --branch NAME"}
 	}
 	out, stderr, code, err = run(ctx, []string{"sh", "-c", pushReviewScript, "sh", p.objects, p.PushURL, p.Commit, kit.PlaceholderSecret, pushReplacedPattern},
@@ -586,6 +598,24 @@ func CompareLink(host, repo, branch string) string {
 		return "https://gitlab.com/" + repo + "/-/merge_requests/new?merge_request%5Bsource_branch%5D=" + b
 	case "bitbucket.org":
 		return "https://bitbucket.org/" + repo + "/pull-requests/new?source=" + b
+	}
+	return ""
+}
+
+// RecordedOrigin is the origin this computer recorded when it made the
+// copy name: the run --clone address, or the uploaded folder's origin as
+// this computer's own git config had it (credential-free). When both
+// records exist, the newer one counts. "" when this computer has none.
+// It never reads the actor, whose git config the agent can write (GAP-0768).
+func RecordedOrigin(dataDir, name string) string {
+	up, uerr := osw.LoadCopy(dataDir, name)
+	hr, herr := loadHostRecord(dataDir, name)
+	haveUp, haveClone := uerr == nil && up != nil, herr == nil && hr.CloneURL != ""
+	switch {
+	case haveClone && (!haveUp || up.UploadedAt == nil || !hr.UploadedAt.Before(*up.UploadedAt)):
+		return strings.TrimSpace(hr.CloneURL)
+	case haveUp:
+		return strings.TrimSpace(up.Remotes["origin"])
 	}
 	return ""
 }

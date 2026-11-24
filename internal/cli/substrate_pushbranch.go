@@ -46,7 +46,8 @@ var substratePushPoll = 3 * time.Second
 
 // runSubstratePushBranch is pull NAME --push-branch BR (B2 2.4): review what
 // the push would carry, ask the gateway (allow, ask or deny), and push the
-// actor's work to its origin as BR from inside the actor.
+// actor's work as BR, from inside the actor, to the origin this computer
+// recorded for the copy (never one the actor's git config names).
 func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substratePullFlags, s *substrateSession, a api.Actor, asJSON bool) error {
 	branch := strings.TrimSpace(f.pushBranch)
 	if err := workspace.CheckCloneRef(branch); err != nil || strings.HasPrefix(branch, "refs/") {
@@ -76,7 +77,8 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 	}
 	errw, w := cmd.ErrOrStderr(), cmd.OutOrStdout()
 	fmt.Fprintln(errw, "Reading the agent's work...")
-	p, err := workspace.PrepareBranchPush(ctx, rel.Client.BranchExec, root, a.Name, substrateGitFrom(settings).HTTPSRewrite)
+	p, err := workspace.PrepareBranchPush(ctx, rel.Client.BranchExec, root, a.Name, workspace.RecordedOrigin(dataDir, copyName),
+		substrateGitFrom(settings).HTTPSRewrite)
 	if err != nil {
 		var pe *workspace.BranchPushError
 		if errors.As(err, &pe) {

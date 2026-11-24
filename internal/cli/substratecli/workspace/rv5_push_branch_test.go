@@ -56,7 +56,7 @@ func TestRV5ReviewRefusesBorrowedObjects(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(info, name), []byte(filepath.Join(other, "objects")+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", nil)
+			_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", "https://git.example.test/team/app.git", nil)
 			var pe *BranchPushError
 			if !errors.As(err, &pe) || pe.Kind != "alternates" {
 				t.Fatalf("a checkout with objects/info/%s: %v, want an alternates refusal", name, err)
