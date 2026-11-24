@@ -423,6 +423,12 @@ func variableProgram(wd Word) bool {
 	return hasVar
 }
 
+// shellVariable is the inherited login-shell slot: it names an
+// interpreter even when the call does not provide its absolute path.
+func shellVariable(raw Word) bool {
+	return len(raw.Segs) == 1 && raw.Segs[0].Var == "SHELL"
+}
+
 // possibleShell lowers the body a variable program word may run as a shell:
 // its -c code, or the text it reads on standard input.
 func (w *walker) possibleShell(c *Cmd, raw Word, args []Word, dialect Dialect, depth int, origin Origin) {
@@ -434,12 +440,12 @@ func (w *walker) possibleShell(c *Cmd, raw Word, args []Word, dialect Dialect, d
 	case sc.hasC && sc.hasArg && sc.code.Static:
 		w.unwrapUncertain(sc.code.Value, dialect, depth, origin, sc.rest, true)
 	case sc.hasC && sc.hasArg:
-		w.possibleShellOpaque(origin)
+		w.possibleShellOpaque(origin, shellVariable(raw))
 	case sc.stdin:
 		if text, _, ok := w.stdinText(c); ok {
 			w.unwrapUncertain(text, dialect, depth, origin, nil, true)
 		} else if hasStdinSource(c) {
-			w.possibleShellOpaque(origin)
+			w.possibleShellOpaque(origin, shellVariable(raw))
 		}
 	}
 }
@@ -449,11 +455,14 @@ func (w *walker) possibleShell(c *Cmd, raw Word, args []Word, dialect Dialect, d
 // substitution): an opaque code exec, conditional and of unknown role -- the
 // reading a named shell gets for an unseen body, as a maybe (DET111 R1,
 // GAP-1554).
-func (w *walker) possibleShellOpaque(origin Origin) {
+func (w *walker) possibleShellOpaque(origin Origin, knownShellSlot bool) {
 	e := Effect{Kind: KindExec, Cond: true, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
 		TargetState: TargetStateUnknown, RoleState: RoleStateUnknown, Origin: origin}
 	e.addReason(ReasonOpaqueCode, ScopeTarget)
 	e.addReason(ReasonDynamicExpansion, ScopeRole)
+	if knownShellSlot && len(w.stageIn.fetches) == 1 {
+		e.Data = &Data{Kind: DataCode, Sources: []Source{{Kind: SourceEffect, Effect: w.stageIn.fetches[0]}}}
+	}
 	w.emit(e)
 }
 

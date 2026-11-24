@@ -1180,6 +1180,9 @@ func (w *walker) resolveWords(in []Word) []Word {
 // indices of the reads whose bytes it may print, and a literal it was fed.
 type stageData struct {
 	reads []int
+	// fetches are literal network responses proven to reach this stage's
+	// stdout. They are provenance for a shell that reads its script on stdin.
+	fetches []int
 	// content: the reads whose bytes the stage prints on its stdout (a
 	// summary or a redirect drops them; GAP-1846).
 	content []int
@@ -1214,6 +1217,22 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 		out.literal = in.literal
 	}
 	out.reads = appendCapped(out.reads, in.reads...)
+	// A fetched response is executable script data only when stdout carries
+	// it. The direct fetch and a one-argument printf of a sole command
+	// substitution use the same bounded source edge.
+	if fetch := w.fetchedStdout(c, start, len(w.res.Effects)); fetch != 0 {
+		out.fetches = []int{fetch}
+	} else if len(c.Assigns) == 0 && len(c.Redirs) == 0 && len(c.Words) == 3 &&
+		c.Words[0].Static && c.Words[0].Value == "printf" && c.Words[1].Static &&
+		(c.Words[1].Value == "%s" || c.Words[1].Value == "%s\\n") &&
+		!c.Words[2].Static && len(c.Nested) == 1 {
+		sub := c.Nested[0]
+		if len(sub.Unknowns) == 0 && len(sub.Stmts) == 1 && len(sub.Stmts[0].Cmds) == 1 {
+			if fetch := w.fetchedStdout(sub.Stmts[0].Cmds[0], start, len(w.res.Effects)); fetch != 0 {
+				out.fetches = []int{fetch}
+			}
+		}
+	}
 	shows := w.printsOut && !stdoutRedirected(c.Redirs)
 	if shows {
 		out.content = appendCapped(out.content, in.content...)
@@ -1238,6 +1257,61 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	w.stageOut = out
 	w.stageIn, w.literalOut, w.redirOut, w.printsOut = savedIn, savedLit, savedRedir, savedPrints
 	w.exactOK, w.exactText, w.literalKind = savedExact, savedText, savedKind
+}
+
+// fetchedStdout returns a literal fetch whose response is this command's
+// stdout. An output file or redirect severs the source-to-script edge.
+func (w *walker) fetchedStdout(c *Cmd, start, end int) int {
+	if c == nil || len(c.Words) == 0 || !c.Words[0].Static || len(c.Nested) != 0 || stdoutRedirected(c.Redirs) {
+		return 0
+	}
+	program := programBasename(c.Words[0].Value, w.o.flavor())
+	switch program {
+	case "curl":
+		for _, word := range c.Words[1:] {
+			if word.Static && (word.Value == "-O" || word.Value == "-OJ" ||
+				word.Value == "--remote-name" || word.Value == "--remote-header-name") {
+				return 0
+			}
+		}
+	case "wget":
+		stdout := false
+		for i, word := range c.Words[1:] {
+			if !word.Static {
+				return 0
+			}
+			if word.Value == "-O-" || word.Value == "--output-document=-" ||
+				(word.Value == "-O" || word.Value == "--output-document") &&
+					i+2 < len(c.Words) && c.Words[i+2].Static && c.Words[i+2].Value == "-" {
+				stdout = true
+			}
+		}
+		if !stdout {
+			return 0
+		}
+	default:
+		return 0
+	}
+	fetch := 0
+	for i := start; i < end && i < len(w.res.Effects); i++ {
+		e := w.res.Effects[i]
+		switch e.Kind {
+		case KindWrite, KindAppend, KindDelete, KindLink:
+			return 0
+		case KindExec:
+			if e.Origin.Program == program && len(e.Reasons) != 0 {
+				return 0
+			}
+		case KindNetworkFetch:
+			if e.Origin.Program != program || e.TargetState != TargetStateKnown ||
+				e.RoleState != RoleStateKnown || e.Target.Type != TargetURL ||
+				e.Target.URL == "" || len(e.Reasons) != 0 || fetch != 0 {
+				return 0
+			}
+			fetch = i + 1
+		}
+	}
+	return fetch
 }
 
 // linkSubstitutionData records that the data a command sends or writes, when
@@ -1528,12 +1602,33 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		// A program named by a variable ("$SHELL" -c BODY, "$s" <<< BODY) may be
 		// a shell: its body is lowered as a possible one (DET111 R1, GAP-1538,
 		// GAP-1554), and the substitutions in its words still run.
-		w.possibleShell(c, rawWordsFor(inner[:1], c.Words)[0], inner[1:], dialect, depth, e.Origin)
+		rawProgram := rawWordsFor(inner[:1], c.Words)[0]
+		possibleStart := len(w.res.Effects)
+		w.possibleShell(c, rawProgram, inner[1:], dialect, depth, e.Origin)
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		nestedStart := len(w.res.Effects)
 		for _, sub := range c.Nested {
 			s := w.saveScope()
 			w.walkCaptured(sub, depth)
 			w.restoreScope(s)
+		}
+		// With only a variable program and one here-string, the sole
+		// substitution supplies its script. Link only a fetch proven to print
+		// to stdout; an unrelated substitution cannot become a script source.
+		if shellVariable(rawProgram) && len(c.Words) == 1 && len(c.Assigns) == 0 && len(c.Redirs) == 1 &&
+			c.Redirs[0].Op == RedirHereString && !c.Redirs[0].Target.Static &&
+			len(c.Nested) == 1 {
+			sub := c.Nested[0]
+			if len(sub.Unknowns) == 0 && len(sub.Stmts) == 1 && len(sub.Stmts[0].Cmds) == 1 {
+				if fetch := w.fetchedStdout(sub.Stmts[0].Cmds[0], nestedStart, len(w.res.Effects)); fetch != 0 {
+					for i := possibleStart; i < nestedStart; i++ {
+						if w.res.Effects[i].Kind == KindExec && w.res.Effects[i].Data == nil &&
+							w.res.Effects[i].TargetState == TargetStateUnknown {
+							w.res.Effects[i].Data = &Data{Kind: DataCode, Sources: []Source{{Kind: SourceEffect, Effect: fetch}}}
+						}
+					}
+				}
+			}
 		}
 		return
 	}
@@ -2464,8 +2559,14 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	e := Effect{Kind: KindExec, Cond: cond, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
 		TargetState: TargetStateUnknown, RoleState: RoleStateUnknown, Origin: origin}
 	e.addReason(ReasonOpaqueCode, ScopeTarget)
-	if c.PipeIn && baseIdx > 0 {
-		e.Data = &Data{Kind: DataCode, Sources: []Source{{Kind: SourceEffect, Effect: baseIdx}}}
+	if c.PipeIn {
+		source := baseIdx
+		if len(w.stageIn.fetches) == 1 && !hasCodeOperand(args, true) {
+			source = w.stageIn.fetches[0]
+		}
+		if source > 0 {
+			e.Data = &Data{Kind: DataCode, Sources: []Source{{Kind: SourceEffect, Effect: source}}}
+		}
 	}
 	w.emit(e)
 }

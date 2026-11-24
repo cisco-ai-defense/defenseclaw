@@ -144,6 +144,9 @@ type EffectShadowResult struct {
 	// UploadProofs are Known reads of a credentials file outside the
 	// protected sets (.env) whose content the call sends out (GAP-1641).
 	UploadProofs []decide.Proof `json:"-"`
+	// FetchedScriptRule is a source-to-interpreter proof from the one effects
+	// read. It stays out of shadow telemetry; the live finding names the rule.
+	FetchedScriptRule string `json:"-"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -1435,6 +1438,57 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 	return p
 }
 
+// effectFetchedScriptRule is the bounded GAP-1554/GAP-1273 proof: one
+// literal curl/wget response is the sole DataCode source of a POSIX shell
+// reading its script. The frontend supplies that edge only when stdout reaches
+// the shell through a pipe, here-string or nested here-document. This does
+// not read remote content or infer a sink from mere co-occurrence.
+func effectFetchedScriptRule(result effects.Result) string {
+	const maxFetchScriptEffects = 256
+	if result.Dialect != effects.DialectPOSIX || len(result.Unknowns) != 0 ||
+		len(result.Effects) > maxFetchScriptEffects {
+		return ""
+	}
+	for _, sink := range result.Effects {
+		if sink.Kind != effects.KindExec || sink.Data == nil ||
+			sink.Data.Kind != effects.DataCode || len(sink.Data.Sources) != 1 {
+			continue
+		}
+		switch sink.Origin.Program {
+		case "sh", "bash", "dash", "zsh", "ksh", "ash", "yash":
+		case "":
+			if sink.TargetState != effects.TargetStateUnknown ||
+				!slices.ContainsFunc(sink.Reasons, func(r effects.Reason) bool {
+					return r.Code == effects.ReasonOpaqueCode
+				}) {
+				continue
+			}
+		default:
+			continue
+		}
+		source := sink.Data.Sources[0]
+		if source.Kind != effects.SourceEffect || source.Effect < 1 ||
+			source.Effect > len(result.Effects) {
+			continue
+		}
+		fetch := result.Effects[source.Effect-1]
+		if fetch.Kind != effects.KindNetworkFetch ||
+			fetch.TargetState != effects.TargetStateKnown ||
+			fetch.RoleState != effects.RoleStateKnown ||
+			fetch.Target.Type != effects.TargetURL || fetch.Target.URL == "" ||
+			len(fetch.Reasons) != 0 {
+			continue
+		}
+		switch fetch.Origin.Program {
+		case "curl", "curl.exe":
+			return "CMD-PIPE-CURL"
+		case "wget", "wget.exe":
+			return "CMD-PIPE-WGET"
+		}
+	}
+	return ""
+}
+
 // effectLiveFindings runs the ON lane for one outermost dispatch: the Known
 // verdict's findings join today's (raise only); a Maybe verdict adds none and
 // is handed to the shadow recorder off the hook's path instead, so the audit
@@ -1442,6 +1496,15 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier effectTierMode, generation func() *compiledRulePackCategories) []RuleFinding {
 	res := computeEffectShadow(request, mode, tier)
 	findings := withEffectClassWriteSeverity(effectShadowFindings(res, mode), generation)
+	if ruleID := res.FetchedScriptRule; ruleID != "" {
+		if severity := effectRuleSeverity(generation(), ruleID); severity != "" {
+			f := RuleFinding{RuleID: ruleID, Title: "Fetched script supplied to a shell",
+				Severity: severity, Confidence: 1}
+			f.Proof = f.Proof.Advise() // the plain CMD-PIPE cell is alert-only
+			f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
+			findings = append(findings, f)
+		}
+	}
 	if len(findings) == 0 && res.Tier != string(effectTierClean) {
 		recordEffectShadowAsync(res, request.recordEffectShadow)
 	}
