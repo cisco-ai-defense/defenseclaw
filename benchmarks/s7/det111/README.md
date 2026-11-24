@@ -47,6 +47,11 @@ The bar (det111-bar-v*.sh) still copies its pinned kit over these paths at run t
   head sha: put both in the testctl row. Last line `DET111GEN PASS|FAIL|NOT-READY ...`; exit 0, 1 or 2.
   The run uses a TMPDIR of its own next to `<outdir>`, so a box guard that sweeps the shared temp folder cannot
   change verdicts mid-run (GAP-2113).
+- `openloop-quiet-gate.sh <gateway test binary> [tries] [pause]`: the fail-closed step for the open-loop latency tests
+  (TestGAP0490OpenLoop{SandboxStream,TwoSandboxes,FourSandboxes}; with DC_GAP0490_OPEN_LOOP_BUDGET=1 also the opt-in account-budget streams). Under measured CPU
+  contention they end as the named skip `GAP-1456 INCONCLUSIVE, box short of CPU (...)`, which prints the probe values and
+  limits (rel-1-0-10:GAP-2129). The step reruns them until each has RUN and PASSED once. If one never passed, or any run
+  failed, the gate fails. Last line `OPENLOOP_GATE PASS|FAIL tries=N runs=R skipped=S passed=P failed=F <Test>=pass/skip/fail ...`.
 - `det111-noloss-v2.py REF HEAD [--base BASE] [--out FILE]`: R-NOLOSS. Counts attack cells weaker at HEAD, benign and
   twin cells raised or newly blocked, REF cells HEAD lost, error verdicts and rows with no role; any of them fails.
   Replaces lanes/trg-nl-v1.py and trg-br-v1.py, which never saw a lost cell and always exited 0.
