@@ -18,6 +18,7 @@ roots that already existed stay as they were.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -147,7 +148,8 @@ def check_harness_output(output: str) -> None:
     assert "/install" in refused and "/uninstall PURGE=1" in refused
 
 
-@pytest.mark.skipif(shutil.which("pwsh") is None, reason="needs PowerShell 7")
+@pytest.mark.skipif(os.name != "nt" or shutil.which("pwsh") is None,
+                    reason="needs Windows PowerShell 7 (the module reads the Windows machine roots on import)")
 def test_a_failed_fresh_install_removes_what_it_created(tmp_path: Path) -> None:
     harness = tmp_path / "harness.ps1"
     harness.write_text(HARNESS, encoding="utf-8")
