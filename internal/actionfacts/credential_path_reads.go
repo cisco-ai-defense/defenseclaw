@@ -829,8 +829,8 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 		for _, index := range operands {
 			argument := command.Arguments[index]
 			r.argument(command.ID, argument, false)
-			if recursive && !argument.Expands && argument.Value != "" {
-				r.searchFolder(command.ID, argument.Value, base, placed, filter)
+			if folder := r.searchFolderWord(argument); recursive && folder != "" {
+				r.searchFolder(command.ID, folder, base, placed, filter)
 			}
 		}
 		if recursive && len(operands) == 0 && (program != "rg" || (!r.pipedStdin(command) && !parseRgCommandLine(argv).stdin)) {
@@ -1596,6 +1596,23 @@ func (r *credentialPathResolver) searchWorkFolder(command CommandFact) (base str
 	return filepath.FromSlash(logical), ok
 }
 
+// searchFolderWord is the folder a recursive search's operand names: its
+// static value, or the home folder an unquoted ~/ word names when the call
+// does not rebind HOME (ArgumentFact.homeTilde). The trusted home rewrite
+// places ~ in a lone command only, so in a list (a cd, a function call
+// before the search) the folder was never walked: `f(){ test -d .git &&
+// return; cd /; }; f && rg -g '/.env' KEY ~/proj` read proj/.env and
+// started no chain (substrate-1:GAP-0689, live TST-6432).
+func (r *credentialPathResolver) searchFolderWord(argument ArgumentFact) string {
+	if !argument.Expands {
+		return argument.Value
+	}
+	if r.home == "" {
+		return ""
+	}
+	return argument.homeTilde
+}
+
 // searchFolder resolves the credentials files under the folder a recursive
 // search reads, in it and in every folder below it (substrate-1:GAP-0344,
 // credentialPathWalk); for ripgrep, only the files and folders its filter
@@ -1611,6 +1628,8 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
+	} else if dir == "~" && r.home != "" {
+		dir = r.home
 	}
 	if !filepath.IsAbs(dir) {
 		if !placed {
@@ -1626,7 +1645,7 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	}
 	// The folder as rg names its paths: the shell expands ~/.
 	shown := folder
-	if strings.HasPrefix(shown, "~/") && r.home != "" {
+	if (shown == "~" || strings.HasPrefix(shown, "~/")) && r.home != "" {
 		shown = r.home + shown[1:]
 	}
 	key := credentialWalkKey{id: id, dir: filepath.Clean(dir), shown: shown}
