@@ -191,41 +191,26 @@ func effectFoldStricter(a, b string) bool {
 	return rank[a] > rank[b]
 }
 
-// TestGAP1790SameRuleKnownMutationFold pins the fold for the exact
-// at/claude-code/1991edd30989a7ef/65 benign row's class. A Known mutation
-// that names the legacy rule may use that rule's 1.0.10 tier even when the
-// legacy finding has no enforcement proof. New floor readings and unrelated
-// rules remain excluded (GAP-1984).
-func TestGAP1790SameRuleKnownMutationFold(t *testing.T) {
+// TestGAP1790ClassEffectFoldKeepsGAP1576 pins the provenance-aware
+// class fold for at/claude-code/1991edd30989a7ef/65 and its no-loss
+// boundary. A new floor reading, another effect, and a different rule
+// cannot take the class finding. An enforcing authorized-keys effect
+// remains beside a rank-one reading (GAP-1576, GAP-1984).
+func TestGAP1790ClassEffectFoldKeepsGAP1576(t *testing.T) {
 	proof := decide.Proof{Kind: decide.KindWrite, Target: decide.TargetCredential,
 		Set: decide.SetNpmrc, Certainty: decide.CertKnown, Source: decide.SourceEffects}
-	f := RuleFinding{RuleID: decide.RuleEffectRestricted, Severity: "CRITICAL",
-		Proof: proof, proof: newFindingProof(findingProofEffect, decide.RuleEffectRestricted, true)}
 	ruleID := decide.RuleFor(proof)
 	if ruleID == "" {
 		t.Fatal("Known npmrc write has no plain rule")
 	}
-	legacy := RuleFinding{RuleID: ruleID, Severity: "MEDIUM"}
-	if got := foldTargetsFor(f, []RuleFinding{legacy}); len(got) != 1 || got[0].RuleID != ruleID {
-		t.Fatalf("same-rule Known mutation targets = %v, want %s", got, ruleID)
-	}
-	legacy.floorRaiseOnly = true
-	if got := foldTargetsFor(f, []RuleFinding{legacy}); len(got) != 0 {
-		t.Fatalf("new floor reading became a fold target: %v", got)
-	}
-	legacy.floorRaiseOnly = false
-	legacy.RuleID = decide.RuleStateWrite
-	if got := foldTargetsFor(f, []RuleFinding{legacy}); decide.FoldsIntoLegacy(decideFinding(f), got) {
-		t.Fatalf("different rule folded the effect finding: %v", got)
-	}
-
-	// T23b uses the class rule's severity-only Decide cell for Known
-	// credential mutations. Its private proof still marks it as an effect.
 	class := RuleFinding{RuleID: ruleID, Severity: "MEDIUM",
 		proof: newFindingProof(findingProofEffect, ruleID, true)}
-	legacy.RuleID = ruleID
+	legacy := RuleFinding{RuleID: ruleID, Severity: "MEDIUM"}
 	if !foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
 		t.Fatal("same-rule class effect did not fold into the 1.0.10 finding")
+	}
+	if got := joinEffectFindings([]RuleFinding{legacy}, []RuleFinding{class}); len(got) != 1 || got[0].RuleID != ruleID {
+		t.Fatalf("class effect joined beside same-rule legacy finding: %v", got)
 	}
 	legacy.floorRaiseOnly = true
 	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
@@ -240,5 +225,14 @@ func TestGAP1790SameRuleKnownMutationFold(t *testing.T) {
 	legacy.proof = newFindingProof(findingProofEffect, ruleID, true)
 	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
 		t.Fatal("another effects finding folded the class effect")
+	}
+
+	keysProof := decide.Proof{Kind: decide.KindWrite, Target: decide.TargetAuthorizedKeys,
+		Certainty: decide.CertKnown, Source: decide.SourceEffects}
+	keysEffect := RuleFinding{RuleID: decide.RuleEffectRestricted, Severity: "CRITICAL",
+		Proof: keysProof, proof: newFindingProof(findingProofEffect, decide.RuleEffectRestricted, true)}
+	keysLegacy := RuleFinding{RuleID: decide.RuleFor(keysProof), Severity: "CRITICAL"}
+	if got := foldTargetsFor(keysEffect, []RuleFinding{keysLegacy}); decide.FoldsIntoLegacy(decideFinding(keysEffect), got) {
+		t.Fatalf("GAP-1576 authorized-keys effect folded into rank-one reading: %v", got)
 	}
 }

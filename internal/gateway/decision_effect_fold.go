@@ -85,9 +85,7 @@ func findingEnforcementRank(f RuleFinding) int {
 // least as high as f (verdict severity) but may neither block nor alert on
 // its own (rank 1, no proof that authorizes its rule) cannot carry the
 // action f proves: folded into it, the call fell to allow under a CRITICAL
-// finding. The exception is a Known effects mutation whose RuleFor proof
-// names that exact legacy rule: its 1.0.10 cell already grades the same
-// mutation (GAP-1790). A new reading adds such a finding beside f (the decoded
+// finding. A new reading adds such a finding beside f (the decoded
 // -EncodedCommand body with control blanks, GAP-1199; an evaluated loop
 // header, GAP-1550; the nested decoded persistence finding of gap-1576
 // f11/f12), so f stands beside it (rel-1-0-10:GAP-1984). A 1.0.10 finding
@@ -108,30 +106,12 @@ func foldTargetsFor(f RuleFinding, other []RuleFinding) []decide.Finding {
 		if isEffectFinding(g) || g.floorRaiseOnly {
 			continue
 		}
-		if _, gs := verdictSeverity(g); strong && gs >= sev && findingEnforcementRank(g) == 1 && !sameRuleKnownMutation(f, g) {
+		if _, gs := verdictSeverity(g); strong && gs >= sev && findingEnforcementRank(g) == 1 {
 			continue
 		}
 		out = append(out, decideFinding(g))
 	}
 	return out
-}
-
-// sameRuleKnownMutation reports the one rank-one legacy finding that can
-// carry a Known effects mutation: the proof names that exact plain rule.
-// Its 1.0.10 cell already grades the set. A different rule, a read, a Maybe
-// reach, or a new floor reading cannot take the effect finding (GAP-1984).
-func sameRuleKnownMutation(effect, legacy RuleFinding) bool {
-	p := effect.Proof
-	if p.Source != decide.SourceEffects || p.Certainty != decide.CertKnown {
-		return false
-	}
-	switch p.Kind {
-	case decide.KindWrite, decide.KindAppend, decide.KindDelete:
-	default:
-		return false
-	}
-	ruleID := decide.RuleFor(p)
-	return ruleID != "" && strings.EqualFold(ruleID, legacy.RuleID)
 }
 
 // withFloorRaiseOnlyMark is findings, each marked floorRaiseOnly, when
