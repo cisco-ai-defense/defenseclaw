@@ -107,6 +107,16 @@ func r3Rows() []r3Row {
 		{gap: "GAP-1244 ${PWD%/*}", o: px, c: sh(`cat "${PWD%/*}/.aws/credentials"`), want: map[string]string{SetCredentials: K}},
 		{gap: "GAP-1244 ${PWD/proj/}", o: px, c: sh(`cat ${PWD/proj/}.ssh/id_rsa`), want: map[string]string{SetCredentials: K}},
 		{gap: "GAP-1244 ${PWD:0:10}", o: px, c: sh(`cat ${PWD:0:10}/.aws/credentials`), want: map[string]string{SetCredentials: K}},
+		// The substring with a negative length or offset, the anchored
+		// replacement and an escaped literal in the pattern (bash 4.2+).
+		{gap: "GAP-1244 ${PWD:0:-5}", o: px, c: sh(`cat ${PWD:0:-5}/.ssh/id_rsa`), path: "/home/dcku/.ssh/id_rsa", want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 ${PWD::-5}", o: px, c: sh(`cat ${PWD::-5}/.ssh/id_rsa`), path: "/home/dcku/.ssh/id_rsa", want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 ${PWD:(-15):10}", o: px, c: sh(`cat ${PWD:(-15):10}/.aws/credentials`), path: "/home/dcku/.aws/credentials", want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 ${PWD/%suffix/} escaped", o: px, c: sh(`cat "${PWD/%\/proj/}/.ssh/id_rsa"`), path: "/home/dcku/.ssh/id_rsa", want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 ${PWD/#prefix/home} escaped", o: px, c: sh(`cat ${PWD/#\/home\/dcku\/proj//home/dcku}/.ssh/id_rsa`), path: "/home/dcku/.ssh/id_rsa", want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 fp: ${PWD:0:-5} project file", o: px, c: sh(`cat ${PWD:0:-5}/proj/notes.txt`), path: "/home/dcku/proj/notes.txt", want: map[string]string{"*": N}},
+		{gap: "GAP-1244 fp: anchored suffix that does not match", o: px, c: sh(`cat ${PWD/%\/x/}/notes.txt`), path: "/home/dcku/proj/notes.txt", want: map[string]string{"*": N}},
+		{gap: "GAP-1244 substring past the start is an expansion error", o: px, c: sh(`cat ${PWD:5:-40}/.ssh/id_rsa`), want: map[string]string{SetCredentials: U}},
 		{gap: "GAP-1037 lastpipe cd", o: px, c: sh(`shopt -s lastpipe; echo x | cd ~/.ssh; cat id_rsa`), want: map[string]string{SetCredentials: K}},
 		{gap: "GAP-1037 pipe cd may run here (zsh)", o: px, c: sh(`echo x | cd ~/.ssh; cat id_rsa`), want: map[string]string{SetCredentials: K}},
 		{gap: "GAP-1037 fp: cd in a middle stage", o: px, c: sh(`shopt -s lastpipe; cd ~/.ssh | cat; cat notes.txt`), want: map[string]string{"*": N}},

@@ -156,7 +156,8 @@ type WordSeg struct {
 // ParamOp is one parameter operator with static operands.
 type ParamOp struct {
 	// Kind is "#", "##", "%", "%%" (pattern removal), "/", "//" (replace
-	// first / every literal match), or ":" (substring).
+	// first / every literal match), "/#", "/%" (replace a literal prefix /
+	// suffix), or ":" (substring; a negative Off or Len counts from the end).
 	Kind     string
 	Pat      string
 	With     string

@@ -6086,13 +6086,49 @@ func applyParamOp(v string, op *ParamOp) (string, bool) {
 		return strings.Replace(v, op.Pat, op.With, 1), true
 	case "//":
 		return strings.ReplaceAll(v, op.Pat, op.With), true
+	case "/#":
+		if strings.HasPrefix(v, op.Pat) {
+			return op.With + v[len(op.Pat):], true
+		}
+		return v, true
+	case "/%":
+		if strings.HasSuffix(v, op.Pat) {
+			return v[:len(v)-len(op.Pat)] + op.With, true
+		}
+		return v, true
 	case ":":
-		if op.Off > len(v) {
+		// bash counts characters: a value with a multi-byte character is
+		// not cut here.
+		for i := 0; i < len(v); i++ {
+			if v[i] >= 0x80 {
+				return "", false
+			}
+		}
+		off := op.Off
+		if off < 0 {
+			// A negative offset counts from the end; past the start the
+			// expansion is empty.
+			if off += len(v); off < 0 {
+				return "", true
+			}
+		}
+		if off > len(v) {
 			return "", true
 		}
-		r := v[op.Off:]
-		if op.HasLen && op.Len < len(r) {
-			r = r[:op.Len]
+		r := v[off:]
+		if op.HasLen {
+			n := op.Len
+			if n < 0 {
+				// A negative length is an end offset from the end of the
+				// value; one before the start is an expansion error (the
+				// command does not run), left unresolved.
+				if n += len(r); n < 0 {
+					return "", false
+				}
+			}
+			if n < len(r) {
+				r = r[:n]
+			}
 		}
 		return r, true
 	}
