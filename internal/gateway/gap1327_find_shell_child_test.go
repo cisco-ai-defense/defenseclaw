@@ -31,7 +31,7 @@ func TestGAP1327FindShellChildReadBodyIsNotAStateWriteFiveTiers(t *testing.T) {
 	rewrite := strings.NewReplacer("~", home)
 	for _, tier := range boundedTestTiers {
 		for _, route := range det111R1Routes() {
-			api := det111R1API(t, route.connector, tier.posture, tier.managed, tier.tier, cwd)
+			api := det111R1API(t, route.connector, tier.posture, tier.managed, tier.tier)
 			useDefaultEffectsLane(t)
 			for _, spell := range []func(string) string{func(s string) string { return s }, rewrite.Replace} {
 				where := tier.name + " " + route.name

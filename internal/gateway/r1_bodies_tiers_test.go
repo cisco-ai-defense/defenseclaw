@@ -224,23 +224,18 @@ func det111R1Routes() []det111R1Route {
 }
 
 // det111R1API is the server of one route and tier, ready for timed calls
-// (rel-1-0-10:GAP-1998). The first inspect of a fresh server builds the
-// default rule generation under the rule publication lock (GAP-1012): under
-// -race that cold build alone ran past the 200 ms scan deadline, so the first
-// openclaw inspect/tool row of the default tier answered 504 in 3 runs out
-// of 3 while every later row answered in time. The openclaw server is warmed
-// with one benign call before any row is judged, and the inspect route keeps the
-// production deadline, scaled under -race only (raceScanBudgetScale, as the
-// gap0437Server tests do): a plain build still judges every row on 200 ms.
-func det111R1API(t *testing.T, connector, posture string, managedInstall bool, tier bounded.Tier, cwd string) *APIServer {
+// (rel-1-0-10:GAP-1998). The first openclaw inspect/tool row of the default
+// tier answered 504 under -race in 3 runs out of 3, while every later row
+// answered in time: that call built the default rule generation and its
+// rules' literal plans inside its 200 ms deadline. The gateway now builds
+// them before the deadline starts (inspectScanBudget), so no row is warmed
+// first; the inspect route keeps the production deadline, scaled under -race
+// only (raceScanBudgetScale, as the gap0437Server tests do): a plain build
+// still judges every row on 200 ms.
+func det111R1API(t *testing.T, connector, posture string, managedInstall bool, tier bounded.Tier) *APIServer {
 	t.Helper()
 	api := gap0589TierAPI(t, connector, posture, managedInstall, tier)
 	api.inspectToolScanTimeout = inspectScanTimeout * raceScanBudgetScale
-	if connector == "openclaw" { // the only route here that answers through the inspect handler
-		warmDefenseClawControl(t, api.handleInspectTool, "/api/v1/inspect/tool", map[string]any{
-			"tool": "exec", "connector": connector, "args": map[string]any{"command": "true", "workdir": cwd},
-		})
-	}
 	return api
 }
 
@@ -259,7 +254,7 @@ func TestDET111R1BodiesVerdictFiveTiers(t *testing.T) {
 	j := newDET111R1Judge(t)
 	for _, tier := range boundedTestTiers {
 		for _, route := range det111R1Routes() {
-			api := det111R1API(t, route.connector, tier.posture, tier.managed, tier.tier, cwd)
+			api := det111R1API(t, route.connector, tier.posture, tier.managed, tier.tier)
 			for _, row := range rows {
 				j.judge(t, api, t.Context(), tier.name, bounded.Unknown(tier.tier), route, cwd, row, rewrite.Replace(row.command), laneOff, probe)
 			}
@@ -383,7 +378,7 @@ func TestDET111R1BodiesVerdictWindowsHost(t *testing.T) {
 		}
 		for _, dialect := range []string{"posix", "powershell"} {
 			for _, route := range det111R1WindowsRoutes(dialect) {
-				api := det111R1API(t, route.connector, tier.posture, tier.managed, tier.tier, `C:\Users\alice\proj`)
+				api := det111R1API(t, route.connector, tier.posture, tier.managed, tier.tier)
 				for _, row := range rows {
 					if row.dialect != dialect {
 						continue

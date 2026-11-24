@@ -468,6 +468,14 @@ func compileRulePackGenerationWithCompiler(
 			semanticRulePositions[ruleID] = len(compiled.semanticRules) - 1
 		}
 	}
+	// Each rule's literal prefilter plan is built with its generation, not by
+	// the first scan that meets the rule, which ran it inside that call's scan
+	// deadline (rel-1-0-10:GAP-1998).
+	for _, category := range ownedCategories {
+		for _, rule := range category.Rules {
+			ruleRequiredLiterals(rule.Pattern)
+		}
+	}
 	return compiled, nil
 }
 
