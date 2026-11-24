@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestClaudeProjectSkillsSkipMacOSProtectedProject(t *testing.T) {
@@ -23,9 +25,7 @@ func TestClaudeProjectSkillsSkipMacOSProtectedProject(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(project, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, project, link)
 	state := `{"projects":{"` + filepath.ToSlash(project) + `":{},"` + filepath.ToSlash(link) + `":{}}}`
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
 		t.Fatal(err)
