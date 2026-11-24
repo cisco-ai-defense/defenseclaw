@@ -29,6 +29,9 @@ import (
 // domain SID with no ProfileList entry and no account on this computer.
 func TestGAP2133AnAccountWhoseProfileDiskIsGoneStaysEnrolled(t *testing.T) {
 	gap1800TrustAll(t)
+	previousOwner := enterpriseHookAuthorizationOwnershipSetter
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = previousOwner })
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
 	dataDir := t.TempDir()
 	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
 	if err := os.MkdirAll(authorizationDir, 0o700); err != nil {

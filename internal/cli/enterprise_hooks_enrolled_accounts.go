@@ -33,7 +33,9 @@ import (
 // is protected, and when the guardian reads a per-user entry in its folder
 // as tamper (the fail-closed rule of a removed ledger, so the decision
 // outlasts the pass that made it). It is removed only when the guardian
-// confirms its account or profile is gone. Earlier releases neither read nor
+// confirms its account is gone (enterpriseHookEnrolledAccountGone): on
+// Windows a removed profile alone is not enough, because an FSLogix-style
+// profile disk that is detached looks the same (GAP-2133). Earlier releases neither read nor
 // write it, so the ledger and activation schemas stay as they were, and a
 // host that upgrades starts it from the ledger rows at its first publish.
 const (
@@ -199,7 +201,7 @@ func recordEnterpriseHookEnrolledAccounts(authorizationDir, now string, previous
 		}
 	}
 	for _, row := range rows {
-		if row.Removed {
+		if row.Removed && enterpriseHookEnrolledAccountGone(row) {
 			delete(next, enterpriseHookEnrolledAccountKey(row.SID))
 		}
 	}
