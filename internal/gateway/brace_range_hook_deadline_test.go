@@ -20,7 +20,14 @@ import (
 // brace forms and the over-bound range still block.
 func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 	f := newB36ManagedHookFixture(t).strict(t)
-	const perCall = time.Second // the hook deadline is about 3 s, the client process takes about 1 s
+	// The hook deadline is about 3 s and the client process takes about 1 s,
+	// so a call answers within perCall. A race build keeps that bound scaled
+	// by raceScanBudgetScale, the race detector's measured slowdown of the
+	// readers (rel-1-0-10:GAP-2094: race slowest 954-999 ms per command at
+	// load 60-85 where the same box ran plain at 313-332 ms, so the -race
+	// shards crossed the plain 1 s); a plain build keeps 1 s, so a slower
+	// product still fails there.
+	perCall := time.Second * raceScanBudgetScale
 	benign := []string{
 		"echo {1..40000} | wc -c",
 		"echo {1..60000} | wc -c",
@@ -65,6 +72,16 @@ func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 			t.Fatal(err)
 		}
 		return calls, slowest
+	}
+	// The first call of the test process builds what every later call reuses
+	// (rule pack, compiled readers); it is not the per-call work the bound is
+	// about: the smallest range was the slowest call of every red run. One
+	// untimed benign call in every mode warms it; its verdict is still held.
+	warm, _ := run("echo {1..8} | wc -c")
+	for _, call := range warm {
+		if call.verdict != "allow" {
+			t.Fatalf("warm-up %s: verdict %s, want allow; body %.200s", call.name, call.verdict, call.body)
+		}
 	}
 	for _, command := range benign {
 		calls, slowest := run(command)
