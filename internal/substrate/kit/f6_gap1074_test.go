@@ -45,8 +45,8 @@ func TestGAP1074EveryTableSkillRootQuarantinesTheFlaggedFolder(t *testing.T) {
 		t.Fatalf("only %d roots in the table", len(roots))
 	}
 	for _, root := range roots {
-		writeSkill(t, root, "bad", "x")
-		writeSkill(t, root, "good", "y")
+		writeSkill1074(t, root, "bad")
+		writeSkill1074(t, root, "good")
 	}
 	listed := map[string]string{}
 	for _, f := range scanSkillFolders(skillRoots(home, repo)) {
@@ -81,5 +81,16 @@ func TestGAP1074EveryTableSkillRootQuarantinesTheFlaggedFolder(t *testing.T) {
 	}
 	if stuck := skillsStillInReach(body, listed); len(stuck) != 0 {
 		t.Errorf("the actor would be refused on the next call: %v", stuck)
+	}
+}
+
+func writeSkill1074(t *testing.T, root, name string) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+name+"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
