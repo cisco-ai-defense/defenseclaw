@@ -18,6 +18,7 @@ package cli
 
 import (
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
@@ -34,8 +35,15 @@ func TestGAP0420TaskRecordIsOfOneActor(t *testing.T) {
 	if err := saveSubstrateTaskRecord(auth.StateDir(), a, substrateTaskRecord{Prompt: "p"}); err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(substrateTaskRecordPath(auth.StateDir(), a)); err != nil || fi.Mode().Perm() != 0o600 {
+	// GAP-1085: Windows has no POSIX mode bits (Go reports 0666 for a
+	// writable file); the record there takes the DACL of the per-user state
+	// folder. Check the 0600 mode only where it exists.
+	fi, err := os.Stat(substrateTaskRecordPath(auth.StateDir(), a))
+	if err != nil || !fi.Mode().IsRegular() {
 		t.Fatalf("task record: %v %v", fi, err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("task record mode %v, want 0600", fi.Mode().Perm())
 	}
 	if _, ok := loadSubstrateTaskRecord(auth.StateDir(), a); !ok {
 		t.Fatal("record not read back")
