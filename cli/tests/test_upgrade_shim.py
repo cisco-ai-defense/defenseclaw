@@ -64,7 +64,7 @@ def recovery_watchers(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
     """Record the recovery watchers the shim starts instead of starting a PowerShell for each."""
     started: list[tuple[int, str]] = []
 
-    def record(powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str]) -> None:
+    def record(powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str], packs: str | None = None) -> None:
         if recovery:
             started.append((pid, os.path.dirname(recovery[0])))
 
@@ -3086,3 +3086,217 @@ def test_a_windows_downgrade_whose_installer_ended_with_an_error_puts_the_rule_p
 
     assert {name: profile_digest(guardrail / name) for name in before} == before
     assert "rule packs default, strict are this release's again" in capsys.readouterr().out
+
+
+# GAP-1084: the saved installer of a Windows downgrade checks that no DefenseClaw
+# program runs from the venv before it opens a log, and the shim is such a
+# program, so a shim that waits for the log deadlocks with it. The shim starts
+# the installer, hands the rule packs and the recovery copy to a watcher outside
+# the venv, and ends.
+def _windows_downgrade_launch(monkeypatch: pytest.MonkeyPatch, *, popen_error: bool = False):
+    """A Windows downgrade with the installer window and the watcher faked, and the log wait booby-trapped."""
+
+    def stage(saved: str, installer: str) -> None:
+        Path(installer).write_text('$DcVersion = "1.0.11"\n', encoding="utf-8")
+
+    started: list[list[str]] = []
+    watched: list[tuple[int, tuple[str, str] | None, str | None]] = []
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        if popen_error:
+            raise OSError("no such file")
+        started.append(argv)
+        return _child(lambda: None)
+
+    def waited(*args: object, **kwargs: object) -> tuple[bool, int | None]:
+        raise AssertionError("the shim waited for the installer's log from inside the venv")
+
+    def watch(powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str], packs: str | None = None):
+        watched.append((pid, recovery, packs))
+        return object()
+
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim, "_copy_windows_saved_installer", stage)
+    monkeypatch.setattr(upgrade_shim, "_check_saved_installer", lambda *a, **k: None)
+    monkeypatch.setattr(upgrade_shim, "_check_installer_version", lambda *a, **k: None)
+    monkeypatch.setattr(upgrade_shim, "_windows_terminal_without_desktop", lambda: False)
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(upgrade_shim, "_await_installer_log", waited)
+    monkeypatch.setattr(upgrade_shim, "_watch_recovery_copy", watch)
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+    return started, watched
+
+
+def test_a_windows_downgrade_ends_after_starting_the_installer_and_does_not_wait_for_its_log(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    guardrail, shipped = _rule_pack_downgrade(tmp_path, monkeypatch, home)
+    monkeypatch.delenv(upgrade_shim.LOCAL_DIR_ENV)
+    _serve_release(monkeypatch, tmp_path / "release-1.0.10")
+    started, watched = _windows_downgrade_launch(monkeypatch)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+
+    assert len(started) == 1 and started[0][-3:-1] == ["-Yes", "-Version"]
+    # The packs stay swapped: the watcher, not this process, puts them back if the installer fails.
+    for name in ("default", "strict"):
+        assert profile_digest(guardrail / name) == profile_digest(shipped / name)
+    assert len(watched) == 1
+    pid, recovery, packs = watched[0]
+    assert pid == _INSTALLER_PID and recovery is not None and packs is not None
+    spec = json.loads(packs)
+    assert spec["dir"] == str(guardrail) and sorted(spec["packs"]) == ["default", "strict"]
+    assert spec["packs"]["default"] == profile_digest(guardrail / "default")
+    assert Path(spec["backup"]).parent == home / "backups" and Path(spec["backup"], "default").is_dir()
+    out = capsys.readouterr().out
+    # GAP-1011: started is not running, and no log was seen.
+    assert "was started in a new window" in out and "has not reported a result yet" in out
+    assert "continues in a new window" not in out and "Its log is saved" not in out
+    assert "If it fails, this release's rule packs are put back" in out
+    upgrade_shim._drop_recovery_copy(recovery)
+
+
+def test_a_windows_downgrade_without_swapped_packs_still_does_not_wait_for_the_log(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.11")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.10")))
+    started, watched = _windows_downgrade_launch(monkeypatch)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+
+    assert len(started) == 1 and len(watched) == 1 and watched[0][2] is None
+    upgrade_shim._drop_recovery_copy(watched[0][1])
+
+
+def test_a_windows_upgrade_still_waits_for_the_installer_to_open_its_log(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The upgrade installer opens its log before its in-use check, so GAP-1011's wait stays.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    release = tmp_path / "release"
+    release.mkdir()
+    script = '$DcVersion = "1.0.1"\n'
+    (release / "install.ps1").write_bytes(script.encode())
+    (release / "checksums.txt").write_text(f"{hashlib.sha256(script.encode()).hexdigest()}  install.ps1\n", encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim, "_windows_terminal_without_desktop", lambda: False)
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *a, **k: _child(lambda: None))
+    waits: list[int] = []
+
+    def waited(proc: types.SimpleNamespace, logs: str, known: dict[str, int]) -> tuple[bool, int | None]:
+        waits.append(proc.pid)
+        return True, None
+
+    monkeypatch.setattr(upgrade_shim, "_await_installer_log", waited)
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 0
+    assert waits == [_INSTALLER_PID]
+
+
+def test_a_windows_downgrade_whose_installer_cannot_start_puts_the_rule_packs_back(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    guardrail, _ = _rule_pack_downgrade(tmp_path, monkeypatch, home)
+    before = {name: profile_digest(guardrail / name) for name in ("default", "strict")}
+    monkeypatch.delenv(upgrade_shim.LOCAL_DIR_ENV)
+    _serve_release(monkeypatch, tmp_path / "release-1.0.10")
+    _, watched = _windows_downgrade_launch(monkeypatch, popen_error=True)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 1
+
+    assert watched == []
+    assert {name: profile_digest(guardrail / name) for name in before} == before
+
+
+def test_a_windows_downgrade_over_ssh_still_refuses_and_puts_the_rule_packs_back(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-1993 stays: no desktop, no installer window; nothing started, nothing left swapped.
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    guardrail, _ = _rule_pack_downgrade(tmp_path, monkeypatch, home)
+    before = {name: profile_digest(guardrail / name) for name in ("default", "strict")}
+    monkeypatch.delenv(upgrade_shim.LOCAL_DIR_ENV)
+    _serve_release(monkeypatch, tmp_path / "release-1.0.10")
+    started, watched = _windows_downgrade_launch(monkeypatch)
+    monkeypatch.setattr(upgrade_shim, "_windows_terminal_without_desktop", lambda: True)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 1
+
+    assert started == [] and watched == []
+    assert {name: profile_digest(guardrail / name) for name in before} == before
+    assert "no desktop" in capsys.readouterr().err
+
+
+def test_the_watcher_gets_the_packs_without_a_recovery_copy_and_neither_name_leaks_from_the_environment(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launches: list[dict[str, str]] = []
+
+    def popen(argv: list[str], **kwargs: object) -> object:
+        launches.append(kwargs["env"])  # type: ignore[arg-type]
+        return object()
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+    spec = json.dumps({"dir": "d", "backup": "b", "packs": {"default": "0" * 64}})
+
+    assert _REAL_WATCH_RECOVERY_COPY("powershell.exe", 7, None, {}, None) is None
+    _REAL_WATCH_RECOVERY_COPY("powershell.exe", 7, None, {"DC_WATCH_DIR": "x", "DC_WATCH_PACKS": "y"}, spec)
+
+    assert launches[0]["DC_WATCH_PACKS"] == spec and "DC_WATCH_DIR" not in launches[0]
+    assert '"' not in upgrade_shim._RECOVERY_WATCHER  # one -Command argument, no quoting to get wrong
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="runs the Windows PowerShell watcher")
+def test_recovery_watcher_puts_the_packs_back_after_a_failure_and_leaves_an_edited_pack_alone(
+    home: Path, tmp_path: Path
+) -> None:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    powershell = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+
+    def swapped_packs(label: str) -> tuple[Path, Path, str]:
+        guardrail = tmp_path / label / "policies" / "guardrail"
+        backup = tmp_path / label / "backups" / "guardrail-profiles-1"
+        for name in ("default", "strict"):
+            (backup / name / "rules").mkdir(parents=True)
+            (backup / name / "rules" / "c2.yaml").write_text(f"{name} of this release\n", encoding="utf-8")
+            (guardrail / name / "rules").mkdir(parents=True)
+            (guardrail / name / "rules" / "c2.yaml").write_text(f"{name} of the older release\n", encoding="utf-8")
+            (guardrail / name / "rules" / "ünï.yaml").write_text("x\n", encoding="utf-8")
+            (guardrail / name / ".hidden").write_text("ignored\n", encoding="utf-8")
+        spec = json.dumps(
+            {"dir": str(guardrail), "backup": str(backup), "packs": {n: profile_digest(guardrail / n) for n in ("default", "strict")}}
+        )
+        return guardrail, backup, spec
+
+    def watch(code: int, spec: str) -> int:
+        installer = subprocess.Popen([powershell, "-NoProfile", "-Command", f"Start-Sleep -Seconds 3; exit {code}"])  # noqa: S603
+        watcher = _REAL_WATCH_RECOVERY_COPY(powershell, installer.pid, None, env, spec)
+        assert watcher is not None
+        return watcher.wait(timeout=90)
+
+    failed, failed_backup, spec = swapped_packs("failed")
+    assert watch(7, spec) == 4
+    for name in ("default", "strict"):
+        assert (failed / name / "rules" / "c2.yaml").read_text(encoding="utf-8") == f"{name} of this release\n"
+    assert not failed_backup.exists()  # every backup left it
+
+    edited, edited_backup, spec = swapped_packs("edited")
+    (edited / "default" / "rules" / "c2.yaml").write_text("my own rule\n", encoding="utf-8")
+    assert watch(1, spec) == 4
+    assert (edited / "default" / "rules" / "c2.yaml").read_text(encoding="utf-8") == "my own rule\n"
+    assert (edited / "strict" / "rules" / "c2.yaml").read_text(encoding="utf-8") == "strict of this release\n"
+    assert (edited_backup / "default").is_dir()  # the left-alone pack's backup is kept
+
+    done, done_backup, spec = swapped_packs("done")
+    assert watch(0, spec) == 0
+    assert (done / "default" / "rules" / "c2.yaml").read_text(encoding="utf-8") == "default of the older release\n"
+    assert (done_backup / "default").is_dir()
