@@ -137,12 +137,18 @@ func (a *APIServer) substrateMCPVerdict(ctx context.Context, reg registry.Regist
 		out.Verdict, out.Source, out.Reason, out.Severity = "deny", "mcp_asset_policy", decision.Reason, "HIGH"
 		return out
 	}
-	judge := func(args json.RawMessage) SubstrateCalloutVerdict {
+	// rulesOnly keeps a reading off the LLM judge and AID: a projection
+	// (another reading of the same call), and a bridged argument reading
+	// whose call's whole params go to them (substrateMCPReading, RV-0841b F6).
+	judge := func(args json.RawMessage, rulesOnly bool) SubstrateCalloutVerdict {
 		return a.substrateMCPToolVerdict(ctx, reg, ToolInspectRequest{
 			Tool: hookTool, Args: args, SessionID: req.SessionID, Connector: connectorName, MCPServerName: server,
+			skipJudge: rulesOnly, skipAID: rulesOnly,
 		})
 	}
-	return a.substrateMCPBoundedVerdict(ctx, reg, connectorName, req.Args, judge(req.Args), judge)
+	full := judge(req.Args, substrateMCPReadingOf(ctx).rulesOnly)
+	return a.substrateMCPBoundedVerdict(ctx, reg, connectorName, req.Args, full,
+		func(p json.RawMessage) SubstrateCalloutVerdict { return judge(p, true) })
 }
 
 // substrateMCPToolVerdict is the tool-rule verdict of one reading of a call.

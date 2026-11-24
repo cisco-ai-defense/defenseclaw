@@ -162,7 +162,9 @@ func TestMCPBridgeJudgesEveryMethod(t *testing.T) {
 	}
 
 	// Each judged method was judged as its tool name with its params as the
-	// arguments; methods with no laptop data the rules read were not judged.
+	// arguments (prompts/get and completion/complete twice: on their
+	// arguments and on their whole params, RV-0841b F1); methods with no
+	// laptop data the rules read were not judged.
 	mu.Lock()
 	var tools []string
 	for _, c := range calls {
@@ -174,7 +176,7 @@ func TestMCPBridgeJudgesEveryMethod(t *testing.T) {
 		t.Fatalf("first verdict read %+v, want resources_read with the params", first)
 	}
 	if want := "resources_read|prompts_get|completion_complete|resources_subscribe|resources_read|resources_read|" +
-		"read_note|resources_read|prompts_get|completion_complete|resources_subscribe"; strings.Join(tools, "|") != want {
+		"read_note|resources_read|prompts_get|prompts_get|completion_complete|completion_complete|resources_subscribe"; strings.Join(tools, "|") != want {
 		t.Fatalf("verdicts %s, want %s", strings.Join(tools, "|"), want)
 	}
 

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -352,18 +353,25 @@ var substrateMCPAllowedFold = func() map[string]string {
 type substrateMCPJudgedCall struct {
 	tool string
 	args []json.RawMessage // each is judged; the strictest verdict holds
-	ref  string            // the prompt or reference it names, for its rows
-	why  string            // why it is refused, when it is
+	// params, when set, is the whole params of a call whose args are parts
+	// of them: judged as well, and the reading the LLM judge and AID read.
+	params json.RawMessage
+	ref    string // the prompt or reference it names, for its rows
+	why    string // why it is refused, when it is
 }
 
 // substrateMCPMethodArgs is the arguments a judged method other than
-// tools/call is judged on, as a tools/call's arguments are (RV-0841 F1):
-// resources/read and resources/subscribe carry them as their params,
-// prompts/get as params.arguments, and completion/complete as the argument
-// it completes ({argument.name: argument.value}) beside the
-// context.arguments. Where the completed argument has the same name as a
-// context argument with another value, both readings are judged. Arguments
-// that are not the object the spec gives are refused, never judged as none.
+// tools/call is judged on. resources/read and resources/subscribe carry
+// them as their params. prompts/get is judged on params.arguments and
+// completion/complete on the argument it completes ({argument.name:
+// argument.value}) beside the context.arguments, as a tools/call's
+// arguments are (RV-0841 F1); where the completed argument has the same
+// name as a context argument with another value, both readings are judged.
+// Both are judged on their whole params as well, so a rule that reads the
+// prompt name, the completion ref or _meta holds them as before
+// (RV-0841b F1). A null field carries nothing and is absent (RV-0841b F5);
+// a field of another shape than the spec gives is refused, never judged as
+// none.
 func substrateMCPMethodArgs(m map[string]any, method string) substrateMCPJudgedCall {
 	refuse := func(what string) substrateMCPJudgedCall {
 		return substrateMCPJudgedCall{why: "the " + method + " " + what}
@@ -376,73 +384,118 @@ func substrateMCPMethodArgs(m map[string]any, method string) substrateMCPJudgedC
 	if !ok {
 		return refuse("params are not an object")
 	}
+	whole, err := substrateMCPEncode(params)
+	if err != nil {
+		return refuse("params do not encode")
+	}
 	var c substrateMCPJudgedCall
-	var readings []any
+	var readings []map[string]any
 	switch method {
 	case "prompts/get":
 		c.ref, _ = params["name"].(string)
-		a, has := params["arguments"]
-		if _, isObject := a.(map[string]any); has && !isObject {
+		a, ok := substrateMCPObjectField(params, "arguments")
+		if !ok {
 			return refuse("arguments are not an object")
 		}
-		readings = []any{a}
+		if a != nil {
+			readings = append(readings, a)
+		}
 	case "completion/complete":
-		arg, _ := params["argument"].(map[string]any)
-		name, _ := arg["name"].(string)
-		value, hasValue := arg["value"]
-		if name == "" || !hasValue {
-			return refuse("argument has no name or value")
+		arg, ok := substrateMCPObjectField(params, "argument")
+		if !ok {
+			return refuse("argument is not an object")
 		}
-		merged := map[string]any{}
-		if cx, has := params["context"]; has {
-			cobj, ok := cx.(map[string]any)
-			if !ok {
-				return refuse("context is not an object")
+		cx, ok := substrateMCPObjectField(params, "context")
+		if !ok {
+			return refuse("context is not an object")
+		}
+		others, ok := substrateMCPObjectField(cx, "arguments")
+		if !ok {
+			return refuse("context arguments are not an object")
+		}
+		merged := maps.Clone(others)
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		if arg != nil {
+			name, named := substrateMCPArgName(arg["name"])
+			value, hasValue := arg["value"]
+			if !named || !hasValue {
+				return refuse("argument has no name or value")
 			}
-			if ca, has := cobj["arguments"]; has {
-				others, ok := ca.(map[string]any)
-				if !ok {
-					return refuse("context arguments are not an object")
-				}
-				maps.Copy(merged, others)
+			if prev, clash := merged[name]; clash && !reflect.DeepEqual(prev, value) {
+				readings = append(readings, maps.Clone(merged))
 			}
+			merged[name] = value
 		}
-		if prev, clash := merged[name]; clash && !reflect.DeepEqual(prev, value) {
-			readings = append(readings, maps.Clone(merged))
+		if len(merged) > 0 {
+			readings = append([]map[string]any{merged}, readings...)
 		}
-		merged[name] = value
-		readings = append([]any{merged}, readings...)
 		ref, _ := params["ref"].(map[string]any)
 		if c.ref, _ = ref["name"].(string); c.ref == "" {
 			c.ref, _ = ref["uri"].(string)
 		}
 	default:
-		readings = []any{params}
+		return substrateMCPJudgedCall{args: []json.RawMessage{whole}}
 	}
 	for _, r := range readings {
-		if r == nil {
-			c.args = append(c.args, nil)
-			continue
-		}
 		args, err := substrateMCPEncode(r)
 		if err != nil {
 			return refuse("arguments do not encode")
 		}
 		c.args = append(c.args, args)
 	}
+	c.params = whole
 	if len(c.ref) > 256 {
 		c.ref = strings.ToValidUTF8(c.ref[:256], "")
 	}
 	return c
 }
 
+// substrateMCPObjectField is obj[key] when it is an object, nil when it is
+// absent or null, and not ok when it is anything else.
+func substrateMCPObjectField(obj map[string]any, key string) (map[string]any, bool) {
+	switch v := obj[key].(type) {
+	case nil:
+		return nil, true
+	case map[string]any:
+		return v, true
+	}
+	return nil, false
+}
+
+// substrateMCPArgName is a completion argument's name: a non-empty string,
+// or a number read as its text (a lenient server keys on it the same way).
+func substrateMCPArgName(v any) (string, bool) {
+	switch n := v.(type) {
+	case string:
+		return n, n != ""
+	case json.Number:
+		return n.String(), true
+	case float64:
+		return strconv.FormatFloat(n, 'g', -1, 64), true
+	}
+	return "", false
+}
+
 // judge is the strictest verdict of the call's readings; a deny ends it.
+// The argument readings come first and, when the whole params are read
+// too, go to the rules alone; the params reading goes to every lane, as
+// the one reading of a call did before. A call judges at most
+// substrateMCPReadingsPerArgs readings per argument reading, projections
+// included (RV-0841b F6).
 func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substrateMCPJudgedCall) SubstrateCalloutVerdict {
+	readings := c.args
+	if c.params != nil {
+		readings = append(slices.Clip(c.args), c.params)
+	}
+	left := substrateMCPReadingsPerArgs*max(len(c.args), 1) - len(readings)
 	var out SubstrateCalloutVerdict
-	for i, args := range c.args {
+	for i, args := range readings {
 		req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: c.tool, Transport: "stdio", Method: method}, Args: args}
 		req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
-		v := substrateMCPJudge(b.a, ctx, b.reg, req)
+		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left}
+		v := substrateMCPJudge(b.a, withSubstrateMCPReading(ctx, rd), b.reg, req)
 		if i == 0 {
 			out = v
 		} else {
