@@ -4,7 +4,10 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -102,5 +105,43 @@ func TestAliasMemoNotWrittenWhenSecondShellReadingBlocks(t *testing.T) {
 	use.sessionID = action.sessionID
 	if got := effectShadowRun(use, effectRulesOn, tierRestricted)[0]; len(got.ReadProofs) != 0 {
 		t.Fatalf("blocked call's link was remembered: %+v", got.ReadProofs)
+	}
+}
+
+// An HTTP call may be refused after the scanner has read its link effect.
+// The alias must stay absent when the route's final bounded-review policy
+// blocks that call.
+func TestAliasMemoNotWrittenAfterFinalInspectBlock(t *testing.T) {
+	useEffectsRulesMode(t, "on")
+	installToolCallCorpusProfileConnector(t, "claudecode", "strict")
+	previousHome := sameHostHomeForTest
+	sameHostHomeForTest = "/home/u"
+	t.Cleanup(func() { sameHostHomeForTest = previousHome })
+	cfg := &config.Config{}
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.BlockAt = "CRITICAL"
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+	api := &APIServer{scannerCfg: cfg}
+	const link = "ln -sf ~/.ssh/id_rsa /home/u/work/final-block-alias"
+	body, err := json.Marshal(map[string]any{
+		"tool": "Bash", "connector": "claudecode", "session_id": "gap2075-final-block",
+		"args": map[string]string{"command": link}, "args_partial": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	api.handleInspectTool(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", bytes.NewReader(body)))
+	var verdict ToolInspectVerdict
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &verdict) != nil ||
+		verdict.Action != guardrailActionBlock {
+		t.Fatalf("final inspect: status %d body %s", recorder.Code, recorder.Body.String())
+	}
+	use := shadowLiveRequest("cat /home/u/work/final-block-alias")
+	use.sessionID = "gap2075-final-block"
+	if got := effectShadowRun(use, effectRulesOn, tierRestricted)[0]; len(got.ReadProofs) != 0 {
+		t.Fatalf("final-blocked link was remembered: %+v", got.ReadProofs)
 	}
 }

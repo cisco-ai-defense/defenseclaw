@@ -147,14 +147,16 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	}
 	// The second command reading can still block a call the first reading
 	// allowed. Hold cross-call aliases until that final merged verdict.
-	var aliasPending effectAliasPending
 	if deferEffectAlias(action) {
-		action.aliasPending = &aliasPending
-		defer func() {
-			if result != nil && result.Action != guardrailActionBlock {
-				aliasPending.commit()
-			}
-		}()
+		if action.aliasPending == nil {
+			aliasPending := &effectAliasPending{}
+			action.aliasPending = aliasPending
+			defer func() {
+				if aliasVerdictCanRun(result) {
+					aliasPending.commit()
+				}
+			}()
+		}
 	}
 	verdict := a.inspectTrustedToolPolicyCtx(ctx, req, action)
 	if verdict == nil || !dispatched || primary.Authoritative() {

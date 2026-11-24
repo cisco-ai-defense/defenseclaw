@@ -66,6 +66,12 @@ func (p *effectAliasPending) set(request trustedActionRequest, result effects.Re
 	p.request, p.result, p.facts, p.flavor, p.ready = request, result, facts, flavor, true
 }
 
+// An approval request is not evidence that the tool ran. Observe-mode
+// downgrades are already reflected in Action at the final commit point.
+func aliasVerdictCanRun(v *ToolInspectVerdict) bool {
+	return v != nil && (v.Action == guardrailActionAllow || v.Action == guardrailActionAlert)
+}
+
 func (p *effectAliasPending) commit() {
 	if p != nil && p.ready {
 		sessionEffectAliases.remember(p.request, p.result, p.facts, p.flavor)
