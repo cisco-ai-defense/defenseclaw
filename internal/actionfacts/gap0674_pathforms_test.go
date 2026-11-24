@@ -33,7 +33,7 @@ func TestGAP0674WalkReadsOneFolderTheSameInEveryFormOfItsPath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	base := credentialPathWalk(root, root, credentialWalkFilter{}, credentialPathWalkBounds)
+	base := credentialPathWalk(root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 	if len(base.found) != len(files) || base.cut {
 		t.Fatalf("walk of %s found %v cut %v, want the %d files and no cut", root, base.found, base.cut, len(files))
 	}
@@ -42,7 +42,7 @@ func TestGAP0674WalkReadsOneFolderTheSameInEveryFormOfItsPath(t *testing.T) {
 		t.Fatalf("only %d forms of the folder: %v", len(forms), forms)
 	}
 	for _, form := range forms {
-		walk := credentialPathWalk(form, form, credentialWalkFilter{}, credentialPathWalkBounds)
+		walk := credentialPathWalk(form, form, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 		if walk.used != base.used || walk.cut || len(walk.found) != len(base.found) {
 			t.Errorf("form %q: used %+v cut %v found %d, want used %+v, no cut, %d found (the form of %q)", form, walk.used, walk.cut, len(walk.found), base.used, len(base.found), root)
 			continue

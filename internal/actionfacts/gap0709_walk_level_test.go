@@ -32,7 +32,7 @@ func TestGAP0709WalkSkipsTheLevelPastTheBound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	walk := credentialPathWalk(root, root, credentialWalkFilter{}, credentialPathWalkBounds)
+	walk := credentialPathWalk(root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 	if want := (credentialPathWalkLimits{folders: 4096, entries: 4146, lookups: 1}); walk.used != want || !walk.cut {
 		t.Fatalf("walk used %+v cut %v, want %+v cut true: the level past the bound was read", walk.used, walk.cut, want)
 	}

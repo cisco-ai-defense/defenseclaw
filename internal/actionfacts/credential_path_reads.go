@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -96,6 +97,10 @@ const MaxCredentialPathCandidates = maxCredentialPathCandidates
 
 type credentialPathLimits struct {
 	candidates, work, lookups int
+	// keepAll keeps every file a walk finds, as the resolve did before it
+	// kept only the files it can still take (substrate-1:GAP-0674): the
+	// differential test's reference.
+	keepAll bool
 }
 
 var defaultCredentialPathLimits = credentialPathLimits{
@@ -469,6 +474,7 @@ type credentialPathResolver struct {
 	held       map[credentialHeldRead]bool
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
+	keepAll    bool                     // see credentialPathLimits.keepAll
 	// walkedBy holds the folders each command already searched, as named
 	// and as resolved: a folder named again by the same command adds
 	// nothing, so grep -r K . . . walks it once (rel-1-0-10:GAP-1668).
@@ -551,7 +557,7 @@ func resolveCredentialPathReadsWithin(
 	if !credentialPathResolveNeeded(words, commands) {
 		return nil
 	}
-	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands}
+	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands, keepAll: limits.keepAll}
 	counted := make(map[int64]bool)
 	for _, command := range commands {
 		if command.Effect == EffectExecute && slices.ContainsFunc(command.Operations, func(op OperationKind) bool {
@@ -1451,11 +1457,57 @@ func (r *credentialPathResolver) argument(id int64, argument ArgumentFact, unkno
 	}
 }
 
+// credentialCandidateCounted reports a word candidate takes of the resolve's
+// caps: one candidate and its length in work. Any other word (empty, a URL,
+// without a dot, slash or underscore) takes nothing.
+func credentialCandidateCounted(value string) bool {
+	return value != "" && !strings.Contains(value, "://") && strings.ContainsAny(value, "./_")
+}
+
+// credentialWalkRoom is what the resolve can still take of the files a walk
+// finds, in the order the walk finds them (the resolver reads them with
+// candidate, which takes one candidate and the file's length in work). The
+// first file past it trips the resolve's cap, which stops the resolve, so the
+// files after that one are never read: the walk keeps none of them.
+type credentialWalkRoom struct {
+	candidates, work int
+	over             bool
+}
+
+// admit reports whether the walk keeps file. The file that trips a cap is kept
+// (the resolve trips on it as before, and records the cap); the files after it
+// are not.
+func (room *credentialWalkRoom) admit(file string) bool {
+	if room.over {
+		return false
+	}
+	if !credentialCandidateCounted(file) {
+		return true
+	}
+	room.candidates--
+	room.work -= len(file)
+	room.over = room.candidates < 0 || room.work < 0
+	return true
+}
+
+// walkRoom is the room the files of a walk of this resolve can take. A resolve
+// that has stopped reads none: the first file found is kept so that the
+// resolve sees a walk with files and stops, as it did with the whole list.
+func (r *credentialPathResolver) walkRoom() credentialWalkRoom {
+	if r.keepAll {
+		return credentialWalkRoom{candidates: math.MaxInt, work: math.MaxInt}
+	}
+	if r.stopped() {
+		return credentialWalkRoom{}
+	}
+	return credentialWalkRoom{candidates: r.candidates.Left(), work: r.work.Left()}
+}
+
 // candidate checks one word. A glob or an unknown read is file-unknown; an
 // exact read keeps its value, and a read of a name the call linked, copied or
 // moved a file to before it also reads that file.
 func (r *credentialPathResolver) candidate(id int64, value string, glob, unknown bool) {
-	if value == "" || strings.Contains(value, "://") || !strings.ContainsAny(value, "./_") || r.stopped() {
+	if !credentialCandidateCounted(value) || r.stopped() {
 		return
 	}
 	if !r.candidates.Take() || !r.work.TakeN(len(value)) {
@@ -1664,7 +1716,7 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 		r.add(id, "", true)
 		return
 	}
-	walk := credentialPathWalk(dir, shown, filter, left)
+	walk := credentialPathWalk(dir, shown, filter, left, r.walkRoom())
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	for _, file := range walk.found {
 		if r.stopped() {
@@ -1839,7 +1891,15 @@ type credentialPathWalkResult struct {
 // read, about 7 ms on every grep -r or rg call there. A level's folders
 // are named only once it is known to fit (credentialPathFolderScan keeps
 // the names), so a level that does not fit costs no path either.
-func credentialPathWalk(dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits) (walk credentialPathWalkResult) {
+//
+// room is what the resolve can still take of the files found (candidate takes
+// one candidate and the file's length in work for each): the walk keeps the
+// files in order up to the one that trips a cap, which the resolve then trips
+// on as it did with every file kept, and no file after it, which the stopped
+// resolve never read. The folders it reads, its cut and its budget are the
+// same either way: a walk that stopped reading there would leave a later folder
+// of the call a budget it did not have (substrate-1:GAP-0674).
+func credentialPathWalk(dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits, room credentialWalkRoom) (walk credentialPathWalkResult) {
 	credentialPathWalkSlots <- struct{}{}
 	defer func() { <-credentialPathWalkSlots }()
 	groups := credentialProbeFirstSegments()
@@ -1887,7 +1947,11 @@ func credentialPathWalk(dir, shown string, filter credentialWalkFilter, limits c
 		}
 		count := 0
 		for _, s := range scans {
-			walk.found = append(walk.found, s.found...)
+			for _, file := range s.found {
+				if room.admit(file) {
+					walk.found = append(walk.found, file)
+				}
+			}
 			count += len(s.ends)
 		}
 		if budget.stop.Load() {
@@ -2009,6 +2073,38 @@ func (r *credentialPathResolver) add(id int64, value string, unknown bool) {
 	}
 	if !r.seen[fact] {
 		r.seen[fact] = true
+		fact.storeOnce()
 		r.reads = append(r.reads, fact)
 	}
+}
+
+// storeOnce makes the spellings of a read share the memory of the longest one
+// where they are the same text or a part of it (a resolved path is the working
+// folder, a slash and the value; a normalized one is the value). A walk of a
+// deep tree names a file with a path of thousands of bytes, and the record of
+// the call keeps each read for as long as the call is judged, so the
+// spellings it kept as separate strings were two or three times the path
+// (substrate-1:GAP-0674). The strings are equal, byte for byte, as they were.
+func (f *PathFact) storeOnce() {
+	host := f.Value
+	for _, s := range []string{f.Normalized, f.Resolved} {
+		if len(s) > len(host) {
+			host = s
+		}
+	}
+	f.Value, f.Normalized, f.Resolved = within(host, f.Value), within(host, f.Normalized), within(host, f.Resolved)
+}
+
+// within is s as a part of host (the same bytes, in host's memory) when host
+// ends or begins with s, and s as it is otherwise.
+func within(host, s string) string {
+	switch {
+	case s == "" || len(s) > len(host):
+		return s
+	case strings.HasSuffix(host, s):
+		return host[len(host)-len(s):]
+	case strings.HasPrefix(host, s):
+		return host[:len(s)]
+	}
+	return s
 }
