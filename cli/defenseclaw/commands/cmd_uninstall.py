@@ -453,7 +453,13 @@ def uninstall_cmd(
     _remove_marked_native_otel_left(gateway_ports)
     if opencode_binary:
         # OpenCode V2's background server kept the plugin it loaded (rel-1-0-6 GAP-0026).
-        outcome = opencode_service.restart_if_running(opencode_binary)
+        # A full uninstall stops it: a restarted server kept running made the
+        # next DefenseClaw install refuse until it was stopped by hand
+        # (GAP-1922). A plain uninstall keeps the restart.
+        if wipe_data or binaries:
+            outcome = opencode_service.stop_if_running(opencode_binary)
+        else:
+            outcome = opencode_service.restart_if_running(opencode_binary)
         opencode_service.report(outcome, what="drops the DefenseClaw plugin")
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).

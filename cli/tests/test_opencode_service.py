@@ -63,6 +63,8 @@ def test_account_binary_is_only_an_opencode_v2(monkeypatch, version, found):
 
 
 def test_uninstall_restarts_the_running_background_server_and_says_so(monkeypatch):
+    # A plain uninstall restarts it; --all and --binaries stop it
+    # (test_opencode_uninstall_stops_gap1922.py, GAP-1922).
     from defenseclaw.commands import cmd_uninstall
 
     order = []
@@ -84,14 +86,14 @@ def test_uninstall_restarts_the_running_background_server_and_says_so(monkeypatc
         opencode_service, "restart_if_running", lambda binary: order.append(f"restart {binary}") or opencode_service.RESTARTED
     )
 
-    result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+    result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--yes"])
     assert result.exit_code == 0, result.output
     assert order == ["probe", "teardown", "restart /u/bin/opencode"]  # found before --binaries removes the CLI
     text = " ".join(result.output.split())
     assert "Restarted OpenCode's background server (opencode service restart), so it drops the DefenseClaw plugin" in text
 
     monkeypatch.setattr(opencode_service, "restart_if_running", lambda binary: opencode_service.NOT_RESTARTED)
-    text = " ".join(CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"]).output.split())
+    text = " ".join(CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--yes"]).output.split())
     assert "run 'opencode service restart'" in text
 
     order.clear()
