@@ -38,6 +38,10 @@ func TestGAP1483HereDocChildFolderVerdicts(t *testing.T) {
 		{"opaque-body", "chroot / sh <<'E'\n: >> .defenseclaw/config.yaml; true\nE"},
 		{"outer-write", "chroot / sh -c ': >> .defenseclaw/config.yaml' >> /tmp/det111-g1483-home/.defenseclaw/config.yaml"},
 		{"skip-chdir", "chroot --skip-chdir / sh <<'E'\n: >> .defenseclaw/config.yaml\nE"},
+		{"compound-sequence", "chroot / sh <<'E'; echo x >> ~/.defenseclaw/config.yaml\n: >> .defenseclaw/config.yaml\nE"},
+		{"compound-and", "chroot / sh <<'E' && echo x >> ~/.defenseclaw/config.yaml\n: >> .defenseclaw/config.yaml\nE"},
+		{"compound-pipe", "chroot / sh <<'E' | echo x >> ~/.defenseclaw/config.yaml\n: >> .defenseclaw/config.yaml\nE"},
+		{"two-chroot", "chroot / sh <<'E'; chroot \"$ROOT\" sh -c ': >> ~/.defenseclaw/config.yaml'\n: >> .defenseclaw/config.yaml\nE"},
 	}
 	for _, tier := range boundedTestTiers {
 		for _, connector := range []string{"claudecode", "codex"} {
@@ -72,8 +76,14 @@ func TestGAP1483HereDocChildFolderVerdicts(t *testing.T) {
 					if tier.name == "strict" || tier.name == "managed strict" {
 						wantAction = "block"
 					}
+				case "compound-sequence", "compound-and", "compound-pipe", "two-chroot":
+					wantAction, wantSeverity = "alert", ""
+					if tier.name == "strict" || tier.name == "managed strict" {
+						wantAction = "block"
+					}
 				}
-				if action != wantAction || severity != wantSeverity {
+				if action != wantAction || (wantSeverity != "" && severity != wantSeverity) ||
+					(wantSeverity == "" && severity == "NONE") {
 					t.Errorf("%s %s %s: %s/%s, want %s/%s", tier.name, connector, row.id,
 						action, severity, wantAction, wantSeverity)
 				}
