@@ -516,6 +516,32 @@ func SettingsDrift(field string) string {
 		"). Ask IT to repair them."
 }
 
+// SettingsDriftOtherGateway is SettingsDrift when another OpenShell
+// gateway of the account runs (gateway: "pid N: command line", as the
+// daemon's OtherGateways lists it): that gateway's settings are the ones
+// that differ, and the person stops it; IT has nothing to repair
+// (rel-1-0-10:GAP-2060).
+func SettingsDriftOtherGateway(field, gateway string) string {
+	stop := "Stop that process"
+	if rest, ok := strings.CutPrefix(gateway, "pid "); ok {
+		if pid, _, ok := strings.Cut(rest, ":"); ok && pid != "" && strings.Trim(pid, "0123456789") == "" {
+			stop += " (`kill " + pid + "`)"
+		}
+	}
+	return "Sandboxes are paused: another OpenShell gateway runs in your account (" + refusalReason(gateway) +
+		") with settings that differ from your organization's (" + refusalValue(field) + "). " + stop +
+		" once your sandboxes are saved; your organization's gateway needs no other."
+}
+
+// UpdateWaitsForSandboxes is the notice while the account's OpenShell
+// gateway still runs under the earlier DefenseClaw a package upgrade
+// replaced, and a sandbox of the account runs on it: the update finishes
+// once they stop, with no repair to ask for (rel-1-0-10:GAP-2073).
+func UpdateWaitsForSandboxes() string {
+	return "DefenseClaw was updated while your sandboxes ran, and your OpenShell gateway still runs under the earlier version: " +
+		"it is replaced once none of your sandboxes runs. Stop the ones that run (" + sandboxCommand + " stop NAME), then run this again."
+}
+
 // PolicyUnloadable is the generic text of a sandbox policy the managed
 // gateway can't load; the details are only in the admin views.
 func PolicyUnloadable() string {

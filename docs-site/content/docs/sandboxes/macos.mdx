@@ -43,7 +43,7 @@ Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox 
 | Docker Desktop 29.8 or newer, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. Turn on **Settings → Resources → Network → Enable host networking**, then restart the gateway (`defenseclaw-gateway restart`). |
 | Disk | At least 13 GiB free in the VM volume (24 GiB recommended). The first image build downloads about 3 GB. |
 
-OpenShell 0.1.6 or newer is required, and MicroVM sandboxes start on a Mac with OpenShell 0.1.9 or newer, and setup offers them as a choice (Docker stays the default). MicroVM sandboxes on a Mac are a Preview. Setup installs it, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
+OpenShell 0.1.6 or newer is required, and MicroVM sandboxes start on a Mac with OpenShell 0.1.9 or newer, and setup offers them as a choice (Docker stays the default). MicroVM sandboxes on a Mac are a Preview. Setup installs OpenShell, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 ### A Homebrew that belongs to another account
 
@@ -90,7 +90,7 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
     { type: "out", text: "DefenseClaw sandbox setup" },
     { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
-    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? Each sandbox gets its own kernel and disk (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "prompt", text: "Install OpenShell 0.1.9 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "out", text: "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which ec2-user owns, so Homebrew at /opt/homebrew cannot install the nvidia/openshell formula as this account" },
     { type: "out", text: "→ Homebrew installs formulas only as the account that owns its prefix (ec2-user): install OpenShell from that account (`defenseclaw sandbox setup --install-openshell` there), or have it give this account the prefix, then run `defenseclaw sandbox setup` here" },
@@ -100,7 +100,7 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
     { type: "out", text: "DefenseClaw sandbox setup" },
     { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
-    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? Each sandbox gets its own kernel and disk (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "prompt", text: "Install OpenShell 0.1.9 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "out", text: "OpenShell install plan" },
     { type: "out", text: "  Release     v0.1.9 (NVIDIA OpenShell upstream installer)" },

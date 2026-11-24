@@ -206,7 +206,8 @@ func TestSetupSaysAnUnmanagedMacGatewayLeftOnVMIsNotReady(t *testing.T) {
 				t.Fatalf("plans %+v, written %d", p, len(ta.gateway.written))
 			}
 			if write {
-				has(t, out, "not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver; then `defenseclaw sandbox run ")
+				has(t, out, "not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver (restarting it stops every ",
+					"); then `defenseclaw sandbox run ")
 				return
 			}
 			has(t, out, "not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the MicroVM driver, where no sandbox starts on a Mac. "+

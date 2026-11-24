@@ -459,6 +459,16 @@ type fakeOpenShell struct {
 	stopped       atomic.Int64
 	// holder is the gateway port's listener: 0 free, else the uid.
 	holder atomic.Int64
+	// others are the account's other OpenShell gateways (OtherGateways).
+	others []string
+	// earlier is the gateway job of an earlier DefenseClaw (EarlierGateway),
+	// which Stop ends; dropDriftOnStop also ends the drift it caused.
+	earlier         string
+	dropDriftOnStop bool
+}
+
+func (f *fakeOpenShell) EarlierGateway(context.Context, sandboxrelay.DaemonSettings) string {
+	return f.earlier
 }
 
 func (f *fakeOpenShell) PortHolder(sandboxrelay.DaemonSettings) (int, bool) {
@@ -467,7 +477,7 @@ func (f *fakeOpenShell) PortHolder(sandboxrelay.DaemonSettings) (int, bool) {
 }
 
 func (f *fakeOpenShell) OtherGateways(context.Context, sandboxrelay.DaemonSettings) []string {
-	return nil
+	return f.others
 }
 
 func (f *fakeOpenShell) Drift(sandboxrelay.DaemonSettings) ([]openshell.SettingDrift, error) {
@@ -486,6 +496,10 @@ func (f *fakeOpenShell) Prepare(_ context.Context, s sandboxrelay.DaemonSettings
 func (f *fakeOpenShell) Stop(context.Context, sandboxrelay.DaemonSettings) bool {
 	f.stopped.Add(1)
 	f.holder.Store(0)
+	f.earlier = ""
+	if f.dropDriftOnStop {
+		f.drift = nil
+	}
 	return true
 }
 func (f *fakeRelay) Relay(context.Context, sandboxrelay.RelayCall) (sandboxrelay.RelayResponse, error) {

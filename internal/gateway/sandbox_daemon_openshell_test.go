@@ -57,11 +57,15 @@ type openShellRig struct {
 	metadata   string
 	// fail makes a command (by prefix) fail with its output.
 	fail map[string]string
-	// active makes the managed gateway unit report active.
+	// active makes the managed gateway unit report active, and state any
+	// other ActiveState (is-active exits 1 with it).
 	active bool
+	state  string
 	// pid and args are the gateway port's listener and its command line.
 	pid  int
 	args string
+	// gatewayVersion is what `openshell-gateway --version` prints.
+	gatewayVersion string
 }
 
 func newOpenShellRig(t *testing.T, goos string) *openShellRig {
@@ -95,6 +99,12 @@ func newOpenShellRig(t *testing.T, goos string) *openShellRig {
 		}
 		if r.active && strings.HasPrefix(line, "systemctl --user is-active ") {
 			return "active", nil
+		}
+		if r.gatewayVersion != "" && line == "openshell-gateway --version" {
+			return r.gatewayVersion, nil
+		}
+		if r.state != "" && strings.HasPrefix(line, "systemctl --user is-active ") {
+			return r.state, errors.New("exit status 3")
 		}
 		return "", nil
 	}
@@ -509,9 +519,34 @@ func TestAccountOpenShellStop(t *testing.T) {
 		t.Fatalf("prerequisite stop: %v", got)
 	}
 	r = newOpenShellRig(t, "linux")
+	r.active = true
 	r.o.Stop(context.Background(), setupSettings())
-	if got := r.ran(); len(got) != 1 || got[0] != "systemctl --user stop "+openShellGatewayUnit {
+	if got := r.ran(); len(got) != 2 || got[1] != "systemctl --user stop "+openShellGatewayUnit {
 		t.Fatalf("stop: %v", got)
+	}
+}
+
+// rel-1-0-10:GAP-1778: `systemctl --user restart` of the managed gateway
+// unit runs its ExecStop, which stops the account's sandboxes through the
+// daemon; the last one's stop made the daemon stop the gateway unit too,
+// and that stop job replaced the restart ("Job ... canceled"), so the
+// gateway and the sandbox stayed stopped until the next sandbox command.
+// A unit the service manager is already stopping or starting is left to
+// it, in both install modes; an inactive one has nothing to stop.
+func TestGAP1778DaemonLeavesAStoppingGatewayUnitToTheServiceManager(t *testing.T) {
+	for _, state := range []string{"deactivating", "activating", "inactive", "failed"} {
+		for _, s := range []sandboxrelay.DaemonSettings{setupSettings(), prerequisiteSettings()} {
+			r := newOpenShellRig(t, "linux")
+			r.state = state
+			if r.o.Stop(context.Background(), s) {
+				t.Fatalf("%s unit, %s mode: Stop reported the gateway stopped", state, s.Enterprise.Install)
+			}
+			for _, c := range r.ran() {
+				if strings.HasPrefix(c, "systemctl --user stop ") {
+					t.Fatalf("%s unit, %s mode: the daemon queued a stop job over the service manager's: %v", state, s.Enterprise.Install, r.ran())
+				}
+			}
+		}
 	}
 }
 
@@ -1525,5 +1560,32 @@ func TestSandboxDaemonStatusNamesTheAgentsRequiredInASandbox(t *testing.T) {
 				t.Fatalf("status managed = %+v, want required_on_host %v", st.Managed, tc.want)
 			}
 		})
+	}
+}
+
+// rel-1-0-10:GAP-2060: a managed Mac account that ran its own Homebrew
+// OpenShell gateway on the organization's gateway port was told, by
+// sandbox run, that its settings differ from the organization's and to
+// ask IT to repair them. The cause was its own gateway, which the account
+// stops itself: the pause names it and how to stop it, as the doctor's
+// Other gateway row does, and does not send the person to IT.
+func TestGAP2060DriftFromTheAccountsOwnGatewayNamesIt(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.resolve = floorResolve
+	f.os.drift = []openshell.SettingDrift{{Field: "OpenShell telemetry", Want: "false", Have: "true"}}
+	f.os.others = []string{"pid 27089: /Users/u/homebrew/opt/openshell/bin/openshell-gateway --config /Users/u/homebrew/var/openshell/gateway.toml"}
+	f.run(t)
+	_, err := sandboxapi.NewUnixClient(f.socket).Create(context.Background(), sandboxapi.CreateRequest{Harness: "claudecode"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		t.Fatalf("drifted create: %v", err)
+	}
+	text := err.Error()
+	for _, want := range []string{"another OpenShell gateway runs in your account (pid 27089: ", "OpenShell telemetry", "`kill 27089`"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("paused by the account's own gateway: %q, want %q in it", text, want)
+		}
+	}
+	if strings.Contains(text, "Ask IT") {
+		t.Fatalf("the account's own gateway sends the person to IT: %q", text)
 	}
 }

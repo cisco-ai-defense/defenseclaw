@@ -532,7 +532,7 @@ func (l *lifecycle) planOpenShell(ctx context.Context, p *plan) error {
 		if a := l.openShellAppliedForPlan(); a != nil && a.Install == config.EnterpriseOpenShellInstallSetup {
 			applied = a.Version
 		}
-		op.downgraded, op.recordOnly = splitAbovePin(env.accountsAboveSetupPin(ctx, settings.Version, applied))
+		op.downgraded, op.recordOnly = splitAbovePin(env.accountsAboveSetupPin(ctx, settings.Version, applied, env.loadOpenShellState().SetupRan))
 		if len(op.downgraded) > 0 && !settings.AllowDowngrade {
 			return errors.New(setupPinDowngradeRefusal(settings.Version, op.downgraded))
 		}
@@ -766,6 +766,14 @@ type openshellState struct {
 	Applied         *openshellApplied  `json:"applied,omitempty"`
 	Pending         map[string]pending `json:"pending,omitempty"`
 	GatewayIdentity string             `json:"gateway_identity,omitempty"`
+	// SetupRan is, by account uid, the setup-mode OpenShell release an
+	// account ran when a switch out of setup mode removed its install
+	// (and with it the install record accountsAboveSetupPin reads), capped
+	// at the setup pin root applied then; only accounts whose gateway
+	// database stayed. A later setup pin below it is refused like one
+	// below the record (rel-1-0-10:GAP-1799). The next setup-mode apply
+	// clears it: the account's daemon then writes a record of its own.
+	SetupRan map[string]string `json:"setup_ran,omitempty"`
 }
 
 // openshellApplied is the sandbox configuration the last committed

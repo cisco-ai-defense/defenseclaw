@@ -261,6 +261,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 				"; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch)"
 			def = noLandlock
 		}
+		if macOS && !vmStarts && rep.OpenShellUpgradeAvailable() && openshell.MicroVMStartsOnMac(openshell.InstallerVersion) {
+			// The question is this OpenShell's; the upgrade step 3 offers
+			// installs one that starts them (rel-1-0-10:GAP-1786).
+			a.note("OpenShell " + openshell.InstallerVersion + " starts MicroVM sandboxes on a Mac: setup offers the upgrade from " + rep.CLIVersion + " after this question")
+		}
 		yes, err := a.ask(question, def, assume)
 		if err != nil {
 			return err
@@ -321,9 +326,23 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	// terminal, checks again once it is changed; one left off ends setup
 	// not ready (GAP-1704).
 	var dockerUnmet []openshell.Check
+	// File sharing is only for the project and settings mounts: the mounts
+	// question comes first, so a no is never told to share the home folder
+	// (rel-1-0-10:GAP-1743). Step 4 takes this answer.
+	var mountsAnswer *bool
+	skipSharing := o.NoMounts
+	if macOS && !microVM && !o.NoMounts {
+		if st, err := a.Gateway.State(); err == nil && !st.BindMounts.Enabled() {
+			yes, err := a.askMounts(assume)
+			if err != nil {
+				return err
+			}
+			mountsAnswer, skipSharing = &yes, !yes
+		}
+	}
 	if macOS && !microVM {
 		for {
-			dockerUnmet = unmetDockerSettings(dockerRep, o.NoMounts)
+			dockerUnmet = unmetDockerSettings(dockerRep, skipSharing)
 			if len(dockerUnmet) == 0 {
 				break
 			}
@@ -480,10 +499,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		changes = microVMChanges(rep, state, a.Geteuid())
 		copyOnly = true
 	} else if !o.NoMounts && !state.BindMounts.Enabled() {
-		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; "+
-			"DefenseClaw mounts only the launch folder and the read-only settings "+strings.Join(mountedSettingsHarnesses(harness.Names()), " and ")+
-			" sandboxes need)", true, assume)
-		if err != nil {
+		var yes bool
+		if mountsAnswer != nil {
+			yes = *mountsAnswer
+		} else if yes, err = a.askMounts(assume); err != nil {
 			return err
 		}
 		changes.EnableBindMounts = yes
@@ -890,8 +909,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
 	case switchTo == openshell.DriverDocker && !leftVM && unmanaged:
-		a.warn("not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver; then `" +
-			CommandName + " run " + cmd + "`")
+		// The restart is the user's, and it stops what runs on the gateway
+		// (rel-1-0-10:GAP-1743).
+		a.warn("not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver (" +
+			a.manualRestartStops(ctx, true, nil) + "); then `" + CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
 	case switchTo == openshell.DriverDocker && !leftVM:
 		a.warn("not ready for sandboxes yet: the gateway still runs the MicroVM driver" + vmWhere + "; restart it on the docker driver (`" +
@@ -1694,6 +1715,14 @@ func (a *App) machineFailure(rep *openshell.DoctorReport, landlockLater bool) er
 		}
 	}
 	return nil
+}
+
+// askMounts asks whether sandboxes mount the project folder (bind mounts
+// on the local gateway); assume answers yes without asking.
+func (a *App) askMounts(assume bool) (bool, error) {
+	return a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; "+
+		"DefenseClaw mounts only the launch folder and the read-only settings "+strings.Join(mountedSettingsHarnesses(harness.Names()), " and ")+
+		" sandboxes need)", true, assume)
 }
 
 // unmetDockerSettings are the Docker Desktop settings a Mac's docker

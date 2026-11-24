@@ -5530,6 +5530,9 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     elif mounts in {"warn", "fail"}:
         off = detail("bind-mounts").startswith("disabled")
         parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
+    # No version at all is no OpenShell yet, which setup installs as its own
+    # release, as Go reads it (openshell.MicroVMStartsOnMac, GAP-1786).
+    vm_version = str(report.get("cli_version") or release).strip()
     # One check per line: joined on one line, the checks after the first
     # few were cut off at 80 columns.
     return SandboxMachineCheck(
@@ -5540,7 +5543,7 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         openshell_attention=attention,
         openshell_upgrade=upgrade,
         openshell_release=release,
-        microvm_starts=mac and microvm_starts_on_mac(str(report.get("cli_version") or release).strip()),
+        microvm_starts=mac and (not vm_version or microvm_starts_on_mac(vm_version)),
     )
 
 
