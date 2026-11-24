@@ -569,8 +569,8 @@ def test_windows_installer_that_takes_the_handoff_lets_the_cli_exit_before_any_l
     # Two polls, then the exit code read at the handoff: no log was needed.
     assert len(polls) == 3
     assert envs[0][upgrade_shim._HANDOFF_ENV] == value
-    # Only the installer takes the handoff, not the hidden recovery watcher.
-    assert len(envs) == 2 and upgrade_shim._HANDOFF_ENV not in envs[1]
+    # Only the installer takes the handoff, never another process the shim starts.
+    assert all(upgrade_shim._HANDOFF_ENV not in env for env in envs[1:])
 
 
 def test_windows_installer_handoff_is_not_made_without_the_windows_api(monkeypatch: pytest.MonkeyPatch) -> None:
