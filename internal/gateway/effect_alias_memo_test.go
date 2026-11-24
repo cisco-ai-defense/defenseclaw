@@ -112,3 +112,49 @@ func TestEffectAliasMemoRelinkAndDeleteInvalidate(t *testing.T) {
 		t.Fatalf("deleted alias retained credential proof: %+v", got)
 	}
 }
+
+func TestAliasMemoSurvivesCdAndRefreshesTTL(t *testing.T) {
+	var memo effectAliasMemo
+	request := shadowLiveRequest("")
+	request.sessionID = "gap2074"
+	const alias = "/home/u/work/alias"
+	linked, facts := aliasMemoFixture(alias)
+	memo.remember(request, linked, facts, effects.FlavorPOSIX)
+	request.Input.CWD = "/home/u/elsewhere"
+	read := effects.Result{Effects: []effects.Effect{{Kind: effects.KindRead,
+		TargetState: effects.TargetStateKnown, RoleState: effects.RoleStateKnown,
+		Target: effects.Target{Path: alias}}}}
+	key, ok := aliasKey(request)
+	if !ok {
+		t.Fatal("valid session key rejected after working folder change")
+	}
+	if got := memo.uses(request, read); len(got) != 1 {
+		t.Fatalf("absolute alias after cd: proofs %+v, want one", got)
+	}
+	// A use near the end of the interval starts another full interval for
+	// both the session and the alias. Simulate elapsed time without sleeping.
+	for i := 0; i < 2; i++ {
+		memo.mu.Lock()
+		s := memo.sessions[key]
+		if s == nil {
+			memo.mu.Unlock()
+			t.Fatal("session lost after a valid alias use")
+		}
+		old := time.Now().Add(-effectAliasTTL + time.Minute)
+		s.at = old
+		entry := s.aliases[alias]
+		entry.at = old
+		s.aliases[alias] = entry
+		memo.mu.Unlock()
+		if got := memo.uses(request, read); len(got) != 1 {
+			t.Fatalf("use %d near TTL: proofs %+v, want one", i, got)
+		}
+		memo.mu.Lock()
+		s = memo.sessions[key]
+		if s == nil || time.Since(s.at) > time.Minute || time.Since(s.aliases[alias].at) > time.Minute {
+			memo.mu.Unlock()
+			t.Fatal("valid alias use did not refresh session and alias TTL")
+		}
+		memo.mu.Unlock()
+	}
+}

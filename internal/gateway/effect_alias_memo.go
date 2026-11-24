@@ -25,7 +25,7 @@ const (
 )
 
 type effectAliasKey struct {
-	connector, session, home, cwd string
+	connector, session, home string
 }
 type effectAliasEntry struct {
 	proof decide.Proof
@@ -56,12 +56,10 @@ func aliasKey(request trustedActionRequest) (effectAliasKey, bool) {
 		connector: strings.TrimSpace(request.Connector),
 		session:   strings.TrimSpace(request.sessionID),
 		home:      request.Input.ActiveHome,
-		cwd:       request.Input.CWD,
 	}
 	return key, key.connector != "" && len(key.connector) <= 64 &&
 		key.session != "" && len(key.session) <= effectAliasMaxSessionBytes &&
-		key.home != "" && len(key.home) <= effectAliasMaxPathBytes &&
-		key.cwd != "" && len(key.cwd) <= effectAliasMaxPathBytes
+		key.home != "" && len(key.home) <= effectAliasMaxPathBytes
 }
 
 func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Result) []effectAliasUse {
@@ -107,6 +105,9 @@ func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Resu
 			delete(session.aliases, e.Target.Path)
 			continue
 		}
+		entry.at = now
+		session.aliases[e.Target.Path] = entry
+		session.at = now
 		p := entry.proof
 		p.Kind = kind
 		uses = append(uses, effectAliasUse{proof: p, effect: i})
