@@ -5163,7 +5163,13 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				}
 				if archiveMayLink(program, words[1:], static[1:]) &&
 					!archiveExtractionHoldsNoLink(file, call, program, words[1:], static[1:], dir, command, home, facts, record) {
-					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
+					destination := archiveDestination(program, words[1:], static[1:], dir)
+					if destination == "" {
+						// A PowerShell call of a Windows home names its folder in
+						// PowerShell words (GAP-1634).
+						destination = psArchiveCallDestination(command[call.Pos().Offset():call.End().Offset()], program, dir, home)
+					}
+					links.unknownIn(destination)
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
 					destination := archiveDestination(program, words[1:], static[1:], dir)

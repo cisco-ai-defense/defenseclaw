@@ -382,7 +382,20 @@ func psNativeExtractor(name string) (string, bool) {
 // are written. A whole archive the text before the call names (a Copy-Item
 // onto it) is staged (psNativeArchiveWords).
 func psNativeArchiveCall(command *psparse.Command, program, cwd, home, text string, read *archiveExtractionScan) {
-	words, static := []string{program}, []bool{true}
+	words, static := psNativeArchiveCallWords(command, program, home)
+	if len(command.Redirs) == 0 && archiveListing(words, static) {
+		start, end := command.Span()
+		read.listings = append(read.listings, archiveListingSpan{text: text, start: start, end: end})
+		return
+	}
+	psNativeArchiveWords(command, words, static, cwd, text, read)
+}
+
+// psNativeArchiveCallWords are the words PowerShell hands the native
+// extractor program of command (psNativeArchiveCall): the program, then each
+// element read by psNativeWord, then the --% words as written.
+func psNativeArchiveCallWords(command *psparse.Command, program, home string) (words []string, static []bool) {
+	words, static = []string{program}, []bool{true}
 	add := func(word string, known bool) {
 		if !known {
 			word = ""
@@ -404,12 +417,42 @@ func psNativeArchiveCall(command *psparse.Command, program, cwd, home, text stri
 	for _, field := range strings.Fields(command.StopParsing) {
 		add(psSlashWord(field), true)
 	}
-	if len(command.Redirs) == 0 && archiveListing(words, static) {
-		start, end := command.Span()
-		read.listings = append(read.listings, archiveListingSpan{text: text, start: start, end: end})
-		return
+	return words, static
+}
+
+// psArchiveCallDestination is the folder a native extractor call extracts
+// in when PowerShell runs it (GAP-1634): text is the one call, read with the
+// words PowerShell hands the program, so -C $env:USERPROFILE\.defenseclaw is
+// that folder of the home, where the POSIX reading of the same text has no
+// static word and the extraction could write anywhere. It is read only for
+// a Windows home (a drive path): there the agent's shell is PowerShell and
+// these spellings are its own; elsewhere, and for a call it cannot read as
+// one native extractor call, it is "" (anywhere), as before.
+func psArchiveCallDestination(text, program, cwd, home string) string {
+	if len(home) < 3 || home[1] != ':' || !strings.ContainsAny(text, `$\`) {
+		return ""
 	}
-	psNativeArchiveWords(command, words, static, cwd, text, read)
+	script, _ := psparse.Parse(text, psparse.Options{Dialect: psparse.DialectUnknown})
+	if script == nil || len(script.Diagnostics) > 0 {
+		return ""
+	}
+	destination, calls := "", 0
+	psparse.WalkCommands(script, func(command *psparse.Command) {
+		calls++
+		name, ok := psparse.LiteralString(command.Name)
+		if !ok {
+			return
+		}
+		if found, ok := psNativeExtractor(strings.ToLower(name)); !ok || found != program {
+			return
+		}
+		words, static := psNativeArchiveCallWords(command, program, home)
+		destination = archiveDestination(program, words[1:], static[1:], cwd)
+	})
+	if calls != 1 {
+		return ""
+	}
+	return destination
 }
 
 // psNativeArchiveWords reads the words of one native extractor call. A whole

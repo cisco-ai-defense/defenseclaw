@@ -48,6 +48,10 @@ func TestGAP1138DotNetFileOpensDevinAndAntigravity(t *testing.T) {
 // it) and a path relative to the working directory, for the write cmdlets,
 // the redirect and the .NET writes and opens of the shared reader.
 func TestGAP1138PowerShellWriteSpellings(t *testing.T) {
+	// The shipped effects lane judges beside the readers (a test has no live
+	// generation, so it is off unless set): the managed-peer relative and ~
+	// cells are placed by its path resolver (rel-1-0-10:GAP-1191).
+	useDefaultEffectsLane(t)
 	var forms []gap1138Form
 	for _, form := range gap1115Forms {
 		switch form.id {
