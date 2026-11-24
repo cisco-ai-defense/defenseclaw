@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -76,6 +77,18 @@ const (
 	maxCredentialPathWalkLookups = 1024
 	credentialPathWalkWorkers    = 4
 )
+
+// credentialPathWalkSlots bounds the walks the process runs at once to
+// max(2, GOMAXPROCS/4) (substrate-1:GAP-0674). The gateway answers many hook
+// calls at once, up to a caller's 64 in flight, and each call that searches a
+// folder recursively walks it. On Windows a walk of 2,047 folders under
+// 2,000-character paths costs about 26 MB and 0.2 s of system calls, so 64
+// of them at once held every walk's found paths and slowed one another: the
+// gateway peaked at 1.3 to 2.3 GB on 2,048 such calls in a minute (1.0.10,
+// which walks nothing: 0.45 to 0.6 GB). A walk waits for a slot before it
+// reads anything, so a call that waits holds none of the walk's memory, and
+// the walk's result is the one it would have had: nothing is cut or skipped.
+var credentialPathWalkSlots = make(chan struct{}, max(2, runtime.GOMAXPROCS(0)/4))
 
 // MaxCredentialPathCandidates is the candidate cap of the resolve
 // (bounded.Items), for the gateway's bound-rule lane test.
@@ -1827,6 +1840,8 @@ type credentialPathWalkResult struct {
 // are named only once it is known to fit (credentialPathFolderScan keeps
 // the names), so a level that does not fit costs no path either.
 func credentialPathWalk(dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits) (walk credentialPathWalkResult) {
+	credentialPathWalkSlots <- struct{}{}
+	defer func() { <-credentialPathWalkSlots }()
 	groups := credentialProbeFirstSegments()
 	budget := credentialPathWalkBudget{limits: limits}
 	folders := int64(0)
@@ -1934,7 +1949,7 @@ type credentialWalkFolder struct {
 
 // scan reads one folder (readCredentialWalkFolder).
 func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter credentialWalkFilter, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
-	readCredentialWalkFolder(folder.dir, func(name []byte, isDir bool) bool {
+	readCredentialWalkFolder(folder.dir, func(name []byte, isDir, regular bool) bool {
 		if !b.take(&b.entries, b.limits.entries) {
 			return false
 		}
@@ -1946,7 +1961,13 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter cred
 				return false
 			}
 			file := filepath.Join(folder.dir, filepath.FromSlash(probe.value))
-			if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+			if regular && probe.value == string(name) {
+				// The entry is the probe's file, a regular file as the folder
+				// read has it: no lookup of it by its path (on Windows, a
+				// 2,000-character path costs a 7 KB conversion and a
+				// system call for each of up to 1,024 files, substrate-1:GAP-0674).
+				s.found = append(s.found, file)
+			} else if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
 				s.found = append(s.found, file)
 			}
 		}
