@@ -61,7 +61,7 @@ func TestGAP1067ShellConnectorsNeverWeakerThanClaudeCodePowerShellOnWindows(t *t
 				claude := shapeParityHook(t, handler("claudecode"), shapeParityCall{name: "claudecode/PowerShell", conn: "claudecode",
 					event: "PreToolUse", body: shapeParityEnvelope("PreToolUse", cwd, "PowerShell", args)}, p.managed)
 				seen := map[string]bool{}
-				for _, call := range shapeParityNative("Bash", args, cwd) {
+				for _, call := range append(shapeParityNative("Bash", args, cwd), shapeParityNativeMore("Bash", args, cwd)...) {
 					if !routes[call.name] {
 						continue
 					}
@@ -73,7 +73,7 @@ func TestGAP1067ShellConnectorsNeverWeakerThanClaudeCodePowerShellOnWindows(t *t
 				}
 				for name := range routes {
 					if !seen[name] {
-						t.Errorf("%s: route %s not rendered by shapeParityNative; the pin no longer covers it", p.name, name)
+						t.Errorf("%s: route %s not rendered by shapeParityNative/More; the pin no longer covers it", p.name, name)
 					}
 				}
 			}
