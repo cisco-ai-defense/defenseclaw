@@ -203,7 +203,6 @@ func closeBifrostTenantsAfter(t *testing.T) {
 	})
 }
 
-
 // GAP-1760: a tenant client nobody asks for any more (a rotated key, a changed
 // base_url) was shut down only when 256 newer tenants pushed it out, and held
 // 1000 idle request workers until then. A new tenant now releases the clients
