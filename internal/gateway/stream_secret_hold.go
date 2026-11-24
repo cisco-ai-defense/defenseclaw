@@ -252,6 +252,11 @@ func (s *secretLane) giveUp(t string) {
 	s.tokenFrom = len(t)
 }
 
+// endRun ends the token or digit run open at the end of t: the lane has
+// ended (rel-1-0-10:GAP-2154), so the run is whole. A run that starts in
+// text added later is held as before.
+func (s *secretLane) endRun(t string) { s.tokenFrom = len(t) }
+
 // pemLineEnd finds the end of the line that starts at start: a line feed,
 // or the two characters backslash n of JSON-escaped text (tool arguments);
 // a carriage return before it, plain or escaped, is not part of the line.

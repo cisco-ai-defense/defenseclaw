@@ -22,7 +22,17 @@ const responseFieldOther responseField = 200
 // withWalkerPieces adds to typed the walker's strings of the same event or
 // body that no typed piece holds.
 func withWalkerPieces(typed []responsePiece, segs []string) []responsePiece {
-	out := typed
+	// A lane end (GAP-2154) goes after the walker's strings of the same
+	// event, so it ends them too.
+	var ends []responsePiece
+	out := typed[:0:0]
+	for _, p := range typed {
+		if p.end {
+			ends = append(ends, p)
+		} else {
+			out = append(out, p)
+		}
+	}
 	for _, seg := range segs {
 		if seg == "" {
 			continue
@@ -38,7 +48,7 @@ func withWalkerPieces(typed []responsePiece, segs []string) []responsePiece {
 			out = append(out, responsePiece{lane: responseLane{field: responseFieldOther}, text: seg})
 		}
 	}
-	return out
+	return append(out, ends...)
 }
 
 // passthroughReplyText is the model text of a buffered reply: the typed
