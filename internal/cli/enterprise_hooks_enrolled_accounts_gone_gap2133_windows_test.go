@@ -76,7 +76,10 @@ func TestGAP2133AnAccountWhoseProfileDiskIsGoneStaysEnrolled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// previous carries alice back in; the record itself must keep her too.
+	if !recorded[enterpriseHookEnrolledAccountKey(domainSID)] {
+		t.Fatal("GAP-2133: the account whose profile disk is gone left the enrolled-accounts record on the pass that marked its row removed")
+	}
+	// Without previous, the record itself must keep her too.
 	if err := recordEnterpriseHookEnrolledAccounts(authorizationDir, "t3", nil, nil, []enterpriseHookReconcileRow{gone}); err != nil {
 		t.Fatal(err)
 	}

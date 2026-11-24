@@ -128,16 +128,6 @@ func forgetTrustedMachineRoot(value string) {
 	}
 }
 
-// resetTrustedMachineRootCache drops every entry; tests use it.
-func resetTrustedMachineRootCache() {
-	trustedMachineRootCache.Lock()
-	defer trustedMachineRootCache.Unlock()
-	for value, entry := range trustedMachineRootCache.entries {
-		delete(trustedMachineRootCache.entries, value)
-		closeTrustedMachineRootWatches(entry.watches)
-	}
-}
-
 // openTrustedMachineRootWatches opens a change notification on every strict
 // ancestor of value, or returns nil (do not cache) when value is not a clean
 // absolute path or any notification cannot be opened.

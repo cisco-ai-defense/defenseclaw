@@ -37,7 +37,13 @@ func freshMachineRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Clean(resolved)
+	clean := filepath.Clean(resolved)
+	// The root leaves the cache when the test ends: its change notifications
+	// close before t.TempDir removes the folders, and the roots of earlier
+	// tests (-count=N) never fill the cache (trustedMachineRootCacheMaxEntries)
+	// so that a later root is not kept.
+	t.Cleanup(func() { forgetTrustedMachineRoot(clean) })
+	return clean
 }
 
 // GAP-0011 (red at the base): one root validated 200 times in a burst ran
