@@ -183,6 +183,7 @@ type OpenShellConfig struct {
 	Egress            OpenShellEgressConfig    `mapstructure:"egress"             yaml:"egress,omitempty"`
 	Image             OpenShellImageConfig     `mapstructure:"image"              yaml:"image,omitempty"`
 	Approvals         OpenShellApprovalsConfig `mapstructure:"approvals"          yaml:"approvals,omitempty"`
+	Vault             OpenShellVaultConfig     `mapstructure:"vault"              yaml:"vault,omitempty"`
 	Resources         OpenShellResourcesConfig `mapstructure:"resources"          yaml:"resources,omitempty"`
 	Harnesses         []string                 `mapstructure:"harnesses"          yaml:"harnesses,omitempty"`
 	Wrappers          []string                 `mapstructure:"wrappers"           yaml:"wrappers,omitempty"`
@@ -338,6 +339,21 @@ type OpenShellApprovalsConfig struct {
 // accepted for triage (default true).
 func (a OpenShellApprovalsConfig) AgentProposalsEnabled() bool {
 	return a.AgentProposals == nil || *a.AgentProposals
+}
+
+// OpenShellVaultConfig tunes the sandbox credential vault.
+type OpenShellVaultConfig struct {
+	// AutoCapture moves a secret with a well-known issuer shape that shows
+	// up in a sandboxed agent's hook call (a prompt, a tool call, a tool's
+	// output, the agent's reply) into the account's vault and answers the
+	// call with the strongest answer its event has; nil means true.
+	AutoCapture *bool `mapstructure:"auto_capture" yaml:"auto_capture,omitempty"`
+}
+
+// AutoCaptureEnabled reports whether sandbox hook calls capture secrets
+// into the vault (default true).
+func (v OpenShellVaultConfig) AutoCaptureEnabled() bool {
+	return v.AutoCapture == nil || *v.AutoCapture
 }
 
 // OpenShellResourcesConfig is a sandbox resource request (or, under Admin, a

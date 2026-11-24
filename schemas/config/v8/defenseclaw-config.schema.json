@@ -939,6 +939,9 @@
         "approvals": {
           "$ref": "#/$defs/openShellApprovals"
         },
+        "vault": {
+          "$ref": "#/$defs/openShellVault"
+        },
         "resources": {
           "$ref": "#/$defs/openShellResources"
         },
@@ -1253,6 +1256,19 @@
           "default": 3000
         },
         "agent_proposals": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": true
+        }
+      }
+    },
+    "openShellVault": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_capture": {
           "type": [
             "boolean",
             "null"

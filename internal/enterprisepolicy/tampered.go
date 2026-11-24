@@ -54,8 +54,11 @@ func TamperedDropIns(opts Options) []string {
 // managed block or marked line was changed, removed or moved, a line was
 // added before DefenseClaw's managed settings block or after its managed
 // hooks block (TOML puts a key there in DefenseClaw's last table), or an
-// administrator value now disables the managed hooks. opts must carry the deployed config, which renders the
-// managed content. The standalone Unix hook guardian checks it between
+// administrator value now disables the managed hooks, the file as a whole no
+// longer parses or carries the managed hooks (an administrator table that
+// collides with DefenseClaw's hook arrays, GAP-1966), or its byte order mark
+// was added or removed. opts must carry the deployed config, which renders
+// the managed content. The standalone Unix hook guardian checks it between
 // lifecycle runs and starts the restore, as for the drop-ins, because such
 // an edit left the file unhealed until an administrator ran a lifecycle
 // action (GAP-1928). An edit of the administrator's own text alone (a
@@ -80,6 +83,21 @@ func TamperedCodexRequirements(opts Options) (string, bool) {
 	}
 	rendered, conflicts, err := renderCodex(opts, stripCodexOwned(current), policy)
 	if err != nil || rendered == nil || len(conflicts) != 0 || !bytes.Equal(rendered, current) {
+		return path, true
+	}
+	// The same probe reconcile runs on the document it would write: a file
+	// that re-renders to itself can still not parse as a whole (a
+	// [hooks.<Event>] table between the blocks redefines DefenseClaw's hook
+	// array) or lack a managed hook, and Codex then runs without them.
+	var probe State
+	if inspectCodex(opts, current, policy, &probe) != nil || len(codexMissingHookConflicts(probe)) > 0 {
+		return path, true
+	}
+	// A byte order mark is the administrator's text's, and the render keeps
+	// it as it finds it, so adding or removing one alone re-renders to the
+	// file; it is still not what DefenseClaw published, and verify fails.
+	if record, err := loadRecord(opts, codexConnector); err == nil && record != nil &&
+		bytes.HasPrefix(current, utf8BOM) != bytes.HasPrefix(record.Preimage, utf8BOM) {
 		return path, true
 	}
 	return "", false

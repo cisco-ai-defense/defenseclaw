@@ -127,7 +127,8 @@ func TestGAP1928TamperedCodexRequirementsIsFoundAndPutBackByEnsure(t *testing.T)
 				}
 				ensure := c.run(Options{Action: ActionEnsure, Reason: "path"})
 				requireOK(t, ensure)
-				if !strings.Contains(strings.Join(ensure.Changes, "\n"), "put back DefenseClaw's codex machine policy") {
+				// The tampered file is kept beside it (GAP-1967).
+				if !strings.Contains(strings.Join(ensure.Changes, "\n"), "restored the published codex machine policy") {
 					t.Fatalf("ensure did not report the restore: changes %v noop %v %q warnings %v\n%s", ensure.Changes, ensure.Noop, ensure.NoopReason, ensure.Warnings, c.read(codexRequirements))
 				}
 				c.requireHealed(t, "ensure")

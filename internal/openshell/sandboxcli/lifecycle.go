@@ -620,6 +620,10 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	}
 	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {
+		// The vault is sealed before the sandbox can capture into it.
+		if err := a.sealVault(); err != nil {
+			return err
+		}
 		a.note("starting " + sb.Name + "…")
 		before := sb
 		startedSandbox, retained, startErr := a.startSandbox(ctx, api, before, StartOptions{}, true)
@@ -1291,6 +1295,10 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 	if sb.Phase == "ready" {
 		a.ok(sb.Name + " is already running → attach with `" + CommandName + " connect " + sb.Name + "`")
 		return nil
+	}
+	// The vault is sealed before the sandbox can capture into it.
+	if err := a.sealVault(); err != nil {
+		return err
 	}
 	kept := false
 	if sb, kept, err = a.startSandbox(ctx, api, sb, o, false); err != nil {

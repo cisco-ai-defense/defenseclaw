@@ -1384,6 +1384,9 @@ var (
 	defenseClawRelaxVerbs = map[string]bool{
 		"use-pack": true, "suppress": true, "severity": true, "trusted-paths": true,
 		"allow-private-upstream": true, "migrate": true,
+		// `sandbox vault confirm` lets sandboxes use a captured secret; an
+		// agent could confirm a value it planted itself (GAP-1978).
+		"confirm": true,
 	}
 	// defenseClawReadFlags make the call run nothing: help, version, and the
 	// check and dry-run switches of the commands that have them.

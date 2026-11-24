@@ -56,6 +56,9 @@ type RunOptions struct {
 	HostPorts []int
 	// Credentials are --credential NAME=host[:port].
 	Credentials []string
+	// Vault are --vault NAME: secrets from the account's vault, each bound
+	// to the host the vault keeps for it.
+	Vault       []string
 	GitHubWrite bool
 	NoMCP       bool
 	ProcessTree bool
@@ -251,6 +254,10 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if note := copyPolicyNote(ex, o, drv); note != "" {
 		a.note(note)
 	}
+	// The vault is sealed before a sandbox can capture a secret into it.
+	if err := a.sealVault(); err != nil {
+		return err
+	}
 
 	// Resume this folder's sandbox instead of starting another. The
 	// sandbox keeps the settings it was created with, so flags that only a
@@ -392,7 +399,14 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		}
 		return problem
 	}
-	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
+	rec := newRunLaunch(sb, spec, o, llm)
+	rec.VaultVersions = a.vaultVersions(o.Vault)
+	a.saveRunLaunch(sb, rec)
+	if len(o.Vault) > 0 {
+		if err := a.vault().MarkUsed(o.Vault, sb.Name); err != nil {
+			a.note("could not record the vault secrets' use: " + err.Error())
+		}
+	}
 	a.warnUnkeptOptionValue(spec, o.Args)
 	autoRm := a.headlessRm(o, headless)
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless,
@@ -1607,6 +1621,10 @@ func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox, run *runLaunch) []strin
 		slices.ContainsFunc(o.Credentials, func(spec string) bool {
 			return !slices.ContainsFunc(sb.Credentials, func(c sandboxapi.CredentialGrant) bool { return grantMatches(spec, c) })
 		}), "--credential")
+	add(len(o.Vault) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Vault, r.Vault) }) &&
+		slices.ContainsFunc(o.Vault, func(name string) bool {
+			return !slices.ContainsFunc(sb.Credentials, func(c sandboxapi.CredentialGrant) bool { return c.Name == name })
+		}), "--vault")
 	add(o.GitHubWrite && !had(func(r *runLaunch) bool { return r.GitHubWrite }) && !slices.ContainsFunc(sb.Credentials, githubWrite), "--github-write")
 	add(o.NoMCP && !had(func(r *runLaunch) bool { return r.NoMCP }), "--no-mcp")
 	add(o.ProcessTree && !sb.ProcessTree, "--process-tree")
@@ -1695,6 +1713,21 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 		}
 		reserved[b.Name] = true
 		req.Credentials = append(req.Credentials, b)
+	}
+	if len(o.Vault) > 0 {
+		st := a.vault()
+		for _, name := range o.Vault {
+			name = strings.TrimSpace(name)
+			if reserved[name] {
+				return req, llmChoice{}, fmt.Errorf("%s is given twice (--vault and --credential, or --vault twice)", name)
+			}
+			e, value, err := st.Resolve(name)
+			if err != nil {
+				return req, llmChoice{}, fmt.Errorf("--vault %s: %w", name, err)
+			}
+			reserved[name] = true
+			req.Credentials = append(req.Credentials, sandboxapi.CredentialBinding{Name: e.Name, Value: value, Host: e.Host, Port: e.Port})
+		}
 	}
 	if o.GitHubWrite {
 		token := a.githubToken()
@@ -2233,6 +2266,9 @@ func bannerCredentials(sb *sandboxapi.Sandbox, o RunOptions) []string {
 			out = append(out, name+" → "+host+" only")
 		}
 	}
+	for _, name := range o.Vault {
+		out = append(out, name+" (from your vault)")
+	}
 	if o.GitHubWrite {
 		out = append(out, githubWriteText)
 	}
@@ -2283,6 +2319,7 @@ func resumeGrants(o RunOptions, sb *sandboxapi.Sandbox) []string {
 				out = append(out, "--github-write (the GitHub token for api.github.com)")
 				github = true
 			}
+		case !githubWrite(c) && slices.Contains(o.Vault, c.Name):
 		case !githubWrite(c) && !slices.ContainsFunc(o.Credentials, func(spec string) bool { return grantMatches(spec, c) }):
 			out = append(out, "--credential "+c.Name+" → "+grantEndpoint(c))
 		}

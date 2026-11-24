@@ -88,6 +88,8 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # migrate puts it back only on that item (rel-1-0-10:GAP-0644).
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
+    # The sandbox vault block (openshell.vault, with auto_capture) is new in 1.0.11.
+    ("openshell.vault", (1, 0, 11)),
     ("guardrail.internal_domains", (1, 0, 6)),
     ("guardrail.chains", (1, 0, 6)),
     ("connectors", (1, 0, 6)),
@@ -140,6 +142,8 @@ NEWER_CONFIG_KEYS = (
     ("notifications.substrate", (1, 0, 11)),
     ("notifications.substrate.asks", (1, 0, 11)),
     ("notifications.substrate.task_end", (1, 0, 11)),
+    # Under substrate (1.0.10), so a downgrade to 1.0.10 kept it (GAP-2035).
+    ("substrate.bundles.oci", (1, 0, 11)),
 )
 # More keys added after 1.0.9, in the same path language: a "*" segment is
 # one entry of a map of named entries (a connector, a profile). 1.0.9

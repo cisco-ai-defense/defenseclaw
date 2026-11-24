@@ -671,7 +671,7 @@ These problems appear while a sandbox runs or when you pull its work back. Befor
 
 **You see:** ``⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)``, ``⚠ the harness is active but its hooks are silent; stopping the sandbox (hooks.on_silence: stop)``, or `silent!` in `sandbox list`.
 
-**Cause:** a tool ran without a DefenseClaw verdict, or the harness worked for `hooks.silence_after` (10 minutes in every built-in pack) without a hook request reaching DefenseClaw. `hooks.on_tamper` is `alert` in `open` and `stop` in `balanced` and `strict`. A managed-tier harness (Claude Code, Codex, GitHub Copilot CLI, Cursor Agent) only alerts on silence.
+**Cause:** a tool ran without a DefenseClaw verdict, or the harness worked for `hooks.silence_after` (10 minutes in every built-in pack) without a hook request reaching DefenseClaw. `hooks.on_tamper` is `alert` in `open` and `stop` in `balanced` and `strict`. A managed-tier harness (Claude Code, Codex, GitHub Copilot CLI) only alerts on silence.
 
 **Fix:** review the activity and stop or delete the sandbox if you did not expect it. Resume a stopped one with `defenseclaw sandbox connect NAME`. Silence detection is a backstop: the file and network boundaries hold either way.
 

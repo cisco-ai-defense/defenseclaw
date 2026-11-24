@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"os"
@@ -23,6 +24,50 @@ import (
 // it; the gateway recomputes it only when PolicyViewStamp changes, never on
 // a hook call.
 func PolicyViewDigest(opts Options, connector string) (string, error) {
+	return policyViewDigest(opts, connector, nil)
+}
+
+// ErrCodexRequirementsChanged is PublishedCodexPolicyViewDigest's error for
+// a Codex requirements file that is not the bytes DefenseClaw last wrote.
+var ErrCodexRequirementsChanged = errors.New("requirements.toml changed after DefenseClaw published it")
+
+// PublishedCodexPolicyViewDigest is the Codex PolicyViewDigest a publish
+// pins: it hashes the requirements file only while the bytes it read are
+// the ones the ownership record says DefenseClaw wrote, so the pin comes
+// from the very bytes it checked and a write between a check and a second
+// read is never pinned (GAP-1928).
+func PublishedCodexPolicyViewDigest(opts Options) (string, error) {
+	path, err := CodexRequirementsPath(opts)
+	if err != nil {
+		return "", err
+	}
+	record, err := loadRecord(opts, codexConnector)
+	if err != nil {
+		return "", err
+	}
+	if !publishedByRecord(record, path) {
+		return "", ErrCodexRequirementsChanged
+	}
+	checked := false
+	digest, err := policyViewDigest(opts, codexConnector, func(name string, data []byte, exists bool) error {
+		if name != path {
+			return nil
+		}
+		checked = true
+		if !exists || sha256Hex(data) != record.PostimageSHA256 {
+			return ErrCodexRequirementsChanged
+		}
+		return nil
+	})
+	if err == nil && !checked {
+		return "", fmt.Errorf("the codex policy view does not read %s", path)
+	}
+	return digest, err
+}
+
+// policyViewDigest is PolicyViewDigest with check run on the bytes read of
+// each source before they are hashed; its error stops the digest.
+func policyViewDigest(opts Options, connector string, check func(path string, data []byte, exists bool) error) (string, error) {
 	names, skipIfUntrusted, err := policyViewSources(opts, connector)
 	if err != nil {
 		return "", err
@@ -39,6 +84,11 @@ func PolicyViewDigest(opts Options, connector string) (string, error) {
 		}
 		if err != nil {
 			return "", fmt.Errorf("read %s policy view: %w", connector, err)
+		}
+		if check != nil {
+			if err := check(path, data, exists); err != nil {
+				return "", err
+			}
 		}
 		digestField(digest, []byte(path))
 		if exists {

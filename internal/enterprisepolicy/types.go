@@ -295,6 +295,12 @@ type State struct {
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`
+	// SavedEdit is where this publish kept the edited file it replaced with
+	// the published one (Codex requirements.toml on Linux and macOS).
+	SavedEdit string `json:"saved_edit,omitempty"`
+	// ReplacedLink is the target of the symbolic link this publish replaced
+	// with the published file.
+	ReplacedLink string `json:"replaced_link,omitempty"`
 	// replacing holds the untrusted files a reconcile replaces at
 	// DefenseClaw's own drop-in names (replaceUntrustedPolicyFile).
 	replacing map[string]policyFileBase

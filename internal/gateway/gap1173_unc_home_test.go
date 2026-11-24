@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // rel-1-0-10:GAP-1173: a UNC home (\\server\share\user, a redirected or
@@ -24,7 +23,7 @@ func TestGAP1173UNCHomeArchiveState(t *testing.T) {
 	}
 	const share = `\\dc-test-srv\home$`
 	var asked atomic.Int32
-	restore := hookpaths.OverrideNetworkSharesForTest(func(name string) string {
+	restore := overrideNetworkSharesIdle(t, func(name string) string {
 		if strings.HasPrefix(strings.ToLower(name), strings.ToLower(share)) {
 			return share
 		}

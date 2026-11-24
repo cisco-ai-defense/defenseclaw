@@ -1346,9 +1346,17 @@ func runConnectorRecoverConfig(cmd *cobra.Command, _ []string) error {
 // downgrade returns to predates route-only (1.0.10); an unknown or
 // unreadable target counts as older, the safe direction.
 func rollbackTargetLacksRouteOnly(target string) bool {
-	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(target), "v"), ".")
+	nums, ok := releaseNumber(target)
+	return !ok || releaseBefore(nums, [3]int{1, 0, 10})
+}
+
+// releaseNumber is the major, minor and patch number of a release version
+// (v1.0.10, 1.0.10); false when it has fewer than three numbers or one is
+// not a number.
+func releaseNumber(version string) ([3]int, bool) {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(version), "v"), ".")
 	if len(parts) < 3 {
-		return true
+		return [3]int{}, false
 	}
 	nums := [3]int{}
 	for i := 0; i < 3; i++ {
@@ -1356,11 +1364,21 @@ func rollbackTargetLacksRouteOnly(target string) bool {
 		// 1.0.11~rc1) does not change the release number.
 		n, err := strconv.Atoi(strings.FieldsFunc(parts[i]+"-", func(r rune) bool { return r == '-' || r == '+' || r == '~' })[0])
 		if err != nil {
-			return true
+			return [3]int{}, false
 		}
 		nums[i] = n
 	}
-	return nums[0] < 1 || (nums[0] == 1 && nums[1] == 0 && nums[2] < 10)
+	return nums, true
+}
+
+// releaseBefore reports whether release a is older than release b.
+func releaseBefore(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }
 
 // managedRouteOnlyConnectors lists the agents a standalone managed
