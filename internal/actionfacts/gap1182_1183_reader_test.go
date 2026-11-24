@@ -131,6 +131,7 @@ func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
 		{"chroot named root", "chroot /srv/root sh -c ': >> home/u/.defenseclaw/config.yaml'", "/srv/root", false},
 		{"chroot skip chdir", "chroot --skip-chdir / sh -c ': >> .defenseclaw/config.yaml'", "/home/u", false},
 		{"nsenter wd", "nsenter --target=1 --wd=/ sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
+		{"nsenter relative parent", "nsenter --target=1 --wd=.. sh -c ': >> u/.defenseclaw/config.yaml'", "/home", false},
 		{"nsenter target wd", "nsenter --target=1 --wd sh -c ': >> .defenseclaw/config.yaml'", "", true},
 		{"nsenter target root", "nsenter --target=1 --root sh -c ': >> .defenseclaw/config.yaml'", "", true},
 	} {
@@ -139,7 +140,8 @@ func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
 			got := SimpleCommands(input, Analyze(input))
 			if !slices.ContainsFunc(got, func(s SimpleCommand) bool {
 				return s.Text == ": >> home/u/.defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown ||
-					s.Text == ": >> .defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown
+					s.Text == ": >> .defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown ||
+					s.Text == ": >> u/.defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown
 			}) {
 				t.Errorf("child folder want %q unknown=%v: %+v", row.cwd, row.unknown, got)
 			}
