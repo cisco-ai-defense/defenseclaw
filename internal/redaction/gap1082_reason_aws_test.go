@@ -55,11 +55,24 @@ func TestIsCanonicalIDRefusesAKeyAndATrailingSeparatorGAP1082(t *testing.T) {
 			}
 		}
 	}
-	for _, id := range []string{"SEC-AWS-KEY-", "SEC-AWS-KEY.", "PII-SSN-US:", "CODEGUARD-0-XSS/", "_SEC-X", "SEC-X_"} {
-		if strings.HasSuffix(id, "-") || strings.HasSuffix(id, ".") || strings.HasSuffix(id, ":") || strings.HasSuffix(id, "/") || strings.HasSuffix(id, "_") {
-			if isCanonicalID(id) {
-				t.Errorf("isCanonicalID(%q) accepts a value that ends in a separator", id)
-			}
+	// A rule id at the end of a sentence is still a rule id (RV-SEC2): only
+	// a key id hidden by the trailing separators is refused.
+	for _, id := range []string{"SEC-AWS-KEY.", "PII-SSN-US:", "CODEGUARD-0-XSS.", "CMD-EVAL."} {
+		if !isCanonicalID(id) {
+			t.Errorf("isCanonicalID(%q) refuses a rule id at the end of a sentence", id)
+		}
+	}
+}
+
+// RV-SEC2: a rule id that ends a sentence or a list keeps its text in the
+// projected reason, as at the parent.
+func TestReasonKeepsARuleIDBeforeTrailingPunctuationRVSEC2(t *testing.T) {
+	for in, want := range map[string]string{
+		"verdict=block rule=CMD-EVAL.":           "verdict=block rule=CMD-EVAL.",
+		"rule=PII-SSN-US, rule=CODEGUARD-0-XSS.": "rule=PII-SSN-US, rule=CODEGUARD-0-XSS.",
+	} {
+		if got := ForSinkReason(in); got != want {
+			t.Errorf("ForSinkReason(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

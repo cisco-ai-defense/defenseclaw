@@ -813,18 +813,14 @@ var safeEnumValues = map[string]struct{}{
 //   - "PII-SSN-US"           — uppercase + separator        → ACCEPTED
 //   - "CODEGUARD-0-XSS"      — uppercase digits + separator → ACCEPTED
 //
-// Two more shapes are refused (GAP-1082). A value that ends in a
-// separator is not a rule id: "AKIA<16>." is a key id at the end of a
-// sentence, and no rule id ends in '.', '-', '_', '/' or ':'. And a
-// value that holds an AWS key id (see containsAWSKeyID) is a credential
-// whatever the characters around it: "AKIA<16>-" and "AKIA<16>:x" are
-// upper case with a separator too.
+// A value that holds an AWS key id is refused (GAP-1082), also when
+// trailing separators hide it: "AKIA<16>." is a key id at the end of a
+// sentence and "AKIA<16>_" one before an underscore, and "AKIA<16>-" or
+// "AKIA<16>:x" are upper case with a separator too (see containsAWSKeyID).
+// A rule id at the end of a sentence ("rule=CMD-EVAL.", "CODEGUARD-0-XSS.")
+// still passes: only a hidden key id is refused, not the separator.
 func isCanonicalID(s string) bool {
 	if len(s) == 0 || len(s) > 64 {
-		return false
-	}
-	switch s[len(s)-1] {
-	case '-', '_', '.', '/', ':':
 		return false
 	}
 	hasUpper := false
@@ -841,7 +837,7 @@ func isCanonicalID(s string) bool {
 			return false
 		}
 	}
-	return hasUpper && hasSeparator && !containsAWSKeyID(s)
+	return hasUpper && hasSeparator && !containsAWSKeyID(s) && !containsAWSKeyID(strings.TrimRight(s, "-_./:"))
 }
 
 // awsKeyIDPrefixes are the four-letter prefixes of an AWS key id, the same
