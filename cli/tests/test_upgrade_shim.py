@@ -2669,36 +2669,3 @@ def test_codex_route_render_is_found(home: Path) -> None:
     assert upgrade_shim._route_only_rendered() == []
     (codex / "config.toml").write_text('model_provider = "defenseclaw_route"\n', encoding="utf-8")
     assert upgrade_shim._route_only_rendered() == ["codex"]
-
-
-@pytest.mark.parametrize("enabled", [True, False])
-def test_agent_class_reporting_survives_downgrade_and_restore(
-    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
-) -> None:
-    import jsonschema
-    import yaml
-    from defenseclaw import migrations
-
-    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
-    config_path = home / "config.yaml"
-    original = {
-        "config_version": 9,
-        "cisco_ai_defense": {"timeout_ms": 5000, "report_agent_class": enabled},
-    }
-    config_path.write_text(yaml.safe_dump(original), encoding="utf-8")
-    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
-
-    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
-
-    assert len(execs) == 1
-    downgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert downgraded["cisco_ai_defense"] == {"timeout_ms": 5000}
-    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
-    jsonschema.validators.validator_for(schema)(schema).validate(downgraded)
-    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
-    assert record["keys"] == {"cisco_ai_defense.report_agent_class": enabled}
-
-    migrations._restore_set_aside_keys(str(home), str(config_path))
-
-    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original
-    assert not _set_aside(home).exists()

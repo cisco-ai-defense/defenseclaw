@@ -57,16 +57,11 @@ Always set `enterprise.profile`. When it is unset, Windows and macOS resolve to 
 
 ## AI Defense class policies
 
-Managed inspection can report the authenticated connector class for Codex, Cursor, Claude Code, and GitHub Copilot to AI Defense. Leave `cisco_ai_defense.report_agent_class` at its default `false` until the AI Defense connection schema and class resolver are deployed and the resolver is in enforce mode. Then set it to `true` in the administrator-owned config and apply the config through the normal lifecycle. The managed gateway sends only the canonical class, never a client-selected connection ID. A class with no enabled class policy uses the global connection policy. Unsupported or conflicting connector context remains on the global policy path.
+Managed inspection automatically sends the authenticated connector class for Codex, Cursor, Claude Code, and GitHub Copilot to AI Defense. No additional setting is required. The gateway sends only the canonical class, never a client-selected connection ID.
 
-```yaml title="config.yaml (excerpt)"
-cisco_ai_defense:
-  report_agent_class: true
-```
+AI Defense uses an enabled policy attached to the matching class connection when one is configured. Otherwise, it uses the policy attached to the existing global/default connection. Missing, unsupported or conflicting authenticated connector context also retains the global policy route.
 
-Set the key back to `false` to make new managed inspection requests omit the class. AI Defense then selects the existing global connection. This does not delete class connections or policy associations. OSS and API-key inspection do not send this field.
-
-For CLI downgrades to releases before 1.0.10, the upgrade shim sets this key aside so the older gateway can load the config. After upgrading again, `defenseclaw migrate` restores the saved value, including an explicit `false`.
+The existing inspection controls continue to govern when remote inspection runs. OSS and API-key inspection do not send this managed class field.
 
 ## Choose the agents to protect
 

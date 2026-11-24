@@ -57,11 +57,10 @@ const tokenUnavailableWarnCooldown = 60 * time.Second
 // cached token and retrying once. See doInspectHTTP for the shared
 // retry mechanics.
 type CiscoDefenseClawInspectClient struct {
-	provider         cloudreg.Provider
-	endpoint         string
-	timeout          time.Duration
-	client           *http.Client
-	reportAgentClass bool
+	provider cloudreg.Provider
+	endpoint string
+	timeout  time.Duration
+	client   *http.Client
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   hookLifecycleMetricV8Runtime
@@ -119,11 +118,10 @@ func NewCiscoDefenseClawInspectClient(cfg *config.CiscoAIDefenseConfig, provider
 	// rationale.
 
 	return &CiscoDefenseClawInspectClient{
-		provider:         provider,
-		endpoint:         endpoint,
-		timeout:          timeout,
-		client:           &http.Client{Timeout: timeout},
-		reportAgentClass: cfg.ReportAgentClass,
+		provider: provider,
+		endpoint: endpoint,
+		timeout:  timeout,
+		client:   &http.Client{Timeout: timeout},
 	}
 }
 
@@ -338,10 +336,8 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// cisco_ai_defense.enabled_rules is set; otherwise it omits config
 	// too and the tenant's own rules apply.
 	payload := map[string]interface{}{"messages": chatMsgs}
-	if c.reportAgentClass {
-		if agentClass := managedInspectAgentClass(ctx); agentClass != "" {
-			payload["agent_class"] = agentClass
-		}
+	if agentClass := managedInspectAgentClass(ctx); agentClass != "" {
+		payload["agent_class"] = agentClass
 	}
 	// Under the Secure Client integration the request names its end user,
 	// so AI Defense can attribute the inspection and choose that person's

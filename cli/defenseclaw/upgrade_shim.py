@@ -92,7 +92,6 @@ NEWER_CONFIG_KEYS = (
     ("guardrail.chains", (1, 0, 6)),
     ("connectors", (1, 0, 6)),
     ("connectors.openclaw", (1, 0, 10)),
-    ("cisco_ai_defense.report_agent_class", (1, 0, 10)),
     ("guardrail.cascade", (1, 0, 10)),
     ("guardrail.secret_flow", (1, 0, 10)),
     ("guardrail.effects_rules_tier", (1, 0, 10)),

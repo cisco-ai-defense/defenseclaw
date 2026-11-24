@@ -177,22 +177,8 @@ func TestDefenseClawInspect_WireShape(t *testing.T) {
 	}
 }
 
-// Count only connector lookups, leaving unrelated inspection context values alone.
-type agentClassLookupContext struct {
-	context.Context
-	lookups atomic.Int64
-}
-
-func (c *agentClassLookupContext) Value(key any) any {
-	switch key.(type) {
-	case authenticatedHookConnectorContextKey, authenticatedInspectConnectorKey:
-		c.lookups.Add(1)
-	}
-	return c.Context.Value(key)
-}
-
 // TestDefenseClawInspect_AgentClass checks the policy-class field on the
-// managed wire without allowing an unverified connector to choose it.
+// managed wire with ordinary configuration, using only authenticated identity.
 func TestDefenseClawInspect_AgentClass(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +187,7 @@ func TestDefenseClawInspect_AgentClass(t *testing.T) {
 		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
 	}))
 	t.Cleanup(srv.Close)
-	c := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000, ReportAgentClass: true}, newFakeCloudProvider("token"))
+	c := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000}, newFakeCloudProvider("token"))
 	cases := []struct {
 		name string
 		ctx  context.Context
@@ -211,25 +197,12 @@ func TestDefenseClawInspect_AgentClass(t *testing.T) {
 		{"codex hook", withAuthenticatedHookConnector(t.Context(), "codex"), "DEFENSE_CLAW_AGENT_CLASS_CODEX"},
 		{"cursor inspect", withAuthenticatedInspectConnector(t.Context(), "cursor"), "DEFENSE_CLAW_AGENT_CLASS_CURSOR"},
 		{"claude hook", withAuthenticatedHookConnector(t.Context(), "claudecode"), "DEFENSE_CLAW_AGENT_CLASS_CLAUDECODE"},
+		{"claude inspect", withAuthenticatedInspectConnector(t.Context(), "claudecode"), "DEFENSE_CLAW_AGENT_CLASS_CLAUDECODE"},
+		{"matching trusted contexts", withAuthenticatedInspectConnector(withAuthenticatedHookConnector(t.Context(), "copilot"), "copilot"), "DEFENSE_CLAW_AGENT_CLASS_COPILOT"},
 		{"copilot hook", withAuthenticatedHookConnector(t.Context(), "copilot"), "DEFENSE_CLAW_AGENT_CLASS_COPILOT"},
 		{"copilot inspect", withAuthenticatedInspectConnector(t.Context(), "copilot"), "DEFENSE_CLAW_AGENT_CLASS_COPILOT"},
 		{"unsupported", withAuthenticatedHookConnector(t.Context(), "openclaw"), ""},
 		{"conflicting trusted contexts", withAuthenticatedInspectConnector(withAuthenticatedHookConnector(t.Context(), "codex"), "cursor"), ""},
-	}
-	defaultOff := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000}, newFakeCloudProvider("token"))
-	offCtx := &agentClassLookupContext{Context: withAuthenticatedHookConnector(t.Context(), "copilot")}
-	if defaultOff.Inspect(offCtx, []ChatMessage{{Role: "user", Content: "hello"}}) == nil {
-		t.Fatal("expected default-off inspection response")
-	}
-	if got := offCtx.lookups.Load(); got != 0 {
-		t.Fatalf("default-off client performed %d connector lookups", got)
-	}
-	var offBody map[string]json.RawMessage
-	if err := json.Unmarshal(gotBody, &offBody); err != nil {
-		t.Fatal(err)
-	}
-	if _, present := offBody["agent_class"]; present {
-		t.Fatal("default-off client sent agent_class")
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
