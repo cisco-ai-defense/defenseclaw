@@ -789,8 +789,7 @@ func registrationHasClientOf(reg *openshell.Registration, tlsDir string) bool {
 func (o *accountOpenShell) managedUnitActive(ctx context.Context) bool {
 	switch o.goos {
 	case "linux":
-		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "is-active", openShellGatewayUnit}, userManagerEnv(o.uid))
-		return err == nil && strings.TrimSpace(out) == "active"
+		return o.unitActiveState(ctx) == "active"
 	case "darwin":
 		label, _ := openShellGatewayAgent()
 		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + label}, nil)
@@ -799,11 +798,34 @@ func (o *accountOpenShell) managedUnitActive(ctx context.Context) bool {
 	return false
 }
 
+// unitActiveState is what `systemctl --user is-active` says of the
+// account's gateway unit (active, deactivating, inactive, ...; "" when it
+// says nothing). It exits non-zero for every state but active, and still
+// prints the state.
+func (o *accountOpenShell) unitActiveState(ctx context.Context) string {
+	out, _ := o.run(ctx, daemonSystemctl, []string{"--user", "is-active", openShellGatewayUnit}, userManagerEnv(o.uid))
+	return strings.TrimSpace(out)
+}
+
 // Stop stops the account's managed gateway unit (no sandbox of the account
 // runs), so the gateway port is free for the next account. A gateway the
 // managed unit did not start is the account's own and is left running.
+//
+// On Linux it stops only an active unit, in both install modes. One that is
+// already stopping or starting has a job of the service manager's: the
+// unit's own ExecStop (stop-sandboxes) stops the account's last sandbox
+// during a `systemctl --user restart`, and the stop this then queued
+// replaced the restart, which ended "canceled" with the gateway left
+// stopped (rel-1-0-10:GAP-1778).
 func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettings) bool {
-	if s.Enterprise.Install != config.EnterpriseOpenShellInstallSetup && !o.managedUnitActive(ctx) {
+	if o.goos == "linux" {
+		if state := o.unitActiveState(ctx); state != "active" {
+			if state == "deactivating" || state == "activating" || state == "reloading" {
+				o.logf("your OpenShell gateway is %s already; the service manager finishes that", state)
+			}
+			return false
+		}
+	} else if s.Enterprise.Install != config.EnterpriseOpenShellInstallSetup && !o.managedUnitActive(ctx) {
 		return false
 	}
 	var err error

@@ -57,8 +57,10 @@ type openShellRig struct {
 	metadata   string
 	// fail makes a command (by prefix) fail with its output.
 	fail map[string]string
-	// active makes the managed gateway unit report active.
+	// active makes the managed gateway unit report active, and state any
+	// other ActiveState (is-active exits 1 with it).
 	active bool
+	state  string
 	// pid and args are the gateway port's listener and its command line.
 	pid  int
 	args string
@@ -95,6 +97,9 @@ func newOpenShellRig(t *testing.T, goos string) *openShellRig {
 		}
 		if r.active && strings.HasPrefix(line, "systemctl --user is-active ") {
 			return "active", nil
+		}
+		if r.state != "" && strings.HasPrefix(line, "systemctl --user is-active ") {
+			return r.state, errors.New("exit status 3")
 		}
 		return "", nil
 	}
@@ -509,9 +514,34 @@ func TestAccountOpenShellStop(t *testing.T) {
 		t.Fatalf("prerequisite stop: %v", got)
 	}
 	r = newOpenShellRig(t, "linux")
+	r.active = true
 	r.o.Stop(context.Background(), setupSettings())
-	if got := r.ran(); len(got) != 1 || got[0] != "systemctl --user stop "+openShellGatewayUnit {
+	if got := r.ran(); len(got) != 2 || got[1] != "systemctl --user stop "+openShellGatewayUnit {
 		t.Fatalf("stop: %v", got)
+	}
+}
+
+// rel-1-0-10:GAP-1778: `systemctl --user restart` of the managed gateway
+// unit runs its ExecStop, which stops the account's sandboxes through the
+// daemon; the last one's stop made the daemon stop the gateway unit too,
+// and that stop job replaced the restart ("Job ... canceled"), so the
+// gateway and the sandbox stayed stopped until the next sandbox command.
+// A unit the service manager is already stopping or starting is left to
+// it, in both install modes; an inactive one has nothing to stop.
+func TestGAP1778DaemonLeavesAStoppingGatewayUnitToTheServiceManager(t *testing.T) {
+	for _, state := range []string{"deactivating", "activating", "inactive", "failed"} {
+		for _, s := range []sandboxrelay.DaemonSettings{setupSettings(), prerequisiteSettings()} {
+			r := newOpenShellRig(t, "linux")
+			r.state = state
+			if r.o.Stop(context.Background(), s) {
+				t.Fatalf("%s unit, %s mode: Stop reported the gateway stopped", state, s.Enterprise.Install)
+			}
+			for _, c := range r.ran() {
+				if strings.HasPrefix(c, "systemctl --user stop ") {
+					t.Fatalf("%s unit, %s mode: the daemon queued a stop job over the service manager's: %v", state, s.Enterprise.Install, r.ran())
+				}
+			}
+		}
 	}
 }
 
