@@ -160,25 +160,37 @@ func TestSubstrateNotifierCheckOffByDefault(t *testing.T) {
 	}
 }
 
-// A missing notifier tool is one plain line and a doctor warning, never a crash.
+// A missing notifier tool is one plain line and a doctor warning, never a
+// crash. Windows delivery (Shell_NotifyIconW) needs no external tool, so
+// there the same set-up with an empty PATH must stay ready and on: the
+// test asserts that instead of skipping.
 func TestWatchMissingNotifierTool(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows delivery needs no external tool")
-	}
 	old := cfg
 	t.Cleanup(func() { cfg = old })
 	cfg = &config.Config{Notifications: config.NotificationsConfig{Enabled: true, Substrate: config.NotificationsSubstrateConfig{Asks: true, TaskEnd: true}}}
 	t.Setenv("PATH", t.TempDir())
 	c := substrateNotifierCheck()
+	p := substrateNotifyPolicyNow()
+	if runtime.GOOS == "windows" {
+		if c.Status != doctorOK || c.Fix != "" {
+			t.Fatalf("check = %+v, want OK: Windows needs no external tool", c)
+		}
+		if !p.Asks || !p.TaskEnd || p.Why != "" {
+			t.Fatalf("policy = %+v, want asks and task_end on", p)
+		}
+		// the notifications.substrate switches still gate it
+		cfg.Notifications.Substrate = config.NotificationsSubstrateConfig{}
+		if p := substrateNotifyPolicyNow(); p.Asks || p.TaskEnd || p.Why == "" {
+			t.Fatalf("policy with both switches off = %+v", p)
+		}
+		return
+	}
 	if c.Status != doctorWarn || c.Fix == "" {
 		t.Fatalf("check = %+v, want a warning with a fix", c)
 	}
-	p := substrateNotifyPolicyNow()
 	if p.Asks || p.TaskEnd || !strings.Contains(p.Why, "not installed") {
 		t.Fatalf("policy = %+v", p)
 	}
-	// the notifications.substrate switches gate it when the tool is there
-	cfg.Notifications.Substrate = config.NotificationsSubstrateConfig{}
 }
 
 // GAP-1044: a poll that could not read an agent (a "-" row, a failed get)
