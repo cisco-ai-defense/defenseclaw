@@ -39,8 +39,8 @@ const (
 // poller: no DirEntry per entry, which made a walk at the bound allocate
 // about 8 MB and slowed every hook call that walks (substrate-1:GAP-0709).
 // A folder that cannot be opened or read on ends the read, as an error of
-// ReadDir does.
-func readCredentialWalkFolder(dir string, each func(name []byte, folder, regular bool) bool) {
+// ReadDir does. dirfd is the folder's descriptor, for credentialWalkSearchable.
+func readCredentialWalkFolder(dir string, each func(name []byte, folder, regular bool, dirfd int) bool) {
 	fd, err := credentialWalkOpen(dir)
 	if err != nil {
 		return
@@ -91,9 +91,21 @@ func readCredentialWalkFolder(dir string, each func(name []byte, folder, regular
 				folder = st.Mode&unix.S_IFMT == unix.S_IFDIR
 				regular = st.Mode&unix.S_IFMT == unix.S_IFREG
 			}
-			if !each(name, folder, regular) {
+			if !each(name, folder, regular, fd) {
 				return
 			}
+		}
+	}
+}
+
+// credentialWalkSearchable reports a folder, open as dirfd, whose files can
+// be looked up (its search permission): a relative check on the descriptor,
+// no lookup of a path (substrate-1:GAP-0674, RV-T6C P4-1).
+func credentialWalkSearchable(dirfd int) bool {
+	for {
+		err := unix.Faccessat(dirfd, ".", unix.X_OK, 0)
+		if !errors.Is(err, unix.EINTR) {
+			return err == nil
 		}
 	}
 }

@@ -2157,12 +2157,14 @@ type credentialWalkFolder struct {
 // can fail when the read did not (substrate-1:GAP-0674, RV-T6C P4-1): the
 // first of a folder on a system that checks a folder's search permission
 // apart from its read permission (a folder of mode 0644 lists its files, but
-// no file in it can be opened, by the walk or by the agent's grep), and a path
+// no file in it can be opened, by the walk or by the agent's grep), unless a
+// check of the open folder (credentialWalkSearchable, Linux) shows it can be
+// entered, and a path
 // past what Windows can name (credentialWalkPathTooLong). The resolve then
 // adds no read the agent cannot make, as before the lookups were skipped.
 func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter credentialWalkFilter, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
-	entered := !credentialWalkSearchChecked
-	readCredentialWalkFolder(folder.dir, func(name []byte, isDir, regular bool) bool {
+	entered, checked := !credentialWalkSearchChecked, false
+	readCredentialWalkFolder(folder.dir, func(name []byte, isDir, regular bool, dirfd int) bool {
 		if !b.take(&b.entries, b.limits.entries) {
 			return false
 		}
@@ -2175,6 +2177,10 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter cred
 			}
 			file := filepath.Join(folder.dir, filepath.FromSlash(probe.value))
 			named := regular && probe.value == string(name)
+			if named && !entered && !checked {
+				checked = true
+				entered = dirfd >= 0 && credentialWalkSearchable(dirfd)
+			}
 			if named && entered && !credentialWalkPathTooLong(file) {
 				// The entry is the probe's file, a regular file as the folder
 				// read has it, in a folder a lookup has entered: no lookup of
