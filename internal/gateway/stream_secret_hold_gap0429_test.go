@@ -290,8 +290,9 @@ func gap0429LLMRun(t *testing.T, rec *httptest.ResponseRecorder, insp ContentIns
 func gap0429Chunks(pieces []string) []StreamChunk {
 	var chunks []StreamChunk
 	for _, p := range pieces {
+		choice, text := gap1265Piece(p)
 		chunks = append(chunks, StreamChunk{ID: "c", Object: "chat.completion.chunk", Model: "gpt-4",
-			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: p}}}})
+			Choices: []ChatChoice{{Index: choice, Delta: &ChatMessage{Content: text}}}})
 	}
 	fin := "stop"
 	return append(chunks, StreamChunk{ID: "c", Object: "chat.completion.chunk", Model: "gpt-4",
