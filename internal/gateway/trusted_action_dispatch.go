@@ -5225,7 +5225,16 @@ func fileToolWriteThroughLinkToState(facts actionfacts.Facts, request trustedAct
 			}
 		}
 		if physical == "" && filepath.IsAbs(candidate.Resolved) && !request.SkipLocalFilesystemResolution {
-			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			var resolved bool
+			physical, resolved = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			if !resolved {
+				// A target whose own local read did not answer is not
+				// proved free of the state, as in linkedActiveStateWrite
+				// (rel-1-0-10:GAP-1804, GAP-1805).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 		}
 		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(candidate.Resolved) {
 			continue

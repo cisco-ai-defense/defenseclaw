@@ -2698,13 +2698,16 @@ type actionStateHome struct {
 	home     string
 	resolved string
 	ok, done bool
+	// unanswered: the home did not resolve because its own local read did
+	// not answer (localReadUnanswered).
+	unanswered bool
 	// memo, when set, answers the walks of this scan (TargetMemo).
 	memo *TargetMemo
 }
 
 func (h *actionStateHome) active() (string, bool) {
 	if !h.done {
-		h.resolved, h.ok = h.memo.resolveWriteTarget(h.home)
+		h.resolved, h.ok, h.unanswered = h.memo.resolveWriteTargetWhy(h.home)
 		h.done = true
 	}
 	return h.resolved, h.ok
@@ -2716,8 +2719,14 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	if !ok || !homeOK {
 		// A target whose own local read did not answer is not proved free
 		// of the state, as a state read that did not answer (below): it is
-		// refused (rel-1-0-10:GAP-1804).
-		return !ok && unanswered && homeOK
+		// refused (rel-1-0-10:GAP-1804). So is any target while the home's
+		// own read did not answer: the target cannot be placed against the
+		// state then (rel-1-0-10:GAP-1805). A home that resolves to nothing
+		// for another reason proves nothing and refuses nothing.
+		if !homeOK {
+			return home.unanswered
+		}
+		return unanswered
 	}
 	relative, err := filepath.Rel(activeHome, resolved)
 	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
@@ -2790,9 +2799,11 @@ func ResolveActiveStateHardlinkTarget(value, home string) (state string, same, c
 	if !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return "", false, true
 	}
-	activeRoot, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))
+	// A state root whose own read did not answer is not proved free of
+	// the file either (rel-1-0-10:GAP-1805).
+	activeRoot, ok, rootUnanswered := resolveWriteTargetWhy(filepath.Join(home, ".defenseclaw"))
 	if !ok {
-		return "", false, true
+		return "", false, !rootUnanswered
 	}
 	files, unanswered := activeStateIdentities(activeRoot)
 	for _, file := range files {
