@@ -22,7 +22,17 @@ const responseFieldOther responseField = 200
 // withWalkerPieces adds to typed the walker's strings of the same event or
 // body that no typed piece holds.
 func withWalkerPieces(typed []responsePiece, segs []string) []responsePiece {
-	out := typed
+	// A lane end (GAP-2154) goes after the walker's strings of the same
+	// event, so it ends them too.
+	var ends []responsePiece
+	out := typed[:0:0]
+	for _, p := range typed {
+		if p.end != laneEndNone {
+			ends = append(ends, p)
+		} else {
+			out = append(out, p)
+		}
+	}
 	for _, seg := range segs {
 		if seg == "" {
 			continue
@@ -38,13 +48,26 @@ func withWalkerPieces(typed []responsePiece, segs []string) []responsePiece {
 			out = append(out, responsePiece{lane: responseLane{field: responseFieldOther}, text: seg})
 		}
 	}
-	return out
+	return append(out, ends...)
 }
 
 // passthroughReplyText is the model text of a buffered reply: the typed
 // lanes, then every other string of the reply on its own line.
 func passthroughReplyText(body []byte, provider string, segs []string) string {
-	typed := extractPassthroughResponseContent(body, provider)
+	return passthroughReplyTextMode(body, provider, segs, false)
+}
+
+func passthroughReplyCheckText(body []byte, provider string, segs []string) string {
+	return passthroughReplyTextMode(body, provider, segs, true)
+}
+
+func passthroughReplyTextMode(body []byte, provider string, segs []string, check bool) string {
+	var typed string
+	if check {
+		typed = extractPassthroughResponseCheckContent(body, provider)
+	} else {
+		typed = extractPassthroughResponseContent(body, provider)
+	}
 	lines := make([]string, 0, len(segs)+1)
 	if typed != "" {
 		lines = append(lines, typed)

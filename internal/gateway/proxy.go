@@ -1824,8 +1824,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		if content != "" {
 			postCtx, postCancel := p.postCallContext(r.Context())
 			t0 := time.Now()
-			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
+			checkContent := passthroughReplyCheckText(inspectBody, provider, scan.Segments)
+			respMessages := []ChatMessage{{Role: "assistant", Content: checkContent}}
+			verdict := p.inspector.Inspect(postCtx, "completion", checkContent, respMessages, label, mode)
 			postCancel()
 			p.resolveConfirm(r.Context(), r, verdict, "completion", label, mode)
 			elapsed := time.Since(t0)
@@ -1889,16 +1890,36 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 // empty and skips the completion check, so every provider the proxy
 // recognises (inferProviderFromURL) has a branch here.
 func extractPassthroughResponseContent(body []byte, provider string) string {
+	return extractPassthroughResponseContentMode(body, provider, false)
+}
+
+func extractPassthroughResponseCheckContent(body []byte, provider string) string {
+	return extractPassthroughResponseContentMode(body, provider, true)
+}
+
+func extractPassthroughResponseContentMode(body []byte, provider string, check bool) string {
+	textOf := func(r *responseText) string {
+		if check {
+			return r.CheckTextNonStream()
+		}
+		return r.String()
+	}
+	piecesOf := func(ps []responsePiece) string {
+		if check {
+			return responsePiecesCheckText(ps)
+		}
+		return responsePiecesText(ps)
+	}
 	switch provider {
 	case "anthropic":
 		pieces, _ := anthropicContentPieces(body)
-		return responsePiecesText(pieces)
+		return piecesOf(pieces)
 
 	case "gemini":
-		return responsePiecesText(geminiPieces(body, false))
+		return piecesOf(geminiPieces(body, false))
 
 	case "ollama":
-		return responsePiecesText(ollamaPieces(body, false))
+		return piecesOf(ollamaPieces(body, false))
 
 	case "bedrock":
 		// Bedrock Converse: {"output":{"message":{"content":[{"text"} |
@@ -1924,7 +1945,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 				r.Add(reasoningPiece(0, c.ReasoningContent.ReasoningText.Text))
 			}
 			if r.Len() > 0 {
-				return r.String()
+				return textOf(&r)
 			}
 		}
 		// InvokeModel answers in the model family's own shape (GAP-0098).
@@ -1960,8 +1981,8 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 					continue
 				}
 				if o.Type == "reasoning" {
-					for _, s := range o.Summary {
-						r.Add(responsePiece{lane: responseLane{field: responseFieldReasoning, part: i}, text: s.Text})
+					for _, summary := range o.Summary {
+						r.Add(summaryPiece(0, i, summary.Text))
 					}
 					for _, c := range o.Content {
 						r.Add(responsePiece{lane: responseLane{field: responseFieldReasoning, part: i}, text: c.Text})
@@ -1977,7 +1998,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 				}
 			}
 			if r.Len() > 0 {
-				return r.String()
+				return textOf(&r)
 			}
 		}
 
@@ -1987,7 +2008,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			Choices []chatShapeChoice `json:"choices"`
 		}
 		if json.Unmarshal(body, &respCC) == nil && len(respCC.Choices) > 0 {
-			return responsePiecesText(chatChoicesPieces(respCC.Choices, false))
+			return piecesOf(chatChoicesPieces(respCC.Choices, false))
 		}
 	}
 	return ""
@@ -3684,7 +3705,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// check, or (full false) the check of a hold due by age only
 	// (inspectStreamText). False: it blocked; the stream is cut.
 	scanMid := func(full bool) bool {
-		midVerdict, ranFull := p.inspectStreamText(llmCtx, accumulated.String(), aliasModel, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(llmCtx, accumulated.CheckText(), aliasModel, mode, full)
 		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",
@@ -3817,6 +3838,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				}
 			}
 			if c.FinishReason != nil && *c.FinishReason != "" {
+				accumulated.Add(messageEndPiece(c.Index)) // GAP-2154
 				streamFinishReasons = append(streamFinishReasons, *c.FinishReason)
 				isToolCallFinish = isToolCallFinish || *c.FinishReason == "tool_calls"
 			}
@@ -3957,8 +3979,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// reaching the buffer threshold) joins the hold after a guardrail check.
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
 		if accumulated.Len() > 0 && mode == "action" {
-			initVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
-				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+			checkContent := accumulated.CheckText()
+			initVerdict := p.inspector.InspectMidStream(llmCtx, "completion", checkContent,
+				[]ChatMessage{{Role: "assistant", Content: checkContent}}, aliasModel, mode)
 			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
@@ -3994,8 +4017,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		t0 := time.Now()
 
 		postCtx, postCancel := p.postCallContext(llmCtx)
-		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
+		checkContent := accumulated.CheckText()
+		respMessages := []ChatMessage{{Role: "assistant", Content: checkContent}}
+		verdict := p.inspector.Inspect(postCtx, "completion", checkContent, respMessages, aliasModel, mode)
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
 		elapsed := time.Since(t0)
@@ -6284,8 +6308,9 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 		defer postCancel()
 
 		postStart := time.Now()
-		respMessages := []ChatMessage{{Role: "assistant", Content: completion}}
-		verdict := p.inspector.Inspect(postCtx, "completion", completion, respMessages, req.Model, mode)
+		checkCompletion := extractRawForwardCheckCompletion(respBody)
+		respMessages := []ChatMessage{{Role: "assistant", Content: checkCompletion}}
+		verdict := p.inspector.Inspect(postCtx, "completion", checkCompletion, respMessages, req.Model, mode)
 		p.logPostCall(req.Model, completion, verdict, time.Since(postStart), usage)
 		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, verdict, time.Since(postStart), mode,
 			verdict != nil && verdict.Action == "block" && mode == "action")
@@ -6472,10 +6497,10 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			return true
 		}
 		finalTextInspected = true
-		content := accumulated.String()
 		postCtx, postCancel := p.postCallContext(llmCtx)
-		verdict := p.inspector.Inspect(postCtx, "completion", content,
-			[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
+		checkContent := accumulated.CheckText()
+		verdict := p.inspector.Inspect(postCtx, "completion", checkContent,
+			[]ChatMessage{{Role: "assistant", Content: checkContent}}, req.Model, mode)
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
 		enforced := verdict != nil && verdict.Action == "block" && mode == "action"
@@ -6522,6 +6547,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	// client gets an SSE comment line every streamKeepAliveAfter (GAP-1307):
 	// heldAt is when the hold began, keepAt the last keep-alive.
 	var heldFrames [][]byte
+	maskedReasoning := map[int][2]int{} // unresolved reasoning bytes already sent masked (GAP-2170)
 	heldSize := 0
 	var heldAt, keepAt time.Time
 	flushHeldFrames := func() {
@@ -6552,11 +6578,25 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	}
 	// secretWait reports that the next frame (next bytes) must wait; ok is
 	// false when a bound blocked.
-	secretWait := func(next int) (wait, ok bool) {
+	secretWait := func(frame *[]byte) (wait, ok bool) {
+		next := len(*frame)
 		if mode != "action" {
 			return false, true
 		}
 		o := accumulated.OpenSecret()
+		if o.reasoningOnly {
+			runs := accumulated.ParkedReasoningRuns()
+			frames := append(append([][]byte(nil), heldFrames...), *frame)
+			if masked, ok := maskRawForwardReasoning(frames, runs, maskedReasoning); ok {
+				heldFrames = masked[:len(masked)-1]
+				heldSize = bufferedBytes(heldFrames)
+				*frame = masked[len(masked)-1]
+				for _, run := range runs {
+					maskedReasoning[run.lane] = [2]int{run.start, run.start + len(run.text)}
+				}
+				return false, true
+			}
+		}
 		switch {
 		case !o.open:
 			return false, true
@@ -6637,7 +6677,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		}
 
 		if mode == "action" && frameHasText {
-			content := accumulated.String()
+			content := accumulated.CheckText()
 			verdict := p.inspector.InspectMidStream(llmCtx, "completion", content,
 				[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
 			p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
@@ -6685,7 +6725,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				return true
 			}
 		}
-		if wait, ok := secretWait(len(frame)); !ok {
+		if wait, ok := secretWait(&frame); !ok {
 			return false
 		} else if wait {
 			if len(heldFrames) == 0 {
@@ -7001,6 +7041,16 @@ func extractRawForwardCompletion(respBody []byte, stream bool) (string, *ChatUsa
 		out.AddAll(pieces)
 	}
 	return out.String(), nil
+}
+
+func extractRawForwardCheckCompletion(respBody []byte) string {
+	var parsed struct {
+		Choices []chatShapeChoice `json:"choices"`
+	}
+	if json.Unmarshal(respBody, &parsed) != nil {
+		return ""
+	}
+	return responsePiecesCheckText(chatChoicesPieces(parsed.Choices, false))
 }
 
 func extractRawForwardToolCalls(respBody []byte, stream bool) json.RawMessage {
