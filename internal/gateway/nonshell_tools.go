@@ -521,6 +521,14 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 				for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
 					add(input, facts, id, "")
 				}
+				// The program a chain of static prefix wrappers runs with its
+				// argv unchanged is judged by its own words too
+				// (taskset 1 sudo chmod u+s F is chmod u+s F; GAP-1461).
+				if program, argv, ok := actionfacts.ExactWrapperChild(c); ok {
+					for _, id := range toolshape.CommandRules(program, argv) {
+						add(input, facts, id, "")
+					}
+				}
 			}
 		}
 		for _, p := range facts.Paths {

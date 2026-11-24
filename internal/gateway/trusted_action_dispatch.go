@@ -982,6 +982,21 @@ func dispatchTrustedActionOnce(
 			}))
 		}()
 	}
+	// A program run through a chain of static prefix wrappers that hands it
+	// its argv unchanged (taskset 1 sudo env LD_PRELOAD=x curl URL, chrt -i
+	// 0 pkill -f defenseclaw) keeps the cell its plain call gets for the
+	// rules that judge the program by its own words (wrappedProgramRules):
+	// the plain reading is judged too and the stricter of the two counts
+	// (GAP-1461, GAP-1494; DET111 ruling 2026-11-24T21:35Z). A wrapper read
+	// only with words that may expand, a shell STRING, a moved folder and
+	// the writer sink grammar keep the readings above.
+	if twin, ok := wrapperExactTwinRequest(request); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return !wrappedProgramRule(f.RuleID)
+			}))
+		}()
+	}
 	// A shell named at run time ("$SHELL" -c TEXT, $BASH -ec TEXT, env
 	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
 	// call does: that reading is judged too, and the stricter of the two
@@ -10659,6 +10674,46 @@ var wrappedStateMutationRules = map[string]bool{
 	"TAMPER.AGENT_HOOK_CONFIG_WRITE":   true,
 	"TAMPER.AGENT_HOOK_CONFIG_DISABLE": true,
 	"CMD-RM-RF":                        true,
+}
+
+// wrapperExactTwinRequest returns the request for the reading of a POSIX
+// Bash call by actionfacts.WrapperUnwrapExactTwin.
+func wrapperExactTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.WrapperUnwrapExactTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
+// wrappedProgramRules are the rules that judge a program by its own words,
+// which a static prefix wrapper hands it unchanged
+// (wrapperExactTwinRequest): the cloud metadata fetch, the setuid and
+// world-writable mode changes (GAP-1461), and the fetched or decoded script
+// run, the reverse shell, a credential file read and the DefenseClaw stop
+// and uninstall (GAP-1494). The writer sink rules (an upload of a file)
+// are not here: sudo curl stays outside their exact curl grammar.
+var wrappedProgramRules = map[string]bool{
+	"C2-METADATA-AWS": true, "C2-METADATA-AZURE": true, "C2-METADATA-GCP": true,
+	"C2-METADATA-HEX": true, "C2-METADATA-DECIMAL": true, "C2-METADATA-OCTAL": true,
+	"CMD-PRIV-SETUID": true, "CMD-CHMOD-WORLD": true,
+	"CMD-PIPE-CURL": true, "CMD-PIPE-WGET": true, "CMD-PIPE-BASE64": true,
+	"CMD-REVSHELL-BASH": true, "CMD-REVSHELL-NC": true, "CMD-REVSHELL-DEVTCP": true, "CMD-REVSHELL-PYTHON": true,
+	"TAMPER.DEFENSECLAW_CONTROL_DISABLE": true,
+	"PATH-AWS-CREDS":                     true, "PATH-GIT-CREDS": true, "PATH-NETRC": true, "PATH-NPMRC": true,
+	"PATH-PYPIRC": true, "PATH-KUBE": true, "PATH-DOCKER": true, "PATH-SSH-KEY": true,
+}
+
+// wrappedProgramRule reports a rule of wrappedProgramRules.
+func wrappedProgramRule(ruleID string) bool {
+	return wrappedProgramRules[canonicalTrustedRuleID(ruleID)]
 }
 
 // wrappedStateMutationRule reports a rule of wrappedStateMutationRules.
