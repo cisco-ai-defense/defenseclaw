@@ -26,14 +26,23 @@ import (
 // skillFolderManaged is skillFolderAdminOwned; tests replace it.
 var skillFolderManaged = skillFolderAdminOwned
 
-// skillFolderAdminOwned reports whether only root can write the skill folder
-// at path: root owns it and neither its group nor others may write it. A
+// skillManagedNeedsNoLink is false: a link above the folder does not change
+// who may write it (/etc is a link on macOS), and the owner and mode are read
+// from the folder's own handle.
+const skillManagedNeedsNoLink = false
+
+// skillFolderAdminOwned reports whether only root can write the opened skill
+// folder: root owns it and neither its group nor others may write it. A
 // folder outside every home that a user made is not reported as managed.
-func skillFolderAdminOwned(path string) bool {
-	info, err := os.Lstat(path)
+func skillFolderAdminOwned(dir *os.File, _ string) bool {
+	info, err := dir.Stat()
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
 		return false
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && st.Uid == 0
 }
+
+// skillEntryAdminOwned is true: below a root-owned folder that neither the
+// group nor others may write, only root can add or remove entries.
+func skillEntryAdminOwned(*os.File, string) bool { return true }

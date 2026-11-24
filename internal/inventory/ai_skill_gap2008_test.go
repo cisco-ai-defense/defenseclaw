@@ -29,11 +29,11 @@ func TestGAP2008LinkedSkillWalkAsksTrustForEveryEntry(t *testing.T) {
 	}
 	var asked []string
 	record := func(_ *os.File, path string) bool { asked = append(asked, path); return true }
-	if _, status, _, _, _ := hashSkillFolderCaptureNamed(real, maxSkillBytes, maxSkillBytes, record); status != SkillContentOK || len(asked) != 0 {
+	if _, status, _, _, _, _ := hashSkillFolderCaptureNamed(real, maxSkillBytes, maxSkillBytes, record, nil); status != SkillContentOK || len(asked) != 0 {
 		t.Fatalf("unlinked folder: status %s, asked %v; want ok and no question", status, asked)
 	}
 	linked := filepath.Join(home, ".claude", "skills", "s")
-	if _, status, _, _, _ := hashSkillFolderCaptureNamed(linked, maxSkillBytes, maxSkillBytes, record); status != SkillContentOK {
+	if _, status, _, _, _, _ := hashSkillFolderCaptureNamed(linked, maxSkillBytes, maxSkillBytes, record, nil); status != SkillContentOK {
 		t.Fatalf("linked parent: status %s", status)
 	}
 	for _, below := range []string{"SKILL.md", "sub", filepath.Join("sub", "notes.txt")} {
@@ -43,7 +43,7 @@ func TestGAP2008LinkedSkillWalkAsksTrustForEveryEntry(t *testing.T) {
 	}
 	for _, refuse := range []string{filepath.Join(real, "sub"), filepath.Join(real, "sub", "notes.txt"), filepath.Join(real, "SKILL.md")} {
 		deny := func(_ *os.File, path string) bool { return path != refuse }
-		hash, status, manifest, _, _ := hashSkillFolderCaptureNamed(linked, maxSkillBytes, maxSkillBytes, deny)
+		hash, status, manifest, _, _, _ := hashSkillFolderCaptureNamed(linked, maxSkillBytes, maxSkillBytes, deny, nil)
 		if hash != "" || status != SkillContentSymlink || manifest != nil {
 			t.Fatalf("untrusted %s below a linked skill folder: %q %s %t; want symlink, no hash, no manifest", refuse, hash, status, manifest != nil)
 		}

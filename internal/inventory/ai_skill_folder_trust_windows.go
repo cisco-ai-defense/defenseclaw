@@ -73,7 +73,11 @@ func skillAccountTrust(account *windows.SID) func(*os.File, string) bool {
 		if directory {
 			need = windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE
 		}
-		return skillAdminSID(owner) && skillAccessGranted(descriptor, account, need)
+		// The entries that name the account or every account first; then
+		// Windows decides with the account's groups, where a deny entry for a
+		// group the account is in takes the right away (GAP-2146).
+		return skillAdminSID(owner) && skillAccessGranted(descriptor, account, need) &&
+			skillAuthzGranted(descriptor, account, need)
 	}
 }
 
@@ -98,7 +102,7 @@ func skillSecurity(opened *os.File, path string) (*windows.SECURITY_DESCRIPTOR, 
 // skillAccessGranted reports whether the access list in descriptor gives
 // account, or a group every account is in, every right in need, and no deny
 // entry for them takes one of those rights. Groups the account may also be
-// in are not looked up: their entries are not counted.
+// in are not looked up here: skillAuthzGranted does that.
 func skillAccessGranted(descriptor *windows.SECURITY_DESCRIPTOR, account *windows.SID, need windows.ACCESS_MASK) bool {
 	dacl, _, err := descriptor.DACL()
 	if err != nil {

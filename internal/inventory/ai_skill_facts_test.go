@@ -259,7 +259,7 @@ func TestDetectSkillsSyncedAndManagedFolders(t *testing.T) {
 	home, managed := t.TempDir(), t.TempDir()
 	// The test folder stands for one an administrator owns.
 	adminOwned := skillFolderManaged
-	skillFolderManaged = func(path string) bool { return pathBelow(managed, path) || adminOwned(path) }
+	skillFolderManaged = func(dir *os.File, path string) bool { return pathBelow(managed, path) || adminOwned(dir, path) }
 	t.Cleanup(func() { skillFolderManaged = adminOwned })
 	skills := filepath.Join(home, ".claude", "skills")
 	writeSkillFiles(t, skills, map[string]string{

@@ -12,6 +12,6 @@ func hashSkillFolder(root string, limit int64) (hash, status string, consumed in
 
 // hashSkillFolderCapture also retains a root SKILL.md prefix.
 func hashSkillFolderCapture(root string, limit int64, captureLimit int) (hash, status string, manifest []byte, consumed int64) {
-	hash, status, manifest, _, consumed = hashSkillFolderCaptureNamed(root, limit, captureLimit, skillHomeOwnerTrust(""))
+	hash, status, manifest, _, consumed, _ = hashSkillFolderCaptureNamed(root, limit, captureLimit, skillHomeOwnerTrust(""), nil)
 	return hash, status, manifest, consumed
 }

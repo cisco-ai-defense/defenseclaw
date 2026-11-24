@@ -49,7 +49,7 @@ func TestSkillOutsideHomesIsManagedOnlyWhenAdminOwned(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		admin = os.Getenv("SystemRoot")
 	}
-	if !skillFolderAdminOwned(admin) || skillFolderAdminOwned(dir) {
-		t.Fatalf("admin-owned %s = %v, user folder = %v", admin, skillFolderAdminOwned(admin), skillFolderAdminOwned(dir))
+	if !skillFolderManagedNow(admin) || skillFolderManagedNow(dir) {
+		t.Fatalf("admin-owned %s = %v, user folder = %v", admin, skillFolderManagedNow(admin), skillFolderManagedNow(dir))
 	}
 }

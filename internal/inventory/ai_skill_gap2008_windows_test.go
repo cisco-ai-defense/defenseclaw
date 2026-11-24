@@ -60,13 +60,13 @@ const gap2008UsersRead = "(A;OICI;0x1200a9;;;BU)"
 // the junction leads into a folder an administrator owns.
 func TestGAP1837AdminFolderThroughAJunctionIsNotManaged(t *testing.T) {
 	system := os.Getenv("SystemRoot")
-	if system == "" || !skillFolderAdminOwned(system) {
+	if system == "" || !skillFolderManagedNow(system) {
 		t.Fatalf("%q is not managed", system)
 	}
 	link := filepath.Join(t.TempDir(), "skills")
 	mklinkJunction(t, link, system)
 	for _, path := range []string{link, filepath.Join(link, "System32")} {
-		if skillFolderAdminOwned(path) {
+		if skillFolderManagedNow(path) {
 			t.Fatalf("%s (through a junction to %s) is managed", path, system)
 		}
 	}
@@ -94,7 +94,7 @@ func TestGAP1837AdminFolderOthersMayChangeIsNotManaged(t *testing.T) {
 				t.Fatal(err)
 			}
 			gap2008Secure(t, dir, admins, tc.dacl)
-			if got := skillFolderAdminOwned(dir); got != tc.managed {
+			if got := skillFolderManagedNow(dir); got != tc.managed {
 				t.Fatalf("managed = %t, want %t", got, tc.managed)
 			}
 		})

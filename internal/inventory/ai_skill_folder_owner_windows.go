@@ -19,6 +19,7 @@
 package inventory
 
 import (
+	"os"
 	"strings"
 	"unsafe"
 
@@ -46,22 +47,31 @@ const skillChangeAccess = windows.ACCESS_MASK(fileAddFile | fileAddSubdirectory 
 // skillFolderManaged is skillFolderAdminOwned; tests replace it.
 var skillFolderManaged = skillFolderAdminOwned
 
+// skillManagedNeedsNoLink is true: a folder reached through a junction or
+// symbolic link is never managed, whatever the folder it leads to.
+const skillManagedNeedsNoLink = true
+
 // skillFolderAdminOwned reports whether only administrators can change the
-// skill folder at path: it is reached with no junction or symbolic link on
-// the way, SYSTEM, Administrators or TrustedInstaller owns it, and its access
-// list lets no other account add to it or change it, directly or through an
-// entry its files and folders inherit (GAP-1837). A standard user can create
-// a folder such as C:\ProgramData\OpenAI\Codex\skills and owns it, and a
-// folder an administrator made under ProgramData lets Users add to it by
-// default; the skills in either are not reported as managed.
-func skillFolderAdminOwned(path string) bool {
-	dir, err := safefile.OpenDirectoryNoFollow(path)
-	if err != nil {
-		return false
-	}
-	defer dir.Close()
+// opened skill folder: SYSTEM, Administrators or TrustedInstaller owns it, and
+// its access list lets no other account add to it or change it, directly or
+// through an entry its files and folders inherit (GAP-1837). A standard user
+// can create a folder such as C:\ProgramData\OpenAI\Codex\skills and owns it,
+// and a folder an administrator made under ProgramData lets Users add to it by
+// default; the skills in either are not reported as managed. The owner and
+// access list are read from dir, the handle the scan hashes from, and dir is
+// opened with no junction on the way (safefile.OpenDirectoryNoFollow), so a
+// swap of the folder at path after the open changes nothing (GAP-2147).
+func skillFolderAdminOwned(dir *os.File, path string) bool {
 	descriptor, _, err := skillSecurity(dir, path)
 	return err == nil && skillDescriptorAdminOnly(descriptor)
+}
+
+// skillEntryAdminOwned reports whether the opened folder or file below a
+// managed skill folder is also one only administrators can change: an
+// administrator copy that kept a user's access entry on a subfolder or file
+// is not (GAP-2147).
+func skillEntryAdminOwned(opened *os.File, path string) bool {
+	return skillFolderAdminOwned(opened, path)
 }
 
 // skillDescriptorAdminOnly reports whether descriptor is an administrator's

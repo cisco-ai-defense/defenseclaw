@@ -62,6 +62,10 @@ type skillHashCacheEntry struct {
 	// manifestPath is the exact root SKILL.md the walk read, in the spelling
 	// it opened the folder by (openSkillFolder).
 	manifestPath string
+	// managed is whether only administrators could change the folder and
+	// everything in it when the walk read it (GAP-2147); set only for a
+	// folder outside every home.
+	managed bool
 }
 
 // skillSignatureRacy reports whether a write after a hash read at readAt could have left
