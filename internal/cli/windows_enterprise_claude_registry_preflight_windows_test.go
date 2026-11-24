@@ -44,6 +44,9 @@ func TestWindowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(t *testing.T) 
 		// compares it with the installed hook.
 		{name: "claude enrolled, hooks table without DefenseClaw", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[]}}`, refused: true},
 		{name: "claude enrolled, DefenseClaw hooks table", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"\"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe\" claudecode"}]}]}}`},
+		// GAP-2175: enrolment matches the hook by file identity, so a matrix
+		// that names it by its 8.3 short path is deferred too.
+		{name: "claude enrolled, DefenseClaw hooks table by 8.3 short path", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"C:\\PROGRA~1\\Cisco\\DEFENS~1\\bin\\DEFENS~1.EXE","args":["hook","--connector","claudecode","--enterprise-managed"]}]}]}}`},
 		{name: "claude enrolled, no value", connectors: []string{"claudecode"}, value: ""},
 		{name: "claude not enrolled, value set", connectors: []string{"codex", "copilot"}, value: `{"env":{}}`},
 		{name: "config not loadable", loadErr: errors.New("bad config"), value: "{}"},
