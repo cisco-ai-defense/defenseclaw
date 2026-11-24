@@ -542,6 +542,46 @@ def test_windows_rollback_whose_installer_opens_its_log_keeps_the_new_window_not
     assert len(polls) == 3
 
 
+def test_windows_upgrade_that_goes_on_in_its_window_says_it_is_not_finished_and_how_to_check(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-1068: the command ended after 3 s while the installer ran for minutes
+    # and stopped the gateway; a doctor run then showed failures, and the
+    # window closed with nothing left to say the install was still going.
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> None:
+        _write_transcript(home)
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    assert "the install is not finished yet" in out, out
+    assert "2 to 5 minutes" in out and "stops the gateway and starts it again" in out, out
+    assert "wait for it to end before you run defenseclaw doctor" in out, out
+    assert str(home / "logs") in out and "install-<time>.log" in out, out
+    assert "defenseclaw --version and defenseclaw doctor" in out, out
+
+
+def test_windows_installer_that_already_ended_with_0_is_not_reported_as_running(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> int:
+        _write_transcript(home)
+        return 0
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "ended with exit code 0" in out, out
+    assert "not finished" not in out and "continues in a new window" not in out, out
+
+
 def test_windows_installer_that_appends_to_a_same_second_log_has_opened_its_log(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -558,7 +598,7 @@ def test_windows_installer_that_appends_to_a_same_second_log_has_opened_its_log(
 
     # The log is the proof the installer ran; its own window shows a failure.
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
-    assert "The installer continues in a new window" in capsys.readouterr().out
+    assert "ended with exit code 1; the window shows why" in capsys.readouterr().out
 
 
 def test_windows_installer_whose_log_name_is_taken_by_another_run_is_not_confirmed_by_it(
@@ -593,7 +633,7 @@ def test_windows_installer_that_fails_after_opening_its_log_is_not_a_shim_error(
 
     # The log is the proof the installer ran; its own window shows a failure.
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
-    assert "The installer continues in a new window" in capsys.readouterr().out
+    assert "ended with exit code 1; the window shows why" in capsys.readouterr().out
 
 
 def test_windows_installer_still_running_without_a_log_is_an_unconfirmed_error_not_rc_0(
