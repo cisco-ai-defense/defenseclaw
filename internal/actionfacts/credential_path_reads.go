@@ -148,16 +148,22 @@ func (f Facts) PlaceCredentialPathReads(reported string) Facts {
 	}
 	placed := &credentialPathRecord{reads: slices.Clone(record.reads), caps: record.caps}
 	for i, candidate := range placed.reads {
-		value := candidate.Value
-		if candidate.Absolute || candidate.Resolved != "" || candidate.Flavor == PathFlavorWindows ||
-			value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") ||
-			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
-			continue
+		if candidate.CredentialReadPlaceable() {
+			placed.reads[i].Resolved = path.Join(reported, candidate.Value)
 		}
-		placed.reads[i].Resolved = path.Join(reported, value)
 	}
 	f.credentialPaths = &credentialPathResult{record: placed}
 	return f
+}
+
+// CredentialReadPlaceable reports a read of the private record that
+// PlaceCredentialPathReads places under the directory the hook reports: a
+// plain relative POSIX spelling the resolve could not place.
+func (f PathFact) CredentialReadPlaceable() bool {
+	value := f.Value
+	return !f.Absolute && f.Resolved == "" && f.Flavor != PathFlavorWindows &&
+		value != "" && !strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "~") &&
+		!strings.ContainsAny(value, "\\$*?[]{}`\x00")
 }
 
 // ThinCredentialPathReads keeps, of a private record of more than whole

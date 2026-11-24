@@ -37,8 +37,9 @@ var credentialPathReadsWhole = 16
 // add such an answer, for the reads the secret-read digest counts and for
 // all reads that are no fixture, both for a call proven to keep its folder
 // and for one that is not (a relative read is then not exact), so the marks
-// do not depend on which facts read the record. Markers and reads the hook
-// places later are always kept. TestGAP0674ThinReadsDifferential* compare
+// do not depend on which facts read the record. Markers, reads the hook
+// places later (CredentialReadPlaceable) and the first other read without a
+// resolved path (hasUnplacedRelativePath) are always kept. TestGAP0674ThinReadsDifferential* compare
 // every answer and the hook's verdict and audit rows with the whole record.
 func thinCredentialPathReads(facts actionfacts.Facts) {
 	facts.ThinCredentialPathReads(credentialPathReadsWhole, chainDistinctCredentialReads)
@@ -47,10 +48,16 @@ func thinCredentialPathReads(facts actionfacts.Facts) {
 // chainDistinctCredentialReads marks the reads thinCredentialPathReads keeps.
 func chainDistinctCredentialReads(reads []actionfacts.PathFact) []bool {
 	keep := make([]bool, len(reads))
+	unplaced := false
 	for i, read := range reads {
 		// A file-unknown marker, and a read the hook places under the folder
 		// it reports (placeSecretReadPaths), whose identity is made later.
-		keep[i] = read.Value == "" || read.Resolved == ""
+		keep[i] = read.Value == "" || read.CredentialReadPlaceable()
+		if !keep[i] && !unplaced && !read.Absolute && read.Resolved == "" {
+			// hasUnplacedRelativePath: one read it counts that no placement
+			// changes (a Windows spelling on a Windows host is one).
+			keep[i], unplaced = true, true
+		}
 	}
 	// The identity sets: of the reads credentialFileReadProofDigest counts
 	// (no fixture) and of those exactSecretReadChainDigest counts (also a
@@ -58,7 +65,7 @@ func chainDistinctCredentialReads(reads []actionfacts.PathFact) []bool {
 	// and for one that is not.
 	var proof, proofUnproven, secret, secretUnproven chainIdentitySet
 	for i, read := range reads {
-		if keep[i] {
+		if read.Value == "" || read.CredentialReadPlaceable() {
 			continue
 		}
 		if proof.settled() && proofUnproven.settled() && secret.settled() && secretUnproven.settled() {
@@ -78,7 +85,7 @@ func chainDistinctCredentialReads(reads []actionfacts.PathFact) []bool {
 			kept = secret.add(identity, exact) || kept
 			kept = secretUnproven.add(identity, unprovenExact) || kept
 		}
-		keep[i] = kept
+		keep[i] = keep[i] || kept
 	}
 	return keep
 }
