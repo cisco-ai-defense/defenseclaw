@@ -59,6 +59,14 @@ func TestGAP0401SubstrateMetricsLeaveThroughTheOTLPExporter(t *testing.T) {
 	fixture.sidecar.bindAPIServerObservabilityV8(f.api)
 	f.api.substrateState().cfg.Actions = &fakeActions{f: f}
 
+	// first_hook_after_resume: the controller saw the actor suspended, so
+	// its next hook call is its first after the resume (GAP-0486).
+	relayStore, relayClient := substrateRelayLeader(t)
+	relayStore.Add(telemetryrelay.Record{Kind: telemetryrelay.KindLifecycle, Lifecycle: chainstate.LifecycleSuspended, At: time.Now().Add(-time.Second),
+		Atespace: "eng-web", Actor: "alice-1", UID: subUID1, Connector: "claudecode"})
+	if err := (&telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}).TakeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	// hook_rtt: a hook call; rate_limited: warm-up pings over the budget.
 	f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice",
 		envelope("claudecode", map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "list the files", "session_id": "m1", "cwd": "/work/app"}))
@@ -73,7 +81,6 @@ func TestGAP0401SubstrateMetricsLeaveThroughTheOTLPExporter(t *testing.T) {
 	_, _ = b.Observe(context.Background(), audit.ToolChainObserveInput{})
 	// idle_suspends, policy_conflicts, unattested_templates: the
 	// controller's counts and gauge through the leader.
-	relayStore, relayClient := substrateRelayLeader(t)
 	relayStore.Add(
 		telemetryrelay.Record{Kind: telemetryrelay.KindCount, Metric: telemetryrelay.MetricIdleSuspends, Value: 1},
 		telemetryrelay.Record{Kind: telemetryrelay.KindCount, Metric: telemetryrelay.MetricPolicyConflicts, Value: 1},

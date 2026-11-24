@@ -160,7 +160,7 @@ The **Substrate agents** board (`defenseclaw-substrate`) shows [Agent Substrate]
 | Actor lifecycle | Lifecycle changes by trigger, Phase transitions, Recent lifecycle records | What caused each change (create, resume re-check, fork, drift, idle suspend) and which phase it entered |
 | Egress through the callout | Egress decisions, Bodies read and bodies over the cap, Secrets injected, Recent blocked requests | What the callout allowed and refused, how often it read a body, and which secrets it injected (names only) |
 
-The board has no panel for `defenseclaw.substrate.first_hook_after_resume`: no component records it in this release (see [Agent Substrate metrics](/docs/observability/sandbox-telemetry)).
+The board has no panel for `defenseclaw.substrate.first_hook_after_resume` yet; the gateway records it (see [Agent Substrate metrics](/docs/observability/sandbox-telemetry)).
 
 The metric panels have no actor, atespace or person label, because those are never metric labels. Actor names appear only in the log panels. Alert rules for the same signals are in the chart (`metrics.prometheusRule.enabled`).
 

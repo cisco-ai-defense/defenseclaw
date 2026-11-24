@@ -51,6 +51,18 @@ func (a *APIServer) recordSubstrateHookRTT(d time.Duration) {
 		})
 }
 
+// recordSubstrateFirstHookAfterResume is
+// defenseclaw.substrate.first_hook_after_resume: the round trip in the
+// gateway of an actor's first hook call after a resume (GAP-0486), the same
+// measure as hook_rtt.
+func (a *APIServer) recordSubstrateFirstHookAfterResume(d time.Duration) {
+	ms := substrateMetricMillis(d)
+	a.recordSubstrateMetricV8(observability.TelemetryInstrumentDefenseClawSubstrateFirstHookAfterResume,
+		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return builder.BuildMetricDefenseClawSubstrateFirstHookAfterResume(observability.MetricDefenseClawSubstrateFirstHookAfterResumeInput{Envelope: envelope, Value: ms})
+		})
+}
+
 // recordSubstrateLeaderObserve is defenseclaw.substrate.leader_observe_latency:
 // one tool-chain step this replica sent to the leader, until its answer.
 func (a *APIServer) recordSubstrateLeaderObserve(d time.Duration) {
