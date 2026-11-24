@@ -637,23 +637,16 @@ var (
 	pythonPathDelete = regexp.MustCompile(`\b(?:pathlib\s*\.\s*)?Path\s*\(\s*` +
 		`(?:os\s*\.\s*path\s*\.\s*(expanduser)\s*\(\s*(?:'([^'\\\n]+)'|"([^"\\\n]+)")\s*\)|(?:'([^'\\\n]+)'|"([^"\\\n]+)"))` +
 		`\s*\)\s*\.\s*(?:unlink|rmdir)\s*\(`)
+	pythonRenameLiteral = regexp.MustCompile(`\bos\s*\.\s*rename\s*\(\s*(?:'([^'\\\n]+)'|"([^"\\\n]+)")\s*,`)
+	nodeDirectDelete    = regexp.MustCompile(`\brequire\s*\(\s*['"](?:node:)?fs['"]\s*\)\s*\.\s*unlinkSync\s*\(\s*(?:'([^'\\\n]+)'|"([^"\\\n]+)")`)
+	nodeFSBinding       = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*require\s*\(\s*['"](?:node:)?fs['"]\s*\)`)
+	rubyFileDelete      = regexp.MustCompile(`\bFile\s*\.\s*delete\s*\(\s*(?:'([^'\\\n]+)'|"([^"\\\n]+)")`)
 )
 
-// pythonDeleteTargets recognizes the bounded Python delete calls
-// (pythonDeleteFunc, pythonPathDelete): the sys.argv indices and literal
-// paths they remove. Python expands no ~ itself, so a ~ literal is a home
-// path only inside os.path.expanduser; elsewhere it stays opaque.
-func pythonDeleteTargets(program, code string, args []Word) (map[int]bool, map[string]bool) {
+// inlineDeleteTargets recognizes bounded static file deletion and rename
+// sources in inline Python, Node and Ruby code. Dynamic paths stay opaque.
+func inlineDeleteTargets(program, code string, args []Word) (map[int]bool, map[string]bool) {
 	argDeletes, literalDeletes := map[int]bool{}, map[string]bool{}
-	if program != "python" && program != "python3" && !strings.HasPrefix(program, "python3.") && !strings.HasPrefix(program, "python2") {
-		return argDeletes, literalDeletes
-	}
-	for _, match := range pythonDeleteArg.FindAllStringSubmatch(code, maxCodeLiterals) {
-		index, err := strconv.Atoi(match[1])
-		if err == nil && index > 0 && index <= len(args) {
-			argDeletes[index-1] = true
-		}
-	}
 	add := func(expanded bool, lits ...string) {
 		for _, lit := range lits {
 			if lit != "" && pathLike(lit) && (expanded || !strings.HasPrefix(lit, "~")) {
@@ -661,12 +654,38 @@ func pythonDeleteTargets(program, code string, args []Word) (map[int]bool, map[s
 			}
 		}
 	}
-	for _, match := range pythonDeleteLiteral.FindAllStringSubmatch(code, maxCodeLiterals) {
-		add(match[1] != "", match[2], match[3])
-	}
-	for _, match := range pythonPathDelete.FindAllStringSubmatch(code, maxCodeLiterals) {
-		add(true, match[2], match[3])
-		add(false, match[4], match[5])
+	switch {
+	case program == "python" || program == "python3" || strings.HasPrefix(program, "python3.") || strings.HasPrefix(program, "python2"):
+		for _, match := range pythonDeleteArg.FindAllStringSubmatch(code, maxCodeLiterals) {
+			index, err := strconv.Atoi(match[1])
+			if err == nil && index > 0 && index <= len(args) {
+				argDeletes[index-1] = true
+			}
+		}
+		for _, match := range pythonDeleteLiteral.FindAllStringSubmatch(code, maxCodeLiterals) {
+			add(match[1] != "", match[2], match[3])
+		}
+		for _, match := range pythonPathDelete.FindAllStringSubmatch(code, maxCodeLiterals) {
+			add(true, match[2], match[3])
+			add(false, match[4], match[5])
+		}
+		for _, match := range pythonRenameLiteral.FindAllStringSubmatch(code, maxCodeLiterals) {
+			add(false, match[1], match[2])
+		}
+	case program == "node" || program == "nodejs":
+		for _, match := range nodeDirectDelete.FindAllStringSubmatch(code, maxCodeLiterals) {
+			add(false, match[1], match[2])
+		}
+		for _, binding := range nodeFSBinding.FindAllStringSubmatch(code, maxCodeLiterals) {
+			call := regexp.MustCompile(`\b` + regexp.QuoteMeta(binding[1]) + `\s*\.\s*unlinkSync\s*\(\s*(?:'([^'\\\n]+)'|"([^"\\\n]+)")`)
+			for _, match := range call.FindAllStringSubmatch(code, maxCodeLiterals) {
+				add(false, match[1], match[2])
+			}
+		}
+	case program == "ruby":
+		for _, match := range rubyFileDelete.FindAllStringSubmatch(code, maxCodeLiterals) {
+			add(false, match[1], match[2])
+		}
 	}
 	return argDeletes, literalDeletes
 }
@@ -770,7 +789,7 @@ func (w *walker) opaquePathEffect(spelling string, origin Origin, cond bool) {
 }
 
 // inlineCode lowers bounded Python open(...).read(), explicit write-mode
-// open(...).write() and delete-call (pythonDeleteTargets) paths as file
+// open(...).write() and delete-call paths paths as file
 // effects; other path literals and arguments
 // remain opaque. It reports whether the call has inline or stdin code (its
 // positionals are then arguments, not a program to run).
@@ -794,7 +813,7 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 	seen := map[string]bool{}
 	readArgs, readLiterals := pythonOpenReadSources(origin.Program, code, ic.args)
 	writeArgs, writeLiterals := pythonOpenWriteTargets(origin.Program, code, ic.args)
-	deleteArgs, deleteLiterals := pythonDeleteTargets(origin.Program, code, ic.args)
+	deleteArgs, deleteLiterals := inlineDeleteTargets(origin.Program, code, ic.args)
 	emitRead := func(spelling string) {
 		if seen[spelling] {
 			return
