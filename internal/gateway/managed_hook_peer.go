@@ -105,10 +105,6 @@ type managedHookConnPeer struct {
 
 type managedHookConnPeerContextKey struct{}
 
-func withManagedHookConnPeer(ctx context.Context, resolve func() managedHookPeer) context.Context {
-	return context.WithValue(ctx, managedHookConnPeerContextKey{}, &managedHookConnPeer{resolve: resolve})
-}
-
 func (c *managedHookConnPeer) identity() managedHookPeer {
 	c.once.Do(func() {
 		c.peer = c.resolve()
@@ -544,12 +540,6 @@ func newManagedHookLedgerLoader(path string) *managedHookLedgerLoader {
 	return &managedHookLedgerLoader{path: path, ttl: 2 * time.Second, now: time.Now, read: readManagedHookLedger}
 }
 
-// newManagedHookRefusedLoader caches the refused-surfaces file like the
-// ledger.
-func newManagedHookRefusedLoader(path string) *managedHookLedgerLoader {
-	return &managedHookLedgerLoader{path: path, ttl: 2 * time.Second, now: time.Now, read: readManagedHookRefusedSurfaces}
-}
-
 func (l *managedHookLedgerLoader) Load() (managedHookLedger, error) {
 	ledger, _, err := l.LoadGeneration()
 	return ledger, err
@@ -576,15 +566,6 @@ func (l *managedHookLedgerLoader) LoadGeneration() (managedHookLedger, uint64, e
 	l.ledger, l.err = read(l.path)
 	l.generation++
 	return l.ledger, l.generation, l.err
-}
-
-// readManagedHookRefusedSurfaces reads the refused-surfaces file; a missing
-// file means nothing is refused.
-func readManagedHookRefusedSurfaces(path string) (managedHookLedger, error) {
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return managedHookLedger{}, nil
-	}
-	return readManagedHookLedger(path)
 }
 
 // readManagedHookLedger reads a guardian record the gateway authorizes from
