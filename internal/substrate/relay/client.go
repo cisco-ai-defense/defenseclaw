@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -289,22 +291,9 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	sendCtx, stopSends := context.WithCancel(ctx)
 	defer stopSends()
 	send := func(frame []byte) error {
-		r, err := do(sendCtx, http.MethodPost, path, AppendStream(nil, frame))
-		if err != nil {
-			if sendCtx.Err() != nil && ctx.Err() == nil {
-				// The end of the attachment cut the write off: the relay
-				// may already have handed the keys to the agent (it answers
-				// 204 after that), so they count as sent and the next
-				// hello's Received count tells (rel-1-0-10:GAP-1765).
-				return errWriteCutAtEnd
-			}
-			return err
-		}
-		r.Body.Close()
-		if r.StatusCode != http.StatusNoContent {
-			return fmt.Errorf("relay write status %d", r.StatusCode)
-		}
-		return nil
+		return pollWrite(ctx, sendCtx, func(wctx context.Context) (*http.Response, error) {
+			return do(wctx, http.MethodPost, path, AppendStream(nil, frame))
+		})
 	}
 	done := make(chan struct{})
 	go func() {
@@ -408,11 +397,55 @@ type sendCount struct {
 // errAttachEnded refuses a chunk read after the attachment ended.
 var errAttachEnded = errors.New("relay: the attachment ended")
 
-// errWriteCutAtEnd is a long-poll write the end of the attachment cut off
-// before its answer: whether it arrived is unknown, so tracked counts it in
-// Sent and does not report it unsent (the user would type it twice); the
-// relay's Received count on the next hello settles it.
-var errWriteCutAtEnd = errors.New("relay: the attachment ended during the write")
+// errWriteUnanswered is a long-poll write that may have reached the relay
+// but got no answer: the end of the attachment cut it off, or the connection
+// failed, after the request went out. Whether it arrived is unknown, so
+// tracked counts it in Sent and does not report it unsent (the user would
+// type it twice); the relay's Received count on the next hello settles it
+// (rel-1-0-10:GAP-1765, GAP-1771).
+var errWriteUnanswered = errors.New("relay: no answer to a long-poll write")
+
+// pollWrite sends one long-poll write (post) and says how it ended. A write
+// the end of the attachment (sendCtx) stopped before it began sends no byte:
+// errAttachEnded, so the chunk is reported unsent (rel-1-0-10:GAP-1771: it
+// was counted in Sent). A write that failed with no answer once the
+// request had a connection and was not refused while being written is
+// errWriteUnanswered (the relay may have handed the keys to the agent; it
+// answers 204 after that). Each transport attempt is judged on its own (a
+// POST net/http retries on a fresh connection), so the last one decides
+// (rel-1-0-10:GAP-2155). Any other failure (no connection, the last
+// attempt's request write failed, the caller's ctx ended) is returned as is
+// and the chunk is reported unsent; if a cut by the caller's ctx did reach
+// the agent, the next hello's Received tells.
+func pollWrite(ctx, sendCtx context.Context, post func(context.Context) (*http.Response, error)) error {
+	if sendCtx.Err() != nil {
+		return errAttachEnded
+	}
+	var conn, writeFailed atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			conn.Store(true)
+			writeFailed.Store(false) // a new attempt: its own write decides
+		},
+		WroteRequest: func(i httptrace.WroteRequestInfo) {
+			if i.Err != nil {
+				writeFailed.Store(true)
+			}
+		},
+	}
+	r, err := post(httptrace.WithClientTrace(sendCtx, trace))
+	if err != nil {
+		if ctx.Err() == nil && conn.Load() && !writeFailed.Load() {
+			return errWriteUnanswered
+		}
+		return err
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("relay write status %d", r.StatusCode)
+	}
+	return nil
+}
 
 // settle ends the count and returns it.
 func (c *sendCount) settle() int64 {
@@ -422,8 +455,8 @@ func (c *sendCount) settle() int64 {
 	return c.n
 }
 
-// tracked wraps send so a chunk that is written, or whose long-poll write the
-// end cut off (errWriteCutAtEnd), is counted in sent, and one that fails or
+// tracked wraps send so a chunk that is written, or whose long-poll write got
+// no answer (errWriteUnanswered), is counted in sent, and one that fails or
 // comes after the attachment ended is reported (OnUnsent).
 func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]byte) error {
 	return func(b []byte) error {
@@ -434,7 +467,7 @@ func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]
 			err = send(b)
 		}
 		switch {
-		case err == nil, errors.Is(err, errWriteCutAtEnd):
+		case err == nil, errors.Is(err, errWriteUnanswered):
 			sent.n += int64(len(b))
 		case o.OnUnsent != nil && len(b) > 0:
 			o.OnUnsent(len(b))
