@@ -254,9 +254,9 @@ enum GatewayAdministratorClient {
                 completion.finish(resultForHelperReply(exitCode: code, output: output))
             }
             // The administrator prompt is answered before this point, so the
-            // budget covers only the helper: its 90 s stop deadline plus the
-            // ownership walk, with time to spare.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 240) {
+            // budget covers only the helper, which stops its ownership walks
+            // in time to answer inside it (GatewayAdminPolicy.repairWalkSeconds).
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .seconds(GatewayAdminPolicy.repairReplySeconds)) {
                 completion.finish(CLIResult(exitCode: 124, output: "The gateway repair timed out. The gateway may still be stopping; check its status before retrying.\n"))
             }
         }
