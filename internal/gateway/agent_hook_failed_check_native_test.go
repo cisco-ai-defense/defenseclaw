@@ -30,6 +30,10 @@ func panicNativeActionOracle(name, event string, profile connector.HookProfile) 
 	case name == "claudecode" && event == "PostToolBatch":
 		// GAP-0440: Claude Code blocks continuation on PostToolBatch.
 		return "block"
+	case name == "copilot" && event == "userPromptTransformed":
+		// GAP-1730, GAP-1753: the gateway's replacement blocks a Copilot
+		// CLI prompt.
+		return "block"
 	case profile.Capabilities.CanBlock && eventIn(event, profile.Capabilities.BlockEvents):
 		return "block"
 	}

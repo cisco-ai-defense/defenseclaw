@@ -28,6 +28,20 @@ copilot_deny() {
     "") printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$1" "$1" ;;
   esac
 }
+{{end}}{{if not .SecureClient}}# copilot_prompt_unreplaced answers a gateway block of a Copilot CLI prompt
+# (userPromptTransformed) that carries no replacement with DefenseClaw's
+# generic replacement, in every fail mode: the replacement is the block of a
+# prompt (GAP-1730), and an error or no output would send the prompt to the
+# model (GAP-1752). Any other answer returns.
+copilot_prompt_unreplaced() {
+  [ "${COPILOT_HOOK_EVENT:-}" = "userPromptTransformed" ] || return 0
+  local unreplaced
+  unreplaced=$(echo "$RESULT" | _dc_jq -r '(.hook_output | if type == "object" then .modifiedTransformedPrompt else null end) as $p | .action == "block" and (($p | type) != "string" or ($p | length) == 0)' 2>/dev/null) || unreplaced=false
+  [ "$unreplaced" = "true" ] || return 0
+  printf 'defenseclaw: copilot hook error: %s\n' "missing native deny in gateway response" >&2
+  printf '{"modifiedTransformedPrompt":"%s"}\n' "DefenseClaw blocked the current user message. Do not answer it or call tools for it. Reply only: DefenseClaw blocked this prompt under the configured security policy."
+  exit 0
+}
 {{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}copilot_managed_failure() {
   local reason="DefenseClaw hook failed closed"
   if [ -n "${1:-}" ] && declare -F defenseclaw_json_escape >/dev/null 2>&1; then
@@ -656,7 +670,8 @@ case "$ACTION" in
   allow|block|confirm|alert) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if not .SecureClient}}copilot_prompt_unreplaced
+{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
   exit 0
 fi
@@ -675,6 +690,7 @@ exit 0
   allow|block|confirm|alert) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
+copilot_prompt_unreplaced
 if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && { [ "$ACTION" = "block" ] || [ "$ACTION" = "confirm" ]; }; then
   fail_response "missing native output in gateway response"
 fi
@@ -682,8 +698,9 @@ if [ "$ACTION" = "block" ]; then
   case "$COPILOT_HOOK_EVENT" in
     preToolUse) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
     permissionRequest) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
-    # The replaced prompt is the block of a prompt (GAP-1730).
-    userPromptTransformed) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '(.modifiedTransformedPrompt | type) == "string" and (.modifiedTransformedPrompt | length) > 0' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
+    # The replaced prompt is the block of a prompt (GAP-1730), checked by
+    # copilot_prompt_unreplaced above (GAP-1752).
+    userPromptTransformed) NATIVE_DENY=true ;;
     *) fail_response "unsupported native block in gateway response" ;;
   esac
   [ "$NATIVE_DENY" = "true" ] || fail_response "missing native deny in gateway response"
@@ -699,7 +716,10 @@ fi
 {{else if not .Managed}}# Fail mode open skips these checks, except while an install that started
 # during the call holds the data directory.
 defenseclaw_close_during_install
-if [ "$FAIL_MODE" != "open" ]; then
+{{if not .SecureClient}}# A prompt block without its replacement is refused in every fail mode: the
+# gateway answered, so it is no outage (GAP-1752).
+copilot_prompt_unreplaced
+{{end}}if [ "$FAIL_MODE" != "open" ]; then
   # Every verdict names its action, and on a tool boundary a block carries
   # Copilot's native deny and a confirmation its native ask, as the Windows
   # hook checks: anything else is no verdict, and would let the call run.
@@ -715,7 +735,6 @@ if [ "$FAIL_MODE" != "open" ]; then
     preToolUse:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
     permissionRequest:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || NATIVE_ANSWER=false ;;
     permissionRequest:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
-    userPromptTransformed:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '(.modifiedTransformedPrompt | type) == "string" and (.modifiedTransformedPrompt | length) > 0' 2>/dev/null) || NATIVE_ANSWER=false ;;
   esac
   if [ "$NATIVE_ANSWER" != "true" ]; then
     case "$ACTION" in

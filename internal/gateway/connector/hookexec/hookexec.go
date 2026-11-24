@@ -2423,10 +2423,28 @@ func failNativeDecision(opts Options, sp spec, reason string) int {
 		case "permissionRequest":
 			fmt.Fprintln(opts.Stdout, `{"behavior":"deny","message":`+message+`}`)
 			return 0
+		case "userPromptTransformed":
+			if sp.dialect != copilotVSCodeLocalSurface {
+				// The block of a Copilot CLI prompt is its replacement
+				// (GAP-1730). A block without one is refused with
+				// DefenseClaw's generic replacement: an error or no output
+				// lets Copilot send the prompt to the model (GAP-1752).
+				logHookFailure(opts, sp, reason, "response", "closed", true)
+				writeFailureDiagnostic(opts, true, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+				fmt.Fprintln(opts.Stdout, `{"modifiedTransformedPrompt":`+mustJSONString(CopilotBlockedPromptText)+`}`)
+				return 0
+			}
 		}
 	}
 	return failResponse(opts, sp, normalizeFailMode(opts.FailMode), reason)
 }
+
+// CopilotBlockedPromptText is what the model receives in place of a Copilot
+// CLI prompt DefenseClaw blocks without naming a Cisco AI Defense category:
+// the gateway's generic replacement (copilotBlockedPromptText), which the
+// native hook also writes when a block arrives without one (GAP-1752).
+const CopilotBlockedPromptText = "DefenseClaw blocked the current user message. Do not answer it or call tools for it. " +
+	"Reply only: DefenseClaw blocked this prompt under the configured security policy."
 
 func managedNativeBlockableEvent(connector, event string) bool {
 	switch connector {

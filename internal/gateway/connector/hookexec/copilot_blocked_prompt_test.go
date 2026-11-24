@@ -9,9 +9,7 @@ import (
 )
 
 // GAP-1730: the native hook forwards the gateway's replacement of a blocked
-// Copilot prompt on every profile, and refuses a userPromptTransformed block
-// that carries no replacement (outside Secure Client) instead of letting the
-// prompt reach the model as if it were allowed.
+// Copilot prompt on every profile.
 func TestGAP1730CopilotNativeHookForwardsTheBlockedPromptReplacement(t *testing.T) {
 	const notice = "DefenseClaw blocked the current user message. Reply only: blocked."
 	replaced := `{"action":"block","raw_action":"block","hook_output":{"modifiedTransformedPrompt":"` + notice + `"}}`
@@ -32,19 +30,43 @@ func TestGAP1730CopilotNativeHookForwardsTheBlockedPromptReplacement(t *testing.
 			}
 		}
 	}
-	for name, profile := range map[string]func(*Options){
+}
+
+// GAP-1752: a gateway block of a Copilot CLI prompt that carries no
+// replacement (an empty, missing or other hook output) still stops the
+// prompt: the native hook writes DefenseClaw's generic replacement, on the
+// per-user and the standalone managed profile, in both fail modes (a
+// contradictory answer is no outage). Before the fix it wrote only an error
+// line and no output, which Copilot reads as no modification, so the blocked
+// prompt reached the model.
+func TestGAP1752CopilotPromptBlockWithoutReplacementFailsClosed(t *testing.T) {
+	// CopilotBlockedPromptText, written out so the test also runs before it existed.
+	want := `{"modifiedTransformedPrompt":"DefenseClaw blocked the current user message. Do not answer it or call tools for it. ` +
+		`Reply only: DefenseClaw blocked this prompt under the configured security policy."}`
+	bodies := map[string]string{
+		"empty output": `{"action":"block","raw_action":"block","hook_output":{}}`,
+		"no output":    `{"action":"block","raw_action":"block"}`,
+		"empty prompt": `{"action":"block","raw_action":"block","hook_output":{"modifiedTransformedPrompt":""}}`,
+		"other field":  `{"action":"block","raw_action":"block","hook_output":{"additionalContext":"x"}}`,
+		"non-string":   `{"action":"block","raw_action":"block","hook_output":{"modifiedTransformedPrompt":7}}`,
+	}
+	profiles := map[string]func(*Options){
 		"per-user":           func(*Options) {},
 		"standalone managed": func(opts *Options) { opts.ManagedEnterprise = true },
-	} {
-		result := run(t, "copilot", ok(`{"action":"block","raw_action":"block","hook_output":{}}`), func(opts *Options) {
-			profile(opts)
-			opts.Event = "userPromptTransformed"
-			opts.FailMode = "closed"
-		})
-		if strings.Contains(result.stdout, "modifiedTransformedPrompt") || strings.TrimSpace(result.stdout) == "{}" ||
-			!strings.Contains(result.stderr, "native output contradicts gateway action") {
-			t.Fatalf("%s: block without replacement: code=%d stdout=%q stderr=%q, want a refused answer",
-				name, result.code, result.stdout, result.stderr)
+	}
+	for profileName, profile := range profiles {
+		for bodyName, body := range bodies {
+			for _, mode := range []string{"open", "closed"} {
+				result := run(t, "copilot", ok(body), func(opts *Options) {
+					profile(opts)
+					opts.Event = "userPromptTransformed"
+					opts.FailMode = mode
+				})
+				if result.code != 0 || strings.TrimSpace(result.stdout) != want {
+					t.Errorf("%s %s %s: code=%d stdout=%q stderr=%q, want exit 0 and %s",
+						profileName, bodyName, mode, result.code, result.stdout, result.stderr, want)
+				}
+			}
 		}
 	}
 }
