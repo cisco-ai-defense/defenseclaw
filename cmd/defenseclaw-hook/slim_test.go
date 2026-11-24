@@ -80,6 +80,12 @@ var slimHookAllowed = []string{
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded",
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic",
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb",
+	// The tier column of a pack (tiers.yaml, DET111 D1): the rule loader
+	// parses and checks it with the decide table (internal/guardrail
+	// compose.go and rulepack.go; the outage fail mode reads its column).
+	// decide links only the standard library and yaml.v3, which the hook
+	// already links.
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide",
 }
 
 // slimHookKnownHeavy are the heavy packages the hook links in 1.0.10 (the
