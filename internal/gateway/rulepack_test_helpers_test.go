@@ -14,7 +14,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -49,11 +48,7 @@ func writeRulePackFixtureFile(t testing.TB, root, relative, contents string) {
 
 func installDefaultRulePackForDataDir(t testing.TB, dataDir string) string {
 	t.Helper()
-	_, helperPath, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve rule-pack test helper path")
-	}
-	source := filepath.Join(filepath.Dir(helperPath), "..", "..", "policies", "guardrail", "default")
+	source := filepath.Join(repoRootFromTestFile(t), "policies", "guardrail", "default")
 	destination := filepath.Join(dataDir, "policies", "guardrail", "default")
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		t.Fatalf("create test rule-pack parent: %v", err)

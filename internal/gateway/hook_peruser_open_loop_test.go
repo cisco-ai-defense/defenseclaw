@@ -79,13 +79,13 @@ func runHookPerUserOpenLoop(t *testing.T, sessions, perSecond int) {
 			}
 		}
 	}
-	cpuBefore := openLoopProcessCPU(t)
+	cpuBefore := processWork(t)
 	base := openLoopResult{problems: map[string]int{}, offered: openLoopBaselineCalls}
 	for n := 0; n < openLoopBaselineCalls; n++ {
 		_, elapsed, status, out, err := performPerUserOpenLoopCall(t.Context(), srv.URL, cwd, names[0], 1000000+n)
 		base.record(elapsed, status, out, err)
 	}
-	base.cpuPerCall = (openLoopProcessCPU(t) - cpuBefore) / openLoopBaselineCalls
+	base.cpuPerCall = (processWork(t) - cpuBefore) / openLoopBaselineCalls
 	plan := openLoopPlan{tokens: names, perSecond: perSecond, duration: duration, cores: runtime.GOMAXPROCS(0)}
 	if path := os.Getenv("S8_GOROUTINE_DUMP"); path != "" {
 		// A goroutine profile half way through the stream, for the

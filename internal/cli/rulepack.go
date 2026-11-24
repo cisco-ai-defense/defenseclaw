@@ -212,7 +212,7 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		if dirLevel {
 			return fmt.Errorf("rule-pack validation failed [%s]: check --dir %s (omit --dir to validate the embedded default pack)", diagnostic.Code, rulePackValidateDir)
 		}
-		return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
+		return rulePackValidationError(response.Error)
 	}
 
 	layers, err := rulePackValidateCustomizations(rulePackValidateLayersJSON)
@@ -232,7 +232,7 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 			if writeErr := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); writeErr != nil {
 				return errors.New("rule-pack validation failed and its safe diagnostic could not be written")
 			}
-			return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
+			return rulePackValidationError(&diagnostic)
 		}
 		rp = composed
 	}
@@ -365,6 +365,42 @@ func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON 
 		response.Error.Reason,
 	)
 	return err
+}
+
+// rulePackValidationError is the error of a refused pack (stderr, exit status
+// 1): its code, where, why and what to change (rel-1-0-10:GAP-2044, GitHub
+// #1452). It printed the code alone, so an integrator that reads stderr had no
+// advice; the reason and place were only on stdout. d is the value-safe
+// diagnostic the output prints, so stderr shows nothing the output does not.
+func rulePackValidationError(d *rulePackWireDiagnostic) error {
+	return fmt.Errorf("rule-pack validation failed [%s] at %s: %s; to fix: %s",
+		d.Code, d.Path, strings.TrimSuffix(d.Reason, "."), rulePackRemedy(d.Code))
+}
+
+// rulePackRemedy says what to change for a refused pack's diagnostic code.
+// The limit codes take the remedy the config writer names
+// (RulePackError.CandidateRemedy), so both commands give one answer.
+func rulePackRemedy(code string) string {
+	if remedy := (&guardrail.RulePackError{Code: code}).CandidateRemedy(); remedy != "" {
+		return remedy
+	}
+	switch {
+	case strings.HasPrefix(code, "yaml_"):
+		return "correct the named file: one YAML document holding only rule-pack fields, each with a value of its type"
+	case strings.HasPrefix(code, "duplicate_"):
+		return "give the named entry an ID that no other entry of the pack uses, or remove the copy"
+	case code == "regex", code == "pattern_size_limit", code == "pattern_count_limit":
+		return "correct or shorten the named pattern (RE2 syntax), or split its patterns across rules"
+	case strings.HasSuffix(code, "_limit"):
+		return "bring the pack under the limit the reason names: remove, merge or split the files or entries it counts"
+	case strings.HasPrefix(code, "semantic_"):
+		return "correct or remove the named rule's expression"
+	case strings.HasPrefix(code, "directory_"), strings.HasSuffix(code, "_unreadable"), code == "not_directory":
+		return "point --dir at the rule-pack folder and make it and its files readable by this account"
+	case code == "rulepack_invalid", code == "internal", strings.HasPrefix(code, "loader_"), code == "embedded_read":
+		return "validate again; if it fails the same way, report it with the code"
+	}
+	return "change the named field or file to a value the rule-pack format allows, then validate again"
 }
 
 func rulePackDiagnostic(err error) rulePackWireDiagnostic {

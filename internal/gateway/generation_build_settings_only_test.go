@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -38,8 +37,7 @@ func writeBundleRecord(t *testing.T, configPath string, raw []byte, bundleID str
 // policy as the signer and the staged verifier do, so its digest equals the
 // signed one and the apply confirms instead of rolling back.
 func TestGenerationSettingsOnlyBundleDigestsInBundleScope(t *testing.T) {
-	_, here, _, _ := runtime.Caller(0)
-	srcPack := filepath.Join(filepath.Dir(here), "..", "..", "policies", "guardrail", "default")
+	srcPack := filepath.Join(repoRootFromTestFile(t), "policies", "guardrail", "default")
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "runtime")
 	if err := os.CopyFS(filepath.Join(dataDir, "policies", "guardrail", "default"), os.DirFS(srcPack)); err != nil {

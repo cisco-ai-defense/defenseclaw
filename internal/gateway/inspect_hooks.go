@@ -71,7 +71,17 @@ const (
 // inspectScanBudget is the synchronous rule-scan deadline of the
 // /api/v1/inspect/* routes: inspectScanTimeout, unless a test set the
 // inspectToolScanTimeout seam (runtime constructors never do).
+//
+// The deadline is the call's own scan: every route reads its budget before
+// it starts the deadline, so the one-time build of the default rule
+// generation happens here, outside it. The first call of a gateway process
+// built that generation (and its semantic programs) inside its 200 ms, and on
+// a busy host it answered 504, which the plugin and the hook script block,
+// while every later call of the same input answered its verdict
+// (rel-1-0-10:GAP-1998). The literal plans of a generation's rules are built
+// when the generation is compiled (compileRulePackGenerationWithCompiler).
 func (a *APIServer) inspectScanBudget() time.Duration {
+	ensureDefaultRuleGeneration()
 	if a.inspectToolScanTimeout > 0 {
 		return a.inspectToolScanTimeout
 	}

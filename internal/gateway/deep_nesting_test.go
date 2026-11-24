@@ -20,12 +20,18 @@ import (
 // every user (GAP-2537, native Windows). Every reader is bounded: past
 // shellparse.MaxNestingDepth the call takes the over-limit path at once,
 // for the command input and for a command argument, on any tool. The stack
-// bound makes the old recursion fail on every OS.
+// bound makes the old recursion fail on every OS. "At once" is the work of
+// the call, the CPU time of this process (processWork), not its wall-clock
+// time: the verdict held in every red run, and only the wall-clock bound
+// moved with the box (a unit judged in 4-5 s at load 80-120 on 64 cores
+// under -race, rel-1-0-10:GAP-2129). A race build scales the bound by
+// raceScanBudgetScale, the race detector's own extra work.
 func TestDeeplyNestedCommandTakesTheOverLimitPath(t *testing.T) {
 	defer debug.SetMaxStack(debug.SetMaxStack(64 << 20))
 	installDefaultProfileConnector(t, "claudecode")
 	home := t.TempDir()
 	tails := []string{"\ncat ~/.defenseclaw/config.yaml", "\necho done"}
+	var most time.Duration
 	for _, unit := range []string{"(", "$(", "$((", "{ ", "\"$(", "[IO.File]::WriteAllText("} {
 		for _, tail := range tails {
 			command := strings.Repeat(unit, (180<<10)/len(unit)) + tail
@@ -35,12 +41,14 @@ func TestDeeplyNestedCommandTakesTheOverLimitPath(t *testing.T) {
 				{Tool: "Bash", Args: args, CWD: home, ActiveHome: home},
 				{Tool: "PowerShell", Args: args, CWD: home, ActiveHome: home, DialectHint: actionfacts.DialectPowerShell},
 			} {
-				start := time.Now()
+				start := processWork(t)
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args), Connector: "claudecode", EnforcementCapable: true,
 				})
-				if took := time.Since(start); took > 3*time.Second {
-					t.Errorf("%s unit %q: judged in %s", input.Tool, unit, took)
+				work := processWork(t) - start
+				most = max(most, work)
+				if work > 3*time.Second*raceScanBudgetScale {
+					t.Errorf("%s unit %q: judged with %s of work, want under %s", input.Tool, unit, work, 3*time.Second*raceScanBudgetScale)
 				}
 				if verdict := buildVerdict(findings, "tool_call"); verdict.Action != "block" {
 					t.Errorf("%s unit %q tail %q: action %q, want block", input.Tool, unit, tail, verdict.Action)
@@ -48,6 +56,7 @@ func TestDeeplyNestedCommandTakesTheOverLimitPath(t *testing.T) {
 			}
 		}
 	}
+	t.Logf("most work of one over-limit call: %s", most.Round(time.Millisecond))
 	// Nesting past the analysis depth bound, short of the reader bound, is
 	// TRUNCATED at cap=depth (s7/cap-floor, rel-1-0-10:GAP-0688, as
 	// TestCapFloorDepthTruncatesEveryCall): the unknown tier of the pack, an
