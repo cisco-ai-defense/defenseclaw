@@ -25338,6 +25338,9 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
     $script:DefenseClawRollbackDeferBusyWriter = [bool](Test-DefenseClawStandaloneProfile)
     $script:DefenseClawRollbackTransitionHookPending = [bool](Test-DefenseClawStandaloneProfile) -and
         -not [string]::IsNullOrWhiteSpace((Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_copy'))
+    $startedUnderGuard = $Snapshot.PSObject.Properties['services_started_under_guard']
+    $script:DefenseClawRollbackGuardianKeepsGuard = $script:DefenseClawRollbackTransitionHookPending -and
+        $null -ne $startedUnderGuard -and $startedUnderGuard.Value -is [bool] -and [bool]$startedUnderGuard.Value
     $script:DefenseClawRollbackCodexVerifyDeferred = $false
     try {
     Assert-DefenseClawEnterpriseDeployment `
@@ -25357,6 +25360,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
     finally {
         $script:DefenseClawRollbackDeferBusyWriter = $false
         $script:DefenseClawRollbackTransitionHookPending = $false
+        $script:DefenseClawRollbackGuardianKeepsGuard = $false
     }
     return $true
 }
@@ -30007,12 +30011,12 @@ function Complete-DefenseClawRestoredHookGuardianPass {
         A pass that does not finish in time is reported, not fatal: the
         restored release is running and the guardian keeps reconciling.
 
-        GAP-2056: the readiness published DefenseClaw's requirements.toml for
-        the guard. Before the guardian restarts, the restored gateway
-        publishes it again for the restored hook (a hand edit made since goes
-        through the GAP-0802 recovery), because a restored guardian of 1.0.10
-        or older refuses its startup reconcile while the file names another
-        hook's folder. The file is verified after the pass. A Codex writer
+        GAP-2056: when the readiness published DefenseClaw's requirements.toml
+        for the guard, the restored gateway publishes it again for the
+        restored hook before the guardian restarts (a hand edit made since
+        goes through the GAP-0802 recovery), because a restored guardian of
+        1.0.10 or older refuses its startup reconcile while the file names
+        another hook's folder. The file is verified after the pass. A Codex writer
         that holds the lock (the running guardian's own pass) defers both
         steps as in the readiness (GAP-0999): the rollback ends held, not
         failed.
@@ -39354,10 +39358,14 @@ $script:DefenseClawRollbackDeferBusyWriter = $false
 # transition hook is still the transaction's guard (the restored hook goes back
 # only after activation). The Codex check of the restored requirements.toml
 # then judges it against the guard, so a file DefenseClaw itself published is
-# not a hand edit: it is published again for the guard (GAP-2056), and again
-# for the restored hook once that is back, then checked
+# not a hand edit: it is kept or published again for the guard (GAP-2056), and
+# published again for the restored hook once that is back, then checked
 # (Complete-DefenseClawRestoredHookGuardianPass).
 $script:DefenseClawRollbackTransitionHookPending = $false
+# GAP-2056: set with it when the failed run had started its services under
+# the guard (services_started_under_guard), so the restored guardian keeps the
+# guard and the file is published again for it.
+$script:DefenseClawRollbackGuardianKeepsGuard = $false
 $script:DefenseClawRollbackCodexVerifyDeferred = $false
 # GAP-0999: set around the call of the managed-hook teardown rollback of a transaction so
 # a busy Codex writer defers that rollback; the second says it did.
@@ -39853,9 +39861,10 @@ function Repair-DefenseClawRecoveredCodexRequirements {
 
         A file that is exactly DefenseClaw's last publication is no hand edit
         (GAP-2012): during a rollback's readiness, while the transaction's
-        guard is still the hook, and with -RestoredHook once the restored hook
-        is back, it is published again for that hook without a backup
-        (GAP-2056).
+        guard is still the hook, it is kept, or published again for the guard
+        when the failed run started its services under the guard; with
+        -RestoredHook, once the restored hook is back, it is published again
+        for that hook. Never with a backup (GAP-2056).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -39905,20 +39914,33 @@ function Repair-DefenseClawRecoveredCodexRequirements {
         # not a hand edit: no backup, no recovery event. It failed the verify
         # only because the hook at the transition path changed under it (the
         # transaction's guard during the readiness, the restored hook once it
-        # is back). GAP-2056: the restored gateway publishes it again for that
-        # hook, as every lifecycle run does. A restored guardian of 1.0.10 or
-        # older refuses its startup reconcile while the file names another
-        # hook's folder, so the rollback could never activate.
-        [void](Invoke-DefenseClawCodexRequirementsCommand `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -Action reconcile)
+        # is back).
+        # GAP-2056: the restored guardian's startup reconcile refuses a file
+        # that names another hook's folder than the one it resolves, and which
+        # one that is depends on how far the failed run got. When this
+        # release's services never started under the guard, the restored
+        # guardian puts its own hook back on its first start, so the file is
+        # kept as it is. When they did, it keeps the guard, so the restored
+        # gateway publishes the file again for the guard. Once the restored
+        # hook is back, it is published again for that hook.
+        if ($RestoredHook -or $script:DefenseClawRollbackGuardianKeepsGuard) {
+            [void](Invoke-DefenseClawCodexRequirementsCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action reconcile)
+        }
         if ($RestoredHook) {
             Write-DefenseClawLifecyclePhase -Stage 'Codex requirements published again for the restored hook (the file is the one DefenseClaw published)'
             return
         }
         $script:DefenseClawRollbackCodexVerifyDeferred = $true
-        Write-DefenseClawLifecyclePhase -Stage 'Codex requirements published again for the transaction guard until the restored hook is back (the file is the one DefenseClaw published)'
+        $stage = if ($script:DefenseClawRollbackGuardianKeepsGuard) {
+            'Codex requirements published again for the transaction guard until the restored hook is back (the file is the one DefenseClaw published)'
+        }
+        else {
+            'Codex requirements kept for the restored hook (the file is the one DefenseClaw published; the restored guardian puts that hook back)'
+        }
+        Write-DefenseClawLifecyclePhase -Stage $stage
         return
     }
     $backupPath = ''
@@ -52317,6 +52339,20 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
                     -Value $quiescenceProperty.Value
             ).ToString('o')
+            if ((Test-DefenseClawStandaloneProfile) -and
+                -not [string]::IsNullOrWhiteSpace((Get-DefenseClawEarlyHookField -Record $activationSnapshot -Name 'early_hook_guard_copy'))) {
+                # GAP-2056: this release's services start while the guard is
+                # the hook. A rollback reads this (its own phase overwrites
+                # service_activation_phase) to know that the restored guardian
+                # will find this release's guardian records and keep the guard,
+                # rather than put its own hook back on its first start.
+                $activationSnapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name services_started_under_guard `
+                        -Value $true `
+                        -Force
+            }
             Set-DefenseClawServiceActivationPhase `
                 -State $activationSnapshot `
                 -Path $snapshot `

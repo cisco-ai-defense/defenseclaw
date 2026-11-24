@@ -19,15 +19,20 @@ publication for no hand edit (no backup, no recovery note). Once the hook is
 back, the guardian is restarted and Setup waits, bounded, for one fresh
 reconcile before the result. A real hand edit still goes through the recovery.
 
-GAP-2056: keeping the file as it was broke the rollback over a published
-1.0.10. That file names the restored hook's folder while the guard is still the
-hook, and the restored 1.0.10 guardian refuses its startup reconcile on it
-("hooks.windows_managed_dir ... does not match protected managed directory"),
-so activation never finished. The restored gateway now publishes DefenseClaw's
-own file again for the guard during the readiness, and again for the restored
-hook before the guardian restarts. The model below is that 1.0.10 guardian:
-it refuses to start while the file names another hook than the one at the
-transition path.
+GAP-2056: the restored 1.0.10 guardian refuses its startup reconcile while
+the file names another hook's folder than the one it resolves ("hooks.
+windows_managed_dir ... does not match protected managed directory"), so the
+rollback never activated. Which hook it resolves depends on how far the failed
+run got:
+- late (cap-f2005a: this release's services had started under the guard, so
+  the restored guardian finds this release's records and keeps the guard): the
+  file must name the guard; keeping it (fix2012b) hung the rollback;
+- early (hook_image_start_failed, nothing started): the restored guardian puts
+  its own hook back on its first start, so the file must stay as it is;
+  publishing it for the guard (fix2056 16690c62f4) hung the rollback.
+The readiness reads services_started_under_guard, which the forward run
+records, and keeps the file or publishes it for the guard. Once the restored
+hook is back it is published for that hook. The model below is that guardian.
 """
 
 from __future__ import annotations
@@ -78,9 +83,16 @@ $script:DefenseClawRollbackCodexVerifyDeferred = $false
 # transition path, and reconcile publishes it for that hook.
 $script:Model1010 = $Case -like 'restored-1010*'
 $script:GuardianStatus = if ($Case -ceq 'restored-1010-stopped') { 'Stopped' } else { 'Running' }
+# Late: the failed run had started its services under the guard.
+$script:DefenseClawRollbackGuardianKeepsGuard = $Case -in @('restored-1010', 'restored-1010-stopped', 'keep-late')
+$script:EarlyRefusal = $Case -ceq 'restored-1010-early'
 function Get-NamedHook { ([IO.File]::ReadAllText($layout.CodexMachinePolicyPath)).Trim() -replace '^managed_hook = ', '' }
 function Get-LiveHook { [IO.File]::ReadAllText($layout.HookPath) }
 function Assert-RestoredGuardianStarts {
+    if ($script:EarlyRefusal) {
+        # No record of the failed release: the guardian puts its own hook back.
+        [IO.File]::WriteAllText($layout.HookPath, 'previous release hook')
+    }
     if ((Get-NamedHook) -cne (Get-LiveHook)) { $script:calls.Add('guardian-refused') }
 }
 function Test-DefenseClawStandaloneProfile { $true }
@@ -170,7 +182,7 @@ if ($Case -ceq 'handedit') {
 } | ConvertTo-Json))
 $before = Get-Sha $requirements
 
-if ($Case -in @('keep', 'handedit')) {
+if ($Case -in @('keep', 'keep-late', 'handedit')) {
     $script:DefenseClawRollbackTransitionHookPending = $true
     Repair-DefenseClawRecoveredCodexRequirements -Layout $layout -GatewayServiceName 'DefenseClawGateway'
 }
@@ -242,12 +254,20 @@ def _run(tmp_path: Path, case: str) -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-def test_the_requirements_defenseclaw_published_are_no_hand_edit_while_the_guard_is_the_hook(tmp_path: Path) -> None:
+def test_the_rollback_keeps_the_requirements_defenseclaw_published_while_the_guard_is_the_hook(tmp_path: Path) -> None:
     result = _run(tmp_path, "keep")
+    assert result["backups"] == 0, result
+    assert result["unchanged"] is True, result
+    assert "codex-reconcile" not in result["calls"], result
+    assert result["notes"] == 0, result
+    assert result["deferred"] is True, result
+
+
+def test_after_services_started_under_the_guard_the_own_file_is_published_for_it(tmp_path: Path) -> None:
+    result = _run(tmp_path, "keep-late")
     assert result["backups"] == 0, result
     assert result["notes"] == 0, result
     assert "event-defenseclaw_recover" not in result["calls"], result
-    # GAP-2056: published again for the guard by the restored gateway.
     assert "codex-reconcile" in result["calls"], result
     assert result["deferred"] is True, result
 
@@ -276,8 +296,8 @@ def test_no_extra_guardian_pass_when_the_previous_hook_was_already_in_place(tmp_
 
 
 def test_the_rollback_over_published_1_0_10_activates_and_ends_on_the_restored_hook(tmp_path: Path) -> None:
-    # GAP-2056 (cap-f2005a): the restored 1.0.10 guardian refused its startup
-    # reconcile, so the rollback never finished.
+    # GAP-2056 late refusal (cap-f2005a): the restored 1.0.10 guardian keeps
+    # the guard and refused its startup reconcile on the kept file.
     result = _run(tmp_path, "restored-1010")
     calls = result["calls"]
     assert "guardian-refused" not in calls, calls
@@ -302,3 +322,17 @@ def test_the_rollback_over_published_1_0_10_ends_on_the_restored_hook_with_the_g
     assert calls[-1] == "final-names-previous release hook", calls
     assert result["backups"] == 0, result
     assert result["notes"] == 0, result
+
+
+def test_an_early_refusal_rollback_over_published_1_0_10_activates_on_the_restored_hook(tmp_path: Path) -> None:
+    # GAP-2056 early refusal (hook_image_start_failed, replay TST-14605): the
+    # restored 1.0.10 guardian puts its hook back and refused a file published
+    # for the guard.
+    result = _run(tmp_path, "restored-1010-early")
+    calls = result["calls"]
+    assert "guardian-refused" not in calls, calls
+    assert "codex-reconcile" not in calls, calls
+    assert calls[-1] == "final-names-previous release hook", calls
+    assert result["backups"] == 0, result
+    assert result["notes"] == 0, result
+    assert "event-defenseclaw_recover" not in calls, calls
