@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
@@ -856,7 +857,27 @@ func quarantinePlugins(dir string, now time.Time) bool {
 	if os.MkdirAll(qdir, 0o700) != nil {
 		return false
 	}
-	return renameFolder(dir, filepath.Join(qdir, fmt.Sprintf("plugins-%d", now.UnixNano()))) == nil
+	return renameFolder(dir, filepath.Join(qdir, fmt.Sprintf("plugins-%d", quarantineStamp(now)))) == nil
+}
+
+var lastQuarantineStamp atomic.Int64
+
+// quarantineStamp is now in nanoseconds, made strictly increasing: one answer
+// quarantines several folders with one now, and two roots that share a parent
+// (.opencode/skill and .opencode/skills, which the table lists side by side)
+// share one quarantine folder, so two refused folders of the same name got the
+// same destination and the second move failed (GAP-1074).
+func quarantineStamp(now time.Time) int64 {
+	for {
+		last := lastQuarantineStamp.Load()
+		n := now.UnixNano()
+		if n <= last {
+			n = last + 1
+		}
+		if lastQuarantineStamp.CompareAndSwap(last, n) {
+			return n
+		}
+	}
 }
 
 // quarantineSkillFolder moves one folder out of its skill root, into
@@ -873,7 +894,7 @@ func quarantineSkillFolder(dir string, now time.Time) bool {
 	}
 	qdir := filepath.Join(filepath.Dir(root), quarantineDirName)
 	if os.MkdirAll(qdir, 0o700) == nil {
-		dst := filepath.Join(qdir, fmt.Sprintf("%s-%d", filepath.Base(dir), now.UnixNano()))
+		dst := filepath.Join(qdir, fmt.Sprintf("%s-%d", filepath.Base(dir), quarantineStamp(now)))
 		if renameFolder(dir, dst) == nil {
 			return true
 		}
