@@ -336,11 +336,13 @@ type walker struct {
 	links      map[string]string // link key -> target physical path (review R7)
 	writeByKey map[string]int    // path key -> 1-based effect index that wrote it
 
-	env      map[string]string
-	curCWD   string
-	curHome  string
-	cwdStack []string
-	lastPrim int // 1-based index of the previous stage's primary effect (pipe join)
+	env         map[string]string
+	captured    map[string][]int // bounded reads assigned from a command substitution
+	capturedOut []int            // content printed by the substitution being walked
+	curCWD      string
+	curHome     string
+	cwdStack    []string
+	lastPrim    int // 1-based index of the previous stage's primary effect (pipe join)
 	// stageIn is what the current command reads on stdin from the previous
 	// pipeline stage; stageOut is what the last finished stage passes on. Each
 	// names the reads whose bytes the stage may print and a literal it was fed
@@ -605,7 +607,8 @@ func (w *walker) walkScript(s *Script, depth int) {
 			// A stage piped on or redirected shows none of its reads, nor do
 			// the bodies it runs (sh -c); the last stage on the call's own
 			// stdout shows what it prints (GAP-1846).
-			hide := c.Pipeline && !c.PipeLast || i+1 < len(st.Cmds) && st.Cmds[i+1].PipeIn || stdoutRedirected(c.Redirs)
+			hide := c.Pipeline && !c.PipeLast || i+1 < len(st.Cmds) && st.Cmds[i+1].PipeIn ||
+				stdoutRedirected(c.Redirs) && !stdoutToAgentStderr(c.Redirs)
 			if hide {
 				w.hidden++
 			}
@@ -614,6 +617,7 @@ func (w *walker) walkScript(s *Script, depth int) {
 				w.hidden--
 			} else if w.hidden == 0 {
 				w.markShown(w.stageOut.content)
+				w.markShown(w.stageOut.agentContent)
 			}
 		}
 		w.leaveStmt()
@@ -634,6 +638,7 @@ func (w *walker) walkCaptured(sub *Script, depth int) {
 	w.hidden++
 	defer func() { w.hidden-- }()
 	w.walkScript(sub, depth)
+	w.capturedOut = appendCapped(w.capturedOut, w.stageOut.content...)
 }
 
 // markShown marks the reads a stage prints on the call's own stdout.
@@ -1208,7 +1213,9 @@ type stageData struct {
 	// content: the reads whose bytes the stage prints on its stdout (a
 	// summary or a redirect drops them; GAP-1846).
 	content []int
-	literal string
+	// agentContent reaches visible stderr but not a downstream pipe.
+	agentContent []int
+	literal      string
 	// exact: the stage printed exactly text (an exact printer, see
 	// exactOutput), so a shell reading the pipe runs that text.
 	exact bool
@@ -1226,6 +1233,8 @@ const maxStageSources = 32
 func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	savedIn, savedLit, savedRedir, savedPrints := w.stageIn, w.literalOut, w.redirOut, w.printsOut
 	savedExact, savedText, savedKind := w.exactOK, w.exactText, w.literalKind
+	savedCapturedOut := w.capturedOut
+	w.capturedOut = nil
 	in := stageData{}
 	if c.PipeIn {
 		in = w.stageOut
@@ -1234,14 +1243,25 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	w.exactOK, w.exactText, w.literalKind = false, "", ""
 	start, own := len(w.res.Effects), w.cmdNo+1
 	w.command(c, dialect, depth, cond)
+	capturedOut := w.capturedOut
+	w.capturedOut = savedCapturedOut
 	out := stageData{literal: w.literalOut, exact: w.exactOK && !stdoutRedirected(c.Redirs), text: w.exactText}
-	if out.literal == "" {
-		out.literal = in.literal
+	printsArgs := printerProgram(c.Words)
+	if !printsArgs {
+		if out.literal == "" {
+			out.literal = in.literal
+		}
+		out.reads = appendCapped(out.reads, in.reads...)
 	}
-	out.reads = appendCapped(out.reads, in.reads...)
 	shows := w.printsOut && !stdoutRedirected(c.Redirs)
-	if shows {
-		out.content = appendCapped(out.content, in.content...)
+	showsStderr := w.printsOut && stdoutToAgentStderr(c.Redirs)
+	if !printsArgs {
+		if shows {
+			out.content = appendCapped(out.content, in.content...)
+		}
+		if showsStderr {
+			out.agentContent = appendCapped(out.agentContent, in.content...)
+		}
 	}
 	var nested []int
 	for i := start; i < len(w.res.Effects); i++ {
@@ -1250,8 +1270,13 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 			continue
 		}
 		out.reads = appendCapped(out.reads, i+1)
-		if shows && e.Origin.Command == own {
-			out.content = appendCapped(out.content, i+1)
+		if e.Origin.Command == own {
+			if shows {
+				out.content = appendCapped(out.content, i+1)
+			}
+			if showsStderr {
+				out.agentContent = appendCapped(out.agentContent, i+1)
+			}
 		}
 		if e.Origin.Command != own {
 			nested = appendCapped(nested, i+1)
@@ -1260,9 +1285,59 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if len(c.Nested) > 0 && len(nested) > 0 {
 		w.linkSubstitutionData(start, own, nested)
 	}
+	if len(c.Words) == 0 {
+		// A bare assignment stores a substitution's output for later echo.
+		// Other assignments already cleared the previous source.
+		for _, a := range c.Assigns {
+			if !a.ValueWord.Static && len(capturedOut) > 0 && len(c.Redirs) == 0 {
+				if w.captured == nil {
+					w.captured = make(map[string][]int)
+				}
+				w.captured[a.Name] = appendCapped(nil, capturedOut...)
+			}
+		}
+	} else if w.printsOut && printerArguments(c.Words) {
+		for _, word := range c.Words[1:] {
+			for _, seg := range word.Segs {
+				if seg.Var != "" {
+					if shows {
+						out.content = appendCapped(out.content, w.captured[seg.Var]...)
+					}
+					if showsStderr {
+						out.agentContent = appendCapped(out.agentContent, w.captured[seg.Var]...)
+					}
+				}
+			}
+			if word.Reason == ReasonDynamicExpansion && len(capturedOut) > 0 {
+				if shows {
+					out.content = appendCapped(out.content, capturedOut...)
+				}
+				if showsStderr {
+					out.agentContent = appendCapped(out.agentContent, capturedOut...)
+				}
+			}
+		}
+	}
 	w.stageOut = out
 	w.stageIn, w.literalOut, w.redirOut, w.printsOut = savedIn, savedLit, savedRedir, savedPrints
 	w.exactOK, w.exactText, w.literalKind = savedExact, savedText, savedKind
+}
+
+// printerArguments identifies a command that prints the bytes of its
+// arguments; the program table accounts for its operands as data.
+func printerProgram(words []Word) bool {
+	if len(words) == 0 || !words[0].Static {
+		return false
+	}
+	switch programBasename(words[0].Value, FlavorPOSIX) {
+	case "echo", "printf":
+		return true
+	}
+	return false
+}
+
+func printerArguments(words []Word) bool {
+	return len(words) > 1 && printerProgram(words)
 }
 
 // linkSubstitutionData records that the data a command sends or writes, when
@@ -1476,6 +1551,8 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if a.NoValue {
 			continue // an attribute change only: the value is untouched
 		}
+		w.ownVars()
+		delete(w.captured, a.Name)
 		if rv.Static {
 			w.ownVars()
 			w.env[a.Name] = rv.Value
@@ -2023,7 +2100,15 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		operandWords = w.joinNewItemName(operandWords)
 	}
 	ops, execCmds, opsUA := w.classifyOperands(operandWords, entry, dialect)
-	w.printsOut = stagePrints(entry, operandWords)
+	w.printsOut = stagePrints(entry, operandWords) || !known && c.PipeIn
+	if entry.Pos == PosInOut {
+		for _, op := range ops {
+			if op.role == RoleWrite {
+				w.printsOut = false
+				break
+			}
+		}
+	}
 	if opsUA {
 		unaccounted = true
 	}
@@ -4377,6 +4462,7 @@ type scopeState struct {
 	alt           []string
 	stack         []string
 	env           map[string]string
+	captured      map[string][]int
 	exported      map[string]bool
 	chain         *cdChain
 	narrowed      *cwdState
@@ -4393,7 +4479,7 @@ type scopeState struct {
 // mutable parts (env, exported set, cwd candidates), so nothing the child does
 // to them can leak into the parent when restoreScope puts the originals back.
 func (w *walker) saveScope() scopeState {
-	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
+	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env, captured: w.captured,
 		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther,
 		execState: w.execState, debugTrap: w.debugTrap, pwdOwn: w.pwdOwn, pwdFunc: w.pwdFunc}
 	w.debugTrap = false // a subshell does not inherit a DEBUG trap
@@ -4416,17 +4502,30 @@ func (w *walker) ownVars() {
 	}
 	w.env = cloneEnv(w.env)
 	w.exported = cloneBools(w.exported)
+	w.captured = cloneCaptured(w.captured)
 	w.varsOwned = true
 }
 
 func (w *walker) restoreScope(s scopeState) {
 	w.curCWD, w.curHome, w.cwdAlt, w.cwdStack, w.env = s.cwd, s.home, s.alt, s.stack, s.env
+	w.captured = s.captured
 	w.exported, w.cdChain, w.narrowed, w.narrowedOther = s.exported, s.chain, s.narrowed, s.narrowedOther
 	w.varsOwned = s.varsOwned
 	w.execState = s.execState
 	w.debugTrap = s.debugTrap
 	w.pwdOwn = s.pwdOwn
 	w.pwdFunc = s.pwdFunc
+}
+
+func cloneCaptured(in map[string][]int) map[string][]int {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]int, len(in))
+	for name, reads := range in {
+		out[name] = reads
+	}
+	return out
 }
 
 func cloneBools(in map[string]bool) map[string]bool {
@@ -4444,6 +4543,7 @@ func cloneBools(in map[string]bool) map[string]bool {
 func (w *walker) unsetVar(name string) {
 	w.ownVars()
 	delete(w.env, name)
+	delete(w.captured, name)
 	delete(w.exported, name) // an unset variable is not exported; a later assignment makes a plain one
 	switch name {
 	case "HOME":
@@ -5889,6 +5989,7 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 		if !hasVal {
 			continue
 		}
+		delete(w.captured, name)
 		if attr || nameref || w.namerefSeen {
 			delete(w.env, name) // the stored value is transformed or aliased
 			if name == "PWD" {

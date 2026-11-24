@@ -664,7 +664,8 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"powershell", "pwsh"}, Pos: PosNone, PSLaunch: true,
 		Flags: map[string]Flag{"-command": {Value: true, Role: RoleExecCode}, "-c": {Value: true, Role: RoleExecCode}, "-encodedcommand": {Value: true, Role: RoleExecCode}, "-enc": {Value: true, Role: RoleExecCode}, "-ec": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-file": {Value: true, Role: RoleExecCode}}})
 	// These builtins only format or emit arguments; their operands are data.
-	add(Program{Names: []string{"echo", "printf", "true", "false"}, Pos: PosNone, InertOperands: true})
+	add(Program{Names: []string{"echo", "printf"}, Pos: PosNone, InertOperands: true, Prints: true,
+		Flags: fl(nil, "-n", "-e", "-E", "-l", "-a", "-h", "-c", "-v", "-f", "-r", "-s", "-t", "-u", "-p", "-i", "-w", "-x", "-z", "-d", "-k", "-m", "-b", "-o", "-g", "-L", "-P", "-H", "-9", "-1")})
 	add(Program{Names: []string{"cat", "tac", "less", "more", "bat", "nl"}, Pos: PosAllRead,
 		Flags: fl(nil, "-n", "-b", "-E", "-s", "-v", "-A", "-T", "-e", "-t", "-u", "-r", "--number", "--show-ends")})
 	add(Program{Names: []string{"head", "tail"}, Pos: PosAllRead,
@@ -856,7 +857,7 @@ func buildPOSIXTable() {
 		Flags: map[string]Flag{"-exec": {Value: true, Role: RoleExecCode}, "-toolexec": {Value: true, Role: RoleExecCode}}})
 	// Inert-operand programs: their positionals are messages, names or option
 	// values, not files they act on (review R5-2 InertOperands).
-	add(Program{Names: []string{"echo", "printf", "true", "false", ":", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias", "ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill", "killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let", "read", "printenv", "logname", "groups", "nproc", "arch"}, Pos: PosNone, InertOperands: true,
+	add(Program{Names: []string{"true", "false", ":", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias", "ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill", "killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let", "read", "printenv", "logname", "groups", "nproc", "arch"}, Pos: PosNone, InertOperands: true,
 		Flags: fl(nil, "-n", "-e", "-E", "-l", "-a", "-h", "-c", "-v", "-f", "-r", "-s", "-t", "-u", "-p", "-i", "-w", "-x", "-z", "-d", "-k", "-m", "-b", "-o", "-g", "-L", "-P", "-H", "-9", "-1")})
 	// Programs that read their file operands. The valued flags below are inert
 	// data (a count, a delimiter, a field list); none of these programs writes a
@@ -882,16 +883,16 @@ func buildPOSIXTable() {
 		}
 		return m
 	}
-	add(Program{Names: []string{"uniq"}, Pos: PosInOut,
+	add(Program{Names: []string{"uniq"}, Pos: PosInOut, Prints: true,
 		Flags: fl(inert("-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"),
 			"-c", "-d", "-D", "-i", "-u", "-z", "--count", "--repeated", "--all-repeated", "--ignore-case", "--unique", "--zero-terminated", "--group")})
-	add(Program{Names: []string{"xxd"}, Pos: PosInOut,
+	add(Program{Names: []string{"xxd"}, Pos: PosInOut, Prints: true,
 		Flags: fl(inert("-c", "-g", "-l", "-o", "-s", "-n", "-cols", "-groupsize", "-len", "-seek", "-name"),
 			"-a", "-b", "-d", "-e", "-E", "-i", "-p", "-ps", "-postscript", "-plain", "-r", "-revert", "-u", "-v", "-C", "-autoskip", "-bits", "-include", "-uppercase", "-EBCDIC")})
 	add(Program{Names: []string{"split", "csplit"}, Pos: PosSourcesDest,
 		Flags: fl(map[string]Flag{"-b": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "-l": {Value: true, Role: RoleIgnore}, "-a": {Value: true, Role: RoleIgnore}, "--additional-suffix": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "--suffix-length": {Value: true, Role: RoleIgnore}, "-k": {Value: true, Role: RoleIgnore}},
 			"-d", "-u", "-z", "-e", "-s", "-x", "--numeric-suffixes", "--elide-empty-files")})
-	add(Program{Names: []string{"tr"}, Pos: PosNone, InertOperands: true, Flags: fl(nil, "-d", "-s", "-c", "-t", "-C")})
+	add(Program{Names: []string{"tr"}, Pos: PosNone, InertOperands: true, Prints: true, Flags: fl(nil, "-d", "-s", "-c", "-t", "-C")})
 	// sort reads its inputs and writes the file named by -o (review R5-2).
 	add(Program{Names: []string{"sort"}, Pos: PosAllRead,
 		Flags: fl(map[string]Flag{"-o": {Value: true, Role: RoleWrite}, "--output": {Value: true, Role: RoleWrite},
