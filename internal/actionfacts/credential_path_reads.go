@@ -625,10 +625,10 @@ func lazyCredentialPathReads(words []credentialPathWord, cwd, home string, comma
 }
 
 func (l *credentialPathResult) get() *credentialPathRecord {
-	return l.getWithin(nil)
+	return l.getWithin(context.Background())
 }
 
-// getWithin is get, the resolve (when it runs now) within ctx (nil: none).
+// getWithin is get, the resolve (when it runs now) within ctx.
 func (l *credentialPathResult) getWithin(ctx context.Context) *credentialPathRecord {
 	if l == nil {
 		return nil
