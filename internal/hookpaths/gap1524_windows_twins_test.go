@@ -6,18 +6,14 @@
 package hookpaths
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-// rel-1-0-10:GAP-1524: TestBoundCallReachesProtectedLink and the
-// long-operand-list fixtures skip on native Windows (POSIX links and a
-// POSIX managed hook fixture; accepted by design, DET111 2026-11-24). These
-// are their Windows twins. A second name of the keys file is made with a
+// rel-1-0-10:GAP-1524: TestBoundCallReachesProtectedLink skips on native
+// Windows (POSIX links; accepted by design, DET111 2026-11-24). This is its
+// Windows twin. A second name of the keys file is made with a
 // hard link, which a standard Windows account may create (a symbolic link
 // needs a privilege the Limited token lacks).
 
@@ -66,41 +62,5 @@ func TestGAP1524WindowsBoundCallReachesProtectedLink(t *testing.T) {
 		if got := BoundCallReachesProtectedLink(row.command, cwd, home); got != row.want {
 			t.Errorf("BoundCallReachesProtectedLink(%q) = %v, want %v", row.command, got, row.want)
 		}
-	}
-}
-
-// Class: a long operand list keeps a protected target past the map budget
-// (POSIX twins TestLongOperandListInADeepFolderIsAllowedAndKeepsProtectedTargets,
-// TestDeepFolderFixtureReachesItsDepthOnAShortTempRoot): 300 operands with
-// a second name of the keys file last carry the protected decision; the
-// same list with an ordinary file last does not.
-func TestGAP1524WindowsLongOperandListKeepsProtectedTarget(t *testing.T) {
-	_, cwd, _ := gap1524WindowsKeysHome(t)
-	words := make([]string, 0, 301)
-	for i := 0; i < 300; i++ {
-		words = append(words, fmt.Sprintf("h%04d", i))
-	}
-	payload := func(last string) []byte {
-		body, err := json.Marshal(map[string]any{
-			"hook_event_name": "PreToolUse", "cwd": cwd, "tool_name": "Bash",
-			"tool_input": map[string]string{"command": "touch " + strings.Join(append(words, last), " ")},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return body
-	}
-	decision := func(last string) (string, bool) {
-		targets, ok := Decode(Resolve(payload(last)))
-		if !ok {
-			t.Fatalf("%s: the client map does not decode", last)
-		}
-		return targets[ActionDecisionKey], targets[BudgetKey] == "1"
-	}
-	if got, _ := decision("output"); got != ProtectedTargetDecision {
-		t.Errorf("300 operands then a second name of the keys file: decision %q, want %q", got, ProtectedTargetDecision)
-	}
-	if got, _ := decision("plain.txt"); got == ProtectedTargetDecision {
-		t.Errorf("300 ordinary operands: decision %q, want none", got)
 	}
 }

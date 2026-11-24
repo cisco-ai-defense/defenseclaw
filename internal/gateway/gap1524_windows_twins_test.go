@@ -7,6 +7,9 @@ package gateway
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -133,6 +136,57 @@ func TestGAP1524WindowsHomeDeleteIsCriticalInEveryTier(t *testing.T) {
 			if a := got[pack.name+"/allowed/"+id]; a["action"] != "allow" {
 				t.Errorf("%s %q: action %v, want allow: %v", pack.name, call, a["action"], a["reason"])
 			}
+		}
+	}
+}
+
+// Class: a long operand list in a deep project folder keeps a protected
+// target (POSIX twins
+// TestLongOperandListInADeepFolderIsAllowedAndKeepsProtectedTargets,
+// TestDeepFolderFixtureReachesItsDepthOnAShortTempRoot): 300 operands and
+// then a second name of the keys file get the verdict of the short call
+// that names only it, which is never an allow; the same list with an
+// ordinary file last stays allowed. The second name is a hard link, which
+// the Limited token may create.
+func TestGAP1524WindowsLongOperandListKeepsProtectedTarget(t *testing.T) {
+	home, cwd := gap1173WindowsStateHome(t)
+	deep := filepath.Join(cwd, "a", "b", "c", "d", "e", "f", "g", "h")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("k\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(keys, filepath.Join(deep, "output")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "plain.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	words := make([]string, 0, 300)
+	for i := 0; i < 300; i++ {
+		words = append(words, fmt.Sprintf("h%04d", i))
+	}
+	list := strings.Join(words, " ")
+	got := gap1524Verdicts(t, deep, map[string]string{
+		"short keys": "touch output",
+		"long keys":  "touch " + list + " output",
+		"long plain": "touch " + list + " plain.txt",
+	})
+	for _, pack := range gap0437Packs {
+		short, long, plain := got[pack.name+"/short keys"], got[pack.name+"/long keys"], got[pack.name+"/long plain"]
+		if short["action"] == "allow" {
+			t.Errorf("%s touch of a second name of the keys file: allow: %v", pack.name, short["reason"])
+		}
+		if hookActionRank(fmt.Sprint(long["action"])) < hookActionRank(fmt.Sprint(short["action"])) {
+			t.Errorf("%s 300 operands then the keys file's second name: action %v, weaker than the short call's %v: %v", pack.name, long["action"], short["action"], long["reason"])
+		}
+		if plain["action"] != "allow" {
+			t.Errorf("%s 300 ordinary operands: action %v, want allow: %v", pack.name, plain["action"], plain["reason"])
 		}
 	}
 }
