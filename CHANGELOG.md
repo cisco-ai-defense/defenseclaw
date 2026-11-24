@@ -10,7 +10,7 @@ for current behavior.
 
 ## [Unreleased] — 1.0.11
 
-DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 0.1.9 and adds one managed config key, `enterprise.openshell.allow_downgrade`. It fixes how blocked tool calls end a streamed reply, Windows managed install, upgrade and uninstall, routing budgets and cost records, sandbox setup on macOS, and a set of smaller connector and CLI issues.
+DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 0.1.9 and adds five config keys: `enterprise.openshell.allow_downgrade` for managed installs, `ai_discovery.include_skill_content_hashes` (on by default), the opt-ins `ai_discovery.include_skill_manifests` and `guardrail.include_hook_event_content` (off by default), and `substrate.bundles.oci` for Agent Substrate (Preview). It fixes how blocked tool calls end a streamed reply, Windows managed install, upgrade and uninstall, routing budgets and cost records, sandbox setup on macOS, and a set of smaller connector and CLI issues.
 
 ### Upgrading
 
