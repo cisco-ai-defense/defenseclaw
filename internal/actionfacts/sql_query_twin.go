@@ -31,7 +31,7 @@ const maxSQLQueryChunks = maxCommandBytes / maxScalarBytes
 // bound, in order (DET111 ruling B on GAP-1926: the statements past the first
 // cut are read too, under the per-call budget maxSQLQueryChunks); each chunk
 // is read as the query of its own reading of the call, and each statement of
-// a chunk is read alone (sqlStatementCandidates). A statement that is itself
+// a chunk is read alone (sqlSessionStatementCandidates). A statement that is itself
 // past the bound ends the chunks, and the statements from there on are not
 // read; the call keeps the truncation record (the cut raises nothing by
 // itself). A query with no complete statement within the bound leaves the
@@ -179,12 +179,22 @@ const (
 // statement boundaries of the inline query of a SQL client: the shortened
 // twin (sqlQueryShortened) and the statement split (sqlStatements) share it.
 func sqlSpans(engine, query string, visit func(kind sqlSpanKind, start, end int)) {
+	noBackslash := false
+	statementStart := 0
 	for i := 0; i < len(query); {
 		c := query[i]
 		switch {
-		case c == '\'' || c == '"' || c == '`':
-			backslash := engine == "mysql" && c != '`' ||
-				c == '\'' && i > 0 && (query[i-1] == 'E' || query[i-1] == 'e') && (i < 2 || !isSQLASTWordByte(query[i-2]))
+		case c == '\'' || c == '"' || c == '`' || c == '[' && engine == "sqlserver":
+			if c == '[' {
+				end := sqlBracketEnd(query, i)
+				visit(sqlSpanQuoted, i, end)
+				i = end
+				continue
+			}
+			backslash := engine == "mysql" && c != '`' && !noBackslash ||
+				engine == "postgresql" && c == '\'' && i > 0 &&
+					(query[i-1] == 'E' || query[i-1] == 'e') &&
+					(i < 2 || !isSQLASTWordByte(query[i-2]))
 			end := sqlQuotedEnd(query, i, c, backslash)
 			visit(sqlSpanQuoted, i, end)
 			i = end
@@ -201,28 +211,116 @@ func sqlSpans(engine, query string, visit func(kind sqlSpanKind, start, end int)
 			}
 			visit(sqlSpanQuoted, i, end)
 			i = end
-		case c == '-' && strings.HasPrefix(query[i:], "--"):
+		case c == '-' && strings.HasPrefix(query[i:], "--") &&
+			(engine != "mysql" || i+2 < len(query) && query[i+2] <= ' '):
 			end := len(query)
-			if newline := strings.IndexByte(query[i:], '\n'); newline >= 0 {
+			if newline := strings.IndexAny(query[i:], "\r\n"); newline >= 0 {
+				end = i + newline
+			}
+			visit(sqlSpanComment, i, end)
+			i = end
+		case c == '#' && engine == "mysql":
+			end := len(query)
+			if newline := strings.IndexAny(query[i:], "\r\n"); newline >= 0 {
 				end = i + newline
 			}
 			visit(sqlSpanComment, i, end)
 			i = end
 		case c == '/' && strings.HasPrefix(query[i:], "/*"):
-			end := len(query)
-			if close := strings.Index(query[i+2:], "*/"); close >= 0 {
-				end = i + 2 + close + 2
+			if engine == "mysql" {
+				if close := strings.Index(query[i+2:], "*/"); close >= 0 {
+					end := i + 2 + close + 2
+					if body, ok := sqlMySQLExecutableCommentBody(query, i, end); ok {
+						visit(sqlSpanByte, body, end-2)
+						i = end
+						continue
+					}
+				}
+			}
+			depth, end := 1, i+2
+			for end < len(query) && depth > 0 {
+				switch {
+				case strings.HasPrefix(query[end:], "/*") && (engine == "postgresql" || engine == "sqlserver"):
+					depth++
+					end += 2
+				case strings.HasPrefix(query[end:], "*/"):
+					depth--
+					end += 2
+				default:
+					end++
+				}
 			}
 			visit(sqlSpanComment, i, end)
 			i = end
 		case c == ';':
 			visit(sqlSpanEnd, i, i+1)
+			if engine == "mysql" {
+				if mode, ok := sqlMySQLBackslashMode(query[statementStart:i]); ok {
+					noBackslash = !mode
+				}
+			}
 			i++
+			statementStart = i
 		default:
 			visit(sqlSpanByte, i, i+1)
 			i++
 		}
 	}
+}
+
+// sqlMySQLExecutableCommentBody gives the SQL body of a balanced MySQL or
+// MariaDB executable comment. The existing mutation grammar validates the
+// whole statement; the span reader must keep the body as code.
+func sqlMySQLExecutableCommentBody(query string, start, end int) (int, bool) {
+	body := start + 3
+	if strings.HasPrefix(query[start:end], "/*M!") {
+		body = start + 4
+	} else if !strings.HasPrefix(query[start:end], "/*!") {
+		return 0, false
+	}
+	for body < end-2 && query[body] >= '0' && query[body] <= '9' {
+		body++
+	}
+	return body, body < end-2
+}
+
+// sqlMySQLBackslashMode reads a literal session SQL mode assignment. Dynamic
+// assignments retain the server default interpretation until a later literal
+// assignment is known. true means the usual backslash escape mode.
+func sqlMySQLBackslashMode(statement string) (bool, bool) {
+	left, right, assigned := strings.Cut(strings.TrimSpace(statement), "=")
+	if !assigned {
+		return false, false
+	}
+	switch strings.ToUpper(strings.Join(strings.Fields(left), " ")) {
+	case "SET SQL_MODE", "SET SESSION SQL_MODE", "SET @@SESSION.SQL_MODE":
+	default:
+		return false, false
+	}
+	right = strings.TrimSpace(right)
+	if len(right) < 2 || right[0] != '\'' || right[len(right)-1] != '\'' {
+		return false, false
+	}
+	for _, mode := range strings.Split(strings.ToUpper(right[1:len(right)-1]), ",") {
+		if strings.TrimSpace(mode) == "NO_BACKSLASH_ESCAPES" {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+func sqlBracketEnd(query string, start int) int {
+	for i := start + 1; i < len(query); i++ {
+		if query[i] != ']' {
+			continue
+		}
+		if i+1 < len(query) && query[i+1] == ']' {
+			i++
+			continue
+		}
+		return i + 1
+	}
+	return len(query)
 }
 
 // sqlQueryShortened is query with each quoted literal or identifier and each
@@ -239,7 +337,11 @@ func sqlQueryShortened(engine, query string) (string, []int) {
 				tag, _ := sqlDollarTag(part)
 				out.WriteString(tag + "x" + tag)
 			} else {
-				out.WriteString(string(part[0]) + "x" + string(part[0]))
+				close := part[0]
+				if close == '[' {
+					close = ']'
+				}
+				out.WriteString(string(part[0]) + "x" + string(close))
 			}
 		case kind == sqlSpanComment && len(part) > stubKeepBytes:
 			out.WriteByte(' ')

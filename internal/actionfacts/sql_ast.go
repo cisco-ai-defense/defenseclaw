@@ -347,8 +347,12 @@ func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact,
 	mutations := make([]SQLMutationFact, 0, len(inputs))
 	sqlFacts := make([]SQLFact, 0, len(inputs))
 	var caps bounded.CapSet
+	var singleParsed sqlASTResult
 	for _, candidate := range inputs {
 		parsed := parseSQLAST(candidate.query)
+		if len(inputs) == 1 {
+			singleParsed = parsed
+		}
 		caps = caps.Union(parsed.caps)
 		if !parsed.unknown {
 			database := candidate.databaseIdentity
@@ -363,21 +367,22 @@ func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact,
 				StatementCount: parsed.statementCount,
 			})
 		}
-
-		// Each statement of a multi-statement inline query is judged as
-		// its bare form (DET111 ruling B on GAP-1926); a statement a
-		// rolled back transaction undoes changes no data.
-		statements, capped, _ := sqlStatementCandidates(candidate)
-		if capped {
-			caps = caps.Union(bounded.Of(bounded.Items))
+	}
+	statements, capped, _ := sqlSessionStatementCandidates(inputs)
+	if capped {
+		caps = caps.Union(bounded.Of(bounded.Items))
+	}
+	for _, statement := range statements {
+		if statement.rolledBack {
+			continue
 		}
-		for _, statement := range statements {
-			if statement.rolledBack {
-				continue
-			}
-			if fact, ok := exactSQLMutationOf(statement, parsed, len(statements) > 1); ok {
-				mutations = append(mutations, fact)
-			}
+		parsed := singleParsed
+		if len(inputs) != 1 || len(statements) != 1 || statement.query != inputs[0].query {
+			parsed = parseSQLAST(statement.query)
+		}
+		caps = caps.Union(parsed.caps)
+		if fact, ok := exactSQLMutationOf(statement, parsed); ok {
+			mutations = append(mutations, fact)
 		}
 	}
 	return mutations, sqlFacts, caps
@@ -385,18 +390,14 @@ func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact,
 
 // exactSQLMutationOf is the exact mutation fact of one statement candidate:
 // the text grammar (exactSQLMutation), else the SQL facts reading of it
-// (exactSQLASTMutationParsed). parsed is the reading of the whole query, read
-// again for the statement alone when split.
-func exactSQLMutationOf(candidate exactSQLMutationInput, parsed sqlASTResult, split bool) (SQLMutationFact, bool) {
+// (exactSQLASTMutationParsed). parsed is the reading of this candidate.
+func exactSQLMutationOf(candidate exactSQLMutationInput, parsed sqlASTResult) (SQLMutationFact, bool) {
 	operation, scope, object, ok := exactSQLMutation(candidate.engine, candidate.query)
 	if candidate.engine == "sqlite" {
 		object, ok = exactSQLiteUnboundedDelete(candidate.query)
 		operation = SQLMutationDeleteUnbounded
 		scope = SQLMutationScopeTable
 	} else if !ok {
-		if split {
-			parsed = parseSQLAST(candidate.query)
-		}
 		if !parsed.unknown {
 			operation, scope, object, ok = exactSQLASTMutationParsed(candidate.engine, candidate.query, parsed)
 		}

@@ -201,7 +201,6 @@ func TestSQLMutationFactsHardNegatives(t *testing.T) {
 		{name: "unquoted dynamic query", input: Input{Tool: "shell", Command: "psql -c $QUERY"}},
 		{name: "dry run", input: Input{Tool: "shell", Command: "psql --dry-run -c 'DELETE FROM customers'"}},
 		{name: "unknown option", input: Input{Tool: "shell", Command: "psql --file migration.sql -c 'DELETE FROM customers'"}},
-		{name: "duplicate query", input: Input{Tool: "shell", Command: "psql -c 'DELETE FROM customers' -c 'TRUNCATE audit_log'"}},
 		{name: "conflicting database", input: Input{Tool: "shell", Command: "psql -d one -c 'DELETE FROM customers' two"}},
 		{name: "joined short option", input: Input{Tool: "shell", Command: "psql '-cDELETE FROM customers'"}},
 		{name: "unquoted heredoc", input: Input{Tool: "shell", Command: "psql <<SQL\nDELETE FROM customers;\nSQL"}},

@@ -14,7 +14,7 @@ import (
 // server file read) judge: every command of the call, not only a call of one
 // command; each -c of a psql call; and mysql and mariadb as well as psql
 // (each reader keeps its own engines) (DET111 T20 review P3-3). Each
-// statement of a query is its own input (sqlStatementCandidates), a
+// statement of a query is its own input (sqlSessionStatementCandidates), a
 // statement in a transaction that is rolled back too: what a server-side
 // function or program does is done when the transaction is undone. Each
 // input is judged by the same exact readers as one psql -c alone, so the
@@ -31,72 +31,85 @@ func sqlCLIReadInputs(input Input, facts Facts) (inputs []exactSQLMutationInput,
 		return nil, caps, false
 	}
 	for _, command := range facts.Commands {
-		for _, query := range exactSQLCLICommandInputs(command, true) {
-			statements, capped, danger := sqlStatementCandidates(query)
-			if capped {
-				caps = caps.Union(bounded.Of(bounded.Items))
-			}
-			unreadDanger = unreadDanger || danger
-			inputs = append(inputs, statements...)
+		statements, capped, danger := sqlSessionStatementCandidates(exactSQLCLICommandInputs(command, true))
+		if capped {
+			caps = caps.Union(bounded.Of(bounded.Items))
 		}
+		unreadDanger = unreadDanger || danger
+		inputs = append(inputs, statements...)
 	}
 	return inputs, caps, unreadDanger
 }
 
-// sqlStatementCandidates is the inline query of a SQL client read statement
-// by statement (DET111 ruling B on GAP-1926): a query of one statement is
-// candidate as it is; a query of more is one candidate per statement, so a
-// statement is judged as its bare form, never above it, wherever it stands
-// in the query (after a SELECT, inside BEGIN ... COMMIT). A structured query
-// keeps its own grammar. rolledBack marks a statement inside a transaction
-// the query undoes: one that ROLLBACK ends, or that the query leaves open
-// (the client's session end rolls it back), unless a statement the engine
-// commits implicitly ends it first (MySQL and Snowflake commit before DDL
-// and before a nested BEGIN). capped reports statements past
-// maxSQLASTStatements, which are not read.
-func sqlStatementCandidates(candidate exactSQLMutationInput) (candidates []exactSQLMutationInput, capped, unreadDanger bool) {
-	if candidate.source == SQLMutationQueryStructured {
-		return []exactSQLMutationInput{candidate}, false, false
+// sqlSessionStatementCandidates reads one client session in input order. A
+// transaction can span several -c options; only a proven full rollback, or a
+// session ending with every statement known, makes its mutations unread.
+// A statement past an input's cap with a danger keyword is a candidate too,
+// read alone outside the transaction reading (GAP-2122); unreadDanger
+// reports one past the danger budget (sqlStatements).
+func sqlSessionStatementCandidates(inputs []exactSQLMutationInput) (candidates []exactSQLMutationInput, capped, unreadDanger bool) {
+	if len(inputs) == 1 && inputs[0].source == SQLMutationQueryStructured {
+		return []exactSQLMutationInput{inputs[0]}, false, false
 	}
-	statements, capped, danger, unreadDanger := sqlStatements(candidate.engine, candidate.query)
-	if len(statements) <= 1 && !capped {
-		return []exactSQLMutationInput{candidate}, false, false
-	}
-	candidates = make([]exactSQLMutationInput, len(statements))
-	open := -1 // index of the first statement of the open transaction
+	var danger []exactSQLMutationInput // past-cap danger statements, read alone (GAP-2122)
+	open := -1                         // index of the first statement of the open transaction
+	tableLocked := false               // MySQL UNLOCK commits only locks acquired by LOCK TABLES.
 	undo := func(end int) {
 		for i := open; i < end; i++ {
 			candidates[i].rolledBack = true
 		}
 		open = -1
 	}
-	for i, statement := range statements {
-		candidates[i] = candidate
-		candidates[i].query = statement.text
-		switch control := sqlTransactionControl(candidate.engine, statement.words); {
-		case control == sqlTransactionBegin && open < 0:
-			open = i
-		case control == sqlTransactionBegin && sqlImplicitCommit(candidate.engine, statement.words):
-			open = i
-		case control == sqlTransactionCommit:
-			open = -1
-		case control == sqlTransactionRollback && open >= 0:
-			undo(i)
-		case open >= 0 && sqlImplicitCommit(candidate.engine, statement.words):
-			open = -1
+	for _, input := range inputs {
+		statements, cut, past, unread := sqlStatements(input.engine, input.query)
+		capped = capped || cut
+		unreadDanger = unreadDanger || unread
+		for _, statement := range past {
+			extra := input
+			extra.query = statement.text
+			danger = append(danger, extra)
+		}
+		for _, statement := range statements {
+			candidate := input
+			if len(inputs) != 1 || len(statements) != 1 || cut {
+				candidate.query = statement.text
+			}
+			i := len(candidates)
+			candidates = append(candidates, candidate)
+			control := sqlTransactionControl(input.engine, statement.words)
+			implicit := sqlImplicitCommit(input.engine, statement.words)
+			if input.engine == "mysql" && len(statement.words) > 1 {
+				name, operand := statement.words[0], statement.words[1]
+				if name == "UNLOCK" && (operand == "TABLE" || operand == "TABLES") {
+					implicit = tableLocked
+					tableLocked = false
+				} else if name == "LOCK" && (operand == "TABLE" || operand == "TABLES") {
+					tableLocked = true
+				} else if control == sqlTransactionBegin {
+					tableLocked = false
+				}
+			}
+			switch {
+			case control == sqlTransactionBegin && open < 0:
+				open = i
+			case control == sqlTransactionBegin && implicit:
+				open = i
+			case control == sqlTransactionCommit:
+				open = -1
+			case control == sqlTransactionRollback && open >= 0:
+				undo(i)
+			case open >= 0 && implicit:
+				open = -1
+			}
 		}
 	}
 	if open >= 0 && !capped {
-		undo(len(statements))
+		undo(len(candidates))
 	}
 	// The statements past the cap with a danger keyword are judged as their
 	// bare form too (GAP-2122: the unpadded cell); a transaction around
 	// them is not read, so none is taken as rolled back.
-	for _, statement := range danger {
-		extra := candidate
-		extra.query = statement.text
-		candidates = append(candidates, extra)
-	}
+	candidates = append(candidates, danger...)
 	return candidates, capped, unreadDanger
 }
 
@@ -137,7 +150,8 @@ func sqlTransactionControl(engine string, words []string) sqlTransactionStatemen
 		return sqlTransactionCommit
 	case "ROLLBACK", "ABORT":
 		if words[0] == "ABORT" && engine != "postgresql" ||
-			slices.Contains(words[1:], "TO") {
+			slices.Contains(words[1:], "TO") ||
+			engine == "sqlserver" && len(words) > 2 && (next == "TRAN" || next == "TRANSACTION") {
 			return sqlTransactionNone
 		}
 		return sqlTransactionRollback
@@ -152,9 +166,38 @@ func sqlImplicitCommit(engine string, words []string) bool {
 	if engine != "mysql" && engine != "snowflake" || len(words) == 0 {
 		return false
 	}
+	if engine == "snowflake" {
+		switch words[0] {
+		case "BEGIN", "START", "DROP", "TRUNCATE", "CREATE", "ALTER", "RENAME", "GRANT", "REVOKE":
+			return true
+		}
+		return false
+	}
+	next := ""
+	if len(words) > 1 {
+		next = words[1]
+	}
 	switch words[0] {
-	case "BEGIN", "START", "DROP", "TRUNCATE", "CREATE", "ALTER", "RENAME", "GRANT", "REVOKE":
+	case "BEGIN", "DROP", "TRUNCATE", "CREATE", "ALTER", "RENAME", "GRANT", "REVOKE", "FLUSH":
 		return true
+	case "START":
+		return next == "TRANSACTION" || next == "REPLICA" || next == "SLAVE"
+	case "STOP":
+		return next == "REPLICA" || next == "SLAVE"
+	case "LOCK":
+		return next == "TABLE" || next == "TABLES"
+	case "ANALYZE", "CHECK", "OPTIMIZE", "REPAIR":
+		return next == "TABLE"
+	case "CACHE":
+		return next == "INDEX"
+	case "LOAD":
+		return next == "INDEX"
+	case "RESET":
+		return next != "PERSIST"
+	case "INSTALL", "UNINSTALL":
+		return next == "PLUGIN" || next == "COMPONENT"
+	case "SET":
+		return next == "PASSWORD"
 	}
 	return false
 }

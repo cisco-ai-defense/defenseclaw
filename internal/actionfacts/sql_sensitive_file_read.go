@@ -389,10 +389,11 @@ func validStaticAbsolutePOSIXPath(value string) bool {
 }
 
 func sqlSensitiveServerFileClass(value string) string {
-	if value == "" || !strings.HasPrefix(value, "/") ||
-		path.Clean(value) != value || hasUnresolvedPathSyntax(value) {
+	if !validSQLSensitiveFileLiteral(value) || !strings.HasPrefix(value, "/") ||
+		hasUnresolvedPathSyntax(value) {
 		return ""
 	}
+	value = path.Clean(value)
 	switch value {
 	case "/etc/passwd":
 		return SQLSensitiveServerFileAccountDatabase
