@@ -11,9 +11,11 @@ import (
 	"testing"
 )
 
+// The sidecar is off by default (GAP-1103); with enabled=true it runs as the
+// pod's non-root identity and the chart refuses a root or unset one.
 func TestChartScannerUsesPodIdentity(t *testing.T) {
 	helm := helmBinary(t)
-	objs := decodeObjects(t, renderChart(t, helm, "default", "--set", "podSecurityContext.runAsUser=12001,podSecurityContext.runAsGroup=12002"))
+	objs := decodeObjects(t, renderChart(t, helm, "default", "--set", "gateway.skillScanner.enabled=true,podSecurityContext.runAsUser=12001,podSecurityContext.runAsGroup=12002"))
 	found := false
 	for _, o := range objs {
 		if o.Kind != "Deployment" || o.Metadata["name"] != "defenseclaw-gateway" {
@@ -43,7 +45,7 @@ func TestChartScannerUsesPodIdentity(t *testing.T) {
 		"podSecurityContext.runAsUser=null",
 		"podSecurityContext.runAsGroup=null",
 	} {
-		cmd := exec.Command(helm, "template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set)
+		cmd := exec.Command(helm, "template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", "gateway.skillScanner.enabled=true", "--set", set)
 		if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "podSecurityContext") {
 			t.Errorf("%s: rendered instead of refusing an unusable scanner identity: %v %s", set, err, out)
 		}

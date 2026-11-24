@@ -232,10 +232,14 @@ gateway:
   # of this release, in their own container of the gateway pod with no Secret
   # mounts and no service-account token. It listens only on a 0600 unix
   # socket in a shared in-memory folder; it has no port and no Service.
-  # enabled: false renders no sidecar, and every skill an agent adds while it
-  # runs follows the fail mode (a managed install refuses it).
+  # Off by default: the sidecar's image is not published yet, and a default
+  # install must come up with the images the release publishes (GAP-1103).
+  # enabled: true needs gateway.skillScanner.image to name an image the
+  # cluster can pull. enabled: false renders no sidecar, and every skill an
+  # agent adds while it runs follows the fail mode (a managed install
+  # refuses it).
   skillScanner:
-    enabled: true
+    enabled: false
     image:
       repository: ghcr.io/cisco-ai-defense/defenseclaw-scanner
       # Defaults to the chart's appVersion; the release sets the digest.

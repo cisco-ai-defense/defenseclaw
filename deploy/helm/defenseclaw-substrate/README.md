@@ -59,7 +59,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `gateway.adminGroups` | [] | groups whose members are DefenseClaw administrators (`--admin-groups`); `config.substrate.identity.admin_groups` is the same list as a config key, and the two add up |
 | `gateway.oidcCA.configMap` or `gateway.oidcCA.secret`, `gateway.oidcCA.key` | "", "", ca.crt | a private OIDC issuer's trust bundle from a ConfigMap or a Secret (the Secret wins): mounted read-only at `/etc/defenseclaw/oidc-ca/`, `--oidc-ca-file` set |
 | `gateway.extraEnv`, `gateway.extraVolumes`, `gateway.extraVolumeMounts` | [] | added to the gateway container and pod |
-| `gateway.skillScanner.enabled` | true | Preview: the skill scanner sidecar (skill-scanner of this release) in the gateway pod; no port, no Secret mounts, no service-account token. false renders none and sets `config.substrate.skills.scan.enabled: false`, so new skills follow the fail mode |
+| `gateway.skillScanner.enabled` | false | Preview: the skill scanner sidecar (skill-scanner of this release) in the gateway pod; no port, no Secret mounts, no service-account token. true needs `gateway.skillScanner.image` to name an image the cluster can pull. false renders none and sets `config.substrate.skills.scan.enabled: false`, so new skills follow the fail mode |
 | `gateway.skillScanner.image.repository`, `.tag`, `.digest` | ghcr.io/cisco-ai-defense/defenseclaw-scanner, the chart version, "" | the sidecar image; a digest wins over the tag |
 | `gateway.skillScanner.resources` | 100m CPU and 256Mi requested, 1Gi limit | the sidecar's resources |
 | `gateway.args` | [] | replaces the whole container argument list (`serve --substrate ...` included); for an added flag use `gateway.extraArgs` |
