@@ -135,8 +135,25 @@ func (r *StepReport) note(format string, args ...any) {
 // atespaces and as global viewer, then grants the launcher atespaces the
 // secrets namespace in the credential provider policy and restarts the
 // provider so it reads the policy. It is idempotent.
+//
+// owner nil is an upgrade without the owner token Secret (the first
+// bootstrap deleted it): the access policies stay as they are, but the
+// credential provider grant, which needs only the Kubernetes API, still
+// follows the plan. Before, that upgrade skipped the grant too, so a cluster
+// upgraded to a chart with self-service secrets never granted their
+// namespace and the provider refused every bound person secret (GAP-1076).
 func Bootstrap(ctx context.Context, plan ChartPlan, owner SubstrateAPI, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "bootstrap"}
+	if owner == nil {
+		r.note("no owner token Secret: the access policies were not touched. Doctor checks them; " +
+			"create the Secret again to rewrite them.")
+		if plan.CredentialProvider.Grant {
+			if err := grantProvider(ctx, plan, kube, &r); err != nil {
+				return r, err
+			}
+		}
+		return r, nil
+	}
 	for _, a := range plan.LauncherAtespaces {
 		ok, err := owner.GetAtespace(ctx, a)
 		if err != nil {
