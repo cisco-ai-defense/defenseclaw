@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -204,8 +205,15 @@ func (s workFolders) within(outer workFolders) workFolders {
 }
 
 // resolveWorkFolder is the folder a command runs in: cwd moved by the steps
-// of w. ok is false when the folder is unresolved or a step cannot be
-// resolved.
+// of w, by the rules the walk moves its own folder by (simpleChangedDir): a
+// POSIX folder joins a step with POSIX rules, a native Windows folder or
+// home (C:\Users\alice, the folder Git Bash runs a POSIX call in) with
+// native ones. ok is false when the folder is unresolved or a step cannot be
+// resolved. A Windows home once gave up on ~ and every step relative to a
+// Windows folder, so the folder of cd ~/.defenseclaw was dropped from the
+// folders a later statement may run in after a cd that may fail, and a write
+// there through a variable was allowed on a Windows gateway
+// (rel-1-0-10:GAP-1880).
 func resolveWorkFolder(cwd, home string, w workFolder) (string, bool) {
 	if w.unknown {
 		return "", false
@@ -214,27 +222,37 @@ func resolveWorkFolder(cwd, home string, w workFolder) (string, bool) {
 	for _, step := range w.steps {
 		switch {
 		case step == "~" || step == "":
-			if !strings.HasPrefix(home, "/") {
+			if !simplePathAbs(home) {
 				return "", false
 			}
-			current = path.Clean(home)
+			current = simplePathClean(home)
 		case strings.HasPrefix(step, "~/"):
-			if !strings.HasPrefix(home, "/") {
+			if !simplePathAbs(home) {
 				return "", false
 			}
-			current = path.Join(home, step[2:])
+			current = workFolderJoin(home, step[2:])
 		case strings.HasPrefix(step, "~"):
 			return "", false
-		case strings.HasPrefix(step, "/"):
-			current = path.Clean(step)
+		case simplePathAbs(step):
+			current = simplePathClean(step)
 		default:
-			if !strings.HasPrefix(current, "/") {
+			if !simplePathAbs(current) {
 				return "", false
 			}
-			current = path.Join(current, step)
+			current = workFolderJoin(current, step)
 		}
 	}
 	return current, true
+}
+
+// workFolderJoin is the folder step names from the absolute folder dir: as
+// the walk joins a cd operand to its folder, with POSIX rules under a POSIX
+// folder and native ones under a Windows folder.
+func workFolderJoin(dir, step string) string {
+	if simplePOSIXAbs(dir) {
+		return path.Join(dir, step)
+	}
+	return filepath.Clean(filepath.Join(dir, step))
 }
 
 // workFolderTracker records, for every statement, the folders it may start
@@ -1240,7 +1258,8 @@ func (f Facts) MoverCallsUnread() bool { return f.moverCallsUnread }
 // where the walk moved, so after `[ -e .bashrc ] || cd /tmp` or a mover
 // call that may return, a write was never read in the hook's folder on a
 // Windows gateway (substrate-1:GAP-0696). resolveWorkFolder reads a step
-// from it as it does from a POSIX folder, and gives up on a relative one.
+// from it, and from a Windows home, as the walk does (rel-1-0-10:GAP-1880),
+// and gives up on a relative one.
 func simplePartWorkFolders(source string, parts []sequenceStatement, cwd, home string) [][]string {
 	out := make([][]string, len(parts))
 	if !simplePathAbs(cwd) || len(parts) == 0 {

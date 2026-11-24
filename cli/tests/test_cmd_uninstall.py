@@ -1969,7 +1969,9 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
             text = "\n".join(echoed)
             folder = os.path.join(root, "openhands")
             self.assertIn(f"  - {folder}: files an earlier uninstall kept from DefenseClaw's OpenHands setup", text)
-            self.assertIn(f"rm -rf {folder}", text)
+            # The plan names no platform, so the command is the POSIX one; shlex.quote is what it prints, and a
+            # Windows temp path (a drive letter and backslashes) gets quoted, so build the expectation the same way.
+            self.assertIn(f"rm -rf {shlex.quote(folder)}", text)
             self.assertTrue(os.path.isfile(earlier), "the user's kept copy is never deleted by an uninstall")
 
     def test_uninstall_says_nothing_of_kept_backups_when_there_are_none(self):
@@ -2011,7 +2013,8 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
             os.makedirs(os.path.join(root, "omnigent-2"))
             posix = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")
             self.assertEqual(len(posix), 2, posix)
-            self.assertIn(f"rm -rf {os.path.join(root, 'omnigent-2')}", posix[1])
+            # The POSIX command quotes a path that needs it (a Windows temp path does: drive letter, backslashes).
+            self.assertIn(f"rm -rf {shlex.quote(os.path.join(root, 'omnigent-2'))}", posix[1])
             windows = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "win32")
             self.assertIn("Remove-Item -Recurse -Force -LiteralPath", windows[1])
             os.makedirs(os.path.join(root, "codex"))

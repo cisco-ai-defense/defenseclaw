@@ -15,6 +15,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
+// operandBoundTruncated reports the evaluation-limit finding of a call past
+// the operand bound.
+func operandBoundTruncated(finding RuleFinding) bool {
+	return finding.RuleID == evaluationLimitRuleID && finding.Evidence == operandBoundReason
+}
+
+// operandBoundTruncatedString is operandBoundTruncated for a finding string
+// of a hook answer.
+func operandBoundTruncatedString(finding string) bool {
+	return strings.HasPrefix(finding, evaluationLimitRuleID+":") && strings.Contains(finding, operandBoundReason)
+}
+
 func operandWords(n int) string {
 	words := make([]string, n)
 	for i := range words {

@@ -2006,14 +2006,10 @@ func (d *SandboxDaemon) idlePortConflict() *sandboxapi.PortConflict {
 	return nil
 }
 
-// managedStatus is Status.Managed: the caller's own policy and the
-// daemon's OpenShell, with settings no older than sandboxDaemonSettingsTTL.
-// Before any sandbox of the caller registered, the policy is the one the
-// managed gateway names for a new run (GAP-0179).
-func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedStatus {
-	return d.managedStatusFor(ctx, d.freshSettings(ctx))
-}
-
+// managedStatusFor is Status.Managed: the caller's own policy and the
+// daemon's OpenShell under settings s. Before any sandbox of the caller
+// registered, the policy is the one the managed gateway names for a new run
+// (GAP-0179).
 func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.DaemonSettings) *sandboxapi.ManagedStatus {
 	out := &sandboxapi.ManagedStatus{
 		RequestAccess:    s.RequestAccess,
@@ -2280,7 +2276,7 @@ type managedSandboxController struct {
 var _ SandboxController = (*managedSandboxController)(nil)
 
 // Status adds the managed part, with settings no older than
-// sandboxDaemonSettingsTTL (managedStatus reads stale ones again).
+// sandboxDaemonSettingsTTL, read once for the managed part and the ports.
 func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	st, err := c.Manager.Status(ctx)
 	if st != nil {

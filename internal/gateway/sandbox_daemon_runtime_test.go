@@ -1092,3 +1092,9 @@ func TestSandboxDaemonRunsOnTheAdministratorsBaseImage(t *testing.T) {
 		}
 	}
 }
+
+// managedStatus is Status.Managed with settings no older than
+// sandboxDaemonSettingsTTL, as managedSandboxController.Status reads them.
+func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedStatus {
+	return d.managedStatusFor(ctx, d.freshSettings(ctx))
+}
