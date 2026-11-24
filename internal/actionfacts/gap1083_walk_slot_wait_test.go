@@ -194,3 +194,37 @@ func TestGAP1083WalkSlotFreeTakenAtOnce(t *testing.T) {
 	}
 	<-credentialPathWalkSlots
 }
+
+// TestGAP1083WalkSlotFreeTakenByACallThatIsDone: a call whose context is done
+// takes a free slot and walks, as it did before the slots had a wait; only a
+// wait for a taken slot ends with the call (RV-0674R F4).
+func TestGAP1083WalkSlotFreeTakenByACallThatIsDone(t *testing.T) {
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !NewCredentialWalkBudget(done).take() {
+		t.Fatal("a free slot was not taken by a call whose context is done")
+	}
+	<-credentialPathWalkSlots
+}
+
+// TestGAP1083RecordsOfOneCallShareTheWait: the records of one Input's
+// budget wait 1 s between them, not 1 s each, and the last one's walk is cut
+// at once (substrate-1:GAP-1083, RV-0674R F1).
+func TestGAP1083RecordsOfOneCallShareTheWait(t *testing.T) {
+	root, home := gap1083Tree(t)
+	gap1083HoldWalkSlots(t)
+	budget := NewCredentialWalkBudget(context.Background())
+	start := time.Now()
+	var tooks []time.Duration
+	for range 4 {
+		at := time.Now()
+		facts := Analyze(Input{Tool: "exec", Command: "grep -r KEY tree", CWD: root, ActiveHome: home, CredentialWalkBudget: budget})
+		if !slices.ContainsFunc(facts.CredentialPathReads(), func(f PathFact) bool { return f.Value == "" }) {
+			t.Errorf("record %d: the walk was not cut: %+v", len(tooks), facts.CredentialPathReads())
+		}
+		tooks = append(tooks, time.Since(at))
+	}
+	if total := time.Since(start); total > credentialPathWalkSlotWait+750*time.Millisecond {
+		t.Errorf("four records of one call took %v (%v) while slow walks held every slot, want at most one wait", total, tooks)
+	}
+}
