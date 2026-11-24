@@ -411,16 +411,22 @@ var errWriteUnanswered = errors.New("relay: no answer to a long-poll write")
 // was counted in Sent). A write that failed with no answer once the
 // request had a connection and was not refused while being written is
 // errWriteUnanswered (the relay may have handed the keys to the agent; it
-// answers 204 after that). Any other failure (no connection, the request
-// write failed, the caller's ctx ended) reached no agent and is returned as
-// is, so the chunk is reported unsent.
+// answers 204 after that). Each transport attempt is judged on its own (a
+// POST net/http retries on a fresh connection), so the last one decides
+// (rel-1-0-10:GAP-2155). Any other failure (no connection, the last
+// attempt's request write failed, the caller's ctx ended) is returned as is
+// and the chunk is reported unsent; if a cut by the caller's ctx did reach
+// the agent, the next hello's Received tells.
 func pollWrite(ctx, sendCtx context.Context, post func(context.Context) (*http.Response, error)) error {
 	if sendCtx.Err() != nil {
 		return errAttachEnded
 	}
 	var conn, writeFailed atomic.Bool
 	trace := &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) { conn.Store(true) },
+		GotConn: func(httptrace.GotConnInfo) {
+			conn.Store(true)
+			writeFailed.Store(false) // a new attempt: its own write decides
+		},
 		WroteRequest: func(i httptrace.WroteRequestInfo) {
 			if i.Err != nil {
 				writeFailed.Store(true)
