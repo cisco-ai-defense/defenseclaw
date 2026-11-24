@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -19,8 +20,9 @@ import (
 // modeled server-program, server file read or drop-database keyword, the
 // cut takes the truncated row (the GAP-0851 bound-only MEDIUM), on the
 // Claude Code and Codex hook routes in the five tiers; the same padding with
-// a benign rest keeps the record (the verdict of the cut alone). At
-// ac8b361121 both were the record: allow with an INFO note.
+// a benign rest keeps the record (the verdict of the cut alone), and so does
+// a benign migration of 300 INSERT statements, which the chunks read whole. At ac8b361121 every row was
+// the record: allow with an INFO note.
 func TestSQLCutUnreadDangerTakesTheTruncatedRowFiveTiers(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX psql spelling")
@@ -36,11 +38,31 @@ func TestSQLCutUnreadDangerTakesTheTruncatedRowFiveTiers(t *testing.T) {
 		"COPY t TO PROGRAM 'true';",
 		"SELECT LOAD_FILE('/etc/hostname');",
 		"DROP DATABASE scratch;",
+		"TRUNCATE TABLE scratch;",
 	}
 	benign := "SELECT 2;"
+	var migration strings.Builder
+	for i := range 300 {
+		fmt.Fprintf(&migration, "INSERT INTO items (id, name) VALUES (%d, 'item %d'); ", i, i)
+	}
 	for _, tier := range boundedTestTiers {
 		for _, route := range r3PosixRoutesForReadRows() {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
+			for _, client := range []string{"psql -d app -c", "mysql app -e"} {
+				for _, rest := range []string{"", "SELECT LOAD_FILE('/etc/hostname');"} {
+					// The migration fits the chunk budget, so every statement
+					// is read: alone it allows, and a statement after it gets
+					// the verdict it gets alone (nothing is unread).
+					got, sev := route.decide(t, api, cwd, client+" \""+migration.String()+rest+"\"")
+					want, wantSev := "allow", ""
+					if rest != "" {
+						want, wantSev = route.decide(t, api, cwd, client+" \""+rest+"\"")
+					}
+					if got != want || wantSev != "" && sev != wantSev {
+						t.Errorf("%s %s %s migration + %q: %s/%s, want %s/%s", tier.name, route.connector, client, rest, got, sev, want, wantSev)
+					}
+				}
+			}
 			for _, shape := range shapes {
 				call := func(rest string) string { return "psql -d app -c \"" + shape.padding + rest + "\"" }
 				base, baseSev := route.decide(t, api, cwd, call(benign))

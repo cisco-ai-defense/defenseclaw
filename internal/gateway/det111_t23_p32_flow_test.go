@@ -13,7 +13,8 @@ import (
 
 // TestCredentialReadKeepsEachFlowFiveTiers (T23 review P3-2): two reads of
 // one effects-only spelling of a home credential in a call, a local count
-// then a show (wc -l X; cat X), get the verdict of the show alone (cat X) on
+// and a show in either order (wc -l X; cat X and cat X; wc -l X), get the
+// verdict of the show alone (cat X) on
 // the Claude Code and Codex hook routes in the five tiers. At ac8b361121 the
 // read proofs were deduplicated by class only, so the count's local proof
 // stood for both and the call allowed where cat X blocks.
@@ -37,6 +38,8 @@ func TestCredentialReadKeepsEachFlowFiveTiers(t *testing.T) {
 		{`wc -l ${PWD%/proj}/.ssh/id_rsa; cat ${PWD%/proj}/.ssh/id_rsa`, `cat ${PWD%/proj}/.ssh/id_rsa`},
 		{`grep -c x ${PWD%/proj}/.ssh/id_rsa && cat ${PWD%/proj}/.ssh/id_rsa`, `cat ${PWD%/proj}/.ssh/id_rsa`},
 		{`wc -l ${PWD%/proj}/.aws/credentials; cat ${PWD%/proj}/.aws/credentials`, `cat ${PWD%/proj}/.aws/credentials`},
+		{`cat ${PWD%/proj}/.ssh/id_rsa; wc -l ${PWD%/proj}/.ssh/id_rsa`, `cat ${PWD%/proj}/.ssh/id_rsa`},
+		{`cat ${PWD%/proj}/.aws/credentials; grep -c x ${PWD%/proj}/.aws/credentials`, `cat ${PWD%/proj}/.aws/credentials`},
 	}
 	for _, tier := range boundedTestTiers {
 		for _, route := range r3PosixRoutesForReadRows() {

@@ -85,9 +85,10 @@ func sqlQueryWordChunks(word sqlQueryWord, value string) (chunks []string, unrea
 
 // sqlUnreadDangerPattern is the modeled keywords of the SQL readers' danger
 // families: a server program (COPY ... TO/FROM PROGRAM, xp_cmdshell), a server
-// file read (LOAD_FILE, pg_read_file, pg_read_binary_file) and dropping a
-// database or schema. RE2: linear in the text.
-var sqlUnreadDangerPattern = lazyMustCompile(`\b(?:(?:TO|FROM)\s+PROGRAM|XP_CMDSHELL|LOAD_FILE|PG_READ_(?:BINARY_)?FILE|DROP\s+(?:DATABASE|SCHEMA))\b`)
+// file read (LOAD_FILE, pg_read_file, pg_read_binary_file), and the
+// destructive scopes of the mutation reader: dropping a database or schema,
+// truncating a table. RE2: linear in the text.
+var sqlUnreadDangerPattern = lazyMustCompile(`\b(?:(?:TO|FROM)\s+PROGRAM|XP_CMDSHELL|LOAD_FILE|PG_READ_(?:BINARY_)?FILE|DROP\s+(?:DATABASE|SCHEMA)|TRUNCATE)\b`)
 
 // sqlUnreadDanger is the bounded keyword scan of SQL text no reader read:
 // only its SQL outside quotes and comments (sqlSpans), so a keyword inside a
