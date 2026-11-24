@@ -434,12 +434,10 @@ func Upgrade(ctx context.Context, c net.Conn, conf *tls.Config) (*tls.Conn, erro
 		resp.Header.Get("Sec-WebSocket-Accept") != wsAccept(key):
 		return nil, fmt.Errorf("%w (the 101 answer is not the relay's)", ErrNoUpgrade)
 	}
-	var under net.Conn = c
-	if n := br.Buffered(); n > 0 {
-		pre, _ := br.Peek(n)
-		under = &prefixConn{Conn: c, prefix: bytes.NewReader(bytes.Clone(pre))}
-	}
-	tc := tls.Client(under, conf)
+	// The relay sends nothing after the 101 before the ClientHello's
+	// answer, but keep anything read ahead.
+	pre, _ := br.Peek(br.Buffered())
+	tc := tls.Client(&prefixConn{Conn: c, prefix: bytes.NewReader(bytes.Clone(pre))}, conf)
 	if err := tc.HandshakeContext(ctx); err != nil {
 		return nil, err
 	}
