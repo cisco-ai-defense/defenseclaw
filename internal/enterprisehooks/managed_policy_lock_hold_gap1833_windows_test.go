@@ -32,10 +32,13 @@ func TestGAP1833UnchangedPassesHoldTheClaudePolicyLockUnderTheSmokeBar(t *testin
 	if _, err := Install(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	transaction := windowsClaudeManagedPolicyTransaction
-	t.Cleanup(func() { windowsClaudeManagedPolicyTransaction = transaction })
+	// The fixture stands in a no-op transaction; the hold is the real lock:
+	// the acquire, its hardening and trust checks, and the body.
+	transaction := withWindowsClaudeManagedPolicyTransaction
+	previous := windowsClaudeManagedPolicyTransaction
+	t.Cleanup(func() { windowsClaudeManagedPolicyTransaction = previous })
 	var whole, inner []time.Duration
-	windowsClaudeManagedPolicyTransaction = func(fn func() error) error {
+	timed := func(fn func() error) error {
 		outer := time.Now()
 		err := transaction(func() error {
 			start := time.Now()
@@ -45,11 +48,15 @@ func TestGAP1833UnchangedPassesHoldTheClaudePolicyLockUnderTheSmokeBar(t *testin
 		whole = append(whole, time.Since(outer))
 		return err
 	}
+	const passes = 20
 	report := func(name string) {
 		sort.Slice(whole, func(i, j int) bool { return whole[i] < whole[j] })
 		sort.Slice(inner, func(i, j int) bool { return inner[i] < inner[j] })
-		if len(whole) == 0 {
-			t.Logf("GAP1833 %-28s took no lock", name)
+		// A user that takes no lock proves nothing: each unchanged pass takes
+		// it at least once.
+		if len(whole) < passes {
+			t.Errorf("%s took the Claude managed policy lock %d times in %d unchanged passes, want at least one per pass", name, len(whole), passes)
+			whole, inner = nil, nil
 			return
 		}
 		t.Logf("GAP1833 %-28s lock-held p50 %8s max %8s | fn p50 %8s max %8s (n=%d)", name,
@@ -60,27 +67,35 @@ func TestGAP1833UnchangedPassesHoldTheClaudePolicyLockUnderTheSmokeBar(t *testin
 		whole, inner = nil, nil
 	}
 	ensure := connector.SetupOpts{APIAddr: opts.APIAddr, HookExecutable: fixture.hookExe}
-	for i := 0; i < 20; i++ {
+	windowsClaudeManagedPolicyTransaction = timed
+	for i := 0; i < passes; i++ {
 		if err := EnsureWindowsStandaloneClaudeManagedPolicy(ensure); err != nil {
 			t.Fatal(err)
 		}
 	}
 	report("standalone ensure")
-	for i := 0; i < 20; i++ {
+	for i := 0; i < passes; i++ {
 		if _, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil {
 			t.Logf("drift restore: %v", err)
 		}
 	}
 	report("drift restore")
-	for i := 0; i < 20; i++ {
+	for i := 0; i < passes; i++ {
 		if _, err := ApplyWindowsClaudeManagedHooksOnlyLock(); err != nil {
 			t.Logf("hooks-only lock: %v", err)
 		}
 	}
 	report("hooks-only lock apply")
-	for i := 0; i < 20; i++ {
-		_ = transaction(func() error { return nil })
+	// The fourth user: the guardian's version floor reconcile
+	// (enterprisepolicy.PublishWindowsClaudeVersionFloor) enters the same lock
+	// through WithWindowsClaudeManagedPolicyTransaction; the floor body it runs
+	// under the lock is timed in internal/enterprisepolicy.
+	for i := 0; i < passes; i++ {
+		if err := WithWindowsClaudeManagedPolicyTransaction(func(string) error { return nil }); err != nil {
+			t.Errorf("version floor lock: %v", err)
+		}
 	}
+	report("version floor lock (empty body)")
 	step := func(name string, fn func() error) {
 		var d []time.Duration
 		for i := 0; i < 20; i++ {
