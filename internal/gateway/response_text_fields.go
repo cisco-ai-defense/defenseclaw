@@ -54,6 +54,15 @@ type responseLane struct {
 type responsePiece struct {
 	lane responseLane
 	text string
+	// end: the provider ended every lane of lane.choice here (a content
+	// block, an output item or the choice finished; rel-1-0-10:GAP-2154).
+	// It carries no text.
+	end bool
+}
+
+// laneEndPiece says every lane of choice ended (GAP-2154).
+func laneEndPiece(choice int) responsePiece {
+	return responsePiece{lane: responseLane{choice: choice}, end: true}
 }
 
 func answerPiece(choice int, text string) responsePiece {
@@ -78,17 +87,28 @@ type responseText struct {
 	lanes  []*strings.Builder
 	secret []secretLane // the open-secret state of each lane (stream_secret_hold.go)
 	index  map[responseLane]int
+	last   int // the lane of the last text added
 	n      int
 	joined string
 	fresh  bool
 }
 
 func (r *responseText) Add(p responsePiece) {
+	if p.end {
+		r.endChoice(p.lane.choice)
+		return
+	}
 	if p.text == "" {
 		return
 	}
 	i, ok := r.index[p.lane]
+	if ok && i != r.last {
+		r.laneMoved(p.lane)
+	}
 	if !ok {
+		if len(r.lanes) > 0 {
+			r.laneMoved(p.lane)
+		}
 		if r.index == nil {
 			r.index = make(map[responseLane]int)
 		}
@@ -101,6 +121,47 @@ func (r *responseText) Add(p responsePiece) {
 	r.lanes[i].WriteString(p.text)
 	r.n += len(p.text)
 	r.fresh = false
+	r.last = i
+}
+
+// The end of a lane (rel-1-0-10:GAP-2154). A token or digit run open at the
+// end of a lane is held until more of that lane decides it (GAP-0429,
+// GAP-1265). When the lane has ended, nothing more of it comes: the run is
+// as long as it will be, so it is ended as the end of the stream ends it
+// (the check reads it whole before what holds it goes out; a card or a
+// token there gets its verdict then). Before, nothing ended it, so the rest
+// of the reply (the other lanes) was held behind it until
+// streamSecretMaxHeld bytes or the end of the stream, where rel/1.0.10
+// streamed it live, and past that bound a strict pack cut the reply
+// (GAP-1767). A lane ends at the provider's own signal (laneEndPiece: an
+// Anthropic or Converse content block stop, an OpenAI Responses .done
+// event, a chat or Gemini finish reason), or, in the order every provider
+// streams a choice in, when a later lane of the same choice starts: the
+// reasoning once the answer, a refusal, a tool call or code starts, and a
+// tool call once a later one starts (laneMoved). An open private-key block
+// is not ended here: it keeps its own bounds.
+
+// endChoice ends the open run of every lane of choice.
+func (r *responseText) endChoice(choice int) {
+	for k, i := range r.index {
+		if k.choice == choice {
+			r.secret[i].endRun(r.lanes[i].String())
+		}
+	}
+}
+
+// laneMoved ends the lanes of l's choice that l follows in stream order.
+func (r *responseText) laneMoved(l responseLane) {
+	for k, i := range r.index {
+		if k.choice != l.choice || k == l {
+			continue
+		}
+		reasoningDone := k.field == responseFieldReasoning && l.field != responseFieldReasoning && l.field != responseFieldOther
+		toolDone := k.field == responseFieldToolInput && l.field == responseFieldToolInput && k.part < l.part
+		if reasoningDone || toolDone {
+			r.secret[i].endRun(r.lanes[i].String())
+		}
+	}
 }
 
 func (r *responseText) AddAll(ps []responsePiece) {
@@ -223,10 +284,11 @@ func (f *legacyFunctionCall) toolCalls() json.RawMessage {
 }
 
 type chatShapeChoice struct {
-	Index   int               `json:"index"`
-	Delta   *chatShapeMessage `json:"delta"`
-	Message *chatShapeMessage `json:"message"`
-	Text    json.RawMessage   `json:"text"` // legacy completions
+	Index        int               `json:"index"`
+	Delta        *chatShapeMessage `json:"delta"`
+	Message      *chatShapeMessage `json:"message"`
+	Text         json.RawMessage   `json:"text"` // legacy completions
+	FinishReason json.RawMessage   `json:"finish_reason"`
 }
 
 // chatContentPieces reads message content: a string, or parts of type
@@ -315,6 +377,9 @@ func chatChoicesPieces(choices []chatShapeChoice, withTools bool) []responsePiec
 		if s := respJSONString(c.Text); s != "" {
 			out = append(out, answerPiece(c.Index, s))
 		}
+		if respJSONString(c.FinishReason) != "" {
+			out = append(out, laneEndPiece(c.Index)) // GAP-2154
+		}
 	}
 	return out
 }
@@ -386,8 +451,16 @@ func streamEventPieces(data, provider string) []responsePiece {
 	case "bedrock":
 		var ev struct {
 			ContentBlockDelta *bedrockStreamDelta `json:"contentBlockDelta"`
+			ContentBlockStop  json.RawMessage     `json:"contentBlockStop"`
+			MessageStop       json.RawMessage     `json:"messageStop"`
 		}
-		if json.Unmarshal([]byte(data), &ev) != nil || ev.ContentBlockDelta == nil {
+		if json.Unmarshal([]byte(data), &ev) != nil {
+			return nil
+		}
+		if len(ev.ContentBlockStop) > 0 || len(ev.MessageStop) > 0 {
+			return []responsePiece{laneEndPiece(0)} // GAP-2154
+		}
+		if ev.ContentBlockDelta == nil {
 			return nil
 		}
 		return ev.ContentBlockDelta.pieces()
@@ -403,6 +476,9 @@ func streamEventPieces(data, provider string) []responsePiece {
 		}
 		if json.Unmarshal([]byte(data), &ev) != nil {
 			return nil
+		}
+		if responsesLaneEnd(ev.Type) {
+			return []responsePiece{laneEndPiece(0)} // GAP-2154
 		}
 		if strings.HasPrefix(ev.Type, "response.") && strings.Contains(ev.Type, ".delta") {
 			// OpenAI Responses: every text delta the client receives.
@@ -422,6 +498,20 @@ func streamEventPieces(data, provider string) []responsePiece {
 		}
 		return chatChoicesPieces(ev.Choices, true)
 	}
+}
+
+// responsesLaneEnd: an OpenAI Responses event that ends the lanes it
+// streamed (an output item, its text, its arguments or the response is
+// done), GAP-2154. Output items stream one at a time.
+func responsesLaneEnd(typ string) bool {
+	if !strings.HasPrefix(typ, "response.") {
+		return false
+	}
+	switch typ {
+	case "response.completed", "response.incomplete", "response.failed":
+		return true
+	}
+	return strings.HasSuffix(typ, ".done")
 }
 
 func anthropicStreamPieces(data []byte) []responsePiece {
@@ -455,6 +545,9 @@ func anthropicStreamPieces(data []byte) []responsePiece {
 			reasoningPiece(0, ev.ContentBlock.Thinking),
 			toolInputPiece(0, ev.Index, jsonArgsText(ev.ContentBlock.Input)),
 		}
+	case "content_block_stop", "message_delta", "message_stop":
+		// Blocks stream one at a time: the block's lane has ended (GAP-2154).
+		return []responsePiece{laneEndPiece(0)}
 	}
 	return nil
 }
@@ -514,8 +607,9 @@ func geminiPieces(body []byte, withTools bool) []responsePiece {
 func geminiResponsePieces(body []byte, withTools bool) []responsePiece {
 	var resp struct {
 		Candidates []struct {
-			Index   *int `json:"index"`
-			Content struct {
+			Index        *int   `json:"index"`
+			FinishReason string `json:"finishReason"`
+			Content      struct {
 				Parts []struct {
 					Text         string `json:"text"`
 					Thought      bool   `json:"thought"`
@@ -552,6 +646,9 @@ func geminiResponsePieces(body []byte, withTools bool) []responsePiece {
 				// model text on every path.
 				out = append(out, responsePiece{lane: responseLane{choice: choice, field: responseFieldCode, part: pi}, text: p.ExecutableCode.Code})
 			}
+		}
+		if c.FinishReason != "" {
+			out = append(out, laneEndPiece(choice)) // GAP-2154
 		}
 	}
 	return out
