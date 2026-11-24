@@ -19,6 +19,16 @@ func credentialWalkRoomAll() credentialWalkRoom {
 	return credentialWalkRoom{candidates: math.MaxInt, work: math.MaxInt}
 }
 
+// resolveKeepingAll is the differential's reference: the resolve whose walks
+// keep every file they find, as before the walk room (substrate-1:GAP-0674).
+func resolveKeepingAll(t *testing.T, limits credentialPathLimits, command, cwd, home string) walkRoomRecord {
+	t.Helper()
+	before := credentialWalkRoomOf
+	credentialWalkRoomOf = func(*credentialPathResolver) credentialWalkRoom { return credentialWalkRoomAll() }
+	defer func() { credentialWalkRoomOf = before }()
+	return resolveWithin(t, limits, command, cwd, home)
+}
+
 // TestGAP0674WalkRoomKeepsFilesUpToTheTrip is substrate-1:GAP-0674: the walk
 // keeps the files the resolve can take and the one that trips its cap, in the
 // order they were found, and none after it.
@@ -126,8 +136,7 @@ func TestGAP0674WalkRoomDifferential(t *testing.T) {
 			for _, work := range []int{0, 10, 200, 3000, 20000, 1 << 20} {
 				limits := credentialPathLimits{candidates: candidates, work: work, lookups: maxCredentialPathLookups}
 				got := resolveWithin(t, limits, command, root, home)
-				limits.keepAll = true
-				want := resolveWithin(t, limits, command, root, home)
+				want := resolveKeepingAll(t, limits, command, root, home)
 				if got.caps.Any() {
 					cuts++
 				}
@@ -223,8 +232,7 @@ func TestGAP0674WalkRoomDifferentialCorpora(t *testing.T) {
 				defaultCredentialPathLimits,
 			} {
 				got := resolveWithin(t, tight, command, root, home)
-				tight.keepAll = true
-				want := resolveWithin(t, tight, command, root, home)
+				want := resolveKeepingAll(t, tight, command, root, home)
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("%q limits %+v: record differs: got %d reads caps %v, want %d reads caps %v", command, tight, len(got.reads), got.caps, len(want.reads), want.caps)
 				}

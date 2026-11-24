@@ -5,7 +5,6 @@ package actionfacts
 
 import (
 	"context"
-	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -155,10 +154,6 @@ const MaxCredentialPathCandidates = maxCredentialPathCandidates
 
 type credentialPathLimits struct {
 	candidates, work, lookups int
-	// keepAll keeps every file a walk finds, as the resolve did before it
-	// kept only the files it can still take (substrate-1:GAP-0674): the
-	// differential test's reference.
-	keepAll bool
 }
 
 var defaultCredentialPathLimits = credentialPathLimits{
@@ -582,7 +577,6 @@ type credentialPathResolver struct {
 	held       map[credentialHeldRead]bool
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
-	keepAll    bool                     // see credentialPathLimits.keepAll
 	wait       *credentialWalkWait      // the wait for walk slots left
 	// walkedBy holds the folders each command already searched, as named
 	// and as resolved: a folder named again by the same command adds
@@ -676,7 +670,7 @@ func resolveCredentialPathReadsWithin(
 	if !credentialPathResolveNeeded(words, commands) {
 		return nil
 	}
-	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands, keepAll: limits.keepAll, wait: newCredentialWalkWait(ctx)}
+	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands, wait: newCredentialWalkWait(ctx)}
 	counted := make(map[int64]bool)
 	for _, command := range commands {
 		if command.Effect == EffectExecute && slices.ContainsFunc(command.Operations, func(op OperationKind) bool {
@@ -1613,14 +1607,16 @@ func (room *credentialWalkRoom) admit(file string) bool {
 // that has stopped reads none: the first file found is kept so that the
 // resolve sees a walk with files and stops, as it did with the whole list.
 func (r *credentialPathResolver) walkRoom() credentialWalkRoom {
-	if r.keepAll {
-		return credentialWalkRoom{candidates: math.MaxInt, work: math.MaxInt}
-	}
 	if r.stopped() {
 		return credentialWalkRoom{}
 	}
 	return credentialWalkRoom{candidates: r.candidates.Left(), work: r.work.Left()}
 }
+
+// credentialWalkRoomOf is the walk room of a resolve (walkRoom). The walk
+// room differential swaps in a room that keeps every file, the resolve
+// before substrate-1:GAP-0674, as its reference.
+var credentialWalkRoomOf = (*credentialPathResolver).walkRoom
 
 // candidate checks one word. A glob or an unknown read is file-unknown; an
 // exact read keeps its value, and a read of a name the call linked, copied or
@@ -1835,7 +1831,7 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 		r.add(id, "", true)
 		return
 	}
-	walk := credentialPathWalk(r.wait, dir, shown, filter, left, r.walkRoom())
+	walk := credentialPathWalk(r.wait, dir, shown, filter, left, credentialWalkRoomOf(r))
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	for _, file := range walk.found {
 		if r.stopped() {
