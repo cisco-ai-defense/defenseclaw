@@ -3514,7 +3514,14 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 				return "", true, true
 			}
 			if parsed.workDir != "" {
-				folder, changed = filepath.Clean(parsed.workDir), true
+				if filepath.IsAbs(parsed.workDir) {
+					folder = filepath.Clean(parsed.workDir)
+				} else if folder != "" {
+					folder = filepath.Join(folder, parsed.workDir)
+				} else {
+					return "", true, true
+				}
+				changed = true
 			}
 		default:
 			child = WrapperChildIndex(words, static)
