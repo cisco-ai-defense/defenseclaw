@@ -72,3 +72,26 @@ func TestGAP1771PollWriteWithNoAnswerCountsSent(t *testing.T) {
 			res.Sent, unsent.Load(), len("keys\r"))
 	}
 }
+
+// A chunk the input pump hands over after the end of the attachment stopped
+// the writes (stopSends) but before settle: no byte leaves, so it is
+// reported unsent; before, the cut write counted it in Sent (client.go
+// sendCtx.Err() after do). A write with no connection is unsent too.
+func TestGAP1771PollWriteAfterTheEndIsUnsent(t *testing.T) {
+	sendCtx, stop := context.WithCancel(context.Background())
+	stop()
+	posts := 0
+	post := func(context.Context) (*http.Response, error) { posts++; return nil, context.Canceled }
+	var sent sendCount
+	var unsent int
+	o := AttachOptions{OnUnsent: func(n int) { unsent += n }}
+	err := o.tracked(&sent, func([]byte) error { return pollWrite(context.Background(), sendCtx, post) })([]byte("keys\r"))
+	if err == nil || posts != 0 || sent.settle() != 0 || unsent != len("keys\r") {
+		t.Fatalf("after the end: err=%v posts=%d Sent=%d unsent=%d, want an error, no post, Sent 0, unsent %d", err, posts, sent.n, unsent, len("keys\r"))
+	}
+	// Refused before any connection (no GotConn): nothing reached the relay.
+	live := context.Background()
+	if err := pollWrite(live, live, func(context.Context) (*http.Response, error) { return nil, io.ErrUnexpectedEOF }); err == nil || err == errWriteUnanswered {
+		t.Fatalf("a write with no connection: %v, want its own error (reported unsent)", err)
+	}
+}
