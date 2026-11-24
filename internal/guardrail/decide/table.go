@@ -145,8 +145,8 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 
 // Row ids of the built-in table.
 const (
-	RowRecord                   = "record"
-	RowKnownAuthorizedKeysWrite = "known-authorized-keys-write"
+	RowRecord              = "record"
+	RowKnownProtectedWrite = "known-protected-write"
 	// RowEffectUnknown: the effect lane's unknown tier is a shadow record on
 	// every set and never moves the live verdict, whatever its Known flag,
 	// target or tier (the MAYBE rule, DET111 PLAN 5.3, GAP-1796; DET111
@@ -218,11 +218,12 @@ const (
 	// rule naming that class gives its plain spelling (cat <the file>),
 	// characterized at a64bfdb931 in the five tiers, so a spelling only the
 	// effects reader resolves gets the plain spelling's verdict.
-	RowReadSSHPrivateKey          = "read-ssh-private-key"
-	RowReadCredential             = "read-credential"
-	RowReadOtherHomeSSHPrivateKey = "read-other-home-ssh-private-key"
-	RowReadOtherHomeGitCredential = "read-other-home-git-credential"
-	RowReadOtherHomeCredential    = "read-other-home-credential"
+	RowReadSSHPrivateKey            = "read-ssh-private-key"
+	RowReadCredential               = "read-credential"
+	RowEffectOtherHomeSSHPrivateKey = "effect-read-other-home-ssh-private-key"
+	RowReadOtherHomeSSHPrivateKey   = "read-other-home-ssh-private-key"
+	RowReadOtherHomeGitCredential   = "read-other-home-git-credential"
+	RowReadOtherHomeCredential      = "read-other-home-credential"
 	// RowTieredStrict grades a conclusion the 1.0.10 readers enforced in the
 	// strict tier only (an alert in default and permissive, per-user and
 	// managed alike): an inline handoff of unknown state, file tool targets
@@ -257,18 +258,26 @@ func uniform(c Cell) [tierCount]Cell { return [tierCount]Cell{c, c, c} }
 // pack's tiers.yaml is its column of this table (TestShippedTiersMatchBuiltin).
 func Builtin() *Table { return &builtin }
 
+// knownProtectedWriteRules are the rules RuleFor names for a Known write:
+// the plain spelling's rule of each restricted set.
+var knownProtectedWriteRules = []string{RuleAuthorizedKeysWrite, RuleStateWrite, RuleHookConfigWrite,
+	"PATH-AWS-CREDS", "PATH-GIT-CREDS", "PATH-NPMRC", "PATH-PYPIRC", "PATH-KUBE", "PATH-DOCKER"}
+
 var builtin = Table{Rows: []Row{
 	{
-		// A resolved write to the authorized_keys member has the plain
-		// 1.0.10 keys-write cell regardless of the program that produced it.
-		ID: RowKnownAuthorizedKeysWrite, Rules: []string{RuleAuthorizedKeysWrite},
-		Kinds: []ProofKind{KindWrite, KindAppend}, Targets: []TargetClass{TargetAuthorizedKeys},
+		// A resolved write, append or delete of an exact member of a restricted set
+		// (authorized_keys, DefenseClaw state, an agent hook config, a
+		// credential file) has the plain spelling's 1.0.10 decision whatever
+		// program the program table modeled it for: the rule the plain
+		// spelling fires (RuleFor) at that rule's pack severity
+		// (PlainWriteSeverity), mapped by the tier levels as that rule's
+		// finding is (GAP-1865, GAP-1478, GAP-1500, GAP-0662, GAP-0506).
+		ID: RowKnownProtectedWrite, Rules: knownProtectedWriteRules,
+		Kinds:     []ProofKind{KindWrite, KindAppend, KindDelete},
+		Targets:   []TargetClass{TargetAuthorizedKeys, TargetState, TargetHookConfig, TargetCredential},
 		Certainty: []Certainty{CertKnown}, Sources: []string{SourceEffects},
-		Content: true, SecureClient: true, Source: "rel-1-0-10:persistence.ssh_authorized_keys_command (GAP-1865)",
-		Cells: [deploymentCount][tierCount]Cell{
-			uniform(Cell{Floor: Block, Levels: true, Severity: SevCritical}),
-			uniform(Cell{Floor: Block, Levels: true, Severity: SevCritical}),
-		},
+		Content: true, SecureClient: true, Source: "rel-1-0-10:plain spelling of each restricted set (GAP-1865, GAP-1478)",
+		Cells: [deploymentCount][tierCount]Cell{uniform(Cell{Levels: true}), uniform(Cell{Levels: true})},
 	},
 	{
 		ID: RowEffectUnknown, Rules: []string{RuleEffectUnknown},
@@ -428,6 +437,23 @@ var builtin = Table{Rows: []Row{
 		Certainty: []Certainty{CertKnown}, Sets: append([]string{SetGitCredentials}, cloudCredentialSets...), SecureClient: true,
 		Source: "rel-1-0-10:GAP-0888",
 		Cells:  [deploymentCount][tierCount]Cell{uniform(alertMedium), uniform(alertMedium)},
+	},
+	{
+		// An effects-proven read of another account's SSH private key takes
+		// the raised plain-form GAP-2135 cell. The legacy row below stays at
+		// its shipped-default cell for findings from the 1.0.10 readers.
+		ID: RowEffectOtherHomeSSHPrivateKey, Kinds: []ProofKind{KindRead},
+		Targets: []TargetClass{TargetOtherHomeCredential}, Certainty: []Certainty{CertKnown},
+		Sets: []string{SetSSHPrivateKey}, Sources: []string{SourceEffects}, SecureClient: true,
+		Source: "DET111 GAP-2135 effect-proven other-home key read",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierPermissive: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierStrict:     {Levels: true, Severity: SevCritical}},
+			{TierDefault: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierPermissive: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierStrict:     {Levels: true, Severity: SevCritical}},
+		},
 	},
 	{
 		// Another account's SSH private key: an alert MEDIUM in default and

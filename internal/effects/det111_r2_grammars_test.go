@@ -45,7 +45,10 @@ var r2GrammarCases = []r2case{
 	{"GAP-1500 sed W", raLin, `sed -n 'W ` + r2Hook + `' f`, r2Verdict("K|write:" + r2Hook), false},
 	{"GAP-1500 sed s///gw", raLin, `sed 's/a/b/gw ` + r2Hook + `' f`, r2Verdict("K|write:" + r2Hook), false},
 	{"GAP-1500 sed -e w", raLin, `sed -e 'w ` + r2Hook + `' f`, r2Verdict("K|write:" + r2Hook), false},
-	{"GAP-1500 sed e runs", raLin, `sed '1e touch x' f`, r2Verdict("U|"), true},
+	// e COMMAND runs COMMAND with /bin/sh: its effects are the command's.
+	{"GAP-1500 sed e runs", raLin, `sed '1e touch x' f`, r2Verdict("K|write:/home/u/proj/x"), true},
+	{"GAP-1500 sed e hook write", raLin, `sed -n '1e echo x > ` + r2Hook + `' f`, r2Verdict("K|write:" + r2Hook), false},
+	{"GAP-1500 sed e pattern space", raLin, `sed 's/a/b/e' f`, r2Verdict("U|"), false},
 	{"R2 sed w stdout", raLin, `sed -n '/x/w /dev/stdout' f`, r2Verdict("K|"), false},
 	{"R2 sed r reads", raLin, `sed 'r /home/u/notes.txt' f`, r2All(r2Has(KindRead, "/home/u/notes.txt", true), r2Verdict("U|")), false},
 	{"R2 sed plain", raLin, `sed -n 's/a/b/p' f`, r2Verdict("K|"), true},

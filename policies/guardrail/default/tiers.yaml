@@ -4,14 +4,12 @@
 version: 1
 tier: default
 rows:
-  - id: known-authorized-keys-write
-    source: rel-1-0-10:persistence.ssh_authorized_keys_command (GAP-1865)
+  - id: known-protected-write
+    source: rel-1-0-10:plain spelling of each restricted set (GAP-1865, GAP-1478)
     per_user:
-      floor: block
-      severity: CRITICAL
+      floor: allow
     managed:
-      floor: block
-      severity: CRITICAL
+      floor: allow
   - id: effect-unknown
     source: DET111 PLAN 5.3 MAYBE rule (GAP-1796)
     per_user:
@@ -134,6 +132,16 @@ rows:
     managed:
       floor: allow
       severity: MEDIUM
+      ceiling: alert
+  - id: effect-read-other-home-ssh-private-key
+    source: DET111 GAP-2135 effect-proven other-home key read
+    per_user:
+      floor: allow
+      severity: HIGH
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: HIGH
       ceiling: alert
   - id: read-other-home-ssh-private-key
     source: rel-1-0-10:PATH-SSH-KEY other home (GAP-0837)

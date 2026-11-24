@@ -81,14 +81,14 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 	// add adds a rule's finding once. An uncertain finding (the call's own
 	// account or API host is unknown) alerts in every tier and never blocks.
 	add := func(ruleID, note string, uncertain bool) {
-		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
+		if _, held := readingRuleSlot(out, ruleID); held {
 			return
 		}
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, mapping.Name, hard && !uncertain))
+		out = withReadingFinding(out, nonShellFinding(rule, note, mapping.Name, hard && !uncertain))
 	}
 	// The hosts the call itself names for its own parties: its primary
 	// recipients and request URLs, and its own account when it says which.

@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 )
@@ -27,12 +28,40 @@ func joinEffectFindings(findings, effect []RuleFinding) []RuleFinding {
 		return findings
 	}
 	for _, f := range effect {
-		if d := decideFinding(f); decide.ShadowOnly(d) || decide.FoldsIntoLegacy(d, foldTargetsFor(f, findings)) {
+		if d := decideFinding(f); decide.ShadowOnly(d) || foldsClassEffectIntoLegacy(f, findings) || decide.FoldsIntoLegacy(d, foldTargetsFor(f, findings)) {
 			continue
 		}
 		findings = append(findings, f)
 	}
 	return findings
+}
+
+// isEffectFinding uses the private gateway proof as well as the Decide
+// proof. T23b grades a Known credential mutation with its class rule's
+// severity-only cell and clears the Decide proof, but keeps the trusted
+// effects provenance in findingProofEffect.
+func isEffectFinding(f RuleFinding) bool {
+	return f.Proof.Source == decide.SourceEffects || f.proof.kind == findingProofEffect
+}
+
+// foldsClassEffectIntoLegacy folds that severity-only class finding into
+// the same 1.0.10 rule when an original reading actually made it. T23b
+// clears the Decide proof only for the Known class mutation; the private
+// effects proof keeps its provenance. A new floor reading and another
+// effects finding cannot stand in for 1.0.10 (GAP-1984).
+func foldsClassEffectIntoLegacy(f RuleFinding, other []RuleFinding) bool {
+	if f.proof.kind != findingProofEffect || !f.proof.authorizes(f.RuleID) || !f.Proof.IsZero() {
+		return false
+	}
+	for _, g := range other {
+		if isEffectFinding(g) || g.floorRaiseOnly {
+			continue
+		}
+		if strings.EqualFold(f.RuleID, g.RuleID) {
+			return true
+		}
+	}
+	return false
 }
 
 // findingEnforcementRank orders what a finding may do to the call: an
@@ -74,7 +103,7 @@ func foldTargetsFor(f RuleFinding, other []RuleFinding) []decide.Finding {
 	_, sev := verdictSeverity(f)
 	var out []decide.Finding
 	for _, g := range other {
-		if g.Proof.Source == decide.SourceEffects || g.floorRaiseOnly {
+		if isEffectFinding(g) || g.floorRaiseOnly {
 			continue
 		}
 		if _, gs := verdictSeverity(g); strong && gs >= sev && findingEnforcementRank(g) == 1 {
@@ -105,7 +134,17 @@ func withFloorRaiseOnlyMark(request trustedActionRequest, findings []RuleFinding
 // the same rule: it is floorRaiseOnly only when both are, so a 1.0.10
 // reading's finding stays a fold target when a new reading proves its rule
 // more strongly.
+//
+// An effects-lane finding is no 1.0.10 reading's finding: a reading 1.0.10
+// did not have that takes its slot (the GAP-1550 foreach header's
+// tamper.detector_state_write in the place of the Known state write finding
+// of the same rule, GAP-1478) stays floorRaiseOnly. Made a fold target, it
+// took the effect finding of the call: the CRITICAL
+// effect.protected_target_restricted fell to its HIGH (rel-1-0-10:GAP-1984).
 func withFloorRaiseOnlyOf(replacement, replaced RuleFinding) RuleFinding {
+	if isEffectFinding(replaced) {
+		return replacement
+	}
 	replacement.floorRaiseOnly = replacement.floorRaiseOnly && replaced.floorRaiseOnly
 	return replacement
 }
@@ -127,7 +166,7 @@ func withEffectsFoldedEitherWay(a, b []RuleFinding) ([]RuleFinding, []RuleFindin
 
 func hasEffectFinding(findings []RuleFinding) bool {
 	for _, f := range findings {
-		if f.Proof.Source == decide.SourceEffects {
+		if isEffectFinding(f) {
 			return true
 		}
 	}
@@ -156,10 +195,57 @@ func withoutEffectsFoldedInto(findings, other []RuleFinding) []RuleFinding {
 	}
 	kept := findings[:0:0]
 	for _, f := range findings {
-		if f.Proof.Source == decide.SourceEffects && decide.FoldsIntoLegacy(decideFinding(f), foldTargetsFor(f, other)) {
+		if isEffectFinding(f) && (foldsClassEffectIntoLegacy(f, other) || decide.FoldsIntoLegacy(decideFinding(f), foldTargetsFor(f, other))) {
 			continue
 		}
 		kept = append(kept, f)
 	}
 	return kept
+}
+
+// readingRuleSlot is where a 1.0.10 reading's finding of ruleID goes in
+// findings. held reports that a finding of a 1.0.10 reading (not the effect
+// lane's) already carries the rule: the reading adds nothing. Otherwise
+// index is the effects-lane finding of the same rule, or -1 when none.
+//
+// A Known protected write finding names the plain spelling's rule
+// (decide.RuleFor, GAP-1478). A reading that dedups by rule id (the agent
+// hook config guard, the non-shell tool effects, a link or CMD twin)
+// dropped its own 1.0.10 finding beside it, so
+// the effect lane had no 1.0.10 finding to fold into and the plain spelling
+// echo x > ~/.claude/settings.json carried effect.protected_target_restricted
+// beside its rule (GAP-1243, GAP-1308). The reading's finding takes the place
+// of the effects-lane finding of its rule instead: the call then holds the
+// finding the plain spelling held before the Known write finding existed,
+// and the effect lane folds into it as it does for the plain spelling
+// (decide.FoldsIntoLegacy, DET111 ruling A). Where no 1.0.10 reading fires,
+// the effects-lane findings stand (R-NOLOSS).
+func readingRuleSlot(findings []RuleFinding, ruleID string) (index int, held bool) {
+	index = -1
+	for i, f := range findings {
+		if f.RuleID != ruleID {
+			continue
+		}
+		if !isEffectFinding(f) {
+			return -1, true
+		}
+		if index < 0 {
+			index = i
+		}
+	}
+	return index, false
+}
+
+// withReadingFinding is findings with f, the finding of a 1.0.10 reading,
+// in the slot readingRuleSlot gives it. findings is changed in place when f
+// takes an effects-lane finding's slot: callers pass their own copy.
+func withReadingFinding(findings []RuleFinding, f RuleFinding) []RuleFinding {
+	switch index, held := readingRuleSlot(findings, f.RuleID); {
+	case held:
+		return findings
+	case index >= 0:
+		findings[index] = f
+		return findings
+	}
+	return append(findings, f)
 }

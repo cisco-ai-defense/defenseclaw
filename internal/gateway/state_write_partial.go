@@ -26,8 +26,8 @@ func withPartialStateWriteFloor(request trustedActionRequest, findings []RuleFin
 		if canonicalTrustedRuleID(finding.RuleID) != canonicalTrustedRuleID(stateWriteRuleID) {
 			continue
 		}
-		if finding.contributesToEnforcement() {
-			return findings // the write is proven: its own verdict decides
+		if finding.contributesToEnforcement() && !isEffectFinding(finding) {
+			return findings // the legacy write is proven: its own verdict decides
 		}
 		if finding.Proof.Recorded() && finding.partialReading {
 			partial = true

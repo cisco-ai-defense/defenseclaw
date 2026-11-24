@@ -291,6 +291,11 @@ const (
 	RuleEvaluationLimit     = "ACTION-COMPOUND-LIMIT"
 )
 
+// RuleHookConfigWrite is the agent hook config guard rule as the packs and
+// the plain spelling write it: a Known write finding carries the same id, so
+// the call shows the rule set of the plain spelling (GAP-1243, GAP-1308).
+const RuleHookConfigWrite = "tamper.agent_hook_config_write"
+
 // Credential file classes (Proof.Set) of a known read: one per 1.0.10 rule
 // that names the file, so the read is named and graded by that rule's row
 // whatever the spelling (DET111 ruling 2026-11-22T04:12Z, GAP-1244).
@@ -363,8 +368,49 @@ func RuleFor(p Proof) string {
 		return RuleStateWrite
 	case TargetAuthorizedKeys:
 		return RuleAuthorizedKeysWrite
-	case TargetCredential, TargetOtherHomeCredential:
+	case TargetCredential:
+		if p.Set == SetSSHPrivateKey && (p.Kind == KindWrite || p.Kind == KindAppend || p.Kind == KindDelete) {
+			return ""
+		}
+		return setRules[p.Set]
+	case TargetOtherHomeCredential:
 		return setRules[p.Set]
 	}
+	// A write, append or delete of a hook config names the rule the
+	// plain spelling fires on it (rm FILE fires it too: GAP-1478,
+	// GAP-1500). Credential class rules were returned above; an own
+	// SSH private key write has none in 1.0.10 (GAP-1878).
+	if p.Kind != KindWrite && p.Kind != KindAppend && p.Kind != KindDelete {
+		return ""
+	}
+	switch p.Target {
+	case TargetHookConfig:
+		return RuleHookConfigWrite
+	}
 	return ""
+}
+
+// plainWriteSeverity is the severity every shipped pack gives the 1.0.10
+// rule a Known protected write names (policies/guardrail/*/rules,
+// TestPlainWriteSeverityIsThePackSeverity). The effect finding carries it,
+// so its cell maps it as the plain spelling's finding.
+var plainWriteSeverity = map[string]Severity{
+	RuleAuthorizedKeysWrite: SevCritical,
+	RuleStateWrite:          SevHigh,
+	RuleHookConfigWrite:     SevHigh,
+	"PATH-AWS-CREDS":        SevCritical,
+	"PATH-GIT-CREDS":        SevCritical,
+	"PATH-NPMRC":            SevMedium,
+	"PATH-PYPIRC":           SevMedium,
+	"PATH-KUBE":             SevHigh,
+	"PATH-DOCKER":           SevHigh,
+}
+
+// PlainWriteSeverity is the pack severity of rule ruleID on a Known
+// protected write (RuleFor).
+func PlainWriteSeverity(ruleID string) Severity {
+	if s, ok := plainWriteSeverity[ruleID]; ok {
+		return s
+	}
+	return SevHigh
 }

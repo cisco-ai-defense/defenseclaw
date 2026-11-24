@@ -47,7 +47,7 @@ type effectFoldRow struct {
 func effectFoldRows(home string) []effectFoldRow {
 	dc := home + "/.defenseclaw"
 	return []effectFoldRow{
-		{name: "npmrc guarded token write (trace 1991edd30989a7ef/65 shape)", command: `[ -e ~/.npmrc ] && echo "~/.npmrc exists, not overwriting" || { umask 077; T=$(cat ~/.registry-token); printf '//registry.example.test/api/npm/:_authToken=%s\n' "$T" > ~/.npmrc; chmod 600 ~/.npmrc; echo "wrote ~/.npmrc"; }`},
+		{name: "at/claude-code/1991edd30989a7ef/65 guarded token write", command: `[ -e ~/.npmrc ] && echo "~/.npmrc exists, not overwriting" || { umask 077; T=$(cat ~/.registry-token); printf '//registry.example.test/api/npm/:_authToken=%s\n' "$T" > ~/.npmrc; chmod 600 ~/.npmrc; echo "wrote ~/.npmrc"; }`},
 		{name: "npmrc plain write", command: `printf 'registry=https://registry.example.test/\n' > ~/.npmrc`},
 		{name: "lifecycle lock and hook token cleanup as another account (trace 387bf49e98fa6eb5/481 shape)", command: "sudo -iu testuser rm -f -- " + strings.Join([]string{
 			dc + "/.codex-lifecycle.lock", dc + "/.hermes-lifecycle.lock", dc + "/aibom_last_digest.json",
@@ -150,6 +150,9 @@ func TestEffectFindingTakesTheLegacySetTier(t *testing.T) {
 			// the account's own DefenseClaw state folder, as on a host
 			api.scannerCfg.DataDir = filepath.Join(home, ".defenseclaw")
 			for _, row := range append(effectFoldRows(home), effectFoldTraceRows(t)...) {
+				if only := os.Getenv("DET111_FOLD_ONLY_ROW"); only != "" && !strings.Contains(row.name, only) {
+					continue
+				}
 				if row.pending != "" {
 					pending[row.name] = true
 				}
@@ -186,4 +189,50 @@ func TestEffectFindingTakesTheLegacySetTier(t *testing.T) {
 func effectFoldStricter(a, b string) bool {
 	rank := map[string]int{"allow": 0, "alert": 1, "confirm": 2, "block": 3}
 	return rank[a] > rank[b]
+}
+
+// TestGAP1790ClassEffectFoldKeepsGAP1576 pins the provenance-aware
+// class fold for at/claude-code/1991edd30989a7ef/65 and its no-loss
+// boundary. A new floor reading, another effect, and a different rule
+// cannot take the class finding. An enforcing authorized-keys effect
+// remains beside a rank-one reading (GAP-1576, GAP-1984).
+func TestGAP1790ClassEffectFoldKeepsGAP1576(t *testing.T) {
+	proof := decide.Proof{Kind: decide.KindWrite, Target: decide.TargetCredential,
+		Set: decide.SetNpmrc, Certainty: decide.CertKnown, Source: decide.SourceEffects}
+	ruleID := decide.RuleFor(proof)
+	if ruleID == "" {
+		t.Fatal("Known npmrc write has no plain rule")
+	}
+	class := RuleFinding{RuleID: ruleID, Severity: "MEDIUM",
+		proof: newFindingProof(findingProofEffect, ruleID, true)}
+	legacy := RuleFinding{RuleID: ruleID, Severity: "MEDIUM"}
+	if !foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("same-rule class effect did not fold into the 1.0.10 finding")
+	}
+	if got := joinEffectFindings([]RuleFinding{legacy}, []RuleFinding{class}); len(got) != 1 || got[0].RuleID != ruleID {
+		t.Fatalf("class effect joined beside same-rule legacy finding: %v", got)
+	}
+	legacy.floorRaiseOnly = true
+	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("new floor reading folded the class effect")
+	}
+	legacy.floorRaiseOnly = false
+	legacy.RuleID = decide.RuleStateWrite
+	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("different rule folded the class effect")
+	}
+	legacy.RuleID = ruleID
+	legacy.proof = newFindingProof(findingProofEffect, ruleID, true)
+	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("another effects finding folded the class effect")
+	}
+
+	keysProof := decide.Proof{Kind: decide.KindWrite, Target: decide.TargetAuthorizedKeys,
+		Certainty: decide.CertKnown, Source: decide.SourceEffects}
+	keysEffect := RuleFinding{RuleID: decide.RuleEffectRestricted, Severity: "CRITICAL",
+		Proof: keysProof, proof: newFindingProof(findingProofEffect, decide.RuleEffectRestricted, true)}
+	keysLegacy := RuleFinding{RuleID: decide.RuleFor(keysProof), Severity: "CRITICAL"}
+	if got := foldTargetsFor(keysEffect, []RuleFinding{keysLegacy}); decide.FoldsIntoLegacy(decideFinding(keysEffect), got) {
+		t.Fatalf("GAP-1576 authorized-keys effect folded into rank-one reading: %v", got)
+	}
 }

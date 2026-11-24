@@ -1074,9 +1074,9 @@ func TestClaudeCodeCredentialReadOutsideActiveHomeAlerts(t *testing.T) {
 			ToolInput: map[string]interface{}{"command": command},
 			Payload:   map[string]interface{}{"tool_name": "Bash"},
 		})
-		if resp.Action != "alert" || resp.WouldBlock || resp.Severity != "MEDIUM" ||
+		if resp.Action != "alert" || resp.WouldBlock || resp.Severity != "HIGH" ||
 			!strings.Contains(strings.Join(resp.Findings, ","), "PATH-SSH-KEY:") {
-			t.Errorf("%q: action=%s severity=%s would_block=%t findings=%v, want a MEDIUM PATH-SSH-KEY alert",
+			t.Errorf("%q: action=%s severity=%s would_block=%t findings=%v, want a HIGH PATH-SSH-KEY alert",
 				command, resp.Action, resp.Severity, resp.WouldBlock, resp.Findings)
 		}
 	}

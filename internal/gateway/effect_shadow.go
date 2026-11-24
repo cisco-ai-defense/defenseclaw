@@ -8,8 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/netip"
+	"net/url"
+	"os"
 	osuser "os/user"
 	pathpkg "path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -18,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
@@ -135,6 +141,9 @@ type EffectShadowResult struct {
 	// authorized_keys write, and a write through a session alias of a
 	// credential member (its class rule, GAP-2025).
 	MutationProofs []decide.Proof `json:"-"`
+	// UploadProofs are Known reads of a credentials file outside the
+	// protected sets (.env) whose content the call sends out (GAP-1641).
+	UploadProofs []decide.Proof `json:"-"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -457,6 +466,7 @@ type effectClass struct {
 	knownMutation  bool
 	readProofs     []decide.Proof
 	mutationProofs []decide.Proof
+	uploadProofs   []decide.Proof
 	// restrictedSets are the sets of the exact members that made the call
 	// restricted: the sets the restricted verdict is about. A file of ~/.ssh
 	// is also a known member of the authorized-keys set by its folder, but
@@ -489,8 +499,27 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if linkHeld {
 			c.linkHeld = true
 		}
+		if proof, ok := knownCredentialFileUploadProof(result, f); ok && fullyAccounted && len(c.uploadProofs) == 0 {
+			c.uploadProofs = append(c.uploadProofs, proof)
+		}
 		if len(known) == 0 && len(maybe) == 0 {
 			continue
+		}
+		// Mixed-purpose agent configs contain ordinary model and runtime
+		// settings beside DefenseClaw's hooks. A complete known write that
+		// preserves the registered entries is no hook mutation; the legacy
+		// readers still grade the call. Deletes, truncations and opaque data
+		// keep their effect grade (GAP-1478).
+		if fullyAccounted && len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 {
+			preserved := false
+			if env.preservedHookConfigPaths != nil {
+				_, preserved = env.preservedHookConfigPaths[effectHookConfigTargetKey(t.GetPath())]
+			} else {
+				preserved = effectKnownHookConfigWritePreservesRegistration(result, f, env.Home)
+			}
+			if preserved {
+				continue
+			}
 		}
 		mutating := mutatingEffectKind(kind)
 		unknownEffect := f.GetTargetState() != "known" || f.GetRoleState() != "known" || kind == string(effects.KindOpaque)
@@ -543,11 +572,16 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			c.known = true
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		}
-		if proof, ok := knownAuthorizedKeysMutationProof(f, flavor); ok && fullyAccounted {
-			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
-			c.restricted, c.restrictedRuling = true, true
-			c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
-			c.known, c.knownMutation = true, true
+		if fullyAccounted {
+			for _, proof := range knownProtectedMutationProofs(f, flavor) {
+				c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+				c.known, c.knownMutation = true, true
+				// The authorized-keys ruling blocks in every pack.
+				if proof.Target == decide.TargetAuthorizedKeys {
+					c.restricted, c.restrictedRuling = true, true
+					c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
+				}
+			}
 		}
 		if c.program == "" && c.kind == "" {
 			c.program, c.kind = f.GetOrigin().GetProgram(), kind
@@ -602,6 +636,116 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 	return c
 }
 
+// effectKnownHookConfigTargets is the per-call handoff from the one effect
+// extraction to the legacy hook reader. An absent map never skips a finding.
+type effectKnownHookConfigTargets struct {
+	paths map[string]struct{}
+}
+
+func effectHookConfigTargetKey(path string) string {
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if agentHookConfigFoldCase() {
+		path = strings.ToLower(path)
+	}
+	return path
+}
+
+func (targets *effectKnownHookConfigTargets) preserves(path string) bool {
+	if targets == nil {
+		return false
+	}
+	key := effectHookConfigTargetKey(path)
+	if key == "" {
+		return false
+	}
+	_, ok := targets.paths[key]
+	return ok
+}
+
+// effectPreservedHookConfigPaths records a target only if every effect on it
+// is a fully known write whose resulting document keeps registered hooks.
+// An unknown or incomplete extraction has no authority to relax a reader.
+func effectPreservedHookConfigPaths(result effects.Result, facts []*semanticpb.EffectFact, home string) map[string]struct{} {
+	safe := make(map[string]struct{})
+	if len(result.Unknowns) != 0 {
+		return safe
+	}
+	unsafe := make(map[string]struct{})
+	for _, fact := range facts {
+		target := fact.GetTarget()
+		if target.GetType() != "path" {
+			continue
+		}
+		key := effectHookConfigTargetKey(target.GetPath())
+		if key == "" {
+			continue
+		}
+		known, maybe, _ := effectProtectedSets(target, fact.GetKind(), effectWritesThroughLink(fact))
+		if len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 &&
+			effectKnownHookConfigWritePreservesRegistration(result, fact, home) {
+			safe[key] = struct{}{}
+		} else {
+			unsafe[key] = struct{}{}
+		}
+	}
+	for key := range unsafe {
+		delete(safe, key)
+	}
+	return safe
+}
+
+// effectKnownHookConfigWritePreservesRegistration proves that the one
+// complete, literal write to a mixed-purpose config leaves DefenseClaw's
+// registered hooks intact. It reads the same bounded before/after document
+// contract as the 1.0.10 hook guard. Unknown data, missing reads and any
+// deletion or truncation keep the effect finding.
+func effectKnownHookConfigWritePreservesRegistration(result effects.Result, f *semanticpb.EffectFact, home string) bool {
+	if f == nil || (f.GetKind() != string(effects.KindWrite) && f.GetKind() != string(effects.KindAppend)) ||
+		f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 {
+		return false
+	}
+	i := int(f.GetIndex()) - 1
+	if i < 0 || i >= len(result.Effects) {
+		return false
+	}
+	e := result.Effects[i]
+	d := e.Data
+	if d == nil || (d.Kind != effects.DataLiteral && d.Kind != effects.DataHeredoc && d.Kind != effects.DataHereString &&
+		d.Kind != effects.DataArgument) || len(d.Sources) != 0 || d.Text == "" || d.Bytes != len(d.Text) {
+		return false
+	}
+	path := f.GetTarget().GetPath()
+	if path == "" {
+		return false
+	}
+	guard := newAgentHookConfigGuard("", home)
+	format := guard.format(path)
+	// Only Codex TOML is a mixed-purpose config with an observed 1.0.10
+	// benign-write cell. Other hook files keep their existing write grade.
+	if format != gatewayconnector.AgentHookConfigCodexTOML {
+		return false
+	}
+	before, exists := guard.read(path)
+	if !exists {
+		// A failed or unreadable file is not proof of absence. Only a
+		// genuinely absent file has no registered entries to preserve.
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	after := []byte(d.Text)
+	if f.GetKind() == string(effects.KindAppend) {
+		if len(before)+len(after) > agentHookConfigMaxBytes {
+			return false
+		}
+		after = append(append([]byte(nil), before...), after...)
+	}
+	return agentHookConfigTurnsOff(format, before, exists, after, true) == ""
+}
+
 // factReach is the reach reason of one relevant fact: none for a known effect
 // on a known member; R-NAME for an unknown effect on a known member;
 // otherwise the basis of the first maybe match that holds (glob, unresolved
@@ -644,8 +788,9 @@ func factReach(f *semanticpb.EffectFact, known []string, unknownEffect bool, env
 // home, and whether the call turns dot matching on for its globs (bash
 // dotglob, zsh globdots or glob_dots).
 type effectReachEnv struct {
-	Home    string
-	DotGlob bool
+	Home                     string
+	DotGlob                  bool
+	preservedHookConfigPaths map[string]struct{}
 }
 
 func newEffectReachEnv(home, text string) effectReachEnv {
@@ -876,18 +1021,19 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		if ruleID == "" {
 			continue
 		}
-		f := RuleFinding{RuleID: ruleID, Title: "Known authorized keys write", Severity: "CRITICAL", Confidence: 1, Proof: proof}
-		switch proof.Target {
-		case decide.TargetAuthorizedKeys:
-		case decide.TargetState:
-			// tamper.detector_state_write is HIGH in every pack (GAP-0747).
-			f.Title, f.Severity = "DefenseClaw security state mutation", "HIGH"
-		default:
-			// The pack's class rule severity replaces it on the live path
-			// (withEffectClassWriteSeverity).
-			f.Title, f.Severity = "Known credential write", "HIGH"
+		f := RuleFinding{RuleID: ruleID, Title: "Known protected file write", Severity: decide.PlainWriteSeverity(ruleID).String(),
+			Confidence: 1, Proof: proof}
+		if proof.Target == decide.TargetState {
+			// The 1.0.10 tamper.detector_state_write title (GAP-0747, GAP-1261).
+			f.Title = "DefenseClaw security state mutation"
 		}
 		f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
+		findings = append(findings, f)
+	}
+	for _, proof := range res.UploadProofs {
+		f := RuleFinding{RuleID: credentialFileExternalUploadRuleID, Title: "Credentials file content sent to an external destination",
+			Severity: "HIGH", Confidence: 1, Proof: proof}
+		f.proof = newFindingProof(findingProofEffect, credentialFileExternalUploadRuleID, mode == effectRulesOn)
 		findings = append(findings, f)
 	}
 	for _, proof := range res.ReadProofs {
@@ -984,27 +1130,68 @@ func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (dec
 	return decide.Proof{}, false
 }
 
-// knownAuthorizedKeysMutationProof uses the resolved target, independent of
-// the program that produced the write. The exact file and a known account-home
-// match carry the same proof through an identity-preserving wrapper.
-func knownAuthorizedKeysMutationProof(f *semanticpb.EffectFact, flavor effects.Flavor) (decide.Proof, bool) {
-	if f == nil || (f.GetKind() != string(effects.KindWrite) && f.GetKind() != string(effects.KindAppend)) ||
-		f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
+// knownProtectedMutationProofs are the decision proofs of one Known write,
+// append or delete of an exact member of a protected set, whatever program
+// the program table modeled it for (redirection, cp, tee, sort -o, rsync, a
+// sed w command, an interpreter's open().write or os.remove): the spelling
+// gets the 1.0.10
+// rule of the plain spelling on that member and that rule's cell (GAP-1865,
+// generalized to the restricted sets by the DET111 ruling of 2026-11-23:
+// GAP-1478, GAP-1500, GAP-0662, GAP-0506). It reads the resolved target, not
+// a reviewed program list. A shell profile write stays content-decided
+// (RowEffectContentDecided, GAP-1795) and an own SSH private key write has
+// no 1.0.10 rule (RowEffectOwnKeyWrite, GAP-1878): neither makes a proof. A
+// Maybe target or an unknown role makes none either.
+func knownProtectedMutationProofs(f *semanticpb.EffectFact, flavor effects.Flavor) []decide.Proof {
+	var kind decide.ProofKind
+	switch f.GetKind() {
+	case string(effects.KindWrite):
+		kind = decide.KindWrite
+	case string(effects.KindAppend):
+		kind = decide.KindAppend
+	case string(effects.KindDelete):
+		// rm FILE and python3 -c 'os.remove(FILE)' are one delete (GAP-1478).
+		kind = decide.KindDelete
+	default:
+		return nil
+	}
+	if f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
 		!effectrules.CanonicalAbsolute(f.GetTarget().GetPath(), flavor) {
-		return decide.Proof{}, false
+		return nil
 	}
+	var proofs []decide.Proof
 	for _, match := range f.GetTarget().GetProtected() {
-		if match.GetSet() == effectrules.SetSSHAuthorizedKeys && match.GetState() == "known" &&
-			(match.GetReason() == "exact" || match.GetReason() == "other_home") {
-			kind := decide.KindWrite
-			if f.GetKind() == string(effects.KindAppend) {
-				kind = decide.KindAppend
-			}
-			return decide.Proof{Kind: kind, Target: decide.TargetAuthorizedKeys,
-				Certainty: decide.CertKnown, Source: effectProofSource}, true
+		if match.GetState() != "known" {
+			continue
 		}
+		p := decide.Proof{Kind: kind, Certainty: decide.CertKnown, Source: effectProofSource}
+		switch match.GetSet() {
+		case effectrules.SetSSHAuthorizedKeys:
+			// The exact file and a known account-home match carry the same
+			// proof through an identity-preserving wrapper.
+			if r := match.GetReason(); r != "exact" && r != "other_home" {
+				continue
+			}
+			p.Target = decide.TargetAuthorizedKeys
+		case effectrules.SetSelfProtection:
+			p.Target = decide.TargetState
+		case effectrules.SetAgentHookConfig:
+			p.Target = decide.TargetHookConfig
+		case effectrules.SetCredentials:
+			p.Target = decide.TargetCredential
+			p.Set = decide.CredentialSet(effectCredentialMemberTail(f.GetTarget().GetPath()))
+		default:
+			continue
+		}
+		if p.Target != decide.TargetAuthorizedKeys && match.GetReason() != "exact" {
+			continue
+		}
+		if decide.RuleFor(p) == "" {
+			continue
+		}
+		proofs = append(proofs, p)
 	}
-	return decide.Proof{}, false
+	return proofs
 }
 
 // knownCredentialReadProof extracts the one 1.0.10 credential class a Known
@@ -1051,19 +1238,37 @@ const maxEffectFlowHops = 8
 // comes from it to another folder (cp, mv, install, a redirect). A copy
 // beside the file (install key key.bak), a discard (> /dev/null) or a
 // summary (grep -c, wc) keeps it local. A copy's own content is followed
-// on: a later send of the copy is a send.
+// on: a later send of the copy is a send, and so is a send of a copy of
+// the copy (a later read of a file the flow wrote carries its content:
+// cat .env > a && cp a b && curl --data-binary @b, GAP-1641).
 func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
+	flow, _ := effectReadFlowTo(result, i)
+	return flow
+}
+
+// effectReadFlowTo is effectReadFlow and, for a sent read, the target of
+// the send (a network send's endpoint or a remote copy's destination).
+func effectReadFlowTo(result effects.Result, i int) (decide.ReadFlow, effects.Target) {
 	if i < 0 || i >= len(result.Effects) || result.Effects[i].Kind != effects.KindRead {
-		return decide.FlowNone
+		return decide.FlowNone, effects.Target{}
 	}
 	read := result.Effects[i]
 	if read.Shown {
-		return decide.FlowShown
+		return decide.FlowShown, effects.Target{}
 	}
 	from := map[int]bool{i + 1: true}
+	written := map[string]bool{}
 	flow, hops := decide.FlowNone, 0
 	for j := i + 1; j < len(result.Effects) && hops < maxEffectFlowHops; j++ {
 		e := result.Effects[j]
+		if e.Kind == effects.KindRead {
+			// A read of a file the flow wrote (cp a b after cat .env > a)
+			// carries the content on to the effects whose data comes from it.
+			if k := e.Target.Key(); k != "" && written[k] {
+				from[j+1] = true
+			}
+			continue
+		}
 		if e.Data == nil || !slices.ContainsFunc(e.Data.Sources, func(s effects.Source) bool {
 			return s.Kind == effects.SourceEffect && from[s.Effect]
 		}) {
@@ -1071,7 +1276,7 @@ func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
 		}
 		switch e.Kind {
 		case effects.KindNetworkSend:
-			return decide.FlowSent
+			return decide.FlowSent, e.Target
 		case effects.KindWrite, effects.KindAppend:
 			// The null device is lowered as no target (> /dev/null).
 			if e.Target.Type == effects.TargetNone || effectDiscardPath(e.Target.Path) || effectDiscardPath(e.Target.Spelling) {
@@ -1079,15 +1284,66 @@ func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
 			}
 			hops++
 			from[j+1] = true
+			if k := e.Target.Key(); k != "" {
+				written[k] = true
+			}
 			if e.Target.Type == effects.TargetRemote {
-				return decide.FlowSent
+				return decide.FlowSent, e.Target
 			}
 			if !effectSameFolder(e.Target, read.Target) {
 				flow = decide.FlowCopied
 			}
 		}
 	}
-	return flow
+	return flow, effects.Target{}
+}
+
+// knownCredentialFileUploadProof is the proof of a Known read of a
+// credentials file outside the protected sets (a .env: any shape of the
+// credentials-file table, actionfacts.MatchCredentialFileShape) whose
+// content the call sends to a destination that is not loopback or private,
+// through copies of copies (effectReadFlowTo, the GAP-1846 content flow):
+// cat .env > f && curl -d @f URL is the upload curl -d @.env URL is, and
+// takes the 1.0.10 rule of that plain spelling (GAP-1641). A read that is
+// only shown, copied or kept local raises nothing here (the 1.0.10 .env
+// reader still grades it), and a file of a protected credential class takes
+// its own read row (knownCredentialReadProof).
+func knownCredentialFileUploadProof(result effects.Result, f *semanticpb.EffectFact) (decide.Proof, bool) {
+	if f == nil || f.GetKind() != string(effects.KindRead) || f.GetTargetState() != "known" ||
+		f.GetRoleState() != "known" || len(f.GetReasons()) != 0 {
+		return decide.Proof{}, false
+	}
+	path := f.GetTarget().GetPath()
+	_, ok := actionfacts.MatchCredentialFileShape(path)
+	if !ok || decide.CredentialSet(effectCredentialMemberTail(path)) != "" {
+		return decide.Proof{}, false
+	}
+	flow, to := effectReadFlowTo(result, int(f.GetIndex())-1)
+	if flow != decide.FlowSent || !effectSendExternal(to) {
+		return decide.Proof{}, false
+	}
+	return decide.Proof{Kind: decide.KindSend, Target: decide.TargetOther, Certainty: decide.CertKnown,
+		Source: effectProofSource, Flow: decide.FlowSent}, true
+}
+
+// effectSendExternal reports a send destination the 1.0.10 upload rule
+// counts as external: a public or unknown host (NETWORK_SCOPE_PUBLIC or
+// _UNKNOWN), not a loopback, private or link-local address.
+func effectSendExternal(t effects.Target) bool {
+	host := t.Host
+	if host == "" && t.URL != "" {
+		if u, err := url.Parse(t.URL); err == nil {
+			host = u.Hostname()
+		}
+	}
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	if a, err := netip.ParseAddr(host); err == nil {
+		return !(a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsUnspecified())
+	}
+	return true
 }
 
 // effectDiscardPath is the null device: what is written there goes nowhere.

@@ -625,6 +625,52 @@ var (
 	pythonOpenDoubleWrite = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
 )
 
+// The bounded Python delete calls (os.remove, os.unlink, os.rmdir,
+// shutil.rmtree, pathlib Path(...).unlink() / .rmdir()) on a literal path,
+// os.path.expanduser of one, or a literal sys.argv index (GAP-1478).
+const pythonDeleteFunc = `(?:\bos\s*\.\s*(?:remove|unlink|rmdir)|\bshutil\s*\.\s*rmtree)\s*\(\s*`
+
+var (
+	pythonDeleteLiteral = regexp.MustCompile(pythonDeleteFunc +
+		`(?:os\s*\.\s*path\s*\.\s*(expanduser)\s*\(\s*)?(?:'([^'\\\n]+)'|"([^"\\\n]+)")`)
+	pythonDeleteArg  = regexp.MustCompile(pythonDeleteFunc + `sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]`)
+	pythonPathDelete = regexp.MustCompile(`\b(?:pathlib\s*\.\s*)?Path\s*\(\s*` +
+		`(?:os\s*\.\s*path\s*\.\s*(expanduser)\s*\(\s*(?:'([^'\\\n]+)'|"([^"\\\n]+)")\s*\)|(?:'([^'\\\n]+)'|"([^"\\\n]+)"))` +
+		`\s*\)\s*\.\s*(?:unlink|rmdir)\s*\(`)
+)
+
+// pythonDeleteTargets recognizes the bounded Python delete calls
+// (pythonDeleteFunc, pythonPathDelete): the sys.argv indices and literal
+// paths they remove. Python expands no ~ itself, so a ~ literal is a home
+// path only inside os.path.expanduser; elsewhere it stays opaque.
+func pythonDeleteTargets(program, code string, args []Word) (map[int]bool, map[string]bool) {
+	argDeletes, literalDeletes := map[int]bool{}, map[string]bool{}
+	if program != "python" && program != "python3" && !strings.HasPrefix(program, "python3.") && !strings.HasPrefix(program, "python2") {
+		return argDeletes, literalDeletes
+	}
+	for _, match := range pythonDeleteArg.FindAllStringSubmatch(code, maxCodeLiterals) {
+		index, err := strconv.Atoi(match[1])
+		if err == nil && index > 0 && index <= len(args) {
+			argDeletes[index-1] = true
+		}
+	}
+	add := func(expanded bool, lits ...string) {
+		for _, lit := range lits {
+			if lit != "" && pathLike(lit) && (expanded || !strings.HasPrefix(lit, "~")) {
+				literalDeletes[lit] = true
+			}
+		}
+	}
+	for _, match := range pythonDeleteLiteral.FindAllStringSubmatch(code, maxCodeLiterals) {
+		add(match[1] != "", match[2], match[3])
+	}
+	for _, match := range pythonPathDelete.FindAllStringSubmatch(code, maxCodeLiterals) {
+		add(true, match[2], match[3])
+		add(false, match[4], match[5])
+	}
+	return argDeletes, literalDeletes
+}
+
 // pythonOpenReadSources recognizes bounded Python open(...).read() forms with
 // a literal path or a literal sys.argv index. Other code remains opaque.
 func pythonOpenReadSources(program, code string, args []Word) (map[int]bool, map[string]bool) {
@@ -723,8 +769,9 @@ func (w *walker) opaquePathEffect(spelling string, origin Origin, cond bool) {
 	w.emit(e)
 }
 
-// inlineCode lowers bounded Python open(...).read() and explicit write-mode
-// open(...).write() paths as file effects; other path literals and arguments
+// inlineCode lowers bounded Python open(...).read(), explicit write-mode
+// open(...).write() and delete-call (pythonDeleteTargets) paths as file
+// effects; other path literals and arguments
 // remain opaque. It reports whether the call has inline or stdin code (its
 // positionals are then arguments, not a program to run).
 func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool {
@@ -747,6 +794,7 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 	seen := map[string]bool{}
 	readArgs, readLiterals := pythonOpenReadSources(origin.Program, code, ic.args)
 	writeArgs, writeLiterals := pythonOpenWriteTargets(origin.Program, code, ic.args)
+	deleteArgs, deleteLiterals := pythonDeleteTargets(origin.Program, code, ic.args)
 	emitRead := func(spelling string) {
 		if seen[spelling] {
 			return
@@ -756,18 +804,21 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 			w.emit(*e)
 		}
 	}
-	emitWrite := func(spelling string, kind Kind) {
+	emitRole := func(spelling string, role Role) {
 		if seen[spelling] {
 			return
 		}
 		seen[spelling] = true
+		if e := w.effectForOperand(operand{value: spelling, static: true, role: role}, Program{}, origin, cond, false, false, false, origin.Dialect, origin.Depth); e != nil {
+			w.emit(*e)
+		}
+	}
+	emitWrite := func(spelling string, kind Kind) {
 		role := RoleWrite
 		if kind == KindAppend {
 			role = RoleAppend
 		}
-		if e := w.effectForOperand(operand{value: spelling, static: true, role: role}, Program{}, origin, cond, false, false, false, origin.Dialect, origin.Depth); e != nil {
-			w.emit(*e)
-		}
+		emitRole(spelling, role)
 	}
 	for _, lit := range codeLiterals(code) {
 		if kind, ok := writeLiterals[lit]; ok {
@@ -776,6 +827,10 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 		}
 		if readLiterals[lit] {
 			emitRead(lit)
+			continue
+		}
+		if deleteLiterals[lit] {
+			emitRole(lit, RoleDelete)
 			continue
 		}
 		if !seen[lit] {
@@ -791,6 +846,10 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 		}
 		if readArgs[i] && a.Static && pathLike(a.Value) {
 			emitRead(a.Value)
+			continue
+		}
+		if deleteArgs[i] && a.Static && pathLike(a.Value) {
+			emitRole(a.Value, RoleDelete)
 			continue
 		}
 		if !a.Static {

@@ -430,6 +430,10 @@ type walker struct {
 	// curProgram is the program of the command being classified (a table row can
 	// serve several names, e.g. gzip and gunzip).
 	curProgram string
+	// edStdin is the static standard input of the ed call being read (its
+	// script, edOperands); edStdinOK is false when it is not known.
+	edStdin   string
+	edStdinOK bool
 	// spec is the environment change the command being walked applies to the
 	// child process it starts (prefix assignments, env/sudo wrapper options).
 	spec *childSpec
@@ -1903,8 +1907,23 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			}
 		case !gitKnownSubcommands[sub]:
 			unaccounted = true
+		case sub == "config" && (hasGitFileOption(inner[1:]) || hasWordFold(inner[1:], "-f")):
+			// git config --file FILE: the file it names is the whole effect
+			// (GAP-0506); a form gitConfigFile does not accept is unaccounted.
+			if file, role, ok := gitConfigFile(inner[1:]); ok {
+				w.emitOperand(operand{value: file.Value, static: true, quoted: file.Quoted, role: role}, origin, cond, dialect, depth)
+			} else {
+				unaccounted = true
+			}
 		case sub == "config" && gitConfigWrites(inner[1:]):
 			unaccounted = true
+		case hasGitFileOption(inner[1:]):
+			// commit / tag / notes --file FILE read the message from FILE.
+			if file, ok := gitFileOptionValue(inner[1:]); ok {
+				w.emitOperand(operand{value: file.Value, static: true, quoted: file.Quoted, role: RoleRead}, origin, cond, dialect, depth)
+			} else {
+				unaccounted = true
+			}
 		}
 	}
 	// programs that run arbitrary code from their arguments (review N18).
@@ -1960,6 +1979,10 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 7. Operands.
 	w.curProgram = program
+	w.edStdin, w.edStdinOK = "", false
+	if program == "ed" && dialect == DialectPOSIX {
+		w.edStdin, _, w.edStdinOK = w.stdinText(c)
+	}
 	operandWords := inner[1:]
 	// xargs appends stdin words after its command. When the preceding stage
 	// printed exactly one literal filename, feed that word through the same
@@ -2063,7 +2086,13 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		case KindLink:
 			w.recordLink(op, ops)
 		}
-		if op.role == RoleExecCode && op.static && entry.ShellCode {
+		if op.role == RoleExecCode && op.static && op.shellCode && dialect == DialectPOSIX {
+			// sed e COMMAND: the command runs in a child /bin/sh, once for
+			// each input line its address selects, so only when the input
+			// has one: its effects are conditional (GAP-1500).
+			w.spec = spec
+			w.unwrapCodeScoped(op.value, true, dialect, depth, true, origin, true)
+		} else if op.role == RoleExecCode && op.static && entry.ShellCode {
 			childScope := program != "eval" && program != "source" && program != "."
 			w.spec = spec
 			switch {
@@ -2517,6 +2546,10 @@ type operand struct {
 	// walk does not read as a pattern (findFiltered alone).
 	findName     string
 	findFiltered bool
+	// shellCode: a RoleExecCode value that is POSIX shell text whatever the
+	// program's row says (a sed e COMMAND, which sed runs with /bin/sh): it
+	// is lowered as sh -c COMMAND is (rel-1-0-10:GAP-1500).
+	shellCode bool
 }
 
 func hasWordFold(words []Word, v string) bool {
@@ -2950,7 +2983,7 @@ func (w *walker) textOperands(kind TextKind, v Word) (ops []operand, bad bool) {
 		// track: the read is kept, the call is not fully known.
 		bad = len(rd.reads) > 0
 		for _, c := range rd.execs {
-			ops = append(ops, operand{value: c, static: true, role: RoleExecCode})
+			ops = append(ops, operand{value: c, static: true, role: RoleExecCode, shellCode: true})
 		}
 		if rd.execDyn {
 			ops = append(ops, operand{role: RoleExecCode})
@@ -3338,6 +3371,10 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		}
 	case PosGit:
 		out = append(out, gitOperands(ps)...)
+	case PosSQLite:
+		out = append(out, sqliteOperands(ps, ctx, mk)...)
+	case PosEd:
+		out = append(out, w.edOperands(ps, mk)...)
 	case PosRobocopy:
 		// robocopy SRC DST [files...]: DST is a directory; each file copies to
 		// DST/basename(file); with no files the whole SRC tree copies into DST
@@ -3599,7 +3636,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	case RoleExecCode:
 		e.Kind = KindExec
 		e.Target.Type = TargetProcess
-		if op.static && p.ShellCode {
+		if op.static && (p.ShellCode || op.shellCode) {
 			e.Data = &Data{Kind: DataCode, Bytes: len(op.value), Text: cap8k(op.value)}
 		} else {
 			e.addReason(ReasonOpaqueCode, ScopeTarget)

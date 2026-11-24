@@ -39,29 +39,30 @@ var credentialTargets = []TargetClass{TargetCredential, TargetOtherHomeCredentia
 // own reader's cell in every tier and deployment; that cell is what the set
 // is worth in the call.
 var legacySetRules = map[string]legacySet{
-	RuleStateWrite:                   {targets: []TargetClass{TargetState}},
-	"TAMPER.AGENT_HOOK_CONFIG_WRITE": {targets: []TargetClass{TargetHookConfig}},
-	RuleAuthorizedKeysWrite:          {targets: []TargetClass{TargetAuthorizedKeys}},
-	RuleShellProfileWrite:            {targets: []TargetClass{TargetAutostart}},
-	RuleGitHookWrite:                 {targets: []TargetClass{TargetAutostart}},
-	RuleSSHDir:                       {targets: credentialTargets},
-	"PATH-SSH-KEY":                   {targets: credentialTargets, set: SetSSHPrivateKey},
-	"PATH-WIN-SSH-KEY":               {targets: credentialTargets, set: SetSSHPrivateKey},
-	"PATH-AWS-CREDS":                 {targets: credentialTargets, set: SetAWSCredentials},
-	"PATH-WIN-AWS-CREDS":             {targets: credentialTargets, set: SetAWSCredentials},
-	"PATH-GIT-CREDS":                 {targets: credentialTargets, set: SetGitCredentials},
-	"PATH-WIN-GIT-CREDS":             {targets: credentialTargets, set: SetGitCredentials},
-	"PATH-NETRC":                     {targets: credentialTargets, set: SetGitCredentials},
-	"PATH-WIN-NETRC":                 {targets: credentialTargets, set: SetGitCredentials},
-	"PATH-NPMRC":                     {targets: credentialTargets, set: SetNpmrc},
-	"PATH-PYPIRC":                    {targets: credentialTargets, set: SetPypirc},
-	"PATH-KUBE":                      {targets: credentialTargets, set: SetKubeConfig},
-	"PATH-WIN-KUBE-CONFIG":           {targets: credentialTargets, set: SetKubeConfig},
-	"PATH-DOCKER":                    {targets: credentialTargets, set: SetDockerConfig},
+	RuleStateWrite:          {targets: []TargetClass{TargetState}},
+	RuleAuthorizedKeysWrite: {targets: []TargetClass{TargetAuthorizedKeys}},
+	RuleShellProfileWrite:   {targets: []TargetClass{TargetAutostart}},
+	RuleGitHookWrite:        {targets: []TargetClass{TargetAutostart}},
+	RuleSSHDir:              {targets: credentialTargets},
+	"PATH-SSH-KEY":          {targets: credentialTargets, set: SetSSHPrivateKey},
+	"PATH-WIN-SSH-KEY":      {targets: credentialTargets, set: SetSSHPrivateKey},
+	"PATH-AWS-CREDS":        {targets: credentialTargets, set: SetAWSCredentials},
+	"PATH-WIN-AWS-CREDS":    {targets: credentialTargets, set: SetAWSCredentials},
+	"PATH-GIT-CREDS":        {targets: credentialTargets, set: SetGitCredentials},
+	"PATH-WIN-GIT-CREDS":    {targets: credentialTargets, set: SetGitCredentials},
+	"PATH-NETRC":            {targets: credentialTargets, set: SetGitCredentials},
+	"PATH-WIN-NETRC":        {targets: credentialTargets, set: SetGitCredentials},
+	"PATH-NPMRC":            {targets: credentialTargets, set: SetNpmrc},
+	"PATH-PYPIRC":           {targets: credentialTargets, set: SetPypirc},
+	"PATH-KUBE":             {targets: credentialTargets, set: SetKubeConfig},
+	"PATH-WIN-KUBE-CONFIG":  {targets: credentialTargets, set: SetKubeConfig},
+	"PATH-DOCKER":           {targets: credentialTargets, set: SetDockerConfig},
 	// The agent instruction file rule (CLAUDE.md), a content rule on a
 	// member of the hook config set: its 1.0.10 cell is what the file is
 	// worth in the call (GAP-1797).
 	"COG-CLAUDE-MD": {targets: []TargetClass{TargetHookConfig}},
+	// The agent hook config guard rule, in the upper case NamesSet looks up.
+	strings.ToUpper(RuleHookConfigWrite): {targets: []TargetClass{TargetHookConfig}},
 }
 
 // Effect-lane rule ids (the gateway's effect.protected_target_<tier>).
@@ -118,7 +119,9 @@ func NamesSet(ruleID string, p Proof) bool {
 // lane never grades a set above the rule that names it (a variant spelling
 // gets the plain spelling's tier, never above it). Where no 1.0.10 finding
 // of the call names the set (a spelling only the effect lane resolves), f
-// stands and its own table row decides.
+// stands and its own table row decides. A Known protected write finding is
+// an effects-lane finding too: it names no set, so the effect lane's raise
+// beside it stands (R-NOLOSS).
 func FoldsIntoLegacy(f Finding, call []Finding) bool {
 	p := f.Proof
 	if p.Source != SourceEffects || !(p.Certainty == CertKnown || p.Advisory()) {

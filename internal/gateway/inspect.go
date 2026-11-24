@@ -1175,6 +1175,9 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 }
 
 func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
+	// Dispatch finishes the effect lane before the legacy hook reader runs.
+	// The request copies share only this call's proven target set.
+	action.preservedHookConfigTargets = &effectKnownHookConfigTargets{}
 	return withFloorRaiseOnlyMark(action, trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient), 0)
 }
 

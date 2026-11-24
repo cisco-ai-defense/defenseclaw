@@ -133,6 +133,9 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	}
 	defer func() {
 		if recover() != nil {
+			if request.preservedHookConfigTargets != nil {
+				request.preservedHookConfigTargets.paths = nil
+			}
 			for i := range results {
 				results[i] = EffectShadowResult{Mode: string(mode), Tier: string(effectTierClean), Action: guardrailActionAllow}
 			}
@@ -171,6 +174,11 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	strict := request.StrictPolicy
 	text := effectReachText(call)
 	reachEnv := newEffectReachEnv(request.Input.ActiveHome, text)
+	var preservedHookConfigPaths map[string]struct{}
+	if mode == effectRulesOn && request.preservedHookConfigTargets != nil {
+		preservedHookConfigPaths = effectPreservedHookConfigPaths(result, facts, request.Input.ActiveHome)
+		reachEnv.preservedHookConfigPaths = preservedHookConfigPaths
+	}
 	// The alias uses (sessionEffectAliases) index the effects of the call's
 	// own reading, so each reading adds them from that one (result).
 	grade := func(reading effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor, tier effectTierMode) effectClass {
@@ -192,6 +200,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
 		res.KnownMutation, res.LinkTo = c.knownMutation, c.linkTo && !c.linkAt
 		res.ReadProofs, res.MutationProofs, res.RestrictedSets, res.CredentialAppend = c.readProofs, c.mutationProofs, c.restrictedSets, c.credentialAppend
+		res.UploadProofs = c.uploadProofs
 		if len(c.writtenCredentialSets) == 1 {
 			res.WrittenCredentialSet = c.writtenCredentialSets[0]
 		}
@@ -214,6 +223,9 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	}
 	if len(result.Unknowns) == 0 {
 		sessionEffectAliases.remember(request, result, facts, opts.Flavor)
+	}
+	if mode == effectRulesOn && request.preservedHookConfigTargets != nil {
+		request.preservedHookConfigTargets.paths = preservedHookConfigPaths
 	}
 	return finish("", len(result.Effects))
 }

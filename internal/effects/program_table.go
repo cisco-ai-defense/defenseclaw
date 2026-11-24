@@ -102,6 +102,8 @@ const (
 	PosZip             PosMode = "zip"      // zip ARCHIVE FILE...: the archive is written, the files are read
 	PosArchive         PosMode = "archive"  // 7z command ARCHIVE [MEMBER...]: role follows the command word
 	PosCompress        PosMode = "compress" // gzip/xz/bzip2: each operand is replaced by its (de)compressed file
+	PosSQLite          PosMode = "sqlite"   // sqlite3 DB [SQL...]: the database is written when the SQL changes it (GAP-0506)
+	PosEd              PosMode = "ed"       // ed FILE with its script on stdin: FILE is written when the script writes it (GAP-0506)
 )
 
 // Program is one table row.
@@ -840,12 +842,22 @@ func buildPOSIXTable() {
 			"--output": {Value: true, Role: RoleOutput}, "--upload-pack": {Value: true, Role: RoleExecCode},
 			"--exec-path": {Value: true, Role: RoleIgnore}, "--git-dir": {Value: true, Role: RoleIgnore},
 			"--work-tree": {Value: true, Role: RoleIgnore}, "--namespace": {Value: true, Role: RoleIgnore},
+			// git config --file FILE writes or reads FILE; commit, tag and notes
+			// --file FILE read their message from it (gitFileEffects, GAP-0506).
+			"--file": {Value: true, Role: RoleIgnore},
+			// git config options (gitConfigFile reads them; GAP-0506)
+			"--type": {Value: true, Role: RoleIgnore}, "--default": {Value: true, Role: RoleIgnore}, "--comment": {Value: true, Role: RoleIgnore},
 			// common subcommand flags, so git add/push/commit stay fully accounted
 			// (their effects are modeled in gitOperands / gitNetworkStage).
 			"-m": {Value: true, Role: RoleIgnore}, "--message": {Value: true, Role: RoleIgnore},
 			"--chmod": {Value: true, Role: RoleIgnore}, "--pathspec-from-file": {Value: true, Role: RoleIgnore},
 			"--repo": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "--push-option": {Value: true, Role: RoleIgnore}},
 			"-p", "-P", "-v", "-h", "--paginate", "--no-pager", "--bare", "--version", "--help", "--no-replace-objects", "--literal-pathspecs", "--no-optional-locks", "--html-path", "--info-path", "--man-path",
+			// git config
+			"--add", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section", "--get", "--get-all",
+			"--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "--list", "--bool", "--int", "--bool-or-int",
+			"--path", "--expiry-date", "--no-type", "--show-origin", "--show-scope", "--name-only", "--null", "--includes",
+			"--no-includes", "--fixed-value",
 			// git add
 			"-A", "--all", "-u", "--update", "--patch", "-n", "--dry-run", "-f", "--force", "-i", "--interactive",
 			"-e", "--edit", "-N", "--intent-to-add", "--ignore-removal", "--ignore-errors", "--renormalize", "--refresh", "--no-all",
@@ -882,6 +894,22 @@ func buildPOSIXTable() {
 		}
 		return m
 	}
+	// sqlite3 DB [SQL...] (GAP-0506): the options that take a value are inert;
+	// -cmd, -init, -A and the rest are unlisted, so the call is not fully known.
+	// sqlite3 takes each option with one dash or two.
+	dashes := func(names ...string) []string {
+		out := make([]string, 0, 2*len(names))
+		for _, n := range names {
+			out = append(out, n, "-"+n)
+		}
+		return out
+	}
+	sqliteSwitches := dashes("-readonly", "-bail", "-batch", "-box", "-column", "-csv", "-echo", "-header", "-noheader",
+		"-html", "-json", "-line", "-list", "-markdown", "-quote", "-table", "-tabs", "-ascii", "-safe", "-nofollow", "-stats",
+		"-version", "-help")
+	sqliteValued := dashes("-separator", "-newline", "-nullvalue", "-mmap", "-vfs", "-maxsize")
+	add(Program{Names: []string{"sqlite3"}, Pos: PosSQLite, Strict: true, Flags: fl(inert(sqliteValued...), sqliteSwitches...)})
+	add(Program{Names: []string{"ed"}, Pos: PosEd, Strict: true, Flags: fl(inert("-p", "--prompt"), "-s", "--quiet", "--silent", "-G", "--traditional", "-l", "--loose-exit-status", "-v", "--verbose", "-E", "--extended-regexp")})
 	add(Program{Names: []string{"uniq"}, Pos: PosInOut,
 		Flags: fl(inert("-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"),
 			"-c", "-d", "-D", "-i", "-u", "-z", "--count", "--repeated", "--all-repeated", "--ignore-case", "--unique", "--zero-terminated", "--group")})
