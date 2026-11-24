@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -192,12 +193,13 @@ func cleanOutagePayload(t *testing.T, fixture *foreignGuardFixture, event string
 // the account's lock and before the first ledger record; if they cannot be
 // removed the hook file and the ledger stay as they were.
 func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
-	skipForeignHookCleanupFixtureOnWindows(t)
+	skipForeignHookLedgerOnWindows(t)
 	useForeignHookGuardian(t, nil)
 	useInProcessCleanupAsSelf(t)
 	trace := traceForeignHookRemovals(t)
+	home := t.TempDir()
 	root := managed.ForeignHookCleanDir(cfg.DataDir)
-	entry := filepath.Join(root, "1001", "p-entry.json")
+	entry := filepath.Join(root, foreignHookTestIdentity(home), "p-entry.json")
 	if err := os.MkdirAll(filepath.Dir(entry), 0o711); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +212,6 @@ func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
 		trace.add("drop")
 		return previous(dir, identity)
 	}
-	home := t.TempDir()
 	foreignHookTestCursorHook(t, home)
 	result, err := cleanEnterpriseForeignHooksFenced(foreignHookTestTarget(home), foreignHookTestInProcessRequest("cursor", home), time.Now())
 	if err != nil || len(result.Removed) != 1 {
@@ -219,7 +220,10 @@ func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
 	if got := trace.String(); !strings.HasPrefix(got, "lock,drop,ledger,") {
 		t.Fatalf("the entries must go after the lock and before the first record: %s", got)
 	}
-	if _, err := os.Lstat(filepath.Dir(entry)); !os.IsNotExist(err) {
+	// Windows publishes no clean-session entries
+	// (DropForeignHookCleanMirrorsForAccount does nothing there): the drop
+	// still runs in its place, and the files are this test's own.
+	if _, err := os.Lstat(filepath.Dir(entry)); runtime.GOOS != "windows" && !os.IsNotExist(err) {
 		t.Fatalf("the account's entries must be gone: %v", err)
 	}
 }
@@ -228,11 +232,12 @@ func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
 // removal of the account's entries: the commit removes them again before it
 // lets go of the lock.
 func TestForeignHookRemovalDropsCleanEntriesAgainAtTheCommit(t *testing.T) {
-	skipForeignHookCleanupFixtureOnWindows(t)
+	skipForeignHookLedgerOnWindows(t)
 	useForeignHookGuardian(t, nil)
 	useInProcessCleanupAsSelf(t)
+	home := t.TempDir()
 	root := managed.ForeignHookCleanDir(cfg.DataDir)
-	late := filepath.Join(root, "1001", "p-late.json")
+	late := filepath.Join(root, foreignHookTestIdentity(home), "p-late.json")
 	previous := enterpriseForeignHookDropCleanMirrors
 	t.Cleanup(func() { enterpriseForeignHookDropCleanMirrors = previous })
 	drops := 0
@@ -249,7 +254,6 @@ func TestForeignHookRemovalDropsCleanEntriesAgainAtTheCommit(t *testing.T) {
 		}
 		return err
 	}
-	home := t.TempDir()
 	foreignHookTestCursorHook(t, home)
 	if result, err := cleanEnterpriseForeignHooksFenced(foreignHookTestTarget(home), foreignHookTestInProcessRequest("cursor", home), time.Now()); err != nil || len(result.Removed) != 1 {
 		t.Fatalf("cleanup %+v: %v", result, err)
@@ -257,7 +261,8 @@ func TestForeignHookRemovalDropsCleanEntriesAgainAtTheCommit(t *testing.T) {
 	if drops != 2 {
 		t.Fatalf("the entries are removed before the first record and at the commit, got %d removals", drops)
 	}
-	if _, err := os.Lstat(late); !os.IsNotExist(err) {
+	// Windows publishes no clean-session entries (see above).
+	if _, err := os.Lstat(late); runtime.GOOS != "windows" && !os.IsNotExist(err) {
 		t.Fatalf("an entry written after the first removal must be gone: %v", err)
 	}
 }
