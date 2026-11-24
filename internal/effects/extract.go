@@ -1595,6 +1595,17 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// the cwd unobservably: mark it dynamic (review R3-6 C06/C07).
 	lprog := funcKey(program, dialect)
 	w.noteShellOptions(program, inner[1:])
+	// A user function, a source or an eval may define pwd again in text the
+	// walk does not read here (a definition inside a function body runs only
+	// when the function is called; a sourced file or a dynamic eval is not
+	// read): $(pwd) after it is unknown, never the word of the earlier
+	// definition (GAP-2082). The pwd function itself, whose body the walk
+	// read as one echo, defines nothing; a static eval or source body the
+	// walk lowers below sets the value again when it defines pwd.
+	if w.pwdFunc != nil && dialect == DialectPOSIX &&
+		(w.funcs[lprog] && lprog != funcKey("pwd", dialect) || runsCodeInThisShell(program) && w.isBuiltin(program, dialect)) {
+		w.pwdFunc = nil
+	}
 	if w.funcs[lprog] || (w.cdUnreliable && isCDName(lprog)) {
 		w.setCWDDynamic()
 	} else if w.applyCWDChange(program, inner[1:], dialect, cond) {
@@ -2153,6 +2164,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.walkCaptured(sub, depth)
 		w.restoreScope(s)
 	}
+}
+
+// runsCodeInThisShell reports a builtin that runs text in the calling shell
+// (eval, source, .), so a function it defines is defined here.
+func runsCodeInThisShell(program string) bool {
+	return program == "eval" || program == "source" || program == "."
 }
 
 // placedHome resolves a HOME= value to the absolute path a bare cd / ~ should
