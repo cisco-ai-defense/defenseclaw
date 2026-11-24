@@ -270,7 +270,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 				// is kept: a redirect to a home path in a command list the
 				// classifier reads only in part (type a.txt & type nul >
 				// %USERPROFILE%\f) keeps its exact target (GAP-2408).
-				if resolved := parse(rewrite); resolved.status == StatusComplete || issuesNarrowed(resolved, parsed) {
+				if resolved := parse(rewrite); resolved.status == StatusComplete || issuesNarrowed(resolved, parsed) ||
+					rewritePlacesHomeOperandsOnly(resolved, parsed) {
 					parsed = resolved
 				}
 			}
@@ -2464,6 +2465,34 @@ func issuesNarrowed(resolved, original parseOutput) bool {
 		return false
 	}
 	return dropped
+}
+
+// rewritePlacesHomeOperandsOnly reports a home rewrite of a PowerShell or
+// cmd call whose parse stays partial for another word of the call, and
+// differs from the original only by the home operands it placed: no issue
+// the original did not have, the same commands, more path facts. Another
+// dynamic word (a delay-bind script block -Body {$_}, a variable) dropped
+// the rewrite, so Get-Content $env:USERPROFILE\.aws\credentials | Out-String
+// | Invoke-WebRequest ... -Body {$_} had no read of the credentials at all
+// and was allowed in every pack, where the same call with the path written
+// out was judged (rel-1-0-10:GAP-2136). The rewrite names the same files the
+// original names, so it only adds facts.
+func rewritePlacesHomeOperandsOnly(resolved, original parseOutput) bool {
+	if resolved.status != StatusPartial || original.status != StatusPartial ||
+		len(resolved.commands) != len(original.commands) || len(resolved.paths) <= len(original.paths) {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if !slices.Contains(original.issues, issue) {
+			return false
+		}
+	}
+	for i := range resolved.commands {
+		if resolved.commands[i].Program != original.commands[i].Program {
+			return false
+		}
+	}
+	return true
 }
 
 // rewriteKeepsOnlyStaticGlobs reports a home rewrite whose parse is left
