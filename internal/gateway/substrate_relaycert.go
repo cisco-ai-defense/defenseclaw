@@ -364,8 +364,11 @@ func (a *APIServer) substrateRelayDial(ctx context.Context, st *substrateState, 
 			}
 			return err
 		}
-		tc := tls.Client(c, dconf)
-		if err := tc.HandshakeContext(hctx); err != nil {
+		// The worker ingress parses the router tunnel as HTTP, so TLS
+		// starts after an upgrade it passes (GAP-1067); a relay that does
+		// not switch is refused, never dialed plain.
+		tc, err := relaytls.Upgrade(hctx, c, dconf)
+		if err != nil {
 			_ = c.Close()
 			return nil, err
 		}

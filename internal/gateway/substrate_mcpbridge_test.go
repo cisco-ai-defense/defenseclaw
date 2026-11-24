@@ -8,7 +8,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"math"
@@ -46,7 +45,7 @@ func newTixgBridge(t *testing.T, managed bool) *tixgBridge {
 	f := newSubstrateFixture(t)
 	b := &tixgBridge{agent: make(chan *websocket.Conn, 1), fixture: f}
 	up := websocket.Upgrader{Subprotocols: []string{relay.Subprotocol}}
-	fake := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s, err := f.sessions.Verify(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 		if err != nil || r.URL.Path != relay.Path(relay.RouteMCP+"/notes") {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -60,7 +59,7 @@ func newTixgBridge(t *testing.T, managed bool) *tixgBridge {
 			return
 		}
 		b.agent <- c
-	}))
+	})
 	// The relay end speaks relay TLS with a uid.<UID> certificate from the
 	// gateway's relay CA, as a kit with relay.streams: tls does.
 	ca := tixRelayCA(t)
@@ -76,11 +75,10 @@ func newTixgBridge(t *testing.T, managed bool) *tixgBridge {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}
-	fake.StartTLS()
-	t.Cleanup(fake.Close)
 	st := f.api.substrateState()
-	st.cfg.Relays = &dialRelay{addr: strings.TrimPrefix(fake.URL, "https://")}
+	// The relay's own listener behind the HTTP-parsing worker ingress
+	// (GAP-1067).
+	st.cfg.Relays = &dialRelay{addr: tixRelayBehindIngress(t, fake, kp)}
 	st.cfg.RelayTLS, st.cfg.RelayCA = relaytls.ModeRequired, ca
 	st.cfg.Managed = managed
 	st.audit = func(_ context.Context, _, _ string, d map[string]any) {

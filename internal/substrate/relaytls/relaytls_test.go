@@ -5,6 +5,7 @@
 package relaytls
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -55,7 +56,7 @@ func serve(t *testing.T, ca *CA, uid string) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	tl, pl := Split(ln, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
+	sp := Split(ln.Addr(), &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS != nil {
@@ -64,19 +65,31 @@ func serve(t *testing.T, ca *CA, uid string) string {
 		}
 		_, _ = io.WriteString(w, "plain")
 	})
-	go func() { _ = http.Serve(tl, mux) }()
-	go func() { _ = http.Serve(pl, mux) }()
+	go func() { _ = http.Serve(sp.TLS(), mux) }()
+	go func() { _ = http.Serve(ln, sp.Handler(mux)) }()
 	return ln.Addr().String()
 }
 
 func get(t *testing.T, addr string, conf *tls.Config) (string, error) {
 	t.Helper()
-	c := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: conf}}
-	scheme := "http"
+	tr := &http.Transport{DisableKeepAlives: true}
 	if conf != nil {
-		scheme = "https"
+		// TLS as the gateway dials it: the upgrade, then TLS (GAP-1067).
+		tr.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
+			raw, err := (&net.Dialer{}).DialContext(ctx, network, a)
+			if err != nil {
+				return nil, err
+			}
+			tc, err := Upgrade(ctx, raw, conf)
+			if err != nil {
+				_ = raw.Close()
+				return nil, err
+			}
+			return tc, nil
+		}
 	}
-	resp, err := c.Get(scheme + "://" + addr + "/readyz")
+	c := &http.Client{Timeout: 5 * time.Second, Transport: tr}
+	resp, err := c.Get("http://" + addr + "/readyz")
 	if err != nil {
 		return "", err
 	}
