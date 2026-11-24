@@ -51,6 +51,27 @@ type effectAliasMemo struct {
 
 var sessionEffectAliases effectAliasMemo
 
+// effectAliasPending holds a call's memo change until the hook decides
+// whether the tool will run. A blocked call must not create or erase aliases.
+type effectAliasPending struct {
+	request trustedActionRequest
+	result  effects.Result
+	facts   []*semanticpb.EffectFact
+	flavor  effects.Flavor
+	ready   bool
+}
+
+func (p *effectAliasPending) set(request trustedActionRequest, result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor) {
+	request.aliasPending = nil
+	p.request, p.result, p.facts, p.flavor, p.ready = request, result, facts, flavor, true
+}
+
+func (p *effectAliasPending) commit() {
+	if p != nil && p.ready {
+		sessionEffectAliases.remember(p.request, p.result, p.facts, p.flavor)
+	}
+}
+
 func aliasKey(request trustedActionRequest) (effectAliasKey, bool) {
 	key := effectAliasKey{
 		connector: strings.TrimSpace(request.Connector),
@@ -122,7 +143,7 @@ func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.
 	}
 	relevant, hasLink := false, false
 	for _, e := range result.Effects {
-		if e.Kind == effects.KindDelete {
+		if e.Kind == effects.KindDelete || aliasReplacedByWrite(e) {
 			relevant = true
 		}
 		if e.Kind == effects.KindLink && e.LinkTarget {
@@ -153,7 +174,7 @@ func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.
 	session = m.sessions[key]
 	if session != nil {
 		for _, e := range result.Effects {
-			if e.Kind == effects.KindDelete && e.Target.Path != "" {
+			if (e.Kind == effects.KindDelete || aliasReplacedByWrite(e)) && e.Target.Path != "" {
 				delete(session.aliases, e.Target.Path)
 			}
 		}
@@ -190,6 +211,12 @@ func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.
 		}
 		session.at = now
 	}
+}
+
+// A rename replaces the alias directory entry. An ordinary cp or shell
+// redirect follows a destination symlink and leaves the alias in place.
+func aliasReplacedByWrite(e effects.Effect) bool {
+	return e.Kind == effects.KindWrite && e.Origin.Program == "mv"
 }
 
 func knownAliasCredential(f *semanticpb.EffectFact) (decide.Proof, bool) {

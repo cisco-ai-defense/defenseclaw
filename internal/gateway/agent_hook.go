@@ -4273,6 +4273,7 @@ func (a *APIServer) inspectAgentHookToolCall(
 		LegacyText:              string(req.ToolArgs),
 		conflictSource:          conflictSource,
 		Connector:               req.ConnectorName,
+		sessionID:               req.SessionID,
 		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 		EnforcementCapable:      enforcementCapable,
 		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),

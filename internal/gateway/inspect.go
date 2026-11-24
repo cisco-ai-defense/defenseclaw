@@ -1308,6 +1308,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		waitCodeGuard = a.startCodeGuardOnArgs(ctx, cgReq)
 	}
 	cfg := a.decisionConfig(ctx)
+	var aliasPending effectAliasPending
+	action.aliasPending = &aliasPending
 	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
@@ -1423,7 +1425,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	} else if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
-	return a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	verdict = a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	if verdict != nil && verdict.Action != guardrailActionBlock {
+		aliasPending.commit()
+	}
+	return verdict
 }
 
 // highestInspectConfidence keeps verdict confidence aligned with the visible
