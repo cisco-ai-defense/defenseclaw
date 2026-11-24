@@ -1841,7 +1841,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 			return
 		}
-		code, ok, opq := powershellLaunchCode(inner[0].Value, w.o.flavor(), inner[1:])
+		code, ok, opq := powershellLaunchCode(inner[0].Value, inner[1:])
 		if opq {
 			w.opaqueExec(origin, cond)
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
@@ -4633,7 +4633,7 @@ var psHostValued = set("executionpolicy", "ep", "windowstyle", "w", "inputformat
 // pwsh working directory with a positional file, an unknown option, or a
 // script file. Windows PowerShell 5.1 consumes -wd without moving a
 // positional body (native TST-16012, GAP-1557).
-func powershellLaunchCode(host string, _ Flavor, args []Word) (code string, ok, opaque bool) {
+func powershellLaunchCode(host string, args []Word) (code string, ok, opaque bool) {
 	// Windows PowerShell 5.1 accepts -wd/-WorkingDirectory as a valued
 	// parameter but leaves a positional command in the caller's cwd (native
 	// TST-16012, GAP-1557). pwsh 7 binds that positional as -File instead,
