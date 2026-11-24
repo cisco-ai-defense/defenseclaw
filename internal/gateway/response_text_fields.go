@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 )
 
 // The model text of a response, read per provider (GAP-0370). A client
@@ -112,6 +113,8 @@ type responseBoundary struct {
 	reasoning, answer         int
 	reasoningEnd, answerStart int
 	secret                    secretLane
+	line                      string // cached once the first answer line is final
+	final                     bool
 }
 
 type responseText struct {
@@ -198,8 +201,8 @@ func (r *responseText) Add(p responsePiece) {
 // piece has been checked. Message ends close the run. Block ends park it
 // because the same lane can resume after an interleaved block (GAP-2162).
 // A switch to a tool call also parks it. A switch from reasoning to answer
-// parks it for at most 512 later bytes, allowing a short text block before
-// more reasoning in the same message (GAP-2170). A refusal or code ends
+// parks it for a bounded answer span, allowing an interleaved text block
+// before more reasoning (GAP-2170). A refusal or code ends
 // reasoning at once. Private-key blocks keep their own bounds.
 
 // streamRunParkMax is how much reply text may follow the end of a block
@@ -227,7 +230,7 @@ func (r *responseText) endChoice(choice int, message bool) {
 		for i := range r.boundaries {
 			b := &r.boundaries[i]
 			if lane, ok := r.laneForIndex(b.reasoning); ok && lane.choice == choice {
-				b.secret.endRun(r.boundaryLine(*b))
+				b.secret.endRun(r.boundaryLine(b))
 			}
 		}
 	}
@@ -259,9 +262,9 @@ func (r *responseText) laneMoved(l responseLane) {
 }
 
 // parkLane parks the open token or digit run of lane i (GAP-2162).
-// The short park covers interleaved reasoning without holding a long
-// unrelated answer behind it (GAP-2170).
-const streamReasoningAnswerParkMax = 512
+// The reasoning park covers a short interleaved answer while letting a
+// completed thinking block release a later, unrelated answer (GAP-2154).
+const streamReasoningAnswerParkMax = 1536
 
 func (r *responseText) parkLane(i, limit int) {
 	s := &r.secret[i]
@@ -336,41 +339,58 @@ func (r *responseText) laneForIndex(i int) (responseLane, bool) {
 	return responseLane{}, false
 }
 
-// boundaryLine copies only the emitted last reasoning line and first answer
-// line at this switch. A newline at the boundary becomes one space.
-func (r *responseText) boundaryLine(b responseBoundary) string {
+// boundaryLine copies the last reasoning line and the first answer line at
+// this switch. Both searches see at most 513 bytes. A completed line is
+// cached; a newline at the boundary becomes one space (GAP-2166, GAP-2177).
+func (r *responseText) boundaryLine(b *responseBoundary) string {
+	if b.final {
+		return b.line
+	}
+	const maxSide = 512
 	left := r.lanes[b.reasoning].String()[:b.reasoningEnd]
 	right := r.lanes[b.answer].String()[b.answerStart:]
 	hadBreak := strings.HasSuffix(left, "\n") || strings.HasPrefix(right, "\n")
+	final := len(right) > maxSide
+	if len(left) > maxSide+1 {
+		left = left[len(left)-maxSide-1:]
+		for len(left) > 0 && !utf8.RuneStart(left[0]) {
+			left = left[1:]
+		}
+	}
+	if len(right) > maxSide+1 {
+		right = right[:maxSide+1]
+	}
 	left = strings.TrimRight(left, "\r\n")
 	right = strings.TrimLeft(right, "\r\n")
 	if n := strings.LastIndexByte(left, '\n'); n >= 0 {
 		left = left[n+1:]
 	}
 	if n := strings.IndexByte(right, '\n'); n >= 0 {
-		right = right[:n]
+		right, final = right[:n], true
 	}
-	const maxSide = 512
 	if len(left) > maxSide {
 		left = left[len(left)-maxSide:]
-		if n := strings.IndexAny(left, " \t"); n >= 0 {
-			left = left[n+1:]
-		} else {
-			left = ""
+		for len(left) > 0 && !utf8.RuneStart(left[0]) {
+			left = left[1:]
 		}
 	}
 	if len(right) > maxSide {
-		right = right[:maxSide]
-		if n := strings.LastIndexAny(right, " \t"); n >= 0 {
-			right = right[:n]
-		} else {
-			right = ""
+		right, final = right[:maxSide], true
+		for len(right) > 0 {
+			ch, size := utf8.DecodeLastRuneInString(right)
+			if ch != utf8.RuneError || size > 1 {
+				break
+			}
+			right = right[:len(right)-1]
 		}
 	}
 	if hadBreak {
-		return strings.TrimRight(left, " \t") + " " + strings.TrimLeft(right, " \t")
+		b.line = strings.TrimRight(left, " \t") + " " + strings.TrimLeft(right, " \t")
+	} else {
+		b.line = left + right
 	}
-	return left + right
+	b.final = final
+	return b.line
 }
 
 // CheckText adds only same-choice reasoning-to-answer boundaries. String
@@ -383,8 +403,8 @@ func (r *responseText) CheckText() string {
 	var sb strings.Builder
 	sb.Grow(len(base) + len(r.boundaries)*64)
 	sb.WriteString(base)
-	for _, b := range r.boundaries {
-		if line := r.boundaryLine(b); line != "" {
+	for i := range r.boundaries {
+		if line := r.boundaryLine(&r.boundaries[i]); line != "" {
 			sb.WriteString("\n\x00\n")
 			sb.WriteString(line)
 		}
@@ -410,7 +430,7 @@ func (r *responseText) CheckTextNonStream() string {
 			continue
 		}
 		boundary := responseBoundary{reasoning: i, answer: answer, reasoningEnd: r.lanes[i].Len()}
-		if line := r.boundaryLine(boundary); line != "" {
+		if line := r.boundaryLine(&boundary); line != "" {
 			base += "\n\x00\n" + line
 		}
 	}

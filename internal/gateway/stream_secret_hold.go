@@ -386,7 +386,13 @@ func (r *responseText) OpenSecret() openSecret {
 	}
 	for i := range r.boundaries {
 		b := &r.boundaries[i]
-		o.open = o.open || b.secret.token(r.boundaryLine(*b))
+		line := r.boundaryLine(b)
+		if b.final {
+			b.secret.endRun(line)
+			continue
+		}
+		boundaryOpen := b.secret.token(line)
+		o.open = o.open || boundaryOpen
 	}
 	return o
 }
@@ -398,7 +404,7 @@ func (r *responseText) ReleaseOpenSecret() {
 	}
 	for i := range r.boundaries {
 		b := &r.boundaries[i]
-		b.secret.giveUp(r.boundaryLine(*b))
+		b.secret.giveUp(r.boundaryLine(b))
 	}
 }
 

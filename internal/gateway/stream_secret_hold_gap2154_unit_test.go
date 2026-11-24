@@ -59,7 +59,7 @@ func TestGAP2154LaneEnds(t *testing.T) {
 	}
 	r.Add(answerPiece(0, strings.Repeat("x", streamReasoningAnswerParkMax+1)))
 	if o := r.OpenSecret(); o.open {
-		t.Fatalf("reasoning stayed held past the short answer bound: %+v", o)
+		t.Fatalf("reasoning stayed held past the block park bound: %+v", o)
 	}
 	r.Add(answerPiece(1, " and 4111"))
 	if !r.OpenSecret().open {
