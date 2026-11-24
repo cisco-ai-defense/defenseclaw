@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // ErrAgentConfigOutsideHome marks a config write or removal DefenseClaw
@@ -50,7 +52,7 @@ func AgentConfigOutsideHome(home, path string) (string, bool, error) {
 	}
 	home = filepath.Clean(home)
 	realHome := home
-	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+	if resolved, err := winpath.EvalLinks(home); err == nil {
 		realHome = resolved
 	}
 	inside := func(candidate string) bool {

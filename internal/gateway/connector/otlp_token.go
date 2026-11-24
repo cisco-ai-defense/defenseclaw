@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // OTLPPathTokenScope identifies a connector-bound OTLP token used in
@@ -558,14 +559,14 @@ func validateOTLPPathTokenLocation(dataDir, path string) error {
 	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return fmt.Errorf("OTLP path-token %s escapes hooks dir %s", path, hooksDir)
 	}
-	evalDataDir, err := filepath.EvalSymlinks(dataDir)
+	evalDataDir, err := winpath.EvalLinks(dataDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	evalTokenDir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	evalTokenDir, err := winpath.EvalLinks(filepath.Dir(path))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

@@ -35,6 +35,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const (
@@ -879,7 +880,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 		if s.macOSPrivacyPathSkipped(path) || s.profileLinkRefused(path) {
 			return
 		}
-		resolved, err := filepath.EvalSymlinks(path)
+		resolved, err := winpath.EvalLinks(path)
 		if err != nil {
 			if !os.IsNotExist(err) && !s.discoveryAccessSkipped(err) {
 				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
@@ -1241,7 +1242,7 @@ func (s *ContinuousDiscoveryService) ownDataDirs() []string {
 		}
 		path = filepath.Clean(path)
 		dirs = append(dirs, path)
-		if resolved, err := filepath.EvalSymlinks(path); err == nil && filepath.Clean(resolved) != path {
+		if resolved, err := winpath.EvalLinks(path); err == nil && filepath.Clean(resolved) != path {
 			dirs = append(dirs, filepath.Clean(resolved))
 		}
 	}
@@ -1956,7 +1957,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(
 	}
 	s.notePrivacyEvidencePath(path)
 	artifactKey := filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := winpath.EvalLinks(path); err == nil {
 		artifactKey = filepath.Clean(resolved)
 	}
 	identity := modelArtifactIdentity{}

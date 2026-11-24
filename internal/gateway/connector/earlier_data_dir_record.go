@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // earlierDataDirRecorded are the files below a data folder whose sha256
@@ -97,8 +99,8 @@ func sameDataFolder(a, b string) bool {
 	if filepath.Clean(a) == filepath.Clean(b) {
 		return true
 	}
-	realA, errA := filepath.EvalSymlinks(a)
-	realB, errB := filepath.EvalSymlinks(b)
+	realA, errA := winpath.EvalLinks(a)
+	realB, errB := winpath.EvalLinks(b)
 	return errA == nil && errB == nil && realA == realB
 }
 

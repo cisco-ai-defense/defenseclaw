@@ -60,6 +60,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // RemovedConnectorNotice is the one line every surface prints for a host an
@@ -445,7 +446,7 @@ func (c removedOnlyConnector) removeEntries(path string, names func(string) bool
 	}
 	// The agent reads its config through links; the file it reads is the
 	// one changed.
-	target, err := filepath.EvalSymlinks(path)
+	target, err := winpath.EvalLinks(path)
 	if err != nil {
 		return err
 	}

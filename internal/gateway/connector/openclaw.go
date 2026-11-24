@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // openClawExtensionFS holds the runtime files of the DefenseClaw OpenClaw
@@ -653,7 +654,7 @@ func safeRemoveAll(target, parent string) error {
 		return nil
 	}
 
-	resolved, err := filepath.EvalSymlinks(target)
+	resolved, err := winpath.EvalLinks(target)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -661,7 +662,7 @@ func safeRemoveAll(target, parent string) error {
 		return fmt.Errorf("resolve symlinks for %s: %w", target, err)
 	}
 
-	resolvedParent, err := filepath.EvalSymlinks(parent)
+	resolvedParent, err := winpath.EvalLinks(parent)
 	if err != nil {
 		return fmt.Errorf("resolve parent %s: %w", parent, err)
 	}
