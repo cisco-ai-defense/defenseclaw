@@ -73,8 +73,6 @@ var det111R1WindowsPending = map[string]string{
 	"GAP-1550/var":                           "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
 	"det111/GAP-1557/argv-wd-positional/var": "codex shell on a Windows host: the effects call has POSIX flavor, so C:\\Users\\... loses its backslashes (S3-PRE effectCall)",
 	"det111/GAP-1557/pwsh-argv-wd-positional/var": "codex shell on a Windows host: the effects call has POSIX flavor, so C:\\Users\\... loses its backslashes (S3-PRE effectCall)",
-	"GAP-1173/var":   "Git Bash on a Windows host: the effects call reads POSIX flavor (S3-PRE effectCall); tar on Windows has no row (S4-R2)",
-	"GAP-1173/var3":  "Git Bash on a Windows host: the effects call reads POSIX flavor (S3-PRE effectCall)",
 	"GAP-1173/var6":  "inline-code folder literal: the classifier grades a folder only for mutations (S4-R3)",
 	"GAP-1173/var4":  "Expand-Archive has no program row (S4-R2)",
 	"GAP-1173/var5":  "tar in PowerShell on Windows has no program row (S4-R2)",

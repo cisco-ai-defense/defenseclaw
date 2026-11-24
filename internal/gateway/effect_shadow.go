@@ -502,6 +502,13 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		// A target only maybe in a set reaches the unknown tier only with a
 		// reach reason (DET111 PLAN 5.3); with none it stays clean, as in
 		// 1.0.10.
+		// A mutation that lands in the DefenseClaw state folder (the folder
+		// itself as a copy or move destination, or a new child of it) is a
+		// known state write whatever member it lands on: it stands as its own
+		// proof, before the reach rule (rel-1-0-10:GAP-1261, GAP-2127).
+		if proof, ok := stateFolderWriteProof(f, flavor); ok {
+			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+		}
 		r := factReach(f, known, unknownEffect, env, flavor)
 		if len(known) == 0 && r == "" {
 			continue
@@ -820,7 +827,12 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 			continue
 		}
 		f := RuleFinding{RuleID: ruleID, Title: "Known authorized keys write", Severity: "CRITICAL", Confidence: 1, Proof: proof}
-		if proof.Target != decide.TargetAuthorizedKeys {
+		switch proof.Target {
+		case decide.TargetAuthorizedKeys:
+		case decide.TargetState:
+			// tamper.detector_state_write is HIGH in every pack (GAP-0747).
+			f.Title, f.Severity = "DefenseClaw security state mutation", "HIGH"
+		default:
 			// The pack's class rule severity replaces it on the live path
 			// (withEffectClassWriteSeverity).
 			f.Title, f.Severity = "Known credential write", "HIGH"
@@ -876,6 +888,45 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		f.Proof = f.Proof.Enforce()
 	}
 	return append(findings, f)
+}
+
+// stateFolderWriteProof is the known DefenseClaw state write of a mutation
+// whose landing is the state folder (~/.defenseclaw) itself or a new child of
+// it: the classifier's protected_dir basis (cp -r proj ~/.defenseclaw, where
+// the copy lands at the folder or below it, dest_may_be_dir) or dir basis (a
+// direct child the set does not list, ~/.defenseclaw/new), for a write or an
+// append (content placed there). Which member the
+// write reaches is unknown; that it writes DefenseClaw's own state is not, so
+// the proof is Known on the state class and takes the state-write row (the
+// GAP-0747 cell: an alert in default and permissive, a block in strict, per
+// user and managed). The program must write the operand (role known) and the
+// path must be canonical and literal; a glob or a dynamic spelling keeps its
+// reach rule. The hook config folders keep their own rules.
+func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (decide.Proof, bool) {
+	if f == nil || f.GetRoleState() != "known" {
+		return decide.Proof{}, false
+	}
+	switch effects.Kind(f.GetKind()) {
+	case effects.KindWrite, effects.KindAppend:
+	default:
+		// A delete, link or mode change of a child the set does not list
+		// keeps its 1.0.10 cell: removing a stale lifecycle lock is a benign
+		// agent trace shape (decision_effect_fold_test, trace
+		// 387bf49e98fa6eb5/481).
+		return decide.Proof{}, false
+	}
+	t := f.GetTarget()
+	if t.GetType() != "path" || t.GetGlob() != "" || !effectrules.CanonicalAbsolute(t.GetPath(), flavor) {
+		return decide.Proof{}, false
+	}
+	for _, m := range t.GetProtected() {
+		if m.GetSet() == effectrules.SetSelfProtection && m.GetState() == semantic.ProtectedUnknown &&
+			(m.GetReason() == "protected_dir" || m.GetReason() == "dir") {
+			return decide.Proof{Kind: effectProofKind(f.GetKind()), Target: decide.TargetState,
+				Certainty: decide.CertKnown, Source: effectProofSource}, true
+		}
+	}
+	return decide.Proof{}, false
 }
 
 // knownAuthorizedKeysMutationProof uses the resolved target, independent of
