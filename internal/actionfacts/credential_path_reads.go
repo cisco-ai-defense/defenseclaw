@@ -2121,6 +2121,24 @@ func (b *credentialPathWalkBudget) take(counter *atomic.Int64, limit int64) bool
 	return true
 }
 
+// credentialWalkSearchChecked: the system checks a folder's search (x)
+// permission apart from its read permission. Windows does not: every user
+// holds the bypass traverse checking privilege, and a folder that can be
+// listed names files whose attributes can be read.
+const credentialWalkSearchChecked = runtime.GOOS != "windows"
+
+// credentialWalkWindowsPathBytes is the longest path, in bytes, of a file
+// the walk finds that Windows surely can name: its paths end at 32,767
+// UTF-16 units, the \\?\ prefix and the closing NUL among them, and a path
+// has no more units than bytes. A longer one is looked up.
+const credentialWalkWindowsPathBytes = 32_000
+
+// credentialWalkPathTooLong reports a path the walk looks up before it
+// counts the file, as one Windows may not name.
+func credentialWalkPathTooLong(file string) bool {
+	return runtime.GOOS == "windows" && len(file) > credentialWalkWindowsPathBytes
+}
+
 // credentialPathFolderScan is one folder of a walk: the credentials files
 // found in it and the folders below it to read next, by name (names[e:f]
 // for consecutive ends e, f, the first from 0) and, when rg globs read the
@@ -2138,7 +2156,16 @@ type credentialWalkFolder struct {
 }
 
 // scan reads one folder (readCredentialWalkFolder).
+//
+// A file the folder read names is looked up by its path only where the lookup
+// can fail when the read did not (substrate-1:GAP-0674, RV-T6C P4-1): the
+// first of a folder on a system that checks a folder's search permission
+// apart from its read permission (a folder of mode 0644 lists its files, but
+// no file in it can be opened, by the walk or by the agent's grep), and a path
+// past what Windows can name (credentialWalkPathTooLong). The resolve then
+// adds no read the agent cannot make, as before the lookups were skipped.
 func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter credentialWalkFilter, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
+	entered := !credentialWalkSearchChecked
 	readCredentialWalkFolder(folder.dir, func(name []byte, isDir, regular bool) bool {
 		if !b.take(&b.entries, b.limits.entries) {
 			return false
@@ -2151,14 +2178,17 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter cred
 				return false
 			}
 			file := filepath.Join(folder.dir, filepath.FromSlash(probe.value))
-			if regular && probe.value == string(name) {
+			named := regular && probe.value == string(name)
+			if named && entered && !credentialWalkPathTooLong(file) {
 				// The entry is the probe's file, a regular file as the folder
-				// read has it: no lookup of it by its path (on Windows, a
-				// 2,000-character path costs a 7 KB conversion and a
-				// system call for each of up to 1,024 files, substrate-1:GAP-0674).
+				// read has it, in a folder a lookup has entered: no lookup of
+				// it by its path (on Windows, a 2,000-character path costs a
+				// 7 KB conversion and a system call for each of up to 1,024
+				// files, substrate-1:GAP-0674).
 				s.found = append(s.found, file)
 			} else if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
 				s.found = append(s.found, file)
+				entered = entered || named
 			}
 		}
 		if !isDir || credentialWalkSkips[string(name)] {
