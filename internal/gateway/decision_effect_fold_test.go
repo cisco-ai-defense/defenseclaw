@@ -47,7 +47,7 @@ type effectFoldRow struct {
 func effectFoldRows(home string) []effectFoldRow {
 	dc := home + "/.defenseclaw"
 	return []effectFoldRow{
-		{name: "npmrc guarded token write (trace 1991edd30989a7ef/65 shape)", command: `[ -e ~/.npmrc ] && echo "~/.npmrc exists, not overwriting" || { umask 077; T=$(cat ~/.registry-token); printf '//registry.example.test/api/npm/:_authToken=%s\n' "$T" > ~/.npmrc; chmod 600 ~/.npmrc; echo "wrote ~/.npmrc"; }`},
+		{name: "at/claude-code/1991edd30989a7ef/65 guarded token write", command: `[ -e ~/.npmrc ] && echo "~/.npmrc exists, not overwriting" || { umask 077; T=$(cat ~/.registry-token); printf '//registry.example.test/api/npm/:_authToken=%s\n' "$T" > ~/.npmrc; chmod 600 ~/.npmrc; echo "wrote ~/.npmrc"; }`},
 		{name: "npmrc plain write", command: `printf 'registry=https://registry.example.test/\n' > ~/.npmrc`},
 		{name: "lifecycle lock and hook token cleanup as another account (trace 387bf49e98fa6eb5/481 shape)", command: "sudo -iu testuser rm -f -- " + strings.Join([]string{
 			dc + "/.codex-lifecycle.lock", dc + "/.hermes-lifecycle.lock", dc + "/aibom_last_digest.json",
@@ -150,6 +150,9 @@ func TestEffectFindingTakesTheLegacySetTier(t *testing.T) {
 			// the account's own DefenseClaw state folder, as on a host
 			api.scannerCfg.DataDir = filepath.Join(home, ".defenseclaw")
 			for _, row := range append(effectFoldRows(home), effectFoldTraceRows(t)...) {
+				if only := os.Getenv("DET111_FOLD_ONLY_ROW"); only != "" && !strings.Contains(row.name, only) {
+					continue
+				}
 				if row.pending != "" {
 					pending[row.name] = true
 				}
@@ -186,4 +189,56 @@ func TestEffectFindingTakesTheLegacySetTier(t *testing.T) {
 func effectFoldStricter(a, b string) bool {
 	rank := map[string]int{"allow": 0, "alert": 1, "confirm": 2, "block": 3}
 	return rank[a] > rank[b]
+}
+
+// TestGAP1790SameRuleKnownMutationFold pins the fold for the exact
+// at/claude-code/1991edd30989a7ef/65 benign row's class. A Known mutation
+// that names the legacy rule may use that rule's 1.0.10 tier even when the
+// legacy finding has no enforcement proof. New floor readings and unrelated
+// rules remain excluded (GAP-1984).
+func TestGAP1790SameRuleKnownMutationFold(t *testing.T) {
+	proof := decide.Proof{Kind: decide.KindWrite, Target: decide.TargetCredential,
+		Set: decide.SetNpmrc, Certainty: decide.CertKnown, Source: decide.SourceEffects}
+	f := RuleFinding{RuleID: decide.RuleEffectRestricted, Severity: "CRITICAL",
+		Proof: proof, proof: newFindingProof(findingProofEffect, decide.RuleEffectRestricted, true)}
+	ruleID := decide.RuleFor(proof)
+	if ruleID == "" {
+		t.Fatal("Known npmrc write has no plain rule")
+	}
+	legacy := RuleFinding{RuleID: ruleID, Severity: "MEDIUM"}
+	if got := foldTargetsFor(f, []RuleFinding{legacy}); len(got) != 1 || got[0].RuleID != ruleID {
+		t.Fatalf("same-rule Known mutation targets = %v, want %s", got, ruleID)
+	}
+	legacy.floorRaiseOnly = true
+	if got := foldTargetsFor(f, []RuleFinding{legacy}); len(got) != 0 {
+		t.Fatalf("new floor reading became a fold target: %v", got)
+	}
+	legacy.floorRaiseOnly = false
+	legacy.RuleID = decide.RuleStateWrite
+	if got := foldTargetsFor(f, []RuleFinding{legacy}); decide.FoldsIntoLegacy(decideFinding(f), got) {
+		t.Fatalf("different rule folded the effect finding: %v", got)
+	}
+
+	// T23b uses the class rule's severity-only Decide cell for Known
+	// credential mutations. Its private proof still marks it as an effect.
+	class := RuleFinding{RuleID: ruleID, Severity: "MEDIUM",
+		proof: newFindingProof(findingProofEffect, ruleID, true)}
+	legacy.RuleID = ruleID
+	if !foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("same-rule class effect did not fold into the 1.0.10 finding")
+	}
+	legacy.floorRaiseOnly = true
+	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("new floor reading folded the class effect")
+	}
+	legacy.floorRaiseOnly = false
+	legacy.RuleID = decide.RuleStateWrite
+	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("different rule folded the class effect")
+	}
+	legacy.RuleID = ruleID
+	legacy.proof = newFindingProof(findingProofEffect, ruleID, true)
+	if foldsClassEffectIntoLegacy(class, []RuleFinding{legacy}) {
+		t.Fatal("another effects finding folded the class effect")
+	}
 }
