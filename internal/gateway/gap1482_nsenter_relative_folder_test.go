@@ -20,12 +20,8 @@ func TestGAP1482NSEnterRelativeChildFolderVerdicts(t *testing.T) {
 	t.Setenv("HOME", home)
 	previous := liveGeneration.Load()
 	liveGeneration.Store(&Generation{Config: &config.Config{}})
-	prevResolver := effectResolverOverride
-	effectResolverOverride = func(path string) (string, bool) { return path, true }
-	t.Cleanup(func() {
-		liveGeneration.Store(previous)
-		effectResolverOverride = prevResolver
-	})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	t.Cleanup(setEffectResolverIdle(t, func(path string) (string, bool) { return path, true }))
 
 	rows := []struct {
 		id, command string
