@@ -39,6 +39,7 @@ func TestKnownCredentialReadRows(t *testing.T) {
 		sev    Severity
 	}
 	block, alertMed, allowMed := want{Block, SevCritical}, want{Alert, SevMedium}, want{Allow, SevMedium}
+	alertHigh := want{Alert, SevHigh}
 	alertCrit := want{Alert, SevCritical}
 	own := [5]want{alertMed, allowMed, alertMed, alertMed, alertMed}
 	for _, tc := range []struct {
@@ -55,7 +56,7 @@ func TestKnownCredentialReadRows(t *testing.T) {
 		{"own pypirc", TargetCredential, SetPypirc, "PATH-PYPIRC", own},
 		{"own kube", TargetCredential, SetKubeConfig, "PATH-KUBE", own},
 		{"own docker", TargetCredential, SetDockerConfig, "PATH-DOCKER", own},
-		{"other ssh key", TargetOtherHomeCredential, SetSSHPrivateKey, "PATH-SSH-KEY", [5]want{alertMed, allowMed, block, alertMed, block}},
+		{"other ssh key", TargetOtherHomeCredential, SetSSHPrivateKey, "PATH-SSH-KEY", [5]want{alertHigh, alertHigh, block, alertHigh, block}},
 		{"other git", TargetOtherHomeCredential, SetGitCredentials, "PATH-GIT-CREDS", [5]want{alertCrit, alertCrit, block, block, block}},
 		{"other aws", TargetOtherHomeCredential, SetAWSCredentials, "PATH-AWS-CREDS", own},
 		{"other npmrc", TargetOtherHomeCredential, SetNpmrc, "PATH-NPMRC", own},
@@ -130,5 +131,31 @@ func TestCredentialSet(t *testing.T) {
 	}
 	if s := (Proof{Kind: KindRead, Target: TargetCredential, Set: SetSSHPrivateKey}).String(); s != "read/credential/known{ssh_private_key}" {
 		t.Errorf("proof key %q", s)
+	}
+}
+
+// TestGAP2135LegacyOtherHomeSSHCellUnchanged keeps the shipped-default
+// 1.0.10 cell beside the source-scoped effect proof row.
+func TestGAP2135LegacyOtherHomeSSHCellUnchanged(t *testing.T) {
+	tiers := []struct {
+		d Deployment
+		t Tier
+		a Action
+		s Severity
+	}{
+		{PerUser, TierDefault, Alert, SevMedium},
+		{PerUser, TierPermissive, Allow, SevMedium},
+		{PerUser, TierStrict, Block, SevCritical},
+		{Managed, TierDefault, Alert, SevMedium},
+		{Managed, TierStrict, Block, SevCritical},
+	}
+	p := Proof{Kind: KindRead, Target: TargetOtherHomeCredential, Certainty: CertKnown,
+		Set: SetSSHPrivateKey, Source: "reader"}
+	for _, tier := range tiers {
+		out := Decide(Input{Findings: []Finding{{RuleID: RuleFor(p), Severity: SevHigh, Proof: p}},
+			Deployment: tier.d, Levels: TierLevels(tier.t), Tier: func() Tier { return tier.t }})
+		if out.Action != tier.a || out.Severity != tier.s {
+			t.Errorf("%v/%v: %s/%s, want %s/%s", tier.d, tier.t, out.Action, out.Severity, tier.a, tier.s)
+		}
 	}
 }

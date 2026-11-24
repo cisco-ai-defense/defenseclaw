@@ -218,11 +218,12 @@ const (
 	// rule naming that class gives its plain spelling (cat <the file>),
 	// characterized at a64bfdb931 in the five tiers, so a spelling only the
 	// effects reader resolves gets the plain spelling's verdict.
-	RowReadSSHPrivateKey          = "read-ssh-private-key"
-	RowReadCredential             = "read-credential"
-	RowReadOtherHomeSSHPrivateKey = "read-other-home-ssh-private-key"
-	RowReadOtherHomeGitCredential = "read-other-home-git-credential"
-	RowReadOtherHomeCredential    = "read-other-home-credential"
+	RowReadSSHPrivateKey            = "read-ssh-private-key"
+	RowReadCredential               = "read-credential"
+	RowEffectOtherHomeSSHPrivateKey = "effect-read-other-home-ssh-private-key"
+	RowReadOtherHomeSSHPrivateKey   = "read-other-home-ssh-private-key"
+	RowReadOtherHomeGitCredential   = "read-other-home-git-credential"
+	RowReadOtherHomeCredential      = "read-other-home-credential"
 	// RowTieredStrict grades a conclusion the 1.0.10 readers enforced in the
 	// strict tier only (an alert in default and permissive, per-user and
 	// managed alike): an inline handoff of unknown state, file tool targets
@@ -436,6 +437,23 @@ var builtin = Table{Rows: []Row{
 		Certainty: []Certainty{CertKnown}, Sets: append([]string{SetGitCredentials}, cloudCredentialSets...), SecureClient: true,
 		Source: "rel-1-0-10:GAP-0888",
 		Cells:  [deploymentCount][tierCount]Cell{uniform(alertMedium), uniform(alertMedium)},
+	},
+	{
+		// An effects-proven read of another account's SSH private key takes
+		// the raised plain-form GAP-2135 cell. The legacy row below stays at
+		// its shipped-default cell for findings from the 1.0.10 readers.
+		ID: RowEffectOtherHomeSSHPrivateKey, Kinds: []ProofKind{KindRead},
+		Targets: []TargetClass{TargetOtherHomeCredential}, Certainty: []Certainty{CertKnown},
+		Sets: []string{SetSSHPrivateKey}, Sources: []string{SourceEffects}, SecureClient: true,
+		Source: "DET111 GAP-2135 effect-proven other-home key read",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierPermissive: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierStrict:     {Levels: true, Severity: SevCritical}},
+			{TierDefault: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierPermissive: {Levels: true, Severity: SevHigh, Ceiling: CeilingAlert},
+				TierStrict:     {Levels: true, Severity: SevCritical}},
+		},
 	},
 	{
 		// Another account's SSH private key: an alert MEDIUM in default and
