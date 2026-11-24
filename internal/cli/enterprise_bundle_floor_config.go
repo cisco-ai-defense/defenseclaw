@@ -109,8 +109,6 @@ var newerConfigKeys = []struct {
 	{"ai_discovery.include_skill_content_hashes", [3]int{1, 0, 11}},
 	{"ai_discovery.include_skill_manifests", [3]int{1, 0, 11}},
 	{"notifications.substrate", [3]int{1, 0, 11}},
-	{"notifications.substrate.asks", [3]int{1, 0, 11}},
-	{"notifications.substrate.task_end", [3]int{1, 0, 11}},
 	{"guardrail.connectors.*.cascade", [3]int{1, 0, 10}},
 	{"guardrail.profiles.*.cascade", [3]int{1, 0, 10}},
 	{"guardrail.profiles.*.connectors.*.cascade", [3]int{1, 0, 10}},

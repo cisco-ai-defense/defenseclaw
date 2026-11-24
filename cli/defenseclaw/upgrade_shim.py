@@ -140,8 +140,6 @@ NEWER_CONFIG_KEYS = (
     ("ai_discovery.include_skill_content_hashes", (1, 0, 11)),
     ("ai_discovery.include_skill_manifests", (1, 0, 11)),
     ("notifications.substrate", (1, 0, 11)),
-    ("notifications.substrate.asks", (1, 0, 11)),
-    ("notifications.substrate.task_end", (1, 0, 11)),
     # Under substrate (1.0.10), so a downgrade to 1.0.10 kept it (GAP-2035).
     ("substrate.bundles.oci", (1, 0, 11)),
     # The same: 1.0.10 has substrate and refuses these (fold of the skill scan,
@@ -149,8 +147,8 @@ NEWER_CONFIG_KEYS = (
     ("substrate.identity.kube_sign_in", (1, 0, 11)),
     ("substrate.skills", (1, 0, 11)),
     ("substrate.usage", (1, 0, 11)),
-    # The same for this release's Substrate blocks (activity, files, git, interactive, launcher, relay TLS,
-    # secrets, revocation): 1.0.10 has substrate and refuses them.
+    # The same: 1.0.10 has substrate, substrate.admin, .egress and .identity, all
+    # closed, and refuses these 1.0.11 blocks under them (GAP-1066).
     ("substrate.activity", (1, 0, 11)),
     ("substrate.admin.git_push", (1, 0, 11)),
     ("substrate.egress.no_swap_hosts", (1, 0, 11)),
