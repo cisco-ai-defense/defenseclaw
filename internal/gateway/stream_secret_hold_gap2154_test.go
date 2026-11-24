@@ -60,12 +60,11 @@ func gap2154Rows(t *testing.T, path, tier, pack string, managed bool) []gap1265R
 	t.Helper()
 	// Freeze: the later lane's first piece must reach the client before its
 	// second piece is read (red: held behind the ended lane's "42").
-	gap2154Park := retestFiller(streamRunParkMax + 2048)[:streamRunParkMax+2048]
 	freeze := append(gap2154Lead(t, path, "total 42"),
-		// Past the initial stream buffer and, after a block end, past the
-		// parked bound of the ended lane's run (GAP-2162), so it goes out
-		// once read.
-		gap2154Later(path, "First part "+gap2154Park+" "+gap2154Alpha+". "),
+		// Past the initial stream buffer (stream_buffer_bytes), so it goes
+		// out on its own once read; well inside streamRunParkMax, so a
+		// parked reasoning run holds it (GAP-2162 round 3).
+		gap2154Later(path, "First part "+retestFiller(2048)[:2048]+" "+gap2154Alpha+". "),
 		gap2154Later(path, "second part "+gap2154Beta+". "+gap2154End+"\n"))
 	// Over the held bound: a benign long answer behind the ended lane's
 	// "step 3" (red: strict cut it, the other tiers raised TRUNCATED).

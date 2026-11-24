@@ -52,12 +52,7 @@ func TestGAP2154LaneEnds(t *testing.T) {
 	}
 	r.Add(answerPiece(0, "The answer."))
 	r.Add(messageEndPiece(1))
-	// The reasoning is parked (a lane switch, GAP-2162) until
-	// streamRunParkMax bytes of other text follow.
-	if !r.OpenSecret().open {
-		t.Fatal("a reasoning run parked by the answer was released at once")
-	}
-	r.Add(answerPiece(0, strings.Repeat("x", streamRunParkMax+1)))
+	// The answer ends the reasoning's run at once (GAP-2162 round 3).
 	if o := r.OpenSecret(); o.open {
 		t.Fatalf("the reasoning (answer of the same choice started) and choice 1 (ended) still hold: %+v", o)
 	}
@@ -73,6 +68,15 @@ func TestGAP2154LaneEnds(t *testing.T) {
 	var tools responseText
 	tools.Add(toolInputPiece(0, 0, `{"n":4`))
 	tools.Add(toolInputPiece(0, 1, `{"path":"a"}`))
+	// A later tool call parks the earlier one's run (GAP-2162).
+	if !tools.OpenSecret().open {
+		t.Fatal("a tool call's run is not parked when a later tool call starts")
+	}
+	tools.Add(toolInputPiece(0, 1, strings.Repeat("x", streamRunParkMax+1)))
+	if tools.OpenSecret().open {
+		t.Fatal("a parked tool call run is held past streamRunParkMax")
+	}
+	tools.Add(toolInputPiece(0, 0, `5`))
 	tools.Add(messageEndPiece(0))
 	if tools.OpenSecret().open {
 		t.Fatal("a tool call's run is held after the message ended")
