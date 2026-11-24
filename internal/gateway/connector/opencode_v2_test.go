@@ -103,7 +103,7 @@ await contract(plugin, {
 }
 
 func TestOpenCodeV2GeneratedAdapter(t *testing.T) {
-	for _, file := range []string{"hooks/opencode-plugin.js", "hooks/opencode-plugin-secure-client.js", "../../enterprisepolicy/opencode_managed_plugin.js", "testdata/bridge_host/opencode-plugin.js", "testdata/bridge_host/opencode-plugin-managed.js"} {
+	for _, file := range []string{"hooks/opencode-plugin.js", "../../enterprisepolicy/opencode_managed_plugin.js", "testdata/bridge_host/opencode-plugin.js", "testdata/bridge_host/opencode-plugin-managed.js"} {
 		body, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)

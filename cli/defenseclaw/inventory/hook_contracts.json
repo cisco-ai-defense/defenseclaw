@@ -2181,6 +2181,7 @@
             "session.idle",
             "session.error",
             "session.deleted",
+            "session.prompt",
             "tool.execute.before",
             "tool.execute.after"
           ],
@@ -2240,7 +2241,8 @@
                 "session.status",
                 "session.idle",
                 "session.error",
-                "session.deleted"
+                "session.deleted",
+                "session.prompt"
               ]
             },
             "covered_tool_surfaces": [

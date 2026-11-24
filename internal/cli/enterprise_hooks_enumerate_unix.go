@@ -419,6 +419,12 @@ func runEnterpriseHooksEnumerateCycle(
 		if err := enterpriseHooksEnumerateRefusedWriter(current.DataDir, cycle.RefusedSurfaces); err != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the refused surfaces: %v\n", err)
 		}
+		// The gateway reads each caller's verified agent version here: a
+		// machine-policy connector has no per-user guardian row
+		// (rel-1-0-10:GAP-0114).
+		if err := enterpriseHooksEnumerateAgentVersionsWriter(current.DataDir, state); err != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the agent versions: %v\n", err)
+		}
 	}
 	return report, nil
 }
@@ -444,12 +450,13 @@ func enterpriseHooksEnumerateDiscoveryBudget(interval time.Duration) time.Durati
 // The cycle's root-only publications; tests replace them, since only root
 // can satisfy their root-owned directory chain.
 var (
-	enterpriseHooksEnumerateManifestWriter    = enterprisehooks.WriteUnixTargetsManifestAtomic
-	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEnumeratorAccounts
-	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgentsForConfig
-	enterpriseHooksEnumerateScanStartedWriter = enterprisehooks.WriteUnixUnprotectedAgentsScanStarted
-	enterpriseHooksEnumerateRefusedWriter     = writeEnterpriseHookRefusedSurfaces
-	enterpriseHooksEnumerateGatewayAgents     = publishEnterpriseHookUnixGatewayUnprotectedAgents
+	enterpriseHooksEnumerateManifestWriter      = enterprisehooks.WriteUnixTargetsManifestAtomic
+	enterpriseHooksEnumerateEligibleWriter      = enterprisehooks.WriteUnixEnumeratorAccounts
+	enterpriseHooksEnumerateUnprotectedWriter   = enterprisehooks.WriteUnixUnprotectedAgentsForConfig
+	enterpriseHooksEnumerateScanStartedWriter   = enterprisehooks.WriteUnixUnprotectedAgentsScanStarted
+	enterpriseHooksEnumerateRefusedWriter       = writeEnterpriseHookRefusedSurfaces
+	enterpriseHooksEnumerateAgentVersionsWriter = writeEnterpriseHookAgentVersions
+	enterpriseHooksEnumerateGatewayAgents       = publishEnterpriseHookUnixGatewayUnprotectedAgents
 )
 
 // enterpriseHooksEnumerateResolver is replaceable in tests.
