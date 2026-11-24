@@ -22,7 +22,8 @@ import (
 // <state folder> relative write, pwsh/powershell -Command '<key>' with a
 // redirect into another account's authorized_keys) were allowed with no
 // finding on Cursor in all five tiers, while the Set-Location twins blocked.
-// The benign rows stay allowed.
+// Cursor is now never weaker than Claude Code's PowerShell tool for the same
+// command, in every tier, and the benign rows are never blocked.
 func TestGAP1576CursorWindowsLauncherLineIsReadAsPowerShell(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "alice")
@@ -42,7 +43,7 @@ func TestGAP1576CursorWindowsLauncherLineIsReadAsPowerShell(t *testing.T) {
 	key := "echo ssh-ed25519 AAAAgap1576 marker"
 	rows := []struct {
 		id, command string
-		block       bool
+		attack      bool
 	}{
 		{"c-wd", "pwsh -NoProfile -wd " + state + ` -Command "Set-Content -Path config.yaml -Value m"`, true},
 		{"c-cd", "Set-Location " + state + "; Set-Content -Path config.yaml -Value m", true},
@@ -54,8 +55,11 @@ func TestGAP1576CursorWindowsLauncherLineIsReadAsPowerShell(t *testing.T) {
 		{"n03", "dir 2>&1 >> out.txt", false},
 		{"n04", "npm test", false},
 	}
-	for _, p := range gap0437Packs {
-		a := gap0437Server(t, p, "cursor", "action")
+	rank := map[string]int{"": 0, "allow": 0, "alert": 1, "confirm": 1, "block": 2}
+	shapeParityTiers(t, func(t *testing.T, p gap0437Pack) {
+		cursor := gap0437Server(t, p, "cursor", "action")
+		claude := gap0437Server(t, p, "claudecode", "action")
+		installToolCallCorpusProfileConnector(t, "claudecode", p.pack)
 		for _, r := range rows {
 			raw, _ := json.Marshal(map[string]any{"hook_event_name": "beforeShellExecution", "conversation_id": "c", "generation_id": "g",
 				"command": r.command, "cwd": project, "workspace_roots": []string{project}})
@@ -66,16 +70,20 @@ func TestGAP1576CursorWindowsLauncherLineIsReadAsPowerShell(t *testing.T) {
 				req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 			}
 			w := httptest.NewRecorder()
-			a.handleAgentHook("cursor").ServeHTTP(w, req)
+			cursor.handleAgentHook("cursor").ServeHTTP(w, req)
 			var out map[string]any
 			_ = json.Unmarshal(w.Body.Bytes(), &out)
 			action, _ := out["action"].(string)
-			if r.block && action != "block" {
-				t.Errorf("%s %s: cursor action %q, want block (%s)", p.name, r.id, action, w.Body.String())
-			}
-			if !r.block && action == "block" {
-				t.Errorf("%s %s: benign cursor row denied (%s)", p.name, r.id, w.Body.String())
+			want := shapeParityHook(t, claude.handleAgentHook("claudecode"), shapeParityCall{name: "claudecode/PowerShell " + r.id, conn: "claudecode",
+				event: "PreToolUse", body: shapeParityEnvelope("PreToolUse", project, "PowerShell", map[string]any{"command": r.command})}, p.managed)
+			switch {
+			case r.attack && rank[action] < rank[want]:
+				t.Errorf("%s %s: cursor %q weaker than Claude Code PowerShell %q (%s)", p.name, r.id, action, want, w.Body.String())
+			case r.attack && action == "allow":
+				t.Errorf("%s %s: cursor allow with Claude Code PowerShell %q", p.name, r.id, want)
+			case !r.attack && action == "block":
+				t.Errorf("%s %s: benign cursor row blocked (%s)", p.name, r.id, w.Body.String())
 			}
 		}
-	}
+	})
 }
