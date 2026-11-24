@@ -16,6 +16,12 @@ func TestGAP0370OpenModeNativeDeadlineRecordMatchesDelivery(t *testing.T) {
 		{"copilot", "preToolUse"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
+			// The record's append is waited for by the production bound on a
+			// clock that never spends it: this test is about what the record
+			// says, and the row must not depend on how fast a loaded machine
+			// schedules a file append (rel-1-0-10:GAP-2106: one native
+			// whole-package run exited at the 100 ms bound with no row).
+			clock := heldWatchdogBounds(t)
 			home := t.TempDir()
 			if err := os.Mkdir(filepath.Join(home, "logs"), 0o700); err != nil {
 				t.Fatal(err)
@@ -64,6 +70,7 @@ func TestGAP0370OpenModeNativeDeadlineRecordMatchesDelivery(t *testing.T) {
 				if entry.Outcome != wantOutcome || entry.FailMode != wantMode {
 					t.Fatalf("native answer block=%t recorded as %+v", blocked, entry)
 				}
+				askedBounds(t, clock)
 			case <-time.After(2 * time.Second):
 				t.Fatal("watchdog did not exit")
 			}

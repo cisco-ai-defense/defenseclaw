@@ -314,10 +314,12 @@ func TestPerUserShellHooksLetAFailedStopEventThrough(t *testing.T) {
 		}
 	}
 	// The Codex missing-token check runs after the binding check, as in the
-	// native runner: a bound Stop whose stdin is not that Stop fails closed.
+	// native runner: a bound Stop whose stdin is not that Stop fails closed,
+	// with Codex's Stop block and exit 0 as the native runner answers
+	// (rel-1-0-10:GAP-1770).
 	for _, stdin := range []string{`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`, `{"hook_event_name":false}`, `not json`, ``} {
 		run := runPerUserHookForStop(t, NewCodexConnector(), "codex-hook.sh", codexArgs("Stop"), stdin, `200|{"action":"allow"}`, "DEFENSECLAW_FAIL_MODE=closed", "DC_TEST_NO_TOKEN=1")
-		if run.code != 2 || strings.Contains(run.stderr, stopEventNotBlockedLead) || !strings.Contains(run.stderr, "binding error") {
+		if run.code != 0 || !strings.Contains(run.stdout, `"decision":"block"`) || strings.Contains(run.stderr, stopEventNotBlockedLead) || !strings.Contains(run.stderr, "binding error") {
 			t.Errorf("codex Stop, missing token, stdin %q: exit %d stderr=%q, want the fail-closed binding error", stdin, run.code, run.stderr)
 		}
 	}
