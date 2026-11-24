@@ -10736,22 +10736,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, Vau
     def _inventory_detail_short(self) -> bool:
         """An open Inventory detail on a short terminal (up to 30 rows).
 
-        At 80x24 the sub-tab line, the filter chips and the multi-connector
-        strip left the detail card one row, its top border, and PgDn showed
-        nothing (B-32). While a detail is open those two give their rows to
-        it; the sub-tab bar stays, and Esc brings them back.
+        At 80x24 the filter chips and the multi-connector strip left the
+        detail card one row, its top border, and PgDn showed nothing (B-32).
+        While a detail is open those two give their rows to it; the sub-tab
+        bar stays, and Esc brings them back.
         """
 
         height = int(getattr(self.size, "height", 0) or 0)
         return bool(self.inventory_model.detail_open) and 0 < height <= 30
 
     def _inventory_body_text(self) -> str:
-        tabs = "" if self._inventory_detail_short() else "  ".join(
-            f"[{TOKENS.accent_violet} bold]{tab.display_label}[/]"
-            if tab.active
-            else f"[{TOKENS.text_secondary}]{tab.display_label}[/]"
-            for tab in self.inventory_model.subtab_info()
-        )
+        # The sub-tabs are the button bar right below, so they are not repeated
+        # here: the text copy took two rows at 80x24 and left the table 3 to 6
+        # rows (GAP-2051). The per-tab counts are in the Summary table.
         scope = self.inventory_model.scope_state()
         scanned = [chip.category for chip in scope.chips if chip.active]
         scan_scope = (
@@ -10776,7 +10773,6 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, Vau
         return (
             f"[bold #22D3EE]Inventory[/]  [{TOKENS.text_muted}]r scans:[/] {scan_scope}{filter_text}\n"
             f"{connector_chip}"
-            f"{tabs}"
         ).rstrip("\n")
 
     def _logs_body_text(self) -> str:
