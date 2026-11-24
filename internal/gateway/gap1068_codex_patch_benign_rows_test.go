@@ -81,7 +81,7 @@ func TestGAP1068CodexApplyPatchBenignCorpusRowsAreNotBlocked(t *testing.T) {
 		for _, r := range rows {
 			action := shapeParityHook(t, handler, shapeParityCall{name: "codex/apply_patch " + r.id, conn: "codex", event: "PreToolUse",
 				headers: map[string]string{"X-DefenseClaw-Hook-Event": "PreToolUse", "X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract},
-				body: shapeParityEnvelope("PreToolUse", r.cwd, "apply_patch", map[string]any{"command": r.command})}, p.managed)
+				body:    shapeParityEnvelope("PreToolUse", r.cwd, "apply_patch", map[string]any{"command": r.command})}, p.managed)
 			switch {
 			case !r.sibling && action != "allow":
 				t.Errorf("%s %s: codex apply_patch %s, want allow (benign project edit)", p.name, r.id, action)
