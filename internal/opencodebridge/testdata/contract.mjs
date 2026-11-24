@@ -126,10 +126,16 @@ export async function contract(plugin, fixture) {
   assert.equal(turn.prompt.text, "ship the fix");
   await new Promise((resolve) => setTimeout(resolve, 200));
   const turns = (await fixture.payloads()).filter((p) => p.hook_event_name === "session.prompt");
-  assert.equal(turns.length, 1);
-  assert.equal(turns[0].prompt, "ship the fix");
-  assert.equal(turns[0].session_id, "ses_test");
-  assert.equal(turns[0].source_event_id, "msg_prompt");
+  if (fixture.sessionPrompt === false) {
+    // The managed plugin carries the shared adapter but drops the turn at its
+    // event allowlist (GAP-0032): nothing reaches the gateway.
+    assert.equal(turns.length, 0);
+  } else {
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].prompt, "ship the fix");
+    assert.equal(turns[0].session_id, "ses_test");
+    assert.equal(turns[0].source_event_id, "msg_prompt");
+  }
   assert(!(await fixture.payloads()).some((p) => p.hook_event_name !== "session.prompt" && "prompt" in p), "only a user turn carries a prompt field");
   await cleanup();
   await new Promise((resolve) => setImmediate(resolve));

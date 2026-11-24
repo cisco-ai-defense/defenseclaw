@@ -509,11 +509,11 @@ async function defenseclawV2Lifecycle(ctx, event, sessions, hooks) {
 
 // The most prompt text sent to the gateway for one turn: the judge reads the
 // task, not an attachment, and the post is bounded like every other one.
-const DEFENSECLAW_V2_PROMPT_MAX = 16 * 1024;
+const OPENCODE_V2_PROMPT_MAX_CHARS = 16 * 1024;
 
 function defenseclawV2PromptText(prompt) {
   const text = typeof prompt === "string" ? prompt : (prompt && typeof prompt.text === "string" ? prompt.text : "");
-  return text.length > DEFENSECLAW_V2_PROMPT_MAX ? text.slice(0, DEFENSECLAW_V2_PROMPT_MAX) : text;
+  return text.length > OPENCODE_V2_PROMPT_MAX_CHARS ? text.slice(0, OPENCODE_V2_PROMPT_MAX_CHARS) : text;
 }
 
 // A user turn (OpenCode 2.x session.prompt) is the task the gateway judges the

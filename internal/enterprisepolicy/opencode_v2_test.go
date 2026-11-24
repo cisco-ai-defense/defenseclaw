@@ -48,6 +48,7 @@ writeFileSync(fake + "/guard.json", JSON.stringify({stdout:'{"deny":false}',exit
 const {default: plugin} = await import(pathToFileURL(path));
 const {contract} = await import(pathToFileURL(shared));
 await contract(plugin, {
+  sessionPrompt: false,
   reply: async (value) => writeFileSync(fake + "/event.json", JSON.stringify({stdout:JSON.stringify(value),exit:0})),
   payloads: async () => readFileSync(fake + "/calls.jsonl", "utf8").trim().split("\n")
     .map((line) => JSON.parse(line)).filter((call) => call.args.includes("--enterprise-managed"))
