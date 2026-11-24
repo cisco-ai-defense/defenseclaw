@@ -372,6 +372,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		FailMode: *failMode, TaskStall: *taskStall, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,
 		SessionIssuer: sessions.Issuer, Audience: sessions.Audience, VerifyURL: sessions.VerifyURL,
 		AgentBinary: agent, Arch: "amd64", Providers: providers(*connectorName, *provider),
+		// Build-time registry lines for launchers older than 1.0.11: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
 		RegistryTokens: kit.NPMRegistryTokens(cfg.Substrate.Secrets)})
 	if err != nil {
 		return ExitUsageError, err

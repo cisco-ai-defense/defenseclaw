@@ -295,6 +295,16 @@ func (s *Store) ByID(id string) (Binding, bool) {
 	return Binding{}, false
 }
 
+// All returns a copy of every binding.
+func (s *Store) All() []Binding {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneBindings(s.doc.Bindings)
+}
+
 // ForOwner returns a copy of the bindings of one person key.
 func (s *Store) ForOwner(owner string) []Binding {
 	if s == nil || owner == "" {
