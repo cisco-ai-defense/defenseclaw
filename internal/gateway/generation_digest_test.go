@@ -556,8 +556,7 @@ func TestBundleRuntimeDigestUsesReceiptSpecificInstalledRoot(t *testing.T) {
 // apply confirms (GAP-0158). A bundle that names a bundle file already agreed;
 // a config with no bundle record keeps every rule pack in its digest.
 func TestBundleRuntimeDigestScopesSettingsOnlyBundle(t *testing.T) {
-	_, here, _, _ := runtime.Caller(0)
-	srcPack := filepath.Join(filepath.Dir(here), "..", "..", "policies", "guardrail", "default")
+	srcPack := filepath.Join(repoRootFromTestFile(t), "policies", "guardrail", "default")
 	const bundleID = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A"
 	for _, namesFile := range []bool{false, true} {
 		name := "settings_only"

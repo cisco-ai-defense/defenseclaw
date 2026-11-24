@@ -12,7 +12,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -157,8 +156,7 @@ func offlineTestDigester(ctx context.Context, cfg *config.Config, raw []byte, go
 // one tested change (block_at), optionally without data_dir and policy_dir.
 func shippedTemplateBundle(t *testing.T, template string, portable bool) *enterprisebundle.Bundle {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "..", "testdata", "enterprise-configs", template))
+	raw, err := os.ReadFile(filepath.Join(repoRootFromTestFile(t), "testdata", "enterprise-configs", template))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,9 +199,8 @@ func deviceBundleDigest(t *testing.T, b *enterprisebundle.Bundle, goos string) s
 	if got, want := cfg.ResolveRulePackDir(globalRulePackRef(cfg)), path.Join(layout.VendorPolicyDir, "guardrail", "default"); got != want {
 		t.Fatalf("device default pack %q, want the vendor pack %q", got, want)
 	}
-	_, file, _, _ := runtime.Caller(0)
 	installedVendor := t.TempDir()
-	if err := os.CopyFS(installedVendor, os.DirFS(filepath.Join(filepath.Dir(file), "..", "..", "policies"))); err != nil {
+	if err := os.CopyFS(installedVendor, os.DirFS(filepath.Join(repoRootFromTestFile(t), "policies"))); err != nil {
 		t.Fatal(err)
 	}
 	packCfg := cloneConfig(cfg)

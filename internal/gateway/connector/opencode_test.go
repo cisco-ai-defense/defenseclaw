@@ -1048,11 +1048,7 @@ func TestOpenCodeMCPInventorySignatureMatchesCapabilities(t *testing.T) {
 	t.Setenv("OPENCODE_CONFIG_DIR", "")
 	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
 
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", ".."))
+	repoRoot := connectorRepoRoot(t)
 	raw, err := os.ReadFile(filepath.Join(repoRoot, "internal", "inventory", "ai_signatures.json"))
 	if err != nil {
 		t.Fatal(err)
