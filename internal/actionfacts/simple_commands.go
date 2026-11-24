@@ -1277,7 +1277,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			// environment of the program (effective, used for nested scripts).
 			resolvedVariable := false
 			resolve := func(text string) string {
-				if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
+				if resolved, ok := simpleResolvedVariables(text, state.vars, home, state.cwd); ok {
 					text = resolved
 					changed, resolvedVariable = true, true
 				}
@@ -1414,7 +1414,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// read as on the top level (rel-1-0-10:GAP-1042).
 					innerInput.folderUnknown = innerInput.CWD == "" && (wrapperFolderUnknown || state.cwdUnknown || input.CWD == "")
 					if shared {
-						if resolved, ok := simpleResolvedVariables(script, effective); ok {
+						if resolved, ok := simpleResolvedVariables(script, effective, home, innerInput.CWD); ok {
 							innerInput.Command = resolved
 						}
 					}
@@ -2745,7 +2745,7 @@ func simpleUnboundUser(source string, vars map[string]string, bound map[string]b
 }
 
 func simpleStaticWord(word *syntax.Word, vars map[string]string) (string, bool) {
-	return simpleStaticWordWithNewline(word, vars, false)
+	return simpleStaticWordWithNewline(word, vars, false, false)
 }
 
 // '[' is a literal test builtin. The ordinary word resolver rejects its
@@ -2768,10 +2768,10 @@ func simpleZshHistoryCall(call *syntax.CallExpr, vars map[string]string, interpr
 // A quoted -c or trap action can contain physical lines. Other shell words
 // still require one line so they cannot silently become a different command.
 func simpleStaticScriptWord(word *syntax.Word, vars map[string]string) (string, bool) {
-	return simpleStaticWordWithNewline(word, vars, true)
+	return simpleStaticWordWithNewline(word, vars, true, false)
 }
 
-func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allowNewline bool) (string, bool) {
+func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allowNewline, allowPWDSuffix bool) (string, bool) {
 	if word == nil {
 		return "", false
 	}
@@ -2800,8 +2800,9 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 			// default of an unset name is what the shell expands.
 			defaulted := part.Exp != nil && simpleVariableName(part.Param.Value) &&
 				(part.Exp.Op == syntax.DefaultUnset || part.Exp.Op == syntax.DefaultUnsetOrNull)
+			pwdSuffix := allowPWDSuffix && simpleKnownPWDSuffix(part, vars)
 			if !known && !defaulted || part.Excl || part.Length || part.Width || part.IsSet || part.Index != nil ||
-				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil && !defaulted ||
+				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil && !defaulted && !pwdSuffix ||
 				part.Flags != nil || part.NestedParam != nil || len(part.Modifiers) != 0 {
 				safe = false
 			}
@@ -2851,7 +2852,53 @@ func simplePlainLiteral(text string) bool {
 	return true
 }
 
-func simpleResolvedVariables(source string, vars map[string]string) (string, bool) {
+// simpleKnownPWDSuffix accepts only a literal path suffix removed from the
+// walk's known current folder. Other parameter patterns remain dynamic; the
+// shell word evaluator below performs the actual expansion.
+func simpleKnownPWDSuffix(param *syntax.ParamExp, vars map[string]string) bool {
+	if param == nil || param.Param == nil || param.Param.Value != "PWD" ||
+		param.Exp == nil || param.Exp.Op != syntax.RemSmallSuffix || param.Exp.Word == nil {
+		return false
+	}
+	pwd, known := vars["PWD"]
+	suffix := param.Exp.Word.Lit()
+	return known && simplePOSIXAbs(pwd) && simplePlainLiteral(pwd) && len(suffix) > 1 &&
+		strings.HasPrefix(suffix, "/") && simplePlainLiteral(suffix)
+}
+
+// simplePWDSuffixPlainControl keeps the existing path owner's content
+// boundary: the same command with a direct spelling of the resolved target
+// must already produce a mutating PathFact. A safe quoted payload that the
+// plain reader leaves alone cannot gain a finding just from path resolution.
+func simplePWDSuffixPlainControl(source string, start, end int, target, shellHome, activeHome, cwd string) bool {
+	if start < 0 || end <= start || end > len(source) || !strings.HasPrefix(target, "/") {
+		return false
+	}
+	plain := "'" + strings.ReplaceAll(target, "'", "'\\''") + "'"
+	if shellHome != "" && shellHome == activeHome &&
+		(target == shellHome || strings.HasPrefix(target, shellHome+"/")) {
+		plain = "~" + strings.TrimPrefix(target, shellHome)
+	}
+	control := source[:start] + plain + source[end:]
+	if len(control) > maxCommandBytes {
+		return false
+	}
+	facts := Analyze(Input{Tool: "Bash", Command: control, CWD: cwd,
+		ActiveHome: activeHome, DialectHint: DialectPOSIX})
+	if !facts.Authoritative() {
+		return false
+	}
+	normalized := simplePathClean(target)
+	for _, path := range facts.Paths {
+		if path.Resolved == normalized &&
+			(path.Access == PathAccessWrite || path.Access == PathAccessAppend || path.Access == PathAccessDelete) {
+			return true
+		}
+	}
+	return false
+}
+
+func simpleResolvedVariables(source string, vars map[string]string, activeHome, cwd string) (string, bool) {
 	file, parsed := shellparse.Parse(source)
 	if !parsed {
 		return "", false
@@ -2862,6 +2909,7 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 	}
 	var replacements []replacement
 	redirectTargets := map[*syntax.Word]bool{}
+	pwdSuffixControls := 0
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if redirect, ok := node.(*syntax.Redirect); ok {
 			if redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc {
@@ -2882,6 +2930,7 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 			return false
 		}
 		hasParam := false
+		pwdSuffix := false
 		hasTilde := false
 		if len(word.Parts) != 0 {
 			if lit, ok := word.Parts[0].(*syntax.Lit); ok {
@@ -2889,19 +2938,32 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 			}
 		}
 		syntax.Walk(word, func(part syntax.Node) bool {
-			if _, ok := part.(*syntax.ParamExp); ok {
+			if param, ok := part.(*syntax.ParamExp); ok {
 				hasParam = true
+				pwdSuffix = pwdSuffix || simpleKnownPWDSuffix(param, vars)
 			}
 			return true
 		})
 		if !hasParam && !hasTilde {
 			return false
 		}
-		value, known := simpleStaticWord(word, vars)
+		if pwdSuffix && !redirectTargets[word] {
+			return false
+		}
+		value, known := simpleStaticWordWithNewline(word, vars, false, pwdSuffix)
 		if !known {
 			return false
 		}
 		start, end := int(word.Pos().Offset()), int(word.End().Offset())
+		if pwdSuffix {
+			if pwdSuffixControls == 4 {
+				return false
+			}
+			pwdSuffixControls++
+			if !simplePWDSuffixPlainControl(source, start, end, value, vars["HOME"], activeHome, cwd) {
+				return false
+			}
+		}
 		if start >= 0 && end > start && end <= len(source) {
 			replacements = append(replacements, replacement{start, end,
 				"'" + strings.ReplaceAll(value, "'", "'\\''") + "'"})
