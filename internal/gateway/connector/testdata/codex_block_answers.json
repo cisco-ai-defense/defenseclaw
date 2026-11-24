@@ -1,0 +1,510 @@
+{
+ "comment": "Codex's answer to a block the hook makes itself (a failure it fails closed on, or a gateway block with no codex_output), for every registered contract and event. The native runner (hookexec emitCodexBlock) and the rendered shell hook (codex-hook.sh codex_closed_answer) must both give exactly this: exit status and stdout, for reason below.",
+ "reason": "blocked \"x\" \\ y",
+ "answers": [
+  {
+   "contract": "",
+   "event": "SessionStart",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "",
+   "event": "UserPromptSubmit",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "",
+   "event": "PreToolUse",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"blocked \\\"x\\\" \\\\ y\"}}\n"
+  },
+  {
+   "contract": "",
+   "event": "PermissionRequest",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"blocked \\\"x\\\" \\\\ y\"}}}\n"
+  },
+  {
+   "contract": "",
+   "event": "PostToolUse",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "",
+   "event": "SubagentStart",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "",
+   "event": "SubagentStop",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "",
+   "event": "PreCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "",
+   "event": "PostCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "",
+   "event": "Stop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "",
+   "event": "SessionEnd",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "",
+   "event": "Notification",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "SessionStart",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "UserPromptSubmit",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "PreToolUse",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"blocked \\\"x\\\" \\\\ y\"}}\n"
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "PermissionRequest",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"blocked \\\"x\\\" \\\\ y\"}}}\n"
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "PostToolUse",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "SubagentStart",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "SubagentStop",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "PreCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "PostCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "Stop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "SessionEnd",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v1",
+   "event": "Notification",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "SessionStart",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "UserPromptSubmit",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "PreToolUse",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"blocked \\\"x\\\" \\\\ y\"}}\n"
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "PermissionRequest",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"blocked \\\"x\\\" \\\\ y\"}}}\n"
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "PostToolUse",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "SubagentStart",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "SubagentStop",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "PreCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "PostCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "Stop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "SessionEnd",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v2",
+   "event": "Notification",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "SessionStart",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "UserPromptSubmit",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "PreToolUse",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"blocked \\\"x\\\" \\\\ y\"}}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "PermissionRequest",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"blocked \\\"x\\\" \\\\ y\"}}}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "PostToolUse",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "SubagentStart",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "SubagentStop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "PreCompact",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "PostCompact",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "Stop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "SessionEnd",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v3",
+   "event": "Notification",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "SessionStart",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "UserPromptSubmit",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "PreToolUse",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"blocked \\\"x\\\" \\\\ y\"}}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "PermissionRequest",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"blocked \\\"x\\\" \\\\ y\"}}}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "PostToolUse",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "SubagentStart",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "SubagentStop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "PreCompact",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "PostCompact",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "Stop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "SessionEnd",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v3-generic",
+   "event": "Notification",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "SessionStart",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "UserPromptSubmit",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "PreToolUse",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"blocked \\\"x\\\" \\\\ y\"}}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "PermissionRequest",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"blocked \\\"x\\\" \\\\ y\"}}}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "PostToolUse",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "SubagentStart",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "SubagentStop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "PreCompact",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "PostCompact",
+   "exit": 0,
+   "stdout": "{\"continue\":false,\"stopReason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "Stop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "SessionEnd",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v4",
+   "event": "Notification",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "SessionStart",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "UserPromptSubmit",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "PreToolUse",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"blocked \\\"x\\\" \\\\ y\"}}\n"
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "PermissionRequest",
+   "exit": 0,
+   "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"blocked \\\"x\\\" \\\\ y\"}}}\n"
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "PostToolUse",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "SubagentStart",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "SubagentStop",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "PreCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "PostCompact",
+   "exit": 2,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "Stop",
+   "exit": 0,
+   "stdout": "{\"decision\":\"block\",\"reason\":\"blocked \\\"x\\\" \\\\ y\"}\n"
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "SessionEnd",
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "contract": "codex-hooks-v9",
+   "event": "Notification",
+   "exit": 2,
+   "stdout": ""
+  }
+ ]
+}
