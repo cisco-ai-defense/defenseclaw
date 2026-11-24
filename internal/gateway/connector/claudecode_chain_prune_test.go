@@ -124,6 +124,7 @@ func TestClaudeCodeChainKeepsAFolderTheSettingsNameAndAFreshOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.publish("MZ guard 2")
+	p.publish("MZ guard 3")
 	fresh := filepath.Join(p.dir, "chain-freshone") // another process is publishing it now
 	if err := os.MkdirAll(fresh, 0o700); err != nil {
 		t.Fatal(err)
@@ -132,14 +133,13 @@ func TestClaudeCodeChainKeepsAFolderTheSettingsNameAndAFreshOne(t *testing.T) {
 	if err := os.MkdirAll(stray, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	p.publish("MZ guard 3")
 	p.publish("MZ guard 4")
 	for _, keep := range []string{named, "chain-freshone", "not-a-chain"} {
 		if _, err := os.Stat(filepath.Join(p.dir, keep)); err != nil {
 			t.Errorf("%s was removed: %v", keep, err)
 		}
 	}
-	// 2 and 3 are older than the previous record and unnamed.
+	// 2 is older than the previous record and unnamed: pruned.
 	if got := p.folders(); len(got) != 4 { // named, previous, newest, fresh
 		t.Fatalf("chain folders = %v", got)
 	}
