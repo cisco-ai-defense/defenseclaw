@@ -29098,11 +29098,18 @@ function Test-DefenseClawRestoredGuardianKeepsGuard {
         the recorded hook is in place, so it still has the restored digest
         when the failed run's guardian never finished a pass, and this
         release's hook when it did. $true (the guard stays) when no digest is
-        recorded or the copy is missing, not a regular file, unreadable or of
-        another digest.
+        recorded, the restored deployment metadata cannot be read (GAP-2128:
+        the readiness calls this after it sets the rollback flags and before
+        the try that resets them, so it must not throw), or the copy is
+        missing, not a regular file, unreadable or of another digest.
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
-    $expected = Get-DefenseClawRecordedHookSHA256 -Layout $Layout
+    try {
+        $expected = Get-DefenseClawRecordedHookSHA256 -Layout $Layout
+    }
+    catch {
+        return $true
+    }
     if ([string]::IsNullOrEmpty($expected)) {
         return $true
     }

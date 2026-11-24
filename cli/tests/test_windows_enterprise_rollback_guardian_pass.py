@@ -127,8 +127,12 @@ function Assert-RestoredGuardianStarts {
     }
     if ((Get-NamedHook) -cne (Get-LiveHook)) { $script:calls.Add('guardian-refused') }
 }
+# GAP-2128: the restored deployment metadata cannot be read (a reparse point,
+# changed ACLs, bad JSON) when the readiness checks the guardian's copy.
+$script:MetadataThrows = $Case -ceq 'restored-1010-badmeta'
 function Get-DefenseClawDeploymentMetadata {
     param($Layout)
+    if ($script:MetadataThrows) { throw 'deployment metadata is not readable' }
     [pscustomobject]@{ hashes = [pscustomobject]@{ hook = $script:RecordedHook } }
 }
 # The readiness around the deployment check (stubbed as in
@@ -272,7 +276,14 @@ elseif ($script:Model1010) {
         $snapshot | Add-Member -MemberType NoteProperty -Name services_started_under_guard -Value $true
     }
     try {
-        [void](Assert-DefenseClawRestoredTransactionReadyForActivation -Snapshot $snapshot -Layout $layout)
+        try {
+            [void](Assert-DefenseClawRestoredTransactionReadyForActivation -Snapshot $snapshot -Layout $layout)
+        }
+        finally {
+            # GAP-2128: the readiness's flags never outlive it.
+            $script:calls.Add("flags-$([bool]$script:DefenseClawRollbackDeferBusyWriter)-$([bool]$script:DefenseClawRollbackTransitionHookPending)-$([bool]$script:DefenseClawRollbackGuardianKeepsGuard)")
+            $script:MetadataThrows = $false
+        }
         # Activation: the restored guardian's startup reconcile.
         $script:calls.Add('activation')
         Assert-RestoredGuardianStarts
@@ -465,3 +476,17 @@ def test_a_busy_codex_writer_after_the_hook_is_back_ends_the_rollback_held(tmp_p
     wait = "guardian-wait-DefenseClawHookGuardian-True"
     after = calls[calls.index(wait):] if wait in calls else []
     assert "codex-verify" not in after, calls
+
+
+def test_an_unreadable_restored_record_publishes_the_file_for_the_guard_and_resets_the_flags(tmp_path: Path) -> None:
+    # GAP-2128: the readiness reads the recorded digest after it sets the
+    # rollback flags and before the try whose finally resets them. A record it
+    # cannot read must not throw out of that window with the flags still set; it
+    # leaves the guard in place, like an unreadable copy, so the file is
+    # published for the guard.
+    result = _run(tmp_path, "restored-1010-badmeta")
+    calls = result["calls"]
+    assert "flags-False-False-False" in calls, calls
+    calls = _assert_activates_on_the_restored_hook(result)
+    readiness = calls[: calls.index("activation")]
+    assert "codex-reconcile" in readiness, calls
