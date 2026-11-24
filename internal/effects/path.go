@@ -23,6 +23,9 @@ func placePath(spelling string, o Options) (abs string, ok bool, reason ReasonCo
 	if spelling == "" {
 		return "", false, ReasonDynamicExpansion
 	}
+	if o.flavor() != FlavorWindows && o.Dialect == DialectPowerShell {
+		return placePowerShellPOSIX(spelling, o)
+	}
 	// A path is KNOWN only in canonical form for its dialect; any other spelling
 	// is unknown so it never produces a different KNOWN key (review R3-7).
 	if r := canonicalIssue(spelling, o.flavor()); r != "" {
@@ -32,6 +35,26 @@ func placePath(spelling string, o Options) (abs string, ok bool, reason ReasonCo
 		return placeWindows(spelling, o)
 	}
 	return placePOSIX(spelling, o)
+}
+
+// placePowerShellPOSIX places a path a PowerShell script names on Linux or
+// macOS (GAP-1142, GAP-1255). PowerShell, not the kernel, turns the spelling
+// into the path it opens: its FileSystem provider takes \ as a separator on
+// every platform and a leading ~ as the home, and it resolves . and .. by
+// name against the location, as .NET's Path.GetFullPath does under every
+// file API. So a .. is a lexical step here, not the physical one a POSIX
+// shell's open takes after a link, and ../x, ~\x and a\..\x are placed like
+// their written-out paths. A provider-qualified spelling (FileSystem::), a
+// PowerShell drive (Env:, HKCU:, Temp:) or a UNC is not a placed file path.
+func placePowerShellPOSIX(spelling string, o Options) (string, bool, ReasonCode) {
+	s := strings.ReplaceAll(spelling, `\`, "/")
+	if strings.HasPrefix(s, "//") || strings.Contains(s, "::") {
+		return "", false, ReasonNonCanonicalPath
+	}
+	if i := strings.IndexByte(s, ':'); i > 0 && !strings.Contains(s[:i], "/") {
+		return "", false, ReasonNonCanonicalPath
+	}
+	return placePOSIX(s, o)
 }
 
 // canonicalIssue reports a non-canonical path spelling that must not be placed
@@ -303,6 +326,22 @@ func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
 		}
 	}
 	s := strings.ReplaceAll(spelling, "/", `\`)
+	// A leading ~ is the home in PowerShell (its FileSystem provider) and a
+	// literal folder name in cmd (GAP-1191): under PowerShell ~ and ~\x are
+	// placed in the home; in a dialect only guessed the spelling has no known
+	// target.
+	if s == "~" || strings.HasPrefix(s, `~\`) {
+		switch o.Dialect {
+		case DialectPowerShell:
+			if !windowsShapedHome(o.Home) {
+				return "", false, ReasonDynamicExpansion
+			}
+			s = strings.TrimRight(strings.ReplaceAll(o.Home, "/", `\`), `\`) + s[1:]
+		case DialectCMD:
+		default:
+			return "", false, ReasonDynamicExpansion
+		}
+	}
 	// UNC and device/extended-length prefixes are kept verbatim after cleaning
 	// their separators; they are absolute by construction.
 	if strings.HasPrefix(s, `\\`) {
@@ -340,6 +379,12 @@ func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
 		return "", false, ReasonDynamicCWD
 	}
 	return normalizeWindows(strings.TrimRight(o.CWD, `\`)+`\`+s, o), true, ""
+}
+
+// windowsShapedHome reports a drive-absolute home (C:\Users\alice) a
+// PowerShell ~ can stand for.
+func windowsShapedHome(home string) bool {
+	return len(home) >= 3 && isDriveLetter(home[0]) && home[1] == ':' && (home[2] == '\\' || home[2] == '/')
 }
 
 // normalizeWindows cleans . and .. segments, trims trailing dots and spaces on

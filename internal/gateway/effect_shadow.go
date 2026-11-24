@@ -485,7 +485,7 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			continue
 		}
 		kind := f.GetKind()
-		known, maybe, linkHeld := effectProtectedSets(t, kind)
+		known, maybe, linkHeld := effectProtectedSets(t, kind, effectWritesThroughLink(f))
 		if linkHeld {
 			c.linkHeld = true
 		}
@@ -568,8 +568,16 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if !effectrules.CanonicalAbsolute(t.GetPath(), flavor) {
 			continue
 		}
+		through := effectWritesThroughLink(f)
 		for _, m := range t.GetProtected() {
-			if m.GetState() != semantic.ProtectedKnown || m.GetReason() != "exact" || m.GetSet() == effectrules.SetOutsideHome {
+			// An exact member, or one a write that opens its path reaches
+			// through a link to the member itself (DET111 ruling R2: the
+			// cell of the file written, never below the link path's). A
+			// credential member is classed by its own name, which the link
+			// path does not carry: through a link it keeps the unknown tier.
+			exact := m.GetReason() == "exact" ||
+				through && m.GetReason() == effectrules.ReasonLinkExact && m.GetSet() != effectrules.SetCredentials
+			if m.GetState() != semantic.ProtectedKnown || !exact || m.GetSet() == effectrules.SetOutsideHome {
 				continue
 			}
 			c.restricted = true
@@ -610,7 +618,7 @@ func factReach(f *semanticpb.EffectFact, known []string, unknownEffect bool, env
 	}
 	t := f.GetTarget()
 	for _, m := range t.GetProtected() {
-		if m.GetState() != semantic.ProtectedUnknown || m.GetReason() == "link" ||
+		if m.GetState() != semantic.ProtectedUnknown || m.GetReason() == "link" || m.GetReason() == effectrules.ReasonLinkExact ||
 			f.GetKind() == string(effects.KindRead) && m.GetReason() == "unresolved" {
 			continue
 		}
@@ -772,10 +780,16 @@ func effectLinkAliasUsed(result effects.Result, i int) bool {
 	return false
 }
 
-func effectProtectedSets(t *semanticpb.EffectTarget, kind string) (known, maybe []string, linkHeld bool) {
+// effectProtectedSets is the known and maybe sets of a fact's target. A member
+// reached only through a link the resolver followed is held (counted, not
+// raised), unless through: the write opens the path it names, so the file the
+// link reaches is the file written (effectWritesThroughLink). Such a known
+// member takes the cell of the file the link reaches, never lower than the
+// link path's own (DET111 ruling R2); an unresolved link keeps its floor.
+func effectProtectedSets(t *semanticpb.EffectTarget, kind string, through bool) (known, maybe []string, linkHeld bool) {
 	for _, m := range t.GetProtected() {
 		switch {
-		case m.GetReason() == "link":
+		case (m.GetReason() == "link" || m.GetReason() == effectrules.ReasonLinkExact) && !(through && m.GetState() == semantic.ProtectedKnown):
 			linkHeld = true
 		case kind == string(effects.KindRead) && m.GetReason() == "unresolved":
 		case m.GetState() == semantic.ProtectedKnown:
@@ -785,6 +799,32 @@ func effectProtectedSets(t *semanticpb.EffectTarget, kind string) (known, maybe 
 		}
 	}
 	return known, maybe, linkHeld
+}
+
+// effectWritesThroughLink reports a content write that opens the path it
+// names on every path of the call: a PowerShell content cmdlet (Set-Content,
+// Add-Content, Out-File, Tee-Object) writes the file a final link reaches,
+// as the FileSystem provider opens it. On Linux and macOS no 1.0.10 link
+// reading follows a PowerShell path, so the held member was an allow
+// (rel-1-0-10:GAP-1142, pwsh -Command Add-Content -Path link-state). A
+// program that may replace the link instead (sed -i, install, mv, Move-Item,
+// Copy-Item, New-Item) and a write that runs only on some paths (a function
+// body run behind a cd) stay held, the legacy link reading their floor
+// (rel-1-0-10:GAP-1243 benign rows, GAP-1286, GAP-1308).
+func effectWritesThroughLink(f *semanticpb.EffectFact) bool {
+	if f.GetCond() || f.GetOrigin().GetDialect() != string(effects.DialectPowerShell) {
+		return false
+	}
+	switch effects.Kind(f.GetKind()) {
+	case effects.KindWrite, effects.KindAppend:
+	default:
+		return false
+	}
+	switch strings.ToLower(f.GetOrigin().GetProgram()) {
+	case "set-content", "add-content", "out-file", "tee-object":
+		return true
+	}
+	return false
 }
 
 // effectAction maps the protected-tier read to the guardrail action. An effect

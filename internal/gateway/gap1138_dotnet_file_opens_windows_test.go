@@ -46,7 +46,11 @@ func TestGAP1138DotNetFileOpensDevinAndAntigravity(t *testing.T) {
 // The other spellings of the home and the file (GAP-1138 review notes):
 // $env:USERPROFILE, ~ (a cmdlet path only: a .NET argument does not expand
 // it) and a path relative to the working directory, for the write cmdlets,
-// the redirect and the .NET writes and opens of the shared reader.
+// the redirect and the .NET writes and opens of the shared reader. Behind a
+// managed gateway too: the relative state spelling of a .NET write, a
+// Get-Item open and New-Item -Value, and the bare ~ of Get-Item, were
+// allowed there (rel-1-0-10:GAP-1191: the gateway asked the client map
+// without hookpaths.OperandPath, and the client listed no bare ~ word).
 func TestGAP1138PowerShellWriteSpellings(t *testing.T) {
 	var forms []gap1138Form
 	for _, form := range gap1115Forms {
@@ -72,15 +76,7 @@ func TestGAP1138PowerShellWriteSpellings(t *testing.T) {
 			return nil
 		}
 		return []string{"$env:USERPROFILE", "~", "relative"}
-	}, func(peer bool, target gap1138Target, spelling string) string {
-		// A managed gateway does not place the relative and ~ spellings of
-		// the state the PowerShell reading names (also for the writes before
-		// GAP-1138): rel-1-0-10:GAP-1191.
-		if peer && target.name == "DefenseClaw state" && (spelling == "relative" || spelling == "~") {
-			return "rel-1-0-10:GAP-1191"
-		}
-		return ""
-	})
+	}, nil)
 }
 
 // gap1138WindowsRun judges forms through each connector of conns, for every

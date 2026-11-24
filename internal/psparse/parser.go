@@ -51,7 +51,7 @@ func Parse(src string, opts Options) (*Script, error) {
 	sc := &Script{Dialect: opts.Dialect}
 	sc.start = 0
 	sc.end = len(src)
-	if len(src) >= maxInput {
+	if truncatedInput(src) {
 		p.diag(0, len(src), ReasonTruncated, "input exceeded byte budget")
 	}
 	sc.Statements = p.parseStatementList(stopTop)

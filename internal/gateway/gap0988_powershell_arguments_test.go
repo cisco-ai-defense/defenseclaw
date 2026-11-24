@@ -129,7 +129,9 @@ func TestGAP0988PowerShellUnreadFloor(t *testing.T) {
 	t.Cleanup(func() { windowsHookHost = previous })
 	unread := []struct{ id, command string }{
 		{"unbalanced-subexpression", "Write-Output $(Get-Date"},
-		{"stop-parsing", "ping.exe --% -n 1 localhost"},
+		// a --% remainder that is not a plain local argv (a %NAME% expansion);
+		// a plain one is read as the argv (GAP-2087)
+		{"stop-parsing", "ping.exe --% -n 1 %COMPUTERNAME%"},
 	}
 	ordinary := []struct{ id, command string }{
 		{"listing", "Get-ChildItem -Path src -Recurse -Filter *.go | Select-Object -First 5"},

@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -382,7 +383,20 @@ func psNativeExtractor(name string) (string, bool) {
 // are written. A whole archive the text before the call names (a Copy-Item
 // onto it) is staged (psNativeArchiveWords).
 func psNativeArchiveCall(command *psparse.Command, program, cwd, home, text string, read *archiveExtractionScan) {
-	words, static := []string{program}, []bool{true}
+	words, static := psNativeArchiveCallWords(command, program, home)
+	if len(command.Redirs) == 0 && archiveListing(words, static) {
+		start, end := command.Span()
+		read.listings = append(read.listings, archiveListingSpan{text: text, start: start, end: end})
+		return
+	}
+	psNativeArchiveWords(command, words, static, cwd, text, read)
+}
+
+// psNativeArchiveCallWords are the words PowerShell hands the native
+// extractor program of command (psNativeArchiveCall): the program, then each
+// element read by psNativeWord, then the --% words as written.
+func psNativeArchiveCallWords(command *psparse.Command, program, home string) (words []string, static []bool) {
+	words, static = []string{program}, []bool{true}
 	add := func(word string, known bool) {
 		if !known {
 			word = ""
@@ -404,12 +418,40 @@ func psNativeArchiveCall(command *psparse.Command, program, cwd, home, text stri
 	for _, field := range strings.Fields(command.StopParsing) {
 		add(psSlashWord(field), true)
 	}
-	if len(command.Redirs) == 0 && archiveListing(words, static) {
-		start, end := command.Span()
-		read.listings = append(read.listings, archiveListingSpan{text: text, start: start, end: end})
-		return
+	return words, static
+}
+
+// psArchiveCallWords are the words PowerShell hands the native extractor of
+// text, one call (GAP-1634): -C $env:USERPROFILE\.defenseclaw is that folder
+// of the home, where the POSIX reading of the same text has a word with no
+// static spelling, so the extraction could write anywhere and any word could
+// be an option. They are read only for a Windows home (a drive path): there
+// the agent's shell is PowerShell and these spellings are its own. ok is
+// false for any other home, a text that is not one clean extractor call of
+// program, or a word with no static spelling here either.
+func psArchiveCallWords(text, program, home string) (words []string, static []bool, ok bool) {
+	if len(home) < 3 || home[1] != ':' || !strings.ContainsAny(text, `$\`) {
+		return nil, nil, false
 	}
-	psNativeArchiveWords(command, words, static, cwd, text, read)
+	script, _ := psparse.Parse(text, psparse.Options{Dialect: psparse.DialectUnknown})
+	if script == nil || len(script.Diagnostics) > 0 {
+		return nil, nil, false
+	}
+	calls := 0
+	psparse.WalkCommands(script, func(command *psparse.Command) {
+		calls++
+		name, named := psparse.LiteralString(command.Name)
+		if !named {
+			return
+		}
+		if found, extractor := psNativeExtractor(strings.ToLower(name)); extractor && found == program {
+			words, static = psNativeArchiveCallWords(command, program, home)
+		}
+	})
+	if calls != 1 || len(words) == 0 || slices.Contains(static, false) {
+		return nil, nil, false
+	}
+	return words, static, true
 }
 
 // psNativeArchiveWords reads the words of one native extractor call. A whole

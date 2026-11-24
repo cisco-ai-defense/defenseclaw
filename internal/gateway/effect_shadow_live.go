@@ -11,10 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -149,21 +151,17 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		effectShadowFaultHook()
 	}
 	result := effects.Extract(call, opts)
-	accountHomes := make([]string, 0, len(opts.Accounts))
-	for _, home := range opts.Accounts {
-		if home != "" {
-			accountHomes = append(accountHomes, home)
-		}
+	facts := effectShadowFacts(request, result, opts)
+	// A PowerShell call on a POSIX host is also read with the host's paths
+	// (DET111 ruling R1): each tier keeps the stronger cell of the two
+	// readings, so the host reading only raises.
+	altOpts, hasAlt := effectPowerShellHostConflict(request, opts)
+	var altResult effects.Result
+	var altFacts []*semanticpb.EffectFact
+	if hasAlt {
+		altResult = effects.Extract(call, altOpts)
+		altFacts = effectShadowFacts(request, altResult, altOpts)
 	}
-	if opts.Flavor == effects.FlavorPOSIX {
-		accountHomes = append(accountHomes, effectMountedAccountHomes(result, request.Input.ActiveHome, opts.Login, accountHomes)...)
-	}
-	facts := effectrules.Project(result, effectrules.Env{
-		Home:         request.Input.ActiveHome,
-		Flavor:       opts.Flavor,
-		AccountHomes: accountHomes,
-		Resolve:      effectResolverOverride,
-	})
 	var aliasUses []effectAliasUse
 	if len(result.Unknowns) == 0 {
 		aliasUses = sessionEffectAliases.uses(request, result)
@@ -173,12 +171,23 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	strict := request.StrictPolicy
 	text := effectReachText(call)
 	reachEnv := newEffectReachEnv(request.Input.ActiveHome, text)
-	for i, tier := range tiers {
-		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
+	// The alias uses (sessionEffectAliases) index the effects of the call's
+	// own reading, so each reading adds them from that one (result).
+	grade := func(reading effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor, tier effectTierMode) effectClass {
+		c := classifyEffects(reading, facts, flavor, tier, reachEnv)
 		for _, use := range aliasUses {
 			addEffectAliasUse(&c, result, use)
 		}
-		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
+		effectReachUnplaced(&c, reading, facts, text, request.Input.ActiveHome, flavor)
+		return c
+	}
+	for i, tier := range tiers {
+		c := grade(result, facts, opts.Flavor, tier)
+		if hasAlt {
+			if alt := grade(altResult, altFacts, altOpts.Flavor, tier); effectClassStronger(alt, c, strict) {
+				c = alt
+			}
+		}
 		res := &results[i]
 		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
 		res.KnownMutation, res.LinkTo = c.knownMutation, c.linkTo && !c.linkAt
@@ -200,7 +209,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	for i := range results {
 		countEffectReach(results[i])
 	}
-	if effectExtractCut(result) {
+	if effectExtractCut(result) || hasAlt && effectExtractCut(altResult) {
 		return finish(effectShadowReasonCut, len(result.Effects))
 	}
 	if len(result.Unknowns) == 0 {
@@ -242,6 +251,87 @@ func addEffectAliasUse(c *effectClass, result effects.Result, use effectAliasUse
 	c.restrictedSets = dedupeStrings(append(c.restrictedSets, effectrules.SetCredentials))
 	c.writtenCredentialSets = dedupeStrings(append(c.writtenCredentialSets, proof.Set))
 	c.credentialAppend = c.credentialAppend || proof.Kind == decide.KindAppend
+}
+
+// effectShadowFacts projects one reading of the call onto the protected
+// sets of the active home and the account homes the call names.
+func effectShadowFacts(request trustedActionRequest, result effects.Result, opts effects.Options) []*semanticpb.EffectFact {
+	accountHomes := make([]string, 0, len(opts.Accounts))
+	for _, home := range opts.Accounts {
+		if home != "" {
+			accountHomes = append(accountHomes, home)
+		}
+	}
+	if opts.Flavor == effects.FlavorPOSIX {
+		accountHomes = append(accountHomes, effectMountedAccountHomes(result, request.Input.ActiveHome, opts.Login, accountHomes)...)
+	}
+	return effectrules.Project(result, effectrules.Env{
+		Home:         request.Input.ActiveHome,
+		Flavor:       opts.Flavor,
+		AccountHomes: accountHomes,
+		Resolve:      effectResolverOverride,
+	})
+}
+
+// effectPowerShellHostConflict is the second reading of a PowerShell call
+// on a Linux or macOS host (DET111 ruling R1, rel-1-0-10:GAP-1255): the path
+// flavor follows the platform of the tool's host, not the shell. effectCall
+// reads a PowerShell hint with Windows paths, and a PowerShell tool on such
+// a host (Claude Code's PowerShell tool carries no hint: only a Windows hook
+// picks a dialect) as POSIX shell text; the host reading is PowerShell
+// placed with the host's POSIX paths, where the extractor applies the
+// PowerShell provider rules (\ and / separators, ~ the home, lexical ..).
+// The ruling keeps both readings and the stronger cell of each tier, so the
+// host reading only raises. A POSIX host is a gateway that is not Windows
+// (it runs on the hook's host) and a POSIX absolute working folder or home;
+// a Windows host, or a call that shows neither, has one reading.
+func effectPowerShellHostConflict(request trustedActionRequest, opts effects.Options) (effects.Options, bool) {
+	in := request.Input
+	posix := func(p string) bool { return strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "//") }
+	if effectWindowsCall(request) || effectHostGOOS == "windows" || !posix(in.CWD) && !posix(in.ActiveHome) {
+		return opts, false
+	}
+	switch {
+	case in.DialectHint == actionfacts.DialectPowerShell:
+	case in.DialectHint == "" && opts.Dialect == effects.DialectNone:
+		switch strings.ToLower(strings.TrimSpace(in.Tool)) {
+		case "powershell", "pwsh":
+		default:
+			return opts, false
+		}
+	default:
+		return opts, false
+	}
+	host := opts
+	host.Flavor, host.Dialect = effects.FlavorPOSIX, effects.DialectPowerShell
+	host.BSDUserland = effectBSDUserland(effectHostGOOS, effects.FlavorPOSIX)
+	host.Env = nil
+	return host, true
+}
+
+// effectClassStronger reports whether a grades a call above b: a stricter
+// action, else a higher tier (restricted, then touching).
+func effectClassStronger(a, b effectClass, strict bool) bool {
+	rank := func(c effectClass) (int, int) {
+		action := 0
+		switch effectAction(c.touches, c.restrictedRuling, strict) {
+		case guardrailActionAlert:
+			action = 1
+		case guardrailActionBlock:
+			action = 2
+		}
+		tier := 0
+		switch {
+		case c.restricted:
+			tier = 2
+		case c.touches:
+			tier = 1
+		}
+		return action, tier
+	}
+	aa, at := rank(a)
+	ba, bt := rank(b)
+	return aa > ba || aa == ba && at > bt
 }
 
 // effectExtractCut reports whether the extractor stopped at one of its

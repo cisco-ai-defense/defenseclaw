@@ -1070,7 +1070,7 @@ func (w *walker) resolveWord(wd Word) Word {
 			quoted = true
 			continue
 		}
-		if i == 0 && !s.Quoted && strings.HasPrefix(lit, "~") && !isTilde(lit, w.o.flavor()) {
+		if i == 0 && !s.Quoted && strings.HasPrefix(lit, "~") && !isTilde(lit, w.o.flavor(), w.curDialect) {
 			v, ok := w.tildePrefix(lit)
 			if !ok {
 				// An account the walker cannot place (~x): the home is unknown,
@@ -1084,7 +1084,7 @@ func (w *walker) resolveWord(wd Word) Word {
 			b.WriteString(v)
 			continue
 		}
-		if i == 0 && isTilde(lit, w.o.flavor()) {
+		if i == 0 && isTilde(lit, w.o.flavor(), w.curDialect) {
 			if w.curHome == "" {
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: tildeTail(lit, wd.Segs[1:])}
 			}
@@ -4542,15 +4542,17 @@ func commandCWDOverride(program string, inner []Word) (dir string, dyn bool) {
 }
 
 // isTilde reports a leading ~ that expands to the home directory: ~ or ~/ on
-// POSIX; ~, ~/ or ~\ on Windows (review N6).
-func isTilde(lit string, flavor Flavor) bool {
+// POSIX; ~, ~/ or ~\ on Windows (review N6), and in PowerShell on every
+// platform: its FileSystem provider takes \ as a separator on Linux and
+// macOS too (rel-1-0-10:GAP-1255, New-Item -Path ~\.defenseclaw\config.yaml).
+func isTilde(lit string, flavor Flavor, dialect Dialect) bool {
 	if lit == "~" {
 		return true
 	}
 	if strings.HasPrefix(lit, "~/") {
 		return true
 	}
-	return flavor == FlavorWindows && strings.HasPrefix(lit, `~\`)
+	return (flavor == FlavorWindows || dialect == DialectPowerShell) && strings.HasPrefix(lit, `~\`)
 }
 
 // powershellLaunchCode returns the PowerShell command text a powershell/pwsh

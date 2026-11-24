@@ -23,12 +23,13 @@ import (
 // expandable / decodeBacktick, so a backtick-e or a u{} escape under
 // DialectUnknown is not static.
 func FromPwshparse(src string, opts Options) (*Script, bool) {
-	// The port reads the same input as Parse (GAP-1947): past maxInput, or
-	// nested past maxPortNesting, it declines before it parses and Parse reads
-	// the call (its first maxInput bytes, a truncated row; its depth guard). A
+	// The port reads the same input as Parse (GAP-1947): a truncated input
+	// (truncatedInput, the one byte bound of both readers, GAP-2086) or one
+	// nested past maxPortNesting declines before it parses, and Parse reads the
+	// call (its first maxInput bytes, a truncated row; its depth guard). A
 	// construct the port does not parse stops the port where it is found
 	// (ParseTreeOrDecline), so a give-up never pays for two full parses.
-	if len(src) > maxInput || nestingOver(src, maxPortNesting) {
+	if truncatedInput(src) || nestingOver(src, maxPortNesting) {
 		return nil, false
 	}
 	res := pwshparse.ParseTreeOrDecline(src)
@@ -41,9 +42,6 @@ func FromPwshparse(src string, opts Options) (*Script, bool) {
 	a.buildOffsets()
 	sc := &Script{Dialect: opts.Dialect}
 	sc.start, sc.end = 0, len(src)
-	if len(src) >= maxInput {
-		a.p.diag(0, len(src), ReasonTruncated, "input exceeded byte budget")
-	}
 	sb := a.scriptBlock(res.Root)
 	sc.Statements = sb.Statements
 	sc.Params = sb.Params
@@ -97,24 +95,165 @@ func ParseEffects(src string, opts Options) (sc *Script, port bool, err error) {
 // so without it a run of 64 KiB of { cost the port eight times Parse.
 const maxPortNesting = 8192
 
-// nestingOver reports whether the open brackets of src ( ( { [ and the $( @(
-// @{ forms) nest deeper than limit at some point, counting every bracket,
-// quoted or not: an upper bound of the parse depth in one linear pass.
+// nestingOver reports whether the brackets of src nest deeper than limit at
+// some point: ( { [ in code, and the $( ) of an expandable string. Brackets in
+// a comment, in a verbatim string or here-string, or in the literal text of an
+// expandable string do not nest in the real parser and are not counted
+// (GAP-2085): 8193 ( in a comment no longer make the port decline. One linear
+// pass, and still an upper bound of the parse depth: a form it does not take
+// apart (a '#' glued to a word, a braced variable) has its brackets counted.
 func nestingOver(src string, limit int) bool {
-	depth := 0
-	for i := 0; i < len(src); i++ {
-		switch src[i] {
-		case '(', '{', '[':
+	type resumePoint struct {
+		depth int
+		in    nestText
+	}
+	var resume []resumePoint // a $( ) of an expandable string: its ')' goes back into the string
+	depth, in, tokenStart := 0, nestCode, true
+	for i := 0; i < len(src); {
+		r, w := utf8.DecodeRuneInString(src[i:])
+		if in != nestCode {
+			switch {
+			case r == '`':
+				_, next := utf8.DecodeRuneInString(src[i+w:])
+				w += next
+			case r == '$' && strings.HasPrefix(src[i+w:], "("):
+				if depth++; depth > limit {
+					return true
+				}
+				resume = append(resume, resumePoint{depth, in})
+				in, tokenStart, w = nestCode, true, w+1
+			case in == nestDQ && isDoubleQuote(r):
+				if r2, w2 := utf8.DecodeRuneInString(src[i+w:]); isDoubleQuote(r2) {
+					w += w2 // a doubled quote is one quote of the text
+				} else {
+					in, tokenStart = nestCode, false
+				}
+			case in == nestHereDQ && r == '\n':
+				if n := hereStringClose(src[i+w:], isDoubleQuote); n > 0 {
+					in, tokenStart, w = nestCode, false, w+n
+				}
+			}
+			i += w
+			continue
+		}
+		switch {
+		case r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '\f' || r == 0xA0:
+			tokenStart = true
+		case r == '(' || r == '{' || r == '[':
 			if depth++; depth > limit {
 				return true
 			}
-		case ')', '}', ']':
+			tokenStart = r != '['
+		case r == ')' || r == '}' || r == ']':
+			if n := len(resume); n > 0 && r == ')' && resume[n-1].depth == depth {
+				in = resume[n-1].in
+				resume = resume[:n-1]
+			}
 			if depth > 0 {
 				depth--
 			}
+			tokenStart = r != ']'
+		case r == ';' || r == '|' || r == ',' || r == '&':
+			tokenStart = true
+		case r == '=':
+			// An = that starts a token is an operator, so the next rune starts one
+			// too ($x =# c is a comment); one glued to a word is word text (a=#b):
+			// tokenStart stays as it was.
+		case r == '`':
+			_, next := utf8.DecodeRuneInString(src[i+w:])
+			w += next
+			tokenStart = false
+		case r == '#' && tokenStart:
+			if end := strings.IndexByte(src[i:], '\n'); end >= 0 {
+				w = end
+			} else {
+				w = len(src) - i
+			}
+		case r == '<' && tokenStart && strings.HasPrefix(src[i+w:], "#"):
+			if end := strings.Index(src[i+w+1:], "#>"); end >= 0 {
+				w += 1 + end + 2
+			} else {
+				w = len(src) - i
+			}
+		case r == '@' && hereStringOpen(src[i+w:]) > 0:
+			q, _ := utf8.DecodeRuneInString(src[i+w:])
+			w += hereStringOpen(src[i+w:])
+			if isDoubleQuote(q) {
+				in = nestHereDQ
+				break
+			}
+			end := len(src) - i
+			for j := i + w; j < len(src); j++ {
+				if src[j] == '\n' {
+					if n := hereStringClose(src[j+1:], isSingleQuote); n > 0 {
+						end = j + 1 + n - i
+						break
+					}
+				}
+			}
+			w, tokenStart = end, false
+		case isSingleQuote(r):
+			end := len(src) - i
+			for j := i + w; j < len(src); {
+				q, qw := utf8.DecodeRuneInString(src[j:])
+				if isSingleQuote(q) {
+					if q2, qw2 := utf8.DecodeRuneInString(src[j+qw:]); isSingleQuote(q2) {
+						j += qw + qw2 // a doubled quote is one quote of the text
+						continue
+					}
+					end = j + qw - i
+					break
+				}
+				j += qw
+			}
+			w, tokenStart = end, false
+		case isDoubleQuote(r):
+			in = nestDQ
+		default:
+			tokenStart = false
 		}
+		i += w
 	}
 	return false
+}
+
+// nestText is where nestingOver is: in code, or in the text of an expandable
+// string or here-string.
+type nestText uint8
+
+const (
+	nestCode nestText = iota
+	nestDQ
+	nestHereDQ
+)
+
+// hereStringOpen is the byte length of a here-string header after its '@' (a
+// quote, then blanks to the end of the line, the newline included), or 0.
+func hereStringOpen(s string) int {
+	q, w := utf8.DecodeRuneInString(s)
+	if !isDoubleQuote(q) && !isSingleQuote(q) {
+		return 0
+	}
+	for j := w; j < len(s); j++ {
+		switch s[j] {
+		case ' ', '\t', '\r':
+		case '\n':
+			return j + 1
+		default:
+			return 0
+		}
+	}
+	return 0
+}
+
+// hereStringClose is the byte length of a here-string close at the start of
+// line s (a quote of the here-string's kind, then '@'), or 0.
+func hereStringClose(s string, quote func(rune) bool) int {
+	q, w := utf8.DecodeRuneInString(s)
+	if quote(q) && strings.HasPrefix(s[w:], "@") {
+		return w + 1
+	}
+	return 0
 }
 
 // pwErrorReason maps a pwshparse error id to the Reason code Parse uses.

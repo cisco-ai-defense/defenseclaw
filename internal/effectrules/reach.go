@@ -36,6 +36,13 @@ const (
 	ReachFS = decide.ReachFS
 )
 
+// ReasonLinkExact is the match basis of a member the resolver reached
+// through a link and found to be an exact member of the set (the link names
+// the member itself, not a file under its folder). It reads as "link"
+// everywhere, except that a write which opens the path it names takes the
+// member's own cell through it (DET111 ruling R2).
+const ReasonLinkExact = "link_exact"
+
 // ReachReasons is every reach reason, in report order.
 var ReachReasons = []string{ReachName, ReachGlob, ReachCWD, ReachRole, ReachCode, ReachFS}
 
@@ -46,7 +53,7 @@ func ReachForMatch(matchReason string, effectReasons []string) string {
 	switch matchReason {
 	case "glob":
 		return ReachGlob
-	case "link", "unresolved":
+	case "link", ReasonLinkExact, "unresolved":
 		return ReachFS
 	case "dynamic":
 		for _, r := range effectReasons {

@@ -127,15 +127,20 @@ func lowerPSParsed(s *Script, sc *psparse.Script, port bool, o Options, expandNe
 		})
 		// A child whose command line is literal is also read as the child reads
 		// it (CommandLineToArgvW, then its -Command / -EncodedCommand or cmd /c
-		// body), so what it runs is visible (DET111 R1, GAP-1577, GAP-1655). The
-		// opaque marker stays: the child's edition (and so its exact argv
-		// reading) is not known, so the call is never fully known.
+		// body), so what it runs is visible (DET111 R1, GAP-1577, GAP-1655). A
+		// powershell or pwsh child keeps the opaque marker: its edition (and so
+		// its exact argv reading) is not known, so the call is never fully
+		// known. A cmd child has no edition: cmd reads its literal command line
+		// one way, so its body is the call's reading (GAP-1577 var4: a Known
+		// write of a cmd /c body started by Start-Process is Known).
 		for n := range spShell {
-			s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
 			c, isCmd := n.(*psparse.Command)
 			text, d, ok := "", DialectNone, false
 			if isCmd {
 				text, d, ok = psStartProcessChild(c)
+			}
+			if !ok || d != DialectCMD {
+				s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
 			}
 			if !ok {
 				continue

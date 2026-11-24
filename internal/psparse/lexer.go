@@ -15,6 +15,13 @@ import (
 // command; PowerShell payloads in the corpora are far smaller.
 const maxInput = 1 << 20 // 1 MiB
 
+// truncatedInput is the one byte bound of a PowerShell reading (GAP-2086): a
+// source of maxInput bytes or more is cut here (or may have been cut to
+// maxInput by its caller), so its reading is a truncated row. Parse reads it
+// (its first maxInput bytes, with a ReasonTruncated diagnostic) and the port
+// declines it (FromPwshparse).
+func truncatedInput(src string) bool { return len(src) >= maxInput }
+
 // lexer turns PowerShell source into a token slice. It never panics: every
 // malformed construct becomes a TokError with a Reason, and scanning
 // continues from the next plausible boundary.
