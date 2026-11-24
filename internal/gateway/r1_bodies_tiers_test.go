@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
@@ -215,7 +216,13 @@ func det111R1Routes() []det111R1Route {
 			}).Action
 		}},
 		{"openclaw inspect/tool", "openclaw", func(t *testing.T, api *APIServer, ctx context.Context, cwd, command string) string {
+			start := processWork(t)
 			out := gap0437Inspect(t, api, cwd, command)
+			work := processWork(t) - start
+			det111R1MostInspectWork = max(det111R1MostInspectWork, work)
+			if work > det111R1InspectWork {
+				t.Errorf("openclaw inspect/tool did %s of work on one call, want under %s: %.120q", work.Round(time.Millisecond), det111R1InspectWork, command)
+			}
 			// the content route reports the pack's action; observe never applies here (action mode)
 			a, _ := out["action"].(string)
 			return a
@@ -223,21 +230,35 @@ func det111R1Routes() []det111R1Route {
 	}
 }
 
-// det111R1API is the server of one route and tier, ready for timed calls
-// (rel-1-0-10:GAP-1998). The first openclaw inspect/tool row of the default
-// tier answered 504 under -race in 3 runs out of 3, while every later row
-// answered in time: that call built the default rule generation and its
-// rules' literal plans inside its 200 ms deadline. The gateway now builds
-// them before the deadline starts (inspectScanBudget), so no row is warmed
-// first; the inspect route keeps the production deadline, scaled under -race
-// only (raceScanBudgetScale, as the gap0437Server tests do): a plain build
-// still judges every row on 200 ms.
+// det111R1API is the server of one route and tier (rel-1-0-10:GAP-1998).
+// These tests judge verdicts, so the inspect route gets no wall-clock deadline
+// (inspectToolScanTimeout a minute): the 504 of a call past the production
+// 200 ms is the defined fail-closed cell of a busy gateway (audited, the plugin
+// blocks it, GAP-0919), proven by its own tests, and it is not a verdict of a
+// row. The first openclaw inspect/tool row of the default tier answered 504
+// under -race in 3 runs out of 3 because that call built the default rule
+// generation and its rules' literal plans inside its deadline; the gateway now
+// builds them before the deadline starts (inspectScanBudget,
+// TestGAP1998ScanBudgetIsReadAfterTheOneTimeRuleBuild). Under 64 CPU burners
+// the heaviest row (a 4 KiB body) still ran past 800 ms of wall clock with the
+// same work. What the deadline is about, the work of one call, is bounded
+// instead: det111R1InspectWork of CPU time (processWork) per inspect call.
 func det111R1API(t *testing.T, connector, posture string, managedInstall bool, tier bounded.Tier) *APIServer {
 	t.Helper()
 	api := gap0589TierAPI(t, connector, posture, managedInstall, tier)
-	api.inspectToolScanTimeout = inspectScanTimeout * raceScanBudgetScale
+	api.inspectToolScanTimeout = time.Minute
 	return api
 }
+
+// det111R1InspectWork bounds the CPU time of one openclaw inspect/tool call of
+// these tests: the production scan budget, scaled under -race
+// (raceScanBudgetScale), times 2 for the rule scans that run in parallel
+// goroutines and for a core shared with a busy sibling thread.
+const det111R1InspectWork = 2 * inspectScanTimeout * raceScanBudgetScale
+
+// det111R1MostInspectWork is the most work of one inspect call seen so far
+// in the test process (logged, for the bound above).
+var det111R1MostInspectWork time.Duration
 
 func TestDET111R1BodiesVerdictFiveTiers(t *testing.T) {
 	home := det111R1Home(t)
@@ -261,6 +282,7 @@ func TestDET111R1BodiesVerdictFiveTiers(t *testing.T) {
 		}
 	}
 	j.finish(t)
+	t.Logf("most work of one openclaw inspect/tool call: %s (bound %s)", det111R1MostInspectWork.Round(time.Millisecond), det111R1InspectWork)
 }
 
 // det111R1Judge judges rows cell by cell and keeps the pending rows honest.
