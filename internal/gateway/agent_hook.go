@@ -2858,10 +2858,10 @@ func (a *APIServer) hookFailedCheckResponse(
 				connectorName, req.HookEventName, recovered)
 			out = resp
 			out.HookOutput = failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, plain, resp.AdditionalContext)
-			out = lifecycleOutput(out)
+			out = withCopilotBlockedPrompt(req, lifecycleOutput(out))
 		}
 	}()
-	return lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
+	return withCopilotBlockedPrompt(req, lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)))
 }
 
 // failedCheckNativeAction is the closed answer of a failed check (and of a
@@ -2890,7 +2890,23 @@ func failedCheckNativeAction(ctx context.Context, profile connector.HookProfile,
 	if everyNativeBlock && action == "allow" && nativeOnlyBlockEvent(connectorName, req.HookEventName) {
 		return "block", false
 	}
+	if action == "allow" && copilotBlockedPromptRewrite(req, "action", "block") {
+		// The gateway's replacement is the block of a Copilot CLI prompt
+		// (GAP-1730), so a closed failed check replaces it too
+		// (withCopilotBlockedPrompt, GAP-1753).
+		return "block", false
+	}
 	return action, wouldBlock
+}
+
+// withCopilotBlockedPrompt gives a blocked Copilot CLI prompt of a failed
+// check the generic replacement, the hook output that carries the block
+// (GAP-1753). Any other answer is returned unchanged.
+func withCopilotBlockedPrompt(req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if resp.Action == "block" && copilotBlockedPromptRewrite(req, "action", "block") {
+		resp.HookOutput = copilotBlockedPromptOutput(req, "action", "block", nil, resp.HookOutput)
+	}
+	return resp
 }
 
 // nativeOnlyBlockEvent names the events whose native hook can block although
@@ -3942,8 +3958,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// profile an action-mode block replaces userPromptTransformed before the
 	// model sees it (GAP-1730). Record that completed replacement as the
 	// effective block; observe mode and every non-rewrite path keep their
-	// mapped outcome.
-	if copilotBlockedPromptRewrite(req, mode, rawAction) {
+	// mapped outcome. The mode is the enforced one, as for every other event
+	// (GAP-1753).
+	if copilotBlockedPromptRewrite(req, effectiveMode, rawAction) {
 		action, wouldBlock = "block", false
 		aiDefenseEnforced = verdict.aiDefenseBlock
 	}
@@ -3969,7 +3986,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
-	resp.HookOutput = copilotBlockedPromptOutput(req, mode, rawAction, findings, resp.HookOutput)
+	resp.HookOutput = copilotBlockedPromptOutput(req, effectiveMode, rawAction, findings, resp.HookOutput)
 	// Secure Client keeps the block message as the reason of the hook
 	// records (issue #1092).
 	if !a.managedAIDOnly() {

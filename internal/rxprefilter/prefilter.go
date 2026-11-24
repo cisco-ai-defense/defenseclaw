@@ -262,6 +262,14 @@ type Text struct {
 	// runMu guards runs, the runs of the text per set of bytes (windows.go).
 	runMu sync.Mutex
 	runs  map[runKey]runSet
+	// valid and aligned (guarded by mu) say whether the text is valid UTF-8
+	// and whether its fold keeps every rune's width (literal_ranges.go).
+	valid, validDone   bool
+	aligned, alignDone bool
+	// hitMu guards hitSets, the literal hits of the text per search plan
+	// (literal_ranges.go).
+	hitMu   sync.Mutex
+	hitSets map[*literalPlan]hitSet
 }
 
 // NewText returns the check state for text.

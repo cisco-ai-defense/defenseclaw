@@ -59,8 +59,8 @@
     "/usr/local/lib/defenseclaw/hooks/copilot-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7178,
-      "sha256": "b37660a1da1af642a879f0abcba004d4b0e0d60793dbe9cd8fc197e44a89b248"
+      "size": 10467,
+      "sha256": "aa76d7f4811921d112f5bfbda35e51fca3ab9be7a6a5a465e8f7c54e0d0192e3"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

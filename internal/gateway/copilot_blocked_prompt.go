@@ -6,6 +6,8 @@ package gateway
 import (
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 // GitHub Copilot drops the output of a userPromptSubmitted hook, so that
@@ -17,10 +19,17 @@ import (
 // the effective verdict is block (not would-block). Copilot's timeline still
 // shows the user's prompt. Observe mode keeps the no-modification contract
 // (GAP-1730; it reverses the GAP-0786 record-only ruling for Copilot).
+//
+// The mode is the one the hook enforces (effectiveMode), not the configured
+// one: a verdict that must be enforced in observe mode and a failed check
+// (closed in observe mode too) replace the prompt as well (GAP-1753). The
+// native hook writes the generic replacement itself when a block arrives
+// without one (hookexec.CopilotBlockedPromptText, GAP-1752).
 
 // copilotBlockedPromptRewrite reports whether this decision will replace the
 // prompt Copilot sends to the model. Callers use the same predicate for the
-// returned vendor payload and the effective audit/telemetry outcome.
+// returned vendor payload and the effective audit/telemetry outcome, with the
+// effective mode.
 func copilotBlockedPromptRewrite(req agentHookRequest, mode, rawAction string) bool {
 	return req.ConnectorName == "copilot" && canonicalEvent(req.HookEventName) == "userprompttransformed" &&
 		mode == "action" && normalizeCodexAction(rawAction) == "block"
@@ -55,7 +64,7 @@ func copilotBlockedPromptText(findings []string) string {
 		id := strings.TrimPrefix(strings.TrimSpace(finding), "ai-defense:")
 		label := ciscoFindingDisplayLabel(id)
 		if id != ciscoUnknownFindingID && label == ciscoFindingDisplayLabel(ciscoUnknownFindingID) {
-			return lead + "DefenseClaw blocked this prompt under the configured security policy."
+			return hookexec.CopilotBlockedPromptText
 		}
 		if !seen[label] {
 			seen[label] = true
@@ -63,7 +72,7 @@ func copilotBlockedPromptText(findings []string) string {
 		}
 	}
 	if len(labels) == 0 {
-		return lead + "DefenseClaw blocked this prompt under the configured security policy."
+		return hookexec.CopilotBlockedPromptText
 	}
 	sort.Strings(labels)
 	return lead + "DefenseClaw blocked this prompt. Cisco AI Defense: " + strings.Join(labels, ", ") + "."

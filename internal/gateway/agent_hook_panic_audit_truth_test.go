@@ -348,6 +348,10 @@ func TestRecoveredPanicAnswerAndAuditRowForEveryEvent(t *testing.T) {
 								}
 							default:
 								healthy := agentHookResponseForProfile(profile, req, want, "block", "WARN", "healthy comparison", nil, "action", false, profile.Capabilities)
+								// A healthy action-mode block of a Copilot CLI prompt is its
+								// replacement, added after the profile's answer (evaluateAgentHook,
+								// GAP-1730); a closed failed check carries it too (GAP-1753).
+								healthy.HookOutput = copilotBlockedPromptOutput(req, "action", "block", nil, healthy.HookOutput)
 								if got, wantShape := nativeControlShape(t, output), nativeControlShape(t, healthy.HookOutput); !reflect.DeepEqual(got, wantShape) {
 									t.Errorf("%s: native output=%v, want the healthy %s control %v", cell, got, want, wantShape)
 									return

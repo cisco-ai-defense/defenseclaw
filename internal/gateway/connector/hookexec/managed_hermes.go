@@ -166,12 +166,13 @@ func failOpenOnlyCloses(opts Options, sp spec) bool {
 	switch sp.connector {
 	case "copilot":
 		if !opts.ManagedEnterprise {
-			return perUserCopilotFailsClosed(opts, sp) && (opts.Event == "preToolUse" || opts.Event == "permissionRequest")
+			return perUserCopilotFailsClosed(opts, sp) &&
+				(opts.Event == "preToolUse" || opts.Event == "permissionRequest" || copilotCLIPromptEvent(opts, sp))
 		}
 		if sp.dialect == copilotVSCodeLocalSurface {
 			return copilotVSCodeLocalOutput(opts.Event, "block", failedClosed) != ""
 		}
-		return opts.Event == "preToolUse" || opts.Event == "permissionRequest"
+		return opts.Event == "preToolUse" || opts.Event == "permissionRequest" || copilotCLIPromptEvent(opts, sp)
 	case "hermes":
 		return hermesBlocksFailures(opts, sp)
 	}
