@@ -43,8 +43,16 @@ func TestCLIRestartProcessProbe(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("running\n"), 0o600); err != nil {
 		os.Exit(2)
 	}
+	// The probe lives only as long as the test process that started it
+	// (GAP-1056): a test binary cut off by its timeout or killed runs no
+	// cleanup, and its probes slept forever with ppid 1, keeping the fds it
+	// inherited (a gate box's heavy-slot lock) open.
+	parent := os.Getppid()
 	for {
-		time.Sleep(time.Second)
+		time.Sleep(200 * time.Millisecond)
+		if os.Getppid() != parent {
+			os.Exit(0)
+		}
 	}
 }
 
@@ -88,6 +96,7 @@ func TestRunRestartRefusesUnsafeIdentityBeforeStoppingHealthyGateway(t *testing.
 		t.Fatalf("start CLI restart probe: %v", err)
 	}
 	// Register before any Fatalf so a failed wait never leaks the probe.
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() {
 		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
 		_ = d.Stop(3 * time.Second)
@@ -120,6 +129,7 @@ func TestRunStartRefusesUnsafeIdentityBeforeAlreadyRunningFastPath(t *testing.T)
 		t.Fatalf("start CLI start probe: %v", err)
 	}
 	// Register before any Fatalf so a failed wait never leaks the probe.
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() {
 		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
 		_ = d.Stop(3 * time.Second)

@@ -41,9 +41,11 @@ func TestStopPerUserGatewayForPurgeStopsTheRunningGateway(t *testing.T) {
 	t.Setenv(cliRestartProbeEnv, marker)
 
 	gateway := daemon.New(config.DefaultDataPath())
-	if _, err := gateway.Start([]string{"-test.run=^TestCLIRestartProcessProbe$"}); err != nil {
+	pid, err := gateway.Start([]string{"-test.run=^TestCLIRestartProcessProbe$"})
+	if err != nil {
 		t.Fatalf("start the probe gateway: %v", err)
 	}
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() { _ = gateway.Stop(3 * time.Second) })
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
