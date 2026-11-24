@@ -4,6 +4,7 @@
 package enterprisepolicy
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"testing"
@@ -50,7 +51,10 @@ func runGAP1833FloorRaces(t *testing.T, fresh func(t *testing.T) gap1833FloorEnv
 		name string
 		// published: the pass runs on a floor DefenseClaw already wrote.
 		published bool
-		change    func(t *testing.T, env gap1833FloorEnv)
+		// every: the change lands at every lock the pass takes (a busy
+		// writer), not only the first.
+		every  bool
+		change func(t *testing.T, env gap1833FloorEnv)
 		// stale is what a pass that applied the plan read before the change
 		// would leave; the row fails if the pass leaves it.
 		stale func(gap1833FloorOutcome) bool
@@ -102,6 +106,18 @@ func runGAP1833FloorRaces(t *testing.T, fresh func(t *testing.T) gap1833FloorEnv
 		},
 		stale: func(o gap1833FloorOutcome) bool { return o.floor != wantClaudeFloorBytes || !o.recorded },
 	}, {
+		name:      "a busy administrator rewrites managed-settings.json at every lock",
+		published: true,
+		every:     true,
+		change: func() func(t *testing.T, env gap1833FloorEnv) {
+			n := 0
+			return func(t *testing.T, env gap1833FloorEnv) {
+				n++
+				env.write(t, base(env), fmt.Sprintf("{\"requiredMinimumVersion\": \"2.1.%d\"}\n", 300+n%2))
+			}
+		}(),
+		stale: func(o gap1833FloorOutcome) bool { return o.floor != "" },
+	}, {
 		name:      "the floor record is rewritten",
 		published: true,
 		change: func(t *testing.T, env gap1833FloorEnv) {
@@ -138,8 +154,12 @@ func runGAP1833FloorRaces(t *testing.T, fresh func(t *testing.T) gap1833FloorEnv
 				}
 				locked := plain
 				if between {
+					changed := false
 					locked = func(fn func(string) error) error {
-						race.change(t, env)
+						if race.every || !changed {
+							race.change(t, env)
+							changed = true
+						}
 						return fn(dir)
 					}
 				} else {

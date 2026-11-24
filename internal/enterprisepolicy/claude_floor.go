@@ -622,26 +622,43 @@ func reconcileClaudeVersionFloorFor(opts Options, connectors []string, transacti
 	// takes about 230 ms on Windows, the transient-name retries of
 	// readPolicyFile, and that read held the lock on every guardian pass
 	// (GAP-1833). Under the lock the pass only checks that every file the
-	// plan was made from is still the same file with the same bytes; any
-	// change, or a snapshot that could not be taken, reads everything again
-	// under the lock, as before.
-	var snapshot *claudeFloorSnapshot
-	if active {
-		snapshot = snapshotClaudeVersionFloor(opts)
-	}
-	return transaction(func(policyDir string) error {
-		if err := requireClaudeFloorDir(opts, policyDir); err != nil {
+	// plan was made from is still the same file with the same bytes. A
+	// change releases the lock and the pass reads again before taking it
+	// again; a second change, or a snapshot that cannot be taken, reads
+	// everything under the lock, as before.
+	for attempt := 1; ; attempt++ {
+		var snapshot *claudeFloorSnapshot
+		if active {
+			snapshot = snapshotClaudeVersionFloor(opts)
+		}
+		last := snapshot == nil || attempt == claudeFloorSnapshotAttempts
+		done := false
+		err := transaction(func(policyDir string) error {
+			if err := requireClaudeFloorDir(opts, policyDir); err != nil {
+				return err
+			}
+			switch {
+			case !active:
+				done = true
+				return removeClaudeVersionFloor(opts, state)
+			case snapshot.unchanged(opts):
+				done = true
+				return applyClaudeVersionFloorPlan(opts, policy, snapshot.plan, state)
+			case last:
+				done = true
+				return applyClaudeVersionFloor(opts, policy, state)
+			}
+			return nil
+		})
+		if err != nil || done {
 			return err
 		}
-		if !active {
-			return removeClaudeVersionFloor(opts, state)
-		}
-		if snapshot.unchanged(opts) {
-			return applyClaudeVersionFloorPlan(opts, policy, snapshot.plan, state)
-		}
-		return applyClaudeVersionFloor(opts, policy, state)
-	})
+	}
 }
+
+// claudeFloorSnapshotAttempts bounds the snapshots of one version floor pass:
+// a source that changes again after the second is read under the lock.
+const claudeFloorSnapshotAttempts = 2
 
 // requireClaudeFloorDir refuses a transaction whose lock guards a different
 // directory than the one the floor is written to.

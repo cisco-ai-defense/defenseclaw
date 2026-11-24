@@ -64,9 +64,10 @@ func TestGAP1833VersionFloorPassHoldsTheRealClaudePolicyLockUnderTheBar(t *testi
 			}
 		}
 		got := holds()
-		// A pass that takes no lock proves nothing.
-		if len(got) != passes {
-			t.Fatalf("%s took the real Claude policy lock %d times in %d passes, want one each", name, len(got), passes)
+		// A pass that takes no lock proves nothing; one whose sources
+		// changed after its unlocked read takes it again.
+		if len(got) < passes {
+			t.Fatalf("%s took the real Claude policy lock %d times in %d passes, want at least one each", name, len(got), passes)
 		}
 		t.Logf("GAP1833 %-32s real lock-held p50 %8s max %8s (n=%d)", name, got[len(got)/2], got[len(got)-1], len(got))
 		return got

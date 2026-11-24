@@ -180,7 +180,7 @@ func (in claudeFloorInput) unchanged() bool {
 	if err != nil || !info.Mode().IsRegular() || !os.SameFile(in.info, info) {
 		return false
 	}
-	file, err := openNoFollow(in.path)
+	file, err := openNoFollowOnce(in.path)
 	if err != nil {
 		return false
 	}
