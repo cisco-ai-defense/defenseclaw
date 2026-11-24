@@ -184,9 +184,13 @@ type accountOpenShell struct {
 	// database (readGatewayDBMigration).
 	gatewayDB func(ctx context.Context, path string) (level int, exists bool, err error)
 
-	// installed is the release this process installed or found intact.
-	mu        sync.Mutex
-	installed string
+	// installed is the release this process installed or found intact;
+	// adminVersion the release of the administrator's gateway binary as
+	// adminVersionKey (its path and file state) last read it.
+	mu              sync.Mutex
+	installed       string
+	adminVersion    string
+	adminVersionKey string
 }
 
 var _ daemonOpenShell = (*accountOpenShell)(nil)
@@ -507,6 +511,14 @@ func (o *accountOpenShell) Prepare(ctx context.Context, s sandboxrelay.DaemonSet
 		if cli, err = o.adminBinary(openshell.DefaultBinary); err != nil {
 			return false, openShellPrerequisiteError("the administrator's OpenShell is not usable: %v", err)
 		}
+		// Never start an older administrator gateway over a database a
+		// newer one migrated (rel-1-0-10:GAP-2070). A gateway still
+		// running from before a lowered binary is refused too: it errs
+		// toward refusing, as status and doctor say.
+		if reason, recovery := o.prerequisiteConflict(ctx, s); reason != "" {
+			o.logf("%s: the OpenShell gateway is not started", reason)
+			return false, openShellPrerequisiteError("%s; %s", reason, recovery)
+		}
 	}
 	started, err := o.ensureRunning(ctx, port, s.Enterprise.GatewayConfigPath)
 	if err != nil {
@@ -825,7 +837,7 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 			}
 			return false
 		}
-	} else if s.Enterprise.Install != config.EnterpriseOpenShellInstallSetup && !o.managedUnitActive(ctx) {
+	} else if s.Enterprise.Install != config.EnterpriseOpenShellInstallSetup && !o.managedUnitActive(ctx) && o.EarlierGateway(ctx, s) == "" {
 		return false
 	}
 	var err error
@@ -837,7 +849,17 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 		label, _ := openShellGatewayAgent()
 		target := o.launchDomain(ctx) + "/" + label
 		if _, perr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); perr != nil {
-			return false
+			// A package upgrade renamed the job while sandboxes ran: the
+			// gateway still runs under the earlier DefenseClaw's label,
+			// whose plist is gone, so it is booted out, and the next start
+			// loads the installed label (rel-1-0-10:GAP-2073).
+			earlier := o.EarlierGateway(ctx, s)
+			if earlier == "" {
+				return false
+			}
+			o.syncBeforeStop(ctx, s)
+			out, err = o.run(ctx, daemonLaunchctl, []string{"bootout", earlier}, nil)
+			break
 		}
 		o.syncBeforeStop(ctx, s)
 		out, err = o.run(ctx, daemonLaunchctl, []string{"kill", "SIGTERM", target}, nil)
@@ -850,6 +872,52 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 	}
 	o.logf("stopped your OpenShell gateway: no sandbox of yours runs")
 	return true
+}
+
+// EarlierGateway is the launchd target ("gui/UID/LABEL") of the account's
+// OpenShell gateway job when it runs under an earlier DefenseClaw's label
+// and the installed label does not run: a package upgrade renamed the
+// LaunchAgent while sandboxes ran, and the lifecycle left that job to
+// stop with them (rel-1-0-10:GAP-2073). "" otherwise, and off macOS.
+func (o *accountOpenShell) EarlierGateway(ctx context.Context, _ sandboxrelay.DaemonSettings) string {
+	if o.goos != "darwin" {
+		return ""
+	}
+	label, _ := openShellGatewayAgent()
+	domain := o.launchDomain(ctx)
+	running := func(target string) bool {
+		out, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
+		return err == nil && openshell.ParseLaunchAgentState([]byte(out)).State == "running"
+	}
+	if running(domain + "/" + label) {
+		return ""
+	}
+	listing, err := o.run(ctx, daemonLaunchctl, []string{"print", domain}, nil)
+	if err != nil {
+		return ""
+	}
+	for _, old := range openshell.LaunchAgentLabelsIn([]byte(listing), openshell.GatewayAgentBase) {
+		if old != label && running(domain+"/"+old) {
+			return domain + "/" + old
+		}
+	}
+	return ""
+}
+
+// earlierGatewayReporter is the daemonOpenShell that can name a gateway job
+// of an earlier DefenseClaw (accountOpenShell.EarlierGateway).
+type earlierGatewayReporter interface {
+	EarlierGateway(ctx context.Context, s sandboxrelay.DaemonSettings) string
+}
+
+var _ earlierGatewayReporter = (*accountOpenShell)(nil)
+
+// updateWaitsError refuses a run while the gateway still runs under an
+// earlier DefenseClaw's job and a sandbox of the account runs on it: the
+// update finishes when they stop, with no repair for IT (GAP-2073).
+func updateWaitsError() error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
+		Message: sandboxapi.UpdateWaitsForSandboxes(), Detail: sandboxrelay.EventSettingsDrift}
 }
 
 // syncBeforeStop syncs the disk of every MicroVM the account's gateway lists
@@ -1172,6 +1240,23 @@ func driftFields(drift []openshell.SettingDrift) string {
 // managed gateway is started and registered (and in setup mode installed
 // first). The caller holds the lifecycle.
 func (d *SandboxDaemon) readyOpenShell(ctx context.Context, s sandboxrelay.DaemonSettings, registration string) error {
+	// The gateway of an earlier DefenseClaw's job (a package upgrade while
+	// sandboxes ran) differs from the render and paused every run with an
+	// "ask IT" text, though the lifecycle promises that the first start
+	// after the sandboxes stop replaces it. It is replaced here once no
+	// sandbox and no MicroVM of the account runs; until then the run
+	// waits for them (rel-1-0-10:GAP-2073).
+	if r, ok := d.openShell.(earlierGatewayReporter); ok && r.EarlierGateway(ctx, s) != "" {
+		if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
+			return updateWaitsError()
+		}
+		if n, err := d.microVMs(ctx); err != nil || n > 0 {
+			return updateWaitsError()
+		}
+		if !d.openShell.Stop(ctx, s) {
+			return openShellPrerequisiteError("the OpenShell gateway of the earlier DefenseClaw could not be stopped; ask IT to run `%s`", openShellGatewayRepairCommand)
+		}
+	}
 	drift, err := d.openShell.Drift(s)
 	if err != nil {
 		return openShellPrerequisiteError("the administrator's rendered OpenShell configuration cannot be read: %v", err)

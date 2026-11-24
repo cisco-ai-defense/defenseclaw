@@ -64,6 +64,8 @@ type openShellRig struct {
 	// pid and args are the gateway port's listener and its command line.
 	pid  int
 	args string
+	// gatewayVersion is what `openshell-gateway --version` prints.
+	gatewayVersion string
 }
 
 func newOpenShellRig(t *testing.T, goos string) *openShellRig {
@@ -97,6 +99,9 @@ func newOpenShellRig(t *testing.T, goos string) *openShellRig {
 		}
 		if r.active && strings.HasPrefix(line, "systemctl --user is-active ") {
 			return "active", nil
+		}
+		if r.gatewayVersion != "" && line == "openshell-gateway --version" {
+			return r.gatewayVersion, nil
 		}
 		if r.state != "" && strings.HasPrefix(line, "systemctl --user is-active ") {
 			return r.state, errors.New("exit status 3")
