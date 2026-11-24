@@ -223,7 +223,7 @@ func TestGAP2170LongInterleavedAnswerStreamsLive(t *testing.T) {
 					row := gap1265Row{name: "long-answer-live", tier: pack, pack: pack, pieces: pieces, at: len(pieces) - 1, pause: gap2162Pause, wantBlocked: true, secret: secret}
 					results, _ := gap1265Serve(t, path, []gap1265Row{row})
 					got := results[0]
-					if !bytes.Contains([]byte(got.snapRaw), []byte(marker)) {
+					if shape != "anthropic" && !bytes.Contains([]byte(got.snapRaw), []byte(marker)) {
 						t.Error("answer stayed held behind reasoning")
 					}
 					if !got.blocked {
@@ -237,6 +237,66 @@ func TestGAP2170LongInterleavedAnswerStreamsLive(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// A signed thinking block must reach the client byte-for-byte when the
+// benign run proves clean. Rewriting it breaks a later signed tool turn.
+func TestGAP2170SignedReasoningWireUnchanged(t *testing.T) {
+	reasoning := retestFiller(2048)[:2048] + " option 3"
+	signature := "synthetic-signature"
+	for _, shape := range []string{"anthropic", "bedrock-converse"} {
+		for _, pack := range []string{"default", "strict"} {
+			t.Run(shape+"/"+pack, func(t *testing.T) {
+				var f streamTailFormat
+				var frames []string
+				switch shape {
+				case "anthropic":
+					f = streamTailFormatNamed(t, "anthropic")
+					frames = []string{
+						strings.TrimPrefix(gap2162AnthropicStart(0, map[string]any{"type": "thinking", "thinking": "", "signature": ""}), gap1265Raw),
+						strings.TrimPrefix(gap2162AnthropicDelta(0, "thinking_delta", reasoning), gap1265Raw),
+						strings.TrimPrefix(gap2162Event("content_block_delta", map[string]any{"index": 0, "delta": map[string]any{"type": "signature_delta", "signature": signature}}), gap1265Raw),
+						strings.TrimPrefix(gap2162AnthropicStop(0), gap1265Raw),
+						strings.TrimPrefix(gap2162AnthropicStart(1, map[string]any{"type": "text", "text": ""}), gap1265Raw),
+						strings.TrimPrefix(gap2162AnthropicDelta(1, "text_delta", "All clear.\n"), gap1265Raw),
+						strings.TrimPrefix(gap2162Event("message_stop", map[string]any{}), gap1265Raw),
+					}
+				case "bedrock-converse":
+					f = streamTailFormat{name: "bedrock-converse", provider: "bedrock", path: "/model/m/converse-stream", ctype: ctEvents}
+					frames = []string{
+						eventStreamBody(t, "contentBlockDelta", streamTailJSON(map[string]any{"contentBlockIndex": 0, "delta": map[string]any{"reasoningContent": map[string]any{"text": reasoning, "signature": signature}}})),
+						eventStreamBody(t, "contentBlockDelta", streamTailJSON(map[string]any{"contentBlockIndex": 1, "delta": map[string]any{"text": "All clear.\n"}})),
+						eventStreamBody(t, "messageStop", "{}"),
+					}
+				}
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", f.ctype)
+					for i, frame := range frames {
+						_, _ = io.WriteString(w, frame)
+						w.(http.Flusher).Flush()
+						if shape == "bedrock-converse" && i == 0 {
+							// Converse has no content-free keepalive; this idle interval
+							// exercises the old mask-on-idle path as well.
+							time.Sleep(streamKeepAliveAfter + 200*time.Millisecond)
+						}
+					}
+				}))
+				defer upstream.Close()
+				registerRawForwardProviderDomain(t, upstream.URL, f.provider)
+				allowRawForwardPrivateTargets(t)
+				proxy := gap0429Proxy(t, &mockProvider{}, retestInspector())
+				rec := httptest.NewRecorder()
+				proxy.handlePassthrough(rec, streamTailWithTier(streamTailRequest(t, f, "", upstream.URL), pack, false))
+				got := rec.Body.Bytes()
+				if !bytes.Contains(got, []byte(streamTailJSON(reasoning))) {
+					t.Error("signed reasoning text changed on the wire")
+				}
+				if !bytes.Contains(got, []byte(signature)) {
+					t.Error("thinking signature was not preserved")
+				}
+			})
 		}
 	}
 }

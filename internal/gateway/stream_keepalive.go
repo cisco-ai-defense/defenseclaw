@@ -40,13 +40,11 @@ import (
 //     ping event.
 //   - (b) where the framing has no content-free event, it checks the held
 //     text, then releases the held events with the bytes of the open run
-//     masked ('*' for each letter and digit), never raw: Bedrock
-//     ConverseStream, InvokeModelWithResponseStream for another model, and
-//     an Anthropic invoke stream before its first event went out (a ping
-//     before message_start breaks the SDK). Only when rel would have sent
-//     those events (past the initial buffer). The run stays open: what
-//     follows it is held again, and the check reads it whole with the rest.
-//     An event that cannot be rewritten keeps everything held, as before.
+//     masked ('*' for each letter and digit), never raw, only for
+//     unsigned providers. Signed Bedrock reasoning remains queued intact.
+//     Only when rel would have sent those events (past the initial buffer).
+//     The run stays open: what follows it is held again, and the check reads
+//     it whole with the rest. An event that cannot be rewritten stays held.
 //
 // An open private-key block keeps its own TRUNCATED idle bound (GAP-0429).
 
@@ -157,7 +155,7 @@ func maskRunText(s string) string {
 // Bedrock event take (bedrockStreamDelta, bedrockInvokeChunkPieces:
 // anthropicStreamPieces, chatChoicesPieces, Mistral outputs; generation,
 // outputText, completion, text). A run in a typed lane is looked for only
-// in those; a run in the walker's lane (responseFieldOther) only in the
+// in those; delta covers OpenAI Responses reasoning deltas. A run in the walker's lane (responseFieldOther) only in the
 // other strings the walker reads. The padding of a frame ("p"), its event
 // type or other metadata never holds a typed run: when a padding value
 // ended like the run, it took the match and the start of the run went out

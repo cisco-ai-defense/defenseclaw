@@ -404,7 +404,10 @@ func (s *passthroughStream) run() {
 	// holding unrelated answer events behind it (GAP-2170). The existing
 	// lane-aware mask validator refuses an event it cannot rewrite safely.
 	maskParkedReasoning := func() bool {
-		if relN == 0 {
+		// Anthropic and Bedrock sign thinking blocks. A masked byte with the
+		// original signature breaks the next tool turn. Only OpenAI reasoning
+		// is unsigned, so signed providers keep the original queued hold.
+		if s.provider != "openai" || relN == 0 {
 			return false
 		}
 		runs := accumulated.ParkedReasoningRuns()
@@ -477,6 +480,11 @@ func (s *passthroughStream) run() {
 		}
 		if !scanText(true) {
 			return false
+		}
+		// Bedrock reasoning can be signed. Keep its queued bytes intact
+		// while an open run waits for more text, as in rel/1.0.10.
+		if s.provider == "bedrock" {
+			return true
 		}
 		runs := accumulated.OpenRuns()
 		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
