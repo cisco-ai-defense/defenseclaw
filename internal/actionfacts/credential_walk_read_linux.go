@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"sync"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -103,12 +104,16 @@ func readCredentialWalkFolder(dir string, each func(name []byte, folder, regular
 // no lookup of a path (substrate-1:GAP-0674, RV-T6C P4-1).
 func credentialWalkSearchable(dirfd int) bool {
 	for {
-		err := unix.Faccessat(dirfd, ".", unix.X_OK, 0)
-		if !errors.Is(err, unix.EINTR) {
-			return err == nil
+		_, _, errno := unix.Syscall(unix.SYS_FACCESSAT, uintptr(dirfd), uintptr(unsafe.Pointer(&credentialWalkDot[0])), unix.X_OK)
+		if errno != unix.EINTR {
+			return errno == 0
 		}
 	}
 }
+
+// credentialWalkDot is ".", NUL-terminated, for credentialWalkSearchable: a
+// check that converts no string.
+var credentialWalkDot = [2]byte{'.', 0}
 
 func credentialWalkOpen(dir string) (int, error) {
 	for {
