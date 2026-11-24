@@ -2461,7 +2461,7 @@ func TestScansSkipMacOSPromptFoldersWithoutFullDiskAccess(t *testing.T) {
 	fullDiskAccess := false
 	macOSFullDiskAccess = func() bool { return fullDiskAccess }
 
-	home := t.TempDir()
+	home := realTempDir(t)
 	for _, dir := range []string{"Desktop/app", "Documents/app", "Downloads/app", "work/app"} {
 		mustWrite(t, filepath.Join(home, dir, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
 	}

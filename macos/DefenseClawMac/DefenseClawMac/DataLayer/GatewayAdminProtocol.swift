@@ -66,6 +66,22 @@ enum GatewayAdminPolicy {
     }()
     static let helperRelativePath = "Contents/Library/LaunchServices/DefenseClawGatewayHelper"
     static let maximumOutputBytes = 1_048_576
+    /// How long the app waits for the helper's repair reply, in seconds.
+    static let repairReplySeconds = 240
+    /// How long the helper's ownership walks may run, counted from the
+    /// request: past it a walk stops where it is and the repair reports
+    /// itself unfinished, so the reply reaches the app inside
+    /// repairReplySeconds even for a home too large to return in one repair
+    /// (about 1.2 ms per handed-over file on an EBS-backed Mac); the next
+    /// repair returns the rest (GAP-2003).
+    static let repairWalkSeconds = 200
+
+    /// The helper's exit code when a walk stopped at that deadline and the
+    /// repair is unfinished: unlike 1 (what is left cannot be returned by
+    /// repeating the repair), repairing again returns the rest. The app keeps
+    /// offering the repair while the helper answers it, whatever the
+    /// top-level files then show (GAP-2003).
+    static let repairUnfinishedExitCode: Int32 = 3
 
     /// Explicit per-operation administrator authentication. Both ends verify
     /// this definition so a preexisting same-name `allow` rule is never trusted.

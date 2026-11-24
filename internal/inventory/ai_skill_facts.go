@@ -121,11 +121,20 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	// A managed Windows scan reads every folder each time: the metadata a
 	// user can write back by hand there is all the cache could check.
 	signed = signed && (skillChangeStampTamperEvident || !s.opts.ManagedEnterprise)
+	location, inHome := s.skillLocation(path)
+	// Only a folder outside every home is ever reported as managed.
+	var managedProbe func(*os.File, string) bool
+	if !bundled && !inHome {
+		managedProbe = skillFolderManaged
+	}
 	hashed, read, keep := cached, int64(0), false
+	managed := false
 	if !inCache || !signed || !cached.fresh(signature, now) {
 		var manifest []byte
 		hashed = skillHashCacheEntry{signature: signature, hashedAt: now}
-		hashed.hash, hashed.status, manifest, hashed.manifestPath, read = hashSkillFolderCaptureNamed(path, limit, maxSkillBytes, s.skillFolderTrust(path))
+		hashed.hash, hashed.status, manifest, hashed.manifestPath, read, hashed.managed = hashSkillFolderCaptureNamed(
+			path, limit, maxSkillBytes, s.skillFolderTrust(path), managedProbe)
+		managed = hashed.managed
 		hashed.front = parseSkillFrontMatter(manifest)
 		if hashed.status == SkillContentOK && manifest != nil {
 			hashed.manifestHash = skillManifestHash(manifest)
@@ -139,8 +148,11 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 		// is not kept: a later same-size write could carry the same stamp and
 		// leave the signature as it was (skillHashCacheRacyWindow).
 		keep = keep && !skillSignatureRacy(newest, now)
+	} else if managedProbe != nil {
+		// Nothing was read this scan: the label is the hashed result's, and
+		// the folder must still be one only administrators can change.
+		managed = hashed.managed && skillFolderManagedNow(path)
 	}
-	location, inHome := s.skillLocation(path)
 	facts := AISkillFacts{
 		ContentHash: hashed.hash, ContentStatus: hashed.status, Scope: SkillScopeUser, Location: location,
 		Author: hashed.front.author, Description: hashed.front.description, Version: hashed.front.version,
@@ -149,7 +161,7 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	switch {
 	case bundled:
 		facts.Scope = SkillScopeBundled
-	case !inHome && skillFolderManaged(path):
+	case managed:
 		facts.Scope = SkillScopeManaged // an admin folder such as /etc/codex/skills
 	}
 	s.skillBytesRead += read
@@ -172,6 +184,17 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 		}
 	}
 	return &facts
+}
+
+// skillFolderManagedNow decides skillFolderManaged for the folder at path
+// from a fresh open, when the scan did not read the folder.
+func skillFolderManagedNow(path string) bool {
+	dir, err := safefile.OpenDirectoryNoFollow(path)
+	if err != nil {
+		return false
+	}
+	defer dir.Close()
+	return skillFolderManaged(dir, path)
 }
 
 // skillNow is the time a skill folder's hash is read at, for the racy-entry
@@ -253,36 +276,48 @@ var skillReadDir = (*os.File).ReadDir
 // targets without opening those targets. It retains a root SKILL.md prefix
 // from the same bounded, stable read that supplies that file's digest, and
 // returns that manifest's exact path, so a later readback never lists again.
-func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, trusted func(*os.File, string) bool) (hash, status string, manifest []byte, manifestPath string, consumed int64) {
-	dir, opened, err := openSkillFolder(root, trusted)
+// When managed is set it decides, from the handle of the folder it hashes
+// (and root, the path it was asked for) and of every folder and file it
+// opens, whether only administrators can change what was hashed (GAP-2147).
+func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, trusted, managed func(*os.File, string) bool) (hash, status string, manifest []byte, manifestPath string, consumed int64, adminOnly bool) {
+	dir, opened, linked, err := openSkillFolder(root, trusted)
 	if errors.Is(err, safefile.ErrSymlinkRefused) {
-		return "", SkillContentSymlink, nil, "", 0
+		return "", SkillContentSymlink, nil, "", 0, false
 	}
 	if err != nil {
-		return "", SkillContentUnreadable, nil, "", 0
+		return "", SkillContentUnreadable, nil, "", 0, false
 	}
 	defer dir.Close()
+	folderManaged := managed != nil && managed(dir, root)
 	if limit <= 0 {
-		return "", SkillContentTooLarge, nil, "", 0
+		return "", SkillContentTooLarge, nil, "", 0, folderManaged
 	}
-	walk := skillHashWalk{limit: limit, captureLimit: captureLimit}
+	walk := skillHashWalk{limit: limit, captureLimit: captureLimit, root: opened, hardLinkTrust: trusted, managed: folderManaged}
+	if linked {
+		walk.trusted = trusted
+	}
+	if folderManaged {
+		walk.entryManaged = skillEntryManaged
+	}
 	walk.rootInfo, _ = dir.Stat()
 	err = walk.readDir(dir, "", 0)
 	if walk.manifestName != "" {
 		manifestPath = filepath.Join(opened, walk.manifestName)
 	}
 	switch {
+	case errors.Is(err, errSkillUntrusted):
+		return "", SkillContentSymlink, nil, "", walk.consumed, false
 	case errors.Is(err, errSkillTooLarge), errors.Is(err, safefile.ErrReadLimit):
-		return "", SkillContentTooLarge, walk.manifest, manifestPath, walk.consumed
+		return "", SkillContentTooLarge, walk.manifest, manifestPath, walk.consumed, walk.managed
 	case err != nil:
-		return "", SkillContentUnreadable, walk.manifest, manifestPath, walk.consumed
+		return "", SkillContentUnreadable, walk.manifest, manifestPath, walk.consumed, walk.managed
 	}
 	sort.Strings(walk.lines)
 	digest := sha256.New()
 	for _, line := range walk.lines {
 		_, _ = io.WriteString(digest, line)
 	}
-	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, walk.manifest, manifestPath, walk.consumed
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, walk.manifest, manifestPath, walk.consumed, walk.managed
 }
 
 // openSkillFolder opens the skill folder at root. A skill folder that is a
@@ -290,39 +325,61 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, tru
 // above it, such as ~/.claude linked into a dotfiles repo or /home linked to
 // /var/home, is resolved once, and the resolved folders, the skill folder
 // included, are accepted only when trusted approves each (GAP-2001). It
-// returns the spelling it opened root by.
-func openSkillFolder(root string, trusted func(*os.File, string) bool) (*os.File, string, error) {
+// returns the spelling it opened root by, and linked when that spelling is
+// the resolved one: the walk below then asks trusted for every folder and
+// file too (GAP-2008).
+func openSkillFolder(root string, trusted func(*os.File, string) bool) (*os.File, string, bool, error) {
 	lexical := filepath.Dir(root)
 	parent, resolved, err := safefile.OpenDirectoryResolved(lexical, trusted)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	defer parent.Close()
 	name := filepath.Base(root)
 	dir, err := safefile.OpenDirectoryChildNoFollow(parent, name)
 	if err != nil {
 		if _, linkErr := safefile.ReadChildLink(parent, name); linkErr == nil {
-			return nil, "", fmt.Errorf("%w: %w", safefile.ErrSymlinkRefused, err)
+			return nil, "", false, fmt.Errorf("%w: %w", safefile.ErrSymlinkRefused, err)
 		}
-		return nil, "", err
+		return nil, "", false, err
 	}
-	opened := filepath.Join(resolved, name)
-	if resolved != lexical && !trusted(dir, opened) {
+	opened, linked := filepath.Join(resolved, name), resolved != lexical
+	if linked && !trusted(dir, opened) {
 		_ = dir.Close()
-		return nil, "", fmt.Errorf("%w: %s has an untrusted owner", safefile.ErrSymlinkRefused, opened)
+		return nil, "", false, fmt.Errorf("%w: %s has an untrusted owner", safefile.ErrSymlinkRefused, opened)
 	}
-	return dir, opened, nil
+	return dir, opened, linked, nil
 }
 
 // skillFolderTrust approves the folders a skill folder at path is reached
-// through when a link above it is resolved: those of the scanned home that
-// holds path, or of the scanning account outside every home.
+// through when a link above it is resolved, and what the walk opens below it:
+// those of the scanned home that holds path, or of the scanning account
+// outside every home.
 func (s *ContinuousDiscoveryService) skillFolderTrust(path string) func(*os.File, string) bool {
 	home, _ := s.skillHome(path)
-	return skillHomeOwnerTrust(home)
+	return s.skillHomeTrust(home)
 }
 
+// errSkillUntrusted is a folder or file below a linked skill folder that the
+// trust does not approve; the folder reads as a refused link (GAP-2008).
+var errSkillUntrusted = errors.New("skill folder entry has an untrusted owner")
+
 type skillHashWalk struct {
+	// trusted, when set (a skill folder reached through a resolved link),
+	// approves every folder and file the walk opens below root, the opened
+	// spelling of the skill folder, so a link in a home cannot lead a root
+	// or SYSTEM scan into what the home owner may not list or read.
+	trusted func(*os.File, string) bool
+	// hardLinkTrust approves a file with more than one name in a walk with
+	// no trust of its own, where the other name may be one only a root scan
+	// can read (GAP-2146).
+	hardLinkTrust func(*os.File, string) bool
+	// managed is whether only administrators can change the folder and
+	// everything opened so far; entryManaged, when set, is asked of each
+	// folder and file the walk opens while it holds (GAP-2147).
+	managed      bool
+	entryManaged func(*os.File, string) bool
+	root         string
 	captureLimit int
 	rootInfo     fs.FileInfo // the opened skill folder, for skillManifestOwned
 	manifest     []byte
@@ -386,6 +443,10 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 			return err
 		}
 		defer dir.Close()
+		if err := walk.approve(dir, rel); err != nil {
+			return err
+		}
+		walk.checkManaged(dir, rel)
 		return walk.readDir(dir, rel+"/", depth+1)
 	}
 
@@ -404,6 +465,13 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 			return walk.openRefused(parent, name, err)
 		}
 		defer file.Close()
+		if err := walk.approve(file, rel); err != nil {
+			return err
+		}
+		if walk.trusted == nil && skillHardLinked(file) && !walk.hardLinkTrust(file, filepath.Join(walk.root, filepath.FromSlash(rel))) {
+			return fmt.Errorf("%w: %s", errSkillUntrusted, rel)
+		}
+		walk.checkManaged(file, rel)
 		captureLimit := 0
 		// Match only a root manifest, never one in a nested skill or scripts folder.
 		// Retain the lexically last case alias, like the original sorted walk.
@@ -441,13 +509,31 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 // too large for the budget by its own record (never the listing, GAP-1901) is
 // too large, as on rel, even when it cannot be opened: on Windows while a
 // writer holds it open, or one the scan may not read (GAP-2006). Only its
-// size is looked at, never its bytes.
+// size is looked at, never its bytes, and it is read relative to the held
+// parent, never by a path that could be resolved again (GAP-2009).
 func (walk *skillHashWalk) openRefused(parent *os.File, name string, err error) error {
-	info, statErr := os.Lstat(filepath.Join(parent.Name(), name))
-	if statErr == nil && info.Mode().IsRegular() && info.Size() > walk.limit-walk.consumed {
+	if size, regular, statErr := safefile.RegularChildSize(parent, name); statErr == nil && regular && size > walk.limit-walk.consumed {
 		return errSkillTooLarge
 	}
 	return err
+}
+
+// approve asks the trust about an opened folder or file at rel below a linked
+// skill folder; below an unlinked one everything is the folder's own.
+func (walk *skillHashWalk) approve(opened *os.File, rel string) error {
+	if walk.trusted == nil || walk.trusted(opened, filepath.Join(walk.root, filepath.FromSlash(rel))) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", errSkillUntrusted, rel)
+}
+
+// checkManaged keeps the folder managed only while the opened folder or file
+// at rel is one only administrators can change: an administrator copy that
+// kept a user's access entry on a subfolder or file is not (GAP-2147).
+func (walk *skillHashWalk) checkManaged(opened *os.File, rel string) {
+	if walk.managed && walk.entryManaged != nil && !walk.entryManaged(opened, filepath.Join(walk.root, filepath.FromSlash(rel))) {
+		walk.managed = false
+	}
 }
 
 func sameOpenedSkillFile(first, second *os.File) bool {

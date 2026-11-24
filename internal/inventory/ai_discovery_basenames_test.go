@@ -85,7 +85,7 @@ func TestDetectSkills_EnumeratesChildBasenames(t *testing.T) {
 }
 
 func TestDetectClaudeProjectSkillsOnlyInsideOwningHome(t *testing.T) {
-	home, outside := t.TempDir(), t.TempDir()
+	home, outside := realTempDir(t), realTempDir(t)
 	project := filepath.Join(home, "work", "app")
 	for _, root := range []string{project, outside} {
 		if err := os.MkdirAll(filepath.Join(root, ".claude", "skills", "project-skill"), 0o700); err != nil {
@@ -202,7 +202,7 @@ func TestDetectMCPPathsClaudeStateScopesAreBoundedAndPrivate(t *testing.T) {
 }
 
 func TestClaudeStateOverOneMiBRetainsMCPAndProjectSkills(t *testing.T) {
-	home := t.TempDir()
+	home := realTempDir(t)
 	project := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(project, ".claude", "skills", "project-skill"), 0o700); err != nil {
 		t.Fatal(err)
