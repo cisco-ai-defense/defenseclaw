@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -45,8 +46,9 @@ func EnrolledUserSignedOutFix(err error) string {
 		errors.Is(err, windows.STATUS_PRIVILEGE_NOT_HELD),
 		errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD):
 		return "the guardian cannot make an S4U logon on this computer (it needs SeTcbPrivilege, which " +
-			"LocalSystem holds): run enterprise windows repair; until then the file is written " +
-			"only while the account is signed in"
+			"LocalSystem holds): run " +
+			managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone) +
+			" in an elevated PowerShell prompt; until then the file is written only while the account is signed in"
 	}
 	return "sign in to that account; the guardian writes its port then"
 }

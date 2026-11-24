@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -36,5 +37,11 @@ func TestGAP1855S4UOfAnUnmappedSIDIsAnUnresolvedAccount(t *testing.T) {
 	}
 	if fix := EnrolledUserSignedOutFix(&enrolledUserSignedOutError{s4u: errors.New("logon refused")}); !strings.HasPrefix(fix, "sign in to that account") {
 		t.Fatalf("a plain refusal lost the sign-in fix: %q", fix)
+	}
+	// The repair is named as it runs on a managed computer, not as a bare
+	// subcommand (TestManagedWindowsCommandsComeFromTheRenderer).
+	repair := managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)
+	if fix := EnrolledUserSignedOutFix(&enrolledUserSignedOutError{s4u: ErrS4UUnavailable}); !strings.Contains(fix, repair) || !strings.Contains(fix, "elevated PowerShell") {
+		t.Fatalf("the S4U-unavailable fix %q does not name %s in an elevated PowerShell prompt", fix, repair)
 	}
 }
