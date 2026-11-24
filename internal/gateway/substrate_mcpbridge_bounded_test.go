@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 )
@@ -312,5 +313,54 @@ func TestMCPBridgeNotificationAllowList(t *testing.T) {
 			t.Fatalf("not-bridged rows %q, want %d", notBridged, len(refusedSilently))
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestSubstrateMCPCutKeepsWholeWords (GAP-1094): a projection cuts a long
+// string at a word boundary, so the cut never makes a word the call did not
+// carry ("/home/me/build" never becomes "/"), and stays valid UTF-8.
+func TestSubstrateMCPCutKeepsWholeWords(t *testing.T) {
+	for _, c := range []struct {
+		s    string
+		n    int
+		tail bool
+		want string
+	}{
+		{"rm -rf /home/me/build", 8, false, "rm -rf"},
+		{"rm -rf /home/me/build", 7, false, "rm -rf "},
+		{"build/me/home/ -rf rm", 8, true, " -rf rm"},
+		{"AAAAAAAAAA", 4, false, "AAAA"},
+		{"AAAAAAAAAA", 4, true, "AAAA"},
+		{"ééééé", 3, false, "é"},
+		{"ééééé", 3, true, "é"},
+		{"short", 64, false, "short"},
+	} {
+		if got := substrateMCPCut(c.s, c.n, c.tail); got != c.want {
+			t.Errorf("cut(%q, %d, tail=%v) = %q, want %q", c.s, c.n, c.tail, got, c.want)
+		}
+	}
+}
+
+// TestSubstrateMCPVerdictMemberWindows (GAP-1094): more top-level members
+// than the reading keeps are judged in windows, so a command after 600
+// members whose keys sort first is still read; projections always fit the
+// reading's bounds.
+func TestSubstrateMCPVerdictMemberWindows(t *testing.T) {
+	b := newTixgBridge(t, false)
+	cmd, _ := json.Marshal(tixgCommand)
+	var members []string
+	for i := range 600 {
+		members = append(members, fmt.Sprintf(`"a%03d":"x"`, i))
+	}
+	args := `{` + strings.Join(members, ",") + `,"command":` + string(cmd) + `}`
+	v := b.fixture.api.substrateMCPVerdict(t.Context(), b.reg, substrateCalloutRequest{V: "1",
+		MCP: calloutapi.MCP{Server: "notes", Tool: "read_file", Transport: "stdio"}, Args: json.RawMessage(args)})
+	if v.Verdict != "deny" || !strings.Contains(v.Reason, "CMD-RM-RF") {
+		t.Fatalf("verdict %+v, want deny CMD-RM-RF", v)
+	}
+	for _, p := range substrateMCPArgsProjections(json.RawMessage(args)) {
+		if issue := actionfacts.ArgsLimitIssue(p); issue != "" {
+			t.Fatalf("projection over the bounds (%s): %.120s", issue, p)
+		}
 	}
 }

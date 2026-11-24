@@ -137,9 +137,18 @@ func (a *APIServer) substrateMCPVerdict(ctx context.Context, reg registry.Regist
 		out.Verdict, out.Source, out.Reason, out.Severity = "deny", "mcp_asset_policy", decision.Reason, "HIGH"
 		return out
 	}
-	tv := a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{
-		Tool: hookTool, Args: req.Args, SessionID: req.SessionID, Connector: connectorName, MCPServerName: server,
-	})
+	judge := func(args json.RawMessage) SubstrateCalloutVerdict {
+		return a.substrateMCPToolVerdict(ctx, reg, ToolInspectRequest{
+			Tool: hookTool, Args: args, SessionID: req.SessionID, Connector: connectorName, MCPServerName: server,
+		})
+	}
+	return a.substrateMCPBoundedVerdict(ctx, reg, connectorName, req.Args, judge(req.Args), judge)
+}
+
+// substrateMCPToolVerdict is the tool-rule verdict of one reading of a call.
+func (a *APIServer) substrateMCPToolVerdict(ctx context.Context, reg registry.Registration, in ToolInspectRequest) SubstrateCalloutVerdict {
+	out := SubstrateCalloutVerdict{V: "1", Verdict: "allow", Source: "none"}
+	tv := a.inspectToolPolicyCtx(ctx, &in)
 	if tv == nil {
 		return out
 	}
