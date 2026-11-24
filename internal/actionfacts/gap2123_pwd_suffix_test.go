@@ -3,7 +3,10 @@
 
 package actionfacts
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGAP2123KnownPWDSuffixRedirect(t *testing.T) {
 	vars := map[string]string{"PWD": "/home/det111/proj", "HOME": "/home/det111"}
@@ -26,6 +29,16 @@ func TestGAP2123KnownPWDSuffixRedirect(t *testing.T) {
 				t.Fatalf("resolution=%t, target match=%t; want resolution=%t", ok, got == test.want, test.resolved)
 			}
 		})
+	}
+	// The parity proof analyzes all known redirect targets at once. More
+	// than four targets stay unresolved without recursive control analysis.
+	multi := "echo y >> ${PWD%/proj}/.bashrc >> ${PWD%/proj}/.zshrc"
+	if got, ok := simpleResolvedVariables(multi, vars, home, cwd); !ok || strings.Contains(got, "${PWD%") {
+		t.Fatal("two known suffix targets were not resolved")
+	}
+	overCap := "echo y" + strings.Repeat(" >> ${PWD%/proj}/.bashrc", 5)
+	if _, ok := simpleResolvedVariables(overCap, vars, home, cwd); ok {
+		t.Fatal("over-cap suffix targets resolved")
 	}
 	for _, pwd := range []string{"/home/det111/pr*j/proj", "/home/det111/my proj/proj", "//host/share/proj"} {
 		unsafeVars := map[string]string{"PWD": pwd, "HOME": "/home/det111"}

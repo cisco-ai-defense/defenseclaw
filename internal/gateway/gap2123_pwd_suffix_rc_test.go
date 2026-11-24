@@ -33,6 +33,7 @@ func TestGAP2123PWDSuffixShellRCVerdicts(t *testing.T) {
 	}{
 		{"plain", "echo y >> ~/.bashrc", true},
 		{"pwd-suffix", "echo y >> ${PWD%/proj}/.bashrc", true},
+		{"two-targets", "echo y >> ${PWD%/proj}/.bashrc >> ${PWD%/proj}/.zshrc", true},
 		{"project-lookalike", "echo y >> ${PWD%/proj}/proj/.bashrc.fixture", false},
 		{"plain-safe-content", `echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc`, false},
 		{"suffix-safe-content", `echo 'export PATH=$HOME/bin:$PATH' >> ${PWD%/proj}/.bashrc`, false},

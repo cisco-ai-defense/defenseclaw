@@ -2866,20 +2866,20 @@ func simpleKnownPWDSuffix(param *syntax.ParamExp, vars map[string]string) bool {
 		strings.HasPrefix(suffix, "/") && simplePlainLiteral(suffix)
 }
 
-// simplePWDSuffixPlainControl keeps the existing path owner's content
-// boundary: the same command with a direct spelling of the resolved target
-// must already produce a mutating PathFact. A safe quoted payload that the
-// plain reader leaves alone cannot gain a finding just from path resolution.
-func simplePWDSuffixPlainControl(source string, start, end int, target, shellHome, activeHome, cwd string) bool {
-	if start < 0 || end <= start || end > len(source) || !strings.HasPrefix(target, "/") {
-		return false
-	}
+func simplePWDSuffixPlainSpelling(target, shellHome, activeHome string) string {
 	plain := "'" + strings.ReplaceAll(target, "'", "'\\''") + "'"
 	if shellHome != "" && shellHome == activeHome &&
 		(target == shellHome || strings.HasPrefix(target, shellHome+"/")) {
 		plain = "~" + strings.TrimPrefix(target, shellHome)
 	}
-	control := source[:start] + plain + source[end:]
+	return plain
+}
+
+// simplePWDSuffixPlainControls keeps the existing path owner's content
+// boundary. Every known suffix target is spelled directly in one control
+// command, so the control analysis cannot recurse through sibling suffixes.
+// A safe quoted payload that the plain reader leaves alone gains no finding.
+func simplePWDSuffixPlainControls(control string, targets []string, activeHome, cwd string) bool {
 	if len(control) > maxCommandBytes {
 		return false
 	}
@@ -2888,14 +2888,24 @@ func simplePWDSuffixPlainControl(source string, start, end int, target, shellHom
 	if !facts.Authoritative() {
 		return false
 	}
-	normalized := simplePathClean(target)
-	for _, path := range facts.Paths {
-		if path.Resolved == normalized &&
-			(path.Access == PathAccessWrite || path.Access == PathAccessAppend || path.Access == PathAccessDelete) {
-			return true
+	for _, target := range targets {
+		if !strings.HasPrefix(target, "/") {
+			return false
+		}
+		normalized := simplePathClean(target)
+		found := false
+		for _, path := range facts.Paths {
+			if path.Resolved == normalized &&
+				(path.Access == PathAccessWrite || path.Access == PathAccessAppend || path.Access == PathAccessDelete) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func simpleResolvedVariables(source string, vars map[string]string, activeHome, cwd string) (string, bool) {
@@ -2906,6 +2916,7 @@ func simpleResolvedVariables(source string, vars map[string]string, activeHome, 
 	type replacement struct {
 		start, end int
 		text       string
+		pwdTarget  string
 	}
 	var replacements []replacement
 	redirectTargets := map[*syntax.Word]bool{}
@@ -2956,20 +2967,49 @@ func simpleResolvedVariables(source string, vars map[string]string, activeHome, 
 		}
 		start, end := int(word.Pos().Offset()), int(word.End().Offset())
 		if pwdSuffix {
-			if pwdSuffixControls == 4 {
-				return false
-			}
 			pwdSuffixControls++
-			if !simplePWDSuffixPlainControl(source, start, end, value, vars["HOME"], activeHome, cwd) {
+			if pwdSuffixControls > 4 {
 				return false
 			}
 		}
 		if start >= 0 && end > start && end <= len(source) {
-			replacements = append(replacements, replacement{start, end,
-				"'" + strings.ReplaceAll(value, "'", "'\\''") + "'"})
+			r := replacement{start: start, end: end,
+				text: "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"}
+			if pwdSuffix {
+				r.pwdTarget = value
+			}
+			replacements = append(replacements, r)
 		}
 		return false
 	})
+	if pwdSuffixControls > 0 {
+		safe := pwdSuffixControls <= 4
+		if safe {
+			control := source
+			var targets []string
+			for i := len(replacements) - 1; i >= 0; i-- {
+				r := replacements[i]
+				if r.pwdTarget == "" {
+					continue
+				}
+				control = control[:r.start] +
+					simplePWDSuffixPlainSpelling(r.pwdTarget, vars["HOME"], activeHome) +
+					control[r.end:]
+				targets = append(targets, r.pwdTarget)
+			}
+			safe = len(targets) == pwdSuffixControls &&
+				simplePWDSuffixPlainControls(control, targets, activeHome, cwd)
+		}
+		if !safe {
+			filtered := replacements[:0]
+			for _, r := range replacements {
+				if r.pwdTarget == "" {
+					filtered = append(filtered, r)
+				}
+			}
+			replacements = filtered
+		}
+	}
 	if len(replacements) == 0 {
 		return "", false
 	}
