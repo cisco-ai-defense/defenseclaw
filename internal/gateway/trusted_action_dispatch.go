@@ -1304,7 +1304,15 @@ func dispatchTrustedActionOnce(
 	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
 		// Two argument keys name one field: judge each candidate (GAP-0678).
-		return dispatchConflictingToolArguments(parent, request, conflict)
+		if !conflict.besideCall {
+			return dispatchConflictingToolArguments(parent, request, conflict)
+		}
+		// No candidate is a complete reading: the call is judged as it
+		// reads, and each candidate only adds (substrate-1:GAP-1105).
+		defer func() {
+			findings = deduplicateTrustedActionFindings(append(findings,
+				dispatchConflictingToolArguments(parent, request, conflict)...))
+		}()
 	}
 	generation := request.generation
 	if generation == nil {
