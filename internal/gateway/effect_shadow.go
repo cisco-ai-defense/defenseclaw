@@ -512,10 +512,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		// A target only maybe in a set reaches the unknown tier only with a
 		// reach reason (DET111 PLAN 5.3); with none it stays clean, as in
 		// 1.0.10.
-		// A mutation that lands in the DefenseClaw state folder (the folder
-		// itself as a copy or move destination, or a new child of it) is a
-		// known state write whatever member it lands on: it stands as its own
-		// proof, before the reach rule (rel-1-0-10:GAP-1261, GAP-2127).
+		// A copy or move onto the DefenseClaw state folder itself, or the
+		// folder moved away, is a known state write whatever member it
+		// reaches: it stands as its own proof, before the reach rule
+		// (rel-1-0-10:GAP-1261).
 		if proof, ok := stateFolderWriteProof(f, flavor); ok {
 			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
 		}
@@ -900,28 +900,34 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 	return append(findings, f)
 }
 
-// stateFolderWriteProof is the known DefenseClaw state write of a mutation
-// whose landing is the state folder (~/.defenseclaw) itself or a new child of
-// it: the classifier's protected_dir basis (cp -r proj ~/.defenseclaw, where
-// the copy lands at the folder or below it, dest_may_be_dir) or dir basis (a
-// direct child the set does not list, ~/.defenseclaw/new, for a write or an
-// append), or a delete, link or mode change of the folder itself. Which
-// member the
-// write reaches is unknown; that it writes DefenseClaw's own state is not, so
-// the proof is Known on the state class and takes the state-write row (the
-// GAP-0747 cell: an alert in default and permissive, a block in strict, per
-// user and managed). The program must write the operand (role known) and the
-// path must be canonical and literal; a glob or a dynamic spelling keeps its
-// reach rule. The hook config folders keep their own rules.
+// stateFolderWriteProof is the known DefenseClaw state write of a mutation of
+// the state folder (~/.defenseclaw) itself, the classifier's protected_dir
+// basis: a copy or move whose landing is the folder (cp -rt ~ .defenseclaw,
+// cp -rT x ~/.defenseclaw, cp -r .defenseclaw ~/: the source's contents
+// merge into the state root, over whatever members it holds), or the folder
+// moved away or removed (mv -St ~/.defenseclaw x). Which member it reaches is
+// unknown; that it rewrites DefenseClaw's own state is not, so the proof is
+// Known on the state class and takes the state-write row (the GAP-0747
+// cell: an alert in default and permissive, a block in strict, per user and
+// managed). A write that may land inside the folder as a new child
+// (dest_may_be_dir: cp -r proj ~/.defenseclaw with the folder there) and a
+// write, mode change or link of an unlisted child keep their 1.0.10 cell:
+// DefenseClaw's own tools and their users keep files there
+// (observability-stack, connector-radar, notes; owner agent traces), and a
+// new non-state entry is not state (rel-1-0-10:GAP-1285). The program must
+// write the operand (role known) and the path must be canonical and literal.
 func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (decide.Proof, bool) {
 	if f == nil || f.GetRoleState() != "known" {
 		return decide.Proof{}, false
 	}
-	content := false
 	switch effects.Kind(f.GetKind()) {
 	case effects.KindWrite, effects.KindAppend:
-		content = true
-	case effects.KindDelete, effects.KindLink, effects.KindPermissionChange:
+		for _, r := range f.GetReasons() {
+			if strings.HasSuffix(r, string(effects.ReasonDestMayBeDir)) {
+				return decide.Proof{}, false
+			}
+		}
+	case effects.KindDelete:
 	default:
 		return decide.Proof{}, false
 	}
@@ -930,13 +936,7 @@ func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (dec
 		return decide.Proof{}, false
 	}
 	for _, m := range t.GetProtected() {
-		// A delete, link or mode change of a child the set does not list
-		// keeps its 1.0.10 cell: removing a stale lifecycle lock is a benign
-		// agent trace shape (decision_effect_fold_test, trace
-		// 387bf49e98fa6eb5/481). Of the folder itself (mv -S.bak
-		// ~/.defenseclaw x moves it away) it is a state write.
-		if m.GetSet() == effectrules.SetSelfProtection && m.GetState() == semantic.ProtectedUnknown &&
-			(m.GetReason() == "protected_dir" || content && m.GetReason() == "dir") {
+		if m.GetSet() == effectrules.SetSelfProtection && m.GetState() == semantic.ProtectedUnknown && m.GetReason() == "protected_dir" {
 			return decide.Proof{Kind: effectProofKind(f.GetKind()), Target: decide.TargetState,
 				Certainty: decide.CertKnown, Source: effectProofSource}, true
 		}
