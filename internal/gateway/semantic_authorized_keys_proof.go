@@ -1085,11 +1085,13 @@ func copyModeWholeCallByName(request trustedActionRequest, input actionfacts.Inp
 // host (its Input.CWD is no host path). It is the call's guest folder
 // (SandboxGuestCWD), or the guest home when the hook client sent no
 // absolute folder, as the actor's shell starts there (substrate-1
-// GAP-0996). Every hook path sets SandboxGuestCWD; only Claude Code and
+// GAP-0996). An explicitly supplied workdir the guest resolver cannot
+// place stays unresolved rather than using that fallback (GAP-1024).
+// Every hook path sets SandboxGuestCWD; only Claude Code and
 // Codex also set SkipLocalFilesystemResolution, which the reading needed
 // before, so Amp, OpenCode and Cursor actors never had it (GAP-0993).
 func copyModeByNameGuestCWD(ctx context.Context, request trustedActionRequest) string {
-	if !isSandboxHookRequest(ctx) || request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+	if !isSandboxHookRequest(ctx) || request.ProtectedHomeHook || request.guestToolCWDUnresolved || filepath.IsAbs(request.Input.CWD) {
 		return ""
 	}
 	if cwd := request.SandboxGuestCWD; path.IsAbs(cwd) {

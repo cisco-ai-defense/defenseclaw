@@ -345,6 +345,9 @@ type trustedActionRequest struct {
 	// the authorized-keys proofs and the guest reading
 	// (sandboxGuestPlacedInput) read it, and only to add findings.
 	SandboxGuestCWD string
+	// guestToolCWDUnresolved marks a supplied workdir that the guest path
+	// resolver cannot place. It must not fall back to the guest home.
+	guestToolCWDUnresolved bool
 	// guestKeyReadCommand is the shell command a Substrate actor's kit
 	// proved reads the actor's SSH private key in the actor's file system
 	// (substrateGuestClaims): the private-key read proof of a request that
