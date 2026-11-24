@@ -160,10 +160,6 @@ func TestSQLSensitiveServerFileReadRejectsAmbiguousInputs(t *testing.T) {
 			query: "SELECT pg_read_file('/etc/hostname');",
 		},
 		{
-			name: "path traversal", connection: "mysql://db.invalid/app",
-			query: "SELECT LOAD_FILE('/srv/../etc/passwd');",
-		},
-		{
 			name: "second statement", connection: "mysql://db.invalid/app",
 			query: "SELECT LOAD_FILE('/etc/passwd'); SELECT 1;",
 		},

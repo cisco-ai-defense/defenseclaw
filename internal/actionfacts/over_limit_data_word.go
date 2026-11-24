@@ -161,6 +161,13 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 				if text, nested, ok := nestedBodyTwin(word); ok {
 					start, end := int(word.Pos().Offset()), int(word.End().Offset())
 					if start >= 0 && end <= len(command) && start < end {
+						if len(nested.QueryChunks) != 0 {
+							chunks := make([]string, len(nested.QueryChunks))
+							for i, chunk := range nested.QueryChunks {
+								chunks[i] = posixSingleQuoted(chunk)
+							}
+							queryChunks = append(queryChunks, queryChunk{len(replacements), chunks})
+						}
 						replacements = append(replacements, replacement{start, end, text})
 						split.Data += nested.Data
 						split.Query += nested.Query
@@ -430,6 +437,19 @@ func overLimitOperandPosition(argv []string, at int) (overLimitPosition, sqlQuer
 			return overLimitCode, sqlQueryWord{}
 		}
 		program := overLimitProgram(argv[start])
+		if program == "kubectl" || program == "oc" || program == "k" {
+			parsed, ok := parseKubectlArgv(argv[start:])
+			if ok && !parsed.unknown && parsed.subcommand == "exec" && len(parsed.command) > 0 {
+				childStart := len(argv) - len(parsed.command)
+				if at > childStart {
+					if engine, isSQL := sqlMutationEngine(overLimitProgram(parsed.command[0])); isSQL {
+						if glued, query := overLimitSQLQueryOperand(engine, argv[at-1], argv[at]); query {
+							return overLimitSQLQuery, sqlQueryWord{engine: engine, glued: glued}
+						}
+					}
+				}
+			}
+		}
 		switch {
 		case overLimitRemoteProgram(program):
 			// classifySSH reads the options and the destination; the words

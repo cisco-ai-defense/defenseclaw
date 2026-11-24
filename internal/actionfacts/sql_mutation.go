@@ -26,7 +26,7 @@ type exactSQLMutationInput struct {
 	connectionIdentity string
 	databaseIdentity   string
 	// rolledBack marks a statement of a multi-statement query inside a
-	// transaction the query undoes (sqlStatementCandidates): it changes no
+	// transaction the query undoes (sqlSessionStatementCandidates): it changes no
 	// data, and the mutation reader leaves it out.
 	rolledBack bool
 }
@@ -174,11 +174,7 @@ func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
 	if input.Tool == "sql_query" || !facts.Authoritative() || len(facts.Commands) != 1 {
 		return nil
 	}
-	candidate, ok := exactSQLMutationCommand(facts.Commands[0])
-	if !ok {
-		return nil
-	}
-	return []exactSQLMutationInput{candidate}
+	return exactSQLCLICommandInputs(facts.Commands[0], true)
 }
 
 // exactDBExecuteInput recognizes the closed two-key schema observed in public
@@ -281,14 +277,6 @@ func exactStructuredSQLMutationTarget(connection, database string) (string, stri
 		return "", "", false
 	}
 	return engine, strings.ToLower(database), true
-}
-
-func exactSQLMutationCommand(command CommandFact) (exactSQLMutationInput, bool) {
-	inputs := exactSQLCLICommandInputs(command, false)
-	if len(inputs) != 1 {
-		return exactSQLMutationInput{}, false
-	}
-	return inputs[0], true
 }
 
 // exactSQLCLICommandInputs is the inline SQL of one SQL client command line:
