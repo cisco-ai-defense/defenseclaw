@@ -45,7 +45,11 @@ func withCredentialPathReadsWhole(t *testing.T, whole int) {
 
 // TestGAP0674ThinReadsCensus: the record is read only where
 // thinCredentialPathReads says it is. A new reader must be checked against
-// the reads the thinning drops, then named here.
+// the reads the thinning drops, then named here. Every node of every
+// non-test file of internal/ and cmd/ is read: a call of a record method in
+// any package, actionfacts too, a function literal in a package-level var,
+// and reflection over a Facts value outside actionfacts
+// (gap0674ReflectionOverFacts).
 func TestGAP0674ThinReadsCensus(t *testing.T) {
 	root := filepath.Join("..", "..")
 	want := map[string]bool{
@@ -63,6 +67,18 @@ func TestGAP0674ThinReadsCensus(t *testing.T) {
 		"internal/actionfacts Facts.PlaceCredentialPathReads credentialPaths":    true,
 		"internal/actionfacts Facts.ThinCredentialPathReads credentialPaths":     true,
 		"internal/actionfacts DynamicRedirectTargetReduction credentialPaths":    true,
+		// Reflection over a Facts value (RV-T6C P4-2). clippedFacts sets only
+		// the slice fields it can set, never the record. The memos compare
+		// facts as a key (reflect.DeepEqual): a record that differs, thinned
+		// or not, is a miss and the value is made again, never a hit on
+		// other facts, since the input is part of the key and the record is
+		// the resolve of that input. One record shared by both facts is
+		// equal without a read (DeepEqual stops at the same pointer).
+		"internal/gateway clippedFacts reflect.ValueOf":                      true,
+		"internal/gateway guestReadingMemo.simpleCommands reflect.DeepEqual": true,
+		"internal/gateway guestReadingMemo.plan reflect.DeepEqual":           true,
+		"internal/gateway guestReadingMemo.placedChildren reflect.DeepEqual": true,
+		"internal/gateway trustedSimpleMemo.commands reflect.DeepEqual":      true,
 	}
 	methods := map[string]bool{
 		"CredentialPathReads": true, "HasCredentialPathReads": true, "CredentialPathReadCaps": true,
@@ -83,34 +99,48 @@ func TestGAP0674ThinReadsCensus(t *testing.T) {
 			}
 			rel, _ := filepath.Rel(root, filepath.Dir(path))
 			rel = filepath.ToSlash(rel)
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				name := fn.Name.Name
-				if fn.Recv != nil && len(fn.Recv.List) == 1 {
-					recv := fn.Recv.List[0].Type
-					if star, ok := recv.(*ast.StarExpr); ok {
-						recv = star.X
-					}
-					if id, ok := recv.(*ast.Ident); ok {
-						name = id.Name + "." + name
-					}
-				}
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					sel, ok := n.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					switch {
-					case rel == "internal/actionfacts" && sel.Sel.Name == "credentialPaths":
-						got[rel+" "+name+" credentialPaths"] = true
-					case rel != "internal/actionfacts" && methods[sel.Sel.Name]:
-						got[rel+" "+name+" "+sel.Sel.Name] = true
+			// Every node of the file is read, each under the name of its
+			// declaration: a function (Type.Method for a method), or a
+			// package-level var with the function literals in its value.
+			inspect := func(name string, node ast.Node) {
+				ast.Inspect(node, func(n ast.Node) bool {
+					switch n := n.(type) {
+					case *ast.SelectorExpr:
+						switch {
+						case rel == "internal/actionfacts" && n.Sel.Name == "credentialPaths":
+							got[rel+" "+name+" credentialPaths"] = true
+						case methods[n.Sel.Name]:
+							got[rel+" "+name+" "+n.Sel.Name] = true
+						}
+					case *ast.CallExpr:
+						if call, ok := gap0674ReflectionOverFacts(n); ok && rel != "internal/actionfacts" {
+							got[rel+" "+name+" "+call] = true
+						}
 					}
 					return true
 				})
+			}
+			for _, decl := range file.Decls {
+				switch decl := decl.(type) {
+				case *ast.FuncDecl:
+					name := decl.Name.Name
+					if decl.Recv != nil && len(decl.Recv.List) == 1 {
+						recv := decl.Recv.List[0].Type
+						if star, ok := recv.(*ast.StarExpr); ok {
+							recv = star.X
+						}
+						if id, ok := recv.(*ast.Ident); ok {
+							name = id.Name + "." + name
+						}
+					}
+					inspect(name, decl)
+				case *ast.GenDecl:
+					for _, spec := range decl.Specs {
+						if value, ok := spec.(*ast.ValueSpec); ok && len(value.Names) > 0 {
+							inspect("var "+value.Names[0].Name, value)
+						}
+					}
+				}
 			}
 			return nil
 		})
@@ -128,6 +158,34 @@ func TestGAP0674ThinReadsCensus(t *testing.T) {
 			t.Errorf("reader %s is gone: update the census and thinCredentialPathReads", key)
 		}
 	}
+}
+
+// gap0674ReflectionOverFacts reports a call of package reflect with an
+// argument that names facts (facts, &facts, entry.facts, actionfacts.Facts):
+// reflection reads the private record through a Facts value however it is
+// unexported, so such a call is a reader the census names
+// (substrate-1:GAP-0674, RV-T6C P4-2). The name is the call's, reflect.Fn.
+func gap0674ReflectionOverFacts(call *ast.CallExpr) (string, bool) {
+	fun, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	if pkg, ok := fun.X.(*ast.Ident); !ok || pkg.Name != "reflect" {
+		return "", false
+	}
+	names := false
+	for _, arg := range call.Args {
+		ast.Inspect(arg, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.Ident:
+				names = names || strings.EqualFold(n.Name, "facts") || strings.HasSuffix(n.Name, "Facts")
+			case *ast.SelectorExpr:
+				names = names || strings.EqualFold(n.Sel.Name, "facts") || n.Sel.Name == "Facts"
+			}
+			return !names
+		})
+	}
+	return "reflect." + fun.Sel.Name, names
 }
 
 type gap0674Stats struct{ calls, thinned, readsBefore, readsAfter, maxAfter int }
