@@ -54,15 +54,35 @@ type responseLane struct {
 type responsePiece struct {
 	lane responseLane
 	text string
-	// end: the provider ended every lane of lane.choice here (a content
-	// block, an output item or the choice finished; rel-1-0-10:GAP-2154).
-	// It carries no text.
-	end bool
+	// end: the provider ended lanes of lane.choice here
+	// (rel-1-0-10:GAP-2154, GAP-2162). It carries no text.
+	end laneEnd
 }
 
-// laneEndPiece says every lane of choice ended (GAP-2154).
+// laneEnd is how far a provider signal ends the lanes of a choice.
+type laneEnd uint8
+
+const (
+	// laneEndNone: a text piece.
+	laneEndNone laneEnd = iota
+	// laneEndBlock: a content block, an output item or one of its parts
+	// ended. The same lane can resume in a later block (text on both sides
+	// of a tool call, interleaved thinking, Responses summary parts), so an
+	// open run is parked, not ended (GAP-2162).
+	laneEndBlock
+	// laneEndMessage: the choice or the whole message finished; nothing more
+	// of its lanes comes.
+	laneEndMessage
+)
+
+// laneEndPiece says a content block of choice ended (GAP-2154, GAP-2162).
 func laneEndPiece(choice int) responsePiece {
-	return responsePiece{lane: responseLane{choice: choice}, end: true}
+	return responsePiece{lane: responseLane{choice: choice}, end: laneEndBlock}
+}
+
+// messageEndPiece says choice finished (GAP-2154, GAP-2162).
+func messageEndPiece(choice int) responsePiece {
+	return responsePiece{lane: responseLane{choice: choice}, end: laneEndMessage}
 }
 
 func answerPiece(choice int, text string) responsePiece {
@@ -88,14 +108,15 @@ type responseText struct {
 	secret []secretLane // the open-secret state of each lane (stream_secret_hold.go)
 	index  map[responseLane]int
 	last   int // the lane of the last text added
+	parked int // lanes with a parked run (GAP-2162)
 	n      int
 	joined string
 	fresh  bool
 }
 
 func (r *responseText) Add(p responsePiece) {
-	if p.end {
-		r.endChoice(p.lane.choice)
+	if p.end != laneEndNone {
+		r.endChoice(p.lane.choice, p.end == laneEndMessage)
 		return
 	}
 	if p.text == "" {
@@ -118,10 +139,18 @@ func (r *responseText) Add(p responsePiece) {
 		r.secret = append(r.secret, secretLane{})
 	}
 	r.secret[i].mark(r.lanes[i].Len(), r.n)
+	if r.secret[i].parked {
+		// The lane resumed: its run goes on and is held as before (GAP-2162).
+		r.secret[i].parked = false
+		r.parked--
+	}
 	r.lanes[i].WriteString(p.text)
 	r.n += len(p.text)
 	r.fresh = false
 	r.last = i
+	if r.parked > 0 {
+		r.expireParked()
+	}
 }
 
 // The end of a lane (rel-1-0-10:GAP-2154). A token or digit run open at the
@@ -140,17 +169,43 @@ func (r *responseText) Add(p responsePiece) {
 // reasoning once the answer, a refusal, a tool call or code starts, and a
 // tool call once a later one starts (laneMoved). An open private-key block
 // is not ended here: it keeps its own bounds.
+//
+// Only the end of the choice or the message (laneEndMessage: a chat or
+// Gemini finish reason, Anthropic message_delta or message_stop, Responses
+// completed, incomplete or failed, Converse messageStop) ends a run at once
+// (rel-1-0-10:GAP-2162). The end of a block and a lane switch (laneEndBlock,
+// laneMoved) park it: the same lane can resume in a later block (text on
+// both sides of a tool call, interleaved thinking blocks, Responses summary
+// parts), and a run ended there let the first part of a token or a card
+// cut by the block go out, while the rest, resumed past the end, was not
+// held either; the check matched only the whole secret, after its first
+// part had reached the client. A parked run stays held until its lane
+// resumes (the run goes on and is held as before), the message ends, or
+// streamRunParkMax bytes of other reply text arrive (then it ends: the
+// rest of the reply is not held behind it, GAP-2154).
 
-// endChoice ends the open run of every lane of choice.
-func (r *responseText) endChoice(choice int) {
+// streamRunParkMax is how much reply text may follow the end of a block
+// while its open run stays parked (GAP-2162): about 64 KiB of stream bytes
+// in the providers' delta framing, more than a tool call or a thinking
+// block between two halves of a secret has in practice.
+const streamRunParkMax = 8 << 10
+
+// endChoice ends (message) or parks (block) the open run of every lane of
+// choice.
+func (r *responseText) endChoice(choice int, message bool) {
 	for k, i := range r.index {
-		if k.choice == choice {
-			r.secret[i].endRun(r.lanes[i].String())
+		if k.choice != choice {
+			continue
+		}
+		if message {
+			r.endLane(i)
+		} else {
+			r.parkLane(i)
 		}
 	}
 }
 
-// laneMoved ends the lanes of l's choice that l follows in stream order.
+// laneMoved parks the lanes of l's choice that l follows in stream order.
 func (r *responseText) laneMoved(l responseLane) {
 	for k, i := range r.index {
 		if k.choice != l.choice || k == l {
@@ -159,7 +214,36 @@ func (r *responseText) laneMoved(l responseLane) {
 		reasoningDone := k.field == responseFieldReasoning && l.field != responseFieldReasoning && l.field != responseFieldOther
 		toolDone := k.field == responseFieldToolInput && l.field == responseFieldToolInput && k.part < l.part
 		if reasoningDone || toolDone {
-			r.secret[i].endRun(r.lanes[i].String())
+			r.parkLane(i)
+		}
+	}
+}
+
+// parkLane parks the open token or digit run of lane i (GAP-2162).
+func (r *responseText) parkLane(i int) {
+	s := &r.secret[i]
+	if s.parked || !s.token(r.lanes[i].String()) {
+		return
+	}
+	s.parked, s.parkedAt = true, r.n
+	r.parked++
+}
+
+// endLane ends the open run of lane i.
+func (r *responseText) endLane(i int) {
+	if r.secret[i].parked {
+		r.secret[i].parked = false
+		r.parked--
+	}
+	r.secret[i].endRun(r.lanes[i].String())
+}
+
+// expireParked ends the parked runs that more than streamRunParkMax bytes of
+// reply text have followed.
+func (r *responseText) expireParked() {
+	for i := range r.secret {
+		if r.secret[i].parked && r.n-r.secret[i].parkedAt > streamRunParkMax {
+			r.endLane(i)
 		}
 	}
 }
@@ -378,7 +462,7 @@ func chatChoicesPieces(choices []chatShapeChoice, withTools bool) []responsePiec
 			out = append(out, answerPiece(c.Index, s))
 		}
 		if respJSONString(c.FinishReason) != "" {
-			out = append(out, laneEndPiece(c.Index)) // GAP-2154
+			out = append(out, messageEndPiece(c.Index)) // GAP-2154
 		}
 	}
 	return out
@@ -457,8 +541,11 @@ func streamEventPieces(data, provider string) []responsePiece {
 		if json.Unmarshal([]byte(data), &ev) != nil {
 			return nil
 		}
-		if len(ev.ContentBlockStop) > 0 || len(ev.MessageStop) > 0 {
-			return []responsePiece{laneEndPiece(0)} // GAP-2154
+		if len(ev.MessageStop) > 0 {
+			return []responsePiece{messageEndPiece(0)} // GAP-2154
+		}
+		if len(ev.ContentBlockStop) > 0 {
+			return []responsePiece{laneEndPiece(0)} // GAP-2162: a block, parked
 		}
 		if ev.ContentBlockDelta == nil {
 			return nil
@@ -477,8 +564,8 @@ func streamEventPieces(data, provider string) []responsePiece {
 		if json.Unmarshal([]byte(data), &ev) != nil {
 			return nil
 		}
-		if responsesLaneEnd(ev.Type) {
-			return []responsePiece{laneEndPiece(0)} // GAP-2154
+		if end := responsesLaneEnd(ev.Type); end != laneEndNone {
+			return []responsePiece{{end: end}} // GAP-2154, GAP-2162
 		}
 		if strings.HasPrefix(ev.Type, "response.") && strings.Contains(ev.Type, ".delta") {
 			// OpenAI Responses: every text delta the client receives.
@@ -500,18 +587,22 @@ func streamEventPieces(data, provider string) []responsePiece {
 	}
 }
 
-// responsesLaneEnd: an OpenAI Responses event that ends the lanes it
-// streamed (an output item, its text, its arguments or the response is
-// done), GAP-2154. Output items stream one at a time.
-func responsesLaneEnd(typ string) bool {
+// responsesLaneEnd is how far an OpenAI Responses event ends the lanes it
+// streamed: the response is done (message), or an output item, its text,
+// its arguments or a summary part is done (block: the lane can resume in a
+// later part, GAP-2162), GAP-2154.
+func responsesLaneEnd(typ string) laneEnd {
 	if !strings.HasPrefix(typ, "response.") {
-		return false
+		return laneEndNone
 	}
 	switch typ {
 	case "response.completed", "response.incomplete", "response.failed":
-		return true
+		return laneEndMessage
 	}
-	return strings.HasSuffix(typ, ".done")
+	if strings.HasSuffix(typ, ".done") {
+		return laneEndBlock
+	}
+	return laneEndNone
 }
 
 func anthropicStreamPieces(data []byte) []responsePiece {
@@ -545,9 +636,11 @@ func anthropicStreamPieces(data []byte) []responsePiece {
 			reasoningPiece(0, ev.ContentBlock.Thinking),
 			toolInputPiece(0, ev.Index, jsonArgsText(ev.ContentBlock.Input)),
 		}
-	case "content_block_stop", "message_delta", "message_stop":
-		// Blocks stream one at a time: the block's lane has ended (GAP-2154).
+	case "content_block_stop":
+		// The block ended; the lane can resume in a later block (GAP-2162).
 		return []responsePiece{laneEndPiece(0)}
+	case "message_delta", "message_stop":
+		return []responsePiece{messageEndPiece(0)} // GAP-2154
 	}
 	return nil
 }
@@ -648,7 +741,7 @@ func geminiResponsePieces(body []byte, withTools bool) []responsePiece {
 			}
 		}
 		if c.FinishReason != "" {
-			out = append(out, laneEndPiece(choice)) // GAP-2154
+			out = append(out, messageEndPiece(choice)) // GAP-2154
 		}
 	}
 	return out

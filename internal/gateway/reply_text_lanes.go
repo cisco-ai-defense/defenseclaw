@@ -27,7 +27,7 @@ func withWalkerPieces(typed []responsePiece, segs []string) []responsePiece {
 	var ends []responsePiece
 	out := typed[:0:0]
 	for _, p := range typed {
-		if p.end {
+		if p.end != laneEndNone {
 			ends = append(ends, p)
 		} else {
 			out = append(out, p)

@@ -3849,7 +3849,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				}
 			}
 			if c.FinishReason != nil && *c.FinishReason != "" {
-				accumulated.Add(laneEndPiece(c.Index)) // GAP-2154
+				accumulated.Add(messageEndPiece(c.Index)) // GAP-2154
 				streamFinishReasons = append(streamFinishReasons, *c.FinishReason)
 				isToolCallFinish = isToolCallFinish || *c.FinishReason == "tool_calls"
 			}

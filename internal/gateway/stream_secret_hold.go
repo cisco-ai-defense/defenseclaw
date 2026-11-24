@@ -178,6 +178,10 @@ type secretLane struct {
 	pemLine  int  // start of the first line of the open block not yet read
 	// tokenFrom: a token run that starts before it was given up at a bound.
 	tokenFrom int
+	// parked: the lane's block ended inside an open run, at reply text
+	// offset parkedAt; the run stays held (rel-1-0-10:GAP-2162).
+	parked   bool
+	parkedAt int
 	// segs places the end of the lane in the reply text (GAP-1306): from
 	// lane byte at, the bytes were added when the reply had n bytes of text.
 	// Only the segments that reach the last streamSecretTail bytes are kept,
