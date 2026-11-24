@@ -303,6 +303,10 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	if !ok {
 		return
 	}
+	// The guest gateway cannot place an explicit tilde workdir. A decision
+	// made in a guessed folder must not become a protected-write claim for
+	// that call; the private-key reader below still protects real key reads.
+	unresolvedToolWorkdir := strings.HasPrefix(strings.TrimSpace(workdir), "~")
 	if workdir != "" {
 		if !filepath.IsAbs(workdir) {
 			workdir = filepath.Join(cwd, workdir)
@@ -317,8 +321,9 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 		hookpaths.ActionMakePrivateKeyRead(command, cwd, home) {
 		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
 	}
-	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
-		hookpaths.ProtectedTargetDecision {
+	if !unresolvedToolWorkdir &&
+		hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
+			hookpaths.ProtectedTargetDecision {
 		f.Proofs = append(f.Proofs, ProofProtectedWrite)
 	}
 	// Which places are private matters only to a call the kit proved reads
