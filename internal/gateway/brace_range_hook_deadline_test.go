@@ -21,12 +21,16 @@ import (
 func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 	f := newB36ManagedHookFixture(t).strict(t)
 	// The hook deadline is about 3 s and the client process takes about 1 s,
-	// so a call answers within perCall. A race build keeps that bound scaled
-	// by raceScanBudgetScale, the race detector's measured slowdown of the
-	// readers (rel-1-0-10:GAP-2094: race slowest 954-999 ms per command at
-	// load 60-85 where the same box ran plain at 313-332 ms, so the -race
-	// shards crossed the plain 1 s); a plain build keeps 1 s, so a slower
-	// product still fails there.
+	// so a call does at most perCall of work: the CPU time of this process
+	// (processWork) over the client header and the gateway answer, not their
+	// wall-clock time. The answers here have no deadline of their own (the
+	// verdict of every row held in every red run); only the wall-clock bound
+	// moved with the box: 1.47 s at load 80-120 on 64 cores under -race
+	// (rel-1-0-10:GAP-2129), 954-999 ms at load 60-85 (GAP-2094). A full
+	// expansion of {1..60000} by every reader, the bug the bound is about
+	// (GAP-0568, about 3 s), is work, and still fails it. A race build keeps
+	// the bound scaled by raceScanBudgetScale, the race detector's own extra
+	// work; a plain build keeps 1 s.
 	perCall := time.Second * raceScanBudgetScale
 	benign := []string{
 		"echo {1..40000} | wc -c",
@@ -52,9 +56,9 @@ func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 	}
 	run := func(command string) (calls []*hookCall, slowest time.Duration) {
 		payload := f.payload(t, command)
-		start := time.Now()
+		start := processWork(t)
 		header := f.clientHeader(t, payload)
-		client := time.Since(start)
+		client := processWork(t) - start
 		for _, call := range everyMode(command, payload, header) {
 			mode := os.FileMode(0o700)
 			if call.managed {
@@ -63,9 +67,9 @@ func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 			if err := os.Chmod(f.homes, mode); err != nil {
 				t.Fatal(err)
 			}
-			start := time.Now()
+			start := processWork(t)
 			call.verdict, call.body = f.serve(call)
-			slowest = max(slowest, client+time.Since(start))
+			slowest = max(slowest, client+processWork(t)-start)
 			calls = append(calls, call)
 		}
 		if err := os.Chmod(f.homes, 0o700); err != nil {
@@ -90,9 +94,9 @@ func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 				t.Errorf("%s: verdict %s, want allow; body %.200s", call.name, call.verdict, call.body)
 			}
 		}
-		t.Logf("%s: slowest call %s", command, slowest.Round(time.Millisecond))
+		t.Logf("%s: most work of a call %s", command, slowest.Round(time.Millisecond))
 		if slowest > perCall {
-			t.Errorf("%s: slowest call took %s (client header included), want under %s", command, slowest.Round(time.Millisecond), perCall)
+			t.Errorf("%s: a call did %s of work (client header included), want under %s", command, slowest.Round(time.Millisecond), perCall)
 		}
 	}
 	for _, tc := range blocked {
@@ -103,7 +107,7 @@ func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
 			}
 		}
 		if slowest > perCall {
-			t.Errorf("%s: slowest call took %s, want under %s", tc.command, slowest.Round(time.Millisecond), perCall)
+			t.Errorf("%s: a call did %s of work, want under %s", tc.command, slowest.Round(time.Millisecond), perCall)
 		}
 	}
 }
