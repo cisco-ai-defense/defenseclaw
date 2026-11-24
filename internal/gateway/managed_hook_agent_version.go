@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,11 +55,31 @@ func (a *APIServer) callerAgentContract(ctx context.Context, name string) (strin
 	if identity == "" || dataDir == "" {
 		return "", "", false
 	}
-	ledger, err := loadCallerAgentLedger(managed.HookGuardianAuthorizationPath(dataDir))
+	if ledger, err := loadCallerAgentLedger(managed.HookGuardianAuthorizationPath(dataDir)); err == nil {
+		if version, contractID, ok := ledger.agentContract(identity, name); ok {
+			return version, contractID, true
+		}
+	}
+	// A Linux or macOS machine-policy connector has no guardian row: the
+	// enumerator publishes the caller's verified version beside the ledger
+	// (managed.HookGuardianAgentVersionsFile). The machine policy is one
+	// render for every account, made without a version, so the contract
+	// stays the one that render speaks (the connector's unversioned
+	// contract); the version decides the compatibility status the audit and
+	// status report against it (rel-1-0-10:GAP-0114).
+	versions, err := loadCallerAgentLedger(filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), managed.HookGuardianAgentVersionsFile))
 	if err != nil {
 		return "", "", false
 	}
-	return ledger.agentContract(identity, name)
+	version, _, ok := versions.agentContract(identity, name)
+	if !ok {
+		return "", "", false
+	}
+	rendered := a.hookProfileForConnector(name).ContractID
+	if rendered == "" {
+		return "", "", false
+	}
+	return version, rendered, true
 }
 
 // agentContract is the agent version and hook contract the protected
