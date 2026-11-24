@@ -375,20 +375,16 @@ func RuleFor(p Proof) string {
 	case TargetOtherHomeCredential:
 		return setRules[p.Set]
 	}
-	// A write, append or delete of a hook config or a credential file names
-	// the rule the plain spelling fires on it (rm FILE fires it too:
-	// GAP-1478, GAP-1500). An own SSH private key write has none in 1.0.10
-	// (GAP-1878).
+	// A write, append or delete of a hook config names the rule the
+	// plain spelling fires on it (rm FILE fires it too: GAP-1478,
+	// GAP-1500). Credential class rules were returned above; an own
+	// SSH private key write has none in 1.0.10 (GAP-1878).
 	if p.Kind != KindWrite && p.Kind != KindAppend && p.Kind != KindDelete {
 		return ""
 	}
 	switch p.Target {
 	case TargetHookConfig:
 		return RuleHookConfigWrite
-	case TargetCredential:
-		if p.Set != SetSSHPrivateKey {
-			return setRules[p.Set]
-		}
 	}
 	return ""
 }
