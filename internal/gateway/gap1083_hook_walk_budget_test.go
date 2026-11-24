@@ -13,9 +13,12 @@ import (
 )
 
 // gap1083HookAnswerWithin is what a hook call may take while slow walks hold
-// every walk slot: the 1 s wait for a slot, once for the whole call, and
-// room for a loaded box. The hook's own budget is 3.5 s.
-const gap1083HookAnswerWithin = 1500 * time.Millisecond
+// every walk slot, over what the same call takes with the slots free (a
+// loaded box or the race detector slow both alike): the 1 s wait for a slot,
+// once for the whole call, and 250 ms. A wait per record adds 1 s for each
+// record, so a call with a wrapper or a second statement is over it. The
+// hook's own budget is 3.5 s.
+const gap1083HookAnswerWithin = time.Second + 250*time.Millisecond
 
 // gap1083ActionRank orders the answers of a call: a walk cut for lack of a
 // slot is never an allow where the whole walk was not.
@@ -91,8 +94,9 @@ func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 				return actions, took
 			}
 			free := make(map[string][]string)
+			freeTook := make(map[string][]time.Duration)
 			for _, c := range calls {
-				free[c.name], _ = run("free", c)
+				free[c.name], freeTook[c.name] = run("free", c)
 			}
 			release, ok := actionfacts.HoldCredentialPathWalkSlots()
 			if !ok {
@@ -102,9 +106,9 @@ func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 			for _, c := range calls {
 				actions, took := run("held", c)
 				for i := range actions {
-					if took[i] > gap1083HookAnswerWithin {
-						t.Errorf("%s %q call %d answered in %v while slow walks held every walk slot, want at most %v",
-							pack, c.name, i, took[i], gap1083HookAnswerWithin)
+					if limit := freeTook[c.name][i] + gap1083HookAnswerWithin; took[i] > limit {
+						t.Errorf("%s %q call %d answered in %v while slow walks held every walk slot, want at most %v (%v with the slots free, and %v)",
+							pack, c.name, i, took[i], limit, freeTook[c.name][i], gap1083HookAnswerWithin)
 					}
 					if gap1083ActionRank(actions[i]) < gap1083ActionRank(free[c.name][i]) {
 						t.Errorf("%s %q call %d: %q while the slots were held, weaker than %q with them free",
