@@ -117,6 +117,8 @@ def _clean_env(home: Path) -> dict[str, str]:
     }
     env["DEFENSECLAW_HOME"] = str(home)
     env["PYTHONPATH"] = str(CLI)
+    # The shim prints arrows; a captured pipe is not the console it writes in a terminal.
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
