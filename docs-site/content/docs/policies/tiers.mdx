@@ -54,7 +54,7 @@ Rows: `effect-unknown`, `effect-content-decided`, `effect-own-key-write`, `effec
 A pack column changes how strongly its tier acts on a row. It cannot change what the rest of the gateway reads from the built-in table, so the loader refuses a column that:
 
 - **Changes a row's severity.** The severity of a verdict always comes from the built-in row.
-- **Lowers a protected row.** `evaluation-fault`, `state-write`, `truncated`, `unverified-path` and `shell-protected-file` may be raised (a higher floor, levels on, a ceiling removed) but never lowered: no lower floor, no tighter ceiling, no `levels: false` where the built-in cell has levels.
+- **Lowers a protected row.** `evaluation-fault`, `state-write`, `truncated`, `unverified-path` and `shell-protected-file` may be raised (a higher floor, levels on, a ceiling removed) but never lowered: the floor cannot go down, the ceiling cannot tighten, and `levels: false` is refused where the built-in cell has levels.
 - **Turns record-only on or off for a row.** A row whose built-in cells are `record` in every tier and deployment stays so, and no other row becomes record-only in every cell.
 
 ## Errors
