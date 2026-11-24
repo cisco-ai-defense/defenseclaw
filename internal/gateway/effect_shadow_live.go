@@ -152,10 +152,10 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	}
 	result := effects.Extract(call, opts)
 	facts := effectShadowFacts(request, result, opts)
-	// A PowerShell call on a POSIX host is also read as it was before the
-	// host flavor (DET111 ruling R1): each tier keeps the stronger cell of
-	// the two readings, so the host reading only raises.
-	altOpts, hasAlt := effectPowerShellHostConflict(request.Input, opts)
+	// A PowerShell call on a POSIX host is also read with the host's paths
+	// (DET111 ruling R1): each tier keeps the stronger cell of the two
+	// readings, so the host reading only raises.
+	altOpts, hasAlt := effectPowerShellHostConflict(request, opts)
 	var altResult effects.Result
 	var altFacts []*semanticpb.EffectFact
 	if hasAlt {
@@ -249,22 +249,39 @@ func effectShadowFacts(request trustedActionRequest, result effects.Result, opts
 }
 
 // effectPowerShellHostConflict is the second reading of a PowerShell call
-// effectCall placed on a POSIX host (DET111 ruling R1: a PowerShell hint or
-// tool that conflicts with the host is read both ways, the stronger cell
-// kept): the reading before the host flavor, Windows paths for a PowerShell
-// hint, POSIX shell text for a PowerShell tool with no hint. Every other call
-// has one reading.
-func effectPowerShellHostConflict(in actionfacts.Input, opts effects.Options) (effects.Options, bool) {
-	if opts.Dialect != effects.DialectPowerShell || opts.Flavor != effects.FlavorPOSIX {
+// on a Linux or macOS host (DET111 ruling R1, rel-1-0-10:GAP-1255): the path
+// flavor follows the platform of the tool's host, not the shell. effectCall
+// reads a PowerShell hint with Windows paths, and a PowerShell tool on such
+// a host (Claude Code's PowerShell tool carries no hint: only a Windows hook
+// picks a dialect) as POSIX shell text; the host reading is PowerShell
+// placed with the host's POSIX paths, where the extractor applies the
+// PowerShell provider rules (\ and / separators, ~ the home, lexical ..).
+// The ruling keeps both readings and the stronger cell of each tier, so the
+// host reading only raises. A POSIX host is a gateway that is not Windows
+// (it runs on the hook's host) and a POSIX absolute working folder or home;
+// a Windows host, or a call that shows neither, has one reading.
+func effectPowerShellHostConflict(request trustedActionRequest, opts effects.Options) (effects.Options, bool) {
+	in := request.Input
+	posix := func(p string) bool { return strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "//") }
+	if effectWindowsCall(request) || effectHostGOOS == "windows" || !posix(in.CWD) && !posix(in.ActiveHome) {
 		return opts, false
 	}
-	alt := opts
-	if in.DialectHint == actionfacts.DialectPowerShell {
-		alt.Flavor, alt.BSDUserland = effects.FlavorWindows, false
-	} else {
-		alt.Dialect = effects.DialectNone
+	switch {
+	case in.DialectHint == actionfacts.DialectPowerShell:
+	case in.DialectHint == "" && opts.Dialect == effects.DialectNone:
+		switch strings.ToLower(strings.TrimSpace(in.Tool)) {
+		case "powershell", "pwsh":
+		default:
+			return opts, false
+		}
+	default:
+		return opts, false
 	}
-	return alt, true
+	host := opts
+	host.Flavor, host.Dialect = effects.FlavorPOSIX, effects.DialectPowerShell
+	host.BSDUserland = effectBSDUserland(effectHostGOOS, effects.FlavorPOSIX)
+	host.Env = nil
+	return host, true
 }
 
 // effectClassStronger reports whether a grades a call above b: a stricter

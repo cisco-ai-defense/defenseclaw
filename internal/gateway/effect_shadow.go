@@ -182,37 +182,17 @@ func effectCall(connector string, in actionfacts.Input, windowsArg ...bool) (eff
 		flavor = effects.FlavorWindows
 	}
 	dialect := effects.DialectNone
-	// The path flavor of a PowerShell call follows the platform of the tool's
-	// host, not the shell (DET111 ruling R1, rel-1-0-10:GAP-1255). The
-	// gateway runs on the hook's host: a POSIX host is a gateway that is not
-	// Windows and a POSIX absolute working folder or home, where the
-	// extractor places PowerShell paths with the PowerShell provider rules
-	// (\ and / separators, ~ the home, lexical ..). A Windows host, or a call
-	// that shows no host, keeps the Windows flavor. On a POSIX host a
-	// PowerShell tool (Claude Code's PowerShell tool) carries no hint, since
-	// only a Windows hook picks a dialect: its script is PowerShell, not a
-	// POSIX shell's text.
-	posix := func(p string) bool { return strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "//") }
-	posixHost := !windows && effectHostGOOS != "windows" && (posix(in.CWD) || posix(in.ActiveHome))
-	powerShell := in.DialectHint == actionfacts.DialectPowerShell
-	if in.DialectHint == "" && posixHost {
-		switch strings.ToLower(strings.TrimSpace(in.Tool)) {
-		case "powershell", "pwsh":
-			powerShell = true
-		}
-	}
-	switch {
-	case powerShell:
-		dialect = effects.DialectPowerShell
-		if !posixHost {
-			flavor = effects.FlavorWindows
-		}
-	case in.DialectHint == actionfacts.DialectCMD:
+	switch in.DialectHint {
+	case actionfacts.DialectPowerShell:
+		flavor, dialect = effects.FlavorWindows, effects.DialectPowerShell
+	case actionfacts.DialectCMD:
 		flavor, dialect = effects.FlavorWindows, effects.DialectCMD
-	case in.DialectHint == actionfacts.DialectPOSIX:
+	case actionfacts.DialectPOSIX:
 		dialect = effects.DialectPOSIX
-	case windows && connector == "claudecode" && strings.EqualFold(in.Tool, "Bash"):
-		dialect = effects.DialectPOSIX
+	default:
+		if windows && connector == "claudecode" && strings.EqualFold(in.Tool, "Bash") {
+			dialect = effects.DialectPOSIX
+		}
 	}
 	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD,
 		Account:     effects.AccountRecord{Home: in.ActiveHome, Shell: in.ActiveShell},
