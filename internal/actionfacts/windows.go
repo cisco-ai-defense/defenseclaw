@@ -5907,7 +5907,8 @@ func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
 //     path: its command line is a script, not an argv;
 //   - a word can name a place outside the working folder or is a switch whose
 //     grammar no reader models: a rooted, drive, UNC or home (~) path, a
-//     /switch, a registry root, or a path with a .. segment. A native
+//     /switch, a registry root, a path with a .. segment, or a remote place
+//     (a URL, an IP address: nxc --% smb 192.0.2.5 -u u -p p). A native
 //     program's operand grammar is not modeled, so such a word keeps the
 //     unknown tier the remainder had.
 func windowsStopParsingLocalArgv(lexemes []windowsLexeme, tail string) ([]string, bool) {
@@ -5947,8 +5948,12 @@ func windowsStopParsingLocalArgv(lexemes []windowsLexeme, tail string) ([]string
 // windowsStopParsingLocalWord reports a --% argv word that names no place
 // outside the working folder: no piece of it (the whole word, or the value
 // after the first = or : of an option) is a rooted, drive, UNC or home path,
-// a /switch, a registry root, or a path with a .. segment.
+// a /switch, a registry root, a path with a .. segment, a URL or an IP
+// address (with a port or prefix length).
 func windowsStopParsingLocalWord(word string) bool {
+	if strings.Contains(word, "://") || windowsStopParsingAddress(word) {
+		return false
+	}
 	pieces := []string{word}
 	if at := strings.IndexAny(word, "=:"); at >= 0 {
 		pieces = append(pieces, word[at+1:])
@@ -5966,4 +5971,21 @@ func windowsStopParsingLocalWord(word string) bool {
 		}
 	}
 	return true
+}
+
+// windowsStopParsingAddress reports a word that is an IP address, alone or
+// with a port (192.0.2.5:445, [2001:db8::1]:445) or a prefix length
+// (192.0.2.0/24).
+func windowsStopParsingAddress(word string) bool {
+	host := word
+	if cut, _, ok := strings.Cut(host, "/"); ok {
+		host = cut
+	}
+	if net.ParseIP(strings.Trim(host, "[]")) != nil {
+		return true
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return net.ParseIP(h) != nil
+	}
+	return false
 }

