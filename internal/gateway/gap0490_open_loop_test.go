@@ -721,7 +721,48 @@ func closeOpenLoopServer(srv *httptest.Server) bool {
 	}
 }
 
+// openLoopTmpfsMagic is the Linux statfs f_type of tmpfs (TMPFS_MAGIC).
+const openLoopTmpfsMagic = 0x01021994
+
+// openLoopDataOnRAM puts every t.TempDir of an open-loop test (the audit
+// store, the journal, the sandbox bindings) on a RAM-backed folder when the
+// box has one (Linux /dev/shm on tmpfs), as Go Throughput Test does with
+// TMPDIR. The code path keeps its real fsync calls and the budgets are
+// unchanged; what leaves the measurement is the disk the box shares with every
+// other test process. In the parallel gate the fsyncs waited on other
+// writers' flushes, which neither the CPU probe nor CPU or IO pressure sees:
+// in every failing run CPU per call was normal (23.7-25.5 ms) while the
+// baseline mean rose from 41-56 ms to 63-70 ms, and the stream then missed
+// its window (rel-1-0-10 GAP-1456). Elsewhere the data stays in the default
+// temp folder.
+func openLoopDataOnRAM(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return
+	}
+	var st unix.Statfs_t
+	if unix.Statfs("/dev/shm", &st) != nil || int64(st.Type) != openLoopTmpfsMagic {
+		t.Log("open-loop data on the default temp folder: no tmpfs /dev/shm")
+		return
+	}
+	// The migrated audit template lives as long as the test process: it is
+	// made in the default temp folder first, so this test's cleanup of its
+	// RAM folder does not take it from the tests after it. Its copy into
+	// the test's store is on RAM.
+	if err := migrateAuditTemplate(); err != nil {
+		t.Fatalf("migrate the template audit database: %v", err)
+	}
+	dir, err := os.MkdirTemp("/dev/shm", "dc-open-loop-")
+	if err != nil {
+		t.Logf("open-loop data on the default temp folder: %v", err)
+		return
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMPDIR", dir)
+}
+
 func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Duration) {
+	openLoopDataOnRAM(t)
 	ctx, cancel := context.WithTimeout(t.Context(), openLoopTestDeadline)
 	defer cancel()
 	var probes openLoopProbes
