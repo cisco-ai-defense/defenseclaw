@@ -900,6 +900,10 @@ func hookDocumentEditedEntry(document interface{}, connector, dataDir, scriptNam
 		windowsCurrent = path.Join(posix, "hooks", strings.ToLower(scriptName))
 		windowsHome = strings.TrimSuffix(path.Dir(posix), "/") + "/"
 	}
+	// Setup's hooks dir on a Windows host, as its hooks-dir claim resolves it
+	// (hookCommandInWindowsDir).
+	windowsHooksVolume, windowsHooks, windowsResolved := windowsResolvedPath(dataDir)
+	windowsHooks = path.Join(windowsHooks, "hooks")
 	if connector == "antigravity" {
 		document = antigravityOwnedHookSections(document)
 	}
@@ -936,11 +940,12 @@ func hookDocumentEditedEntry(document interface{}, connector, dataDir, scriptNam
 			windows := windowsHookScriptCommandAsPOSIX(command)
 			rest, ok := editedDefenseClawHookScript(windows, scriptName)
 			// Setup's hooks-dir claim reads a Windows path in this install's
-			// Windows hooks dir too (hookCommandInWindowsDir, GAP-1981): such
-			// a word is passed as the same name under current's dir.
+			// Windows hooks dir too, on its volume and with . and .. resolved
+			// (hookCommandInWindowsDir, GAP-1981, GAP-2116): such a word is
+			// passed as the same name under current's dir.
 			claimWord := ""
-			if windowsWord, _, split := posixHookCommandSplit(windows); split && windowsCurrent != "" {
-				if name, inDir := strings.CutPrefix(windowsWord, path.Dir(windowsCurrent)+"/"); inDir {
+			if windowsResolved {
+				if name, inDir := windowsHookCommandInDir(command, windowsHooksVolume, windowsHooks); inDir {
 					claimWord = path.Join(path.Dir(current), name)
 				}
 			}

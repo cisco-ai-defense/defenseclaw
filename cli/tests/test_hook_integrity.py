@@ -748,6 +748,65 @@ def test_edited_hook_entries_under_a_drive_path_data_dir(tmp_path, monkeypatch, 
     assert bool(problems) is case.get("drive_edited", case["edited"]), problems
 
 
+@pytest.mark.parametrize("data_dir", ["C:/Users/u/.defenseclaw", "C:\\Users\\u\\.defenseclaw"])
+@pytest.mark.parametrize(
+    ("command", "reported"),
+    [
+        # Kept by Setup's hooks-dir claim (another volume, or out through ..),
+        # as 1.0.10 kept them, so not reported (GAP-2116).
+        ("D:\\Users\\u\\.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", False),
+        ("\\\\srv\\share\\Users\\u\\.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", False),
+        ("\\\\localhost\\C$\\Users\\u\\.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", False),
+        ("C:\\Users\\u\\.defenseclaw\\hooks\\..\\..\\x\\.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", False),
+        ("C:/Users/u/.defenseclaw/hooks/../../x/.defenseclaw/hooks/claude-code-hook.old.sh --event PreToolUse", False),
+        ("\\\\?\\C:\\Users\\u\\.defenseclaw\\hooks\\..\\..\\x\\.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", False),
+        # In this install's hooks dir, any case or separator: Setup removes it.
+        ("C:\\Users\\u\\.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", True),
+        ("c:/USERS/U/.DefenseClaw/HOOKS/CLAUDE-CODE-HOOK.OLD.SH --event PreToolUse", True),
+        ("C:/Users/u/.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", True),
+        ("\\\\?\\C:\\Users\\u\\.defenseclaw\\hooks\\claude-code-hook.old.sh --event PreToolUse", True),
+        ('"C:\\Users\\u\\.defenseclaw\\hooks\\claude-code-hook.old.sh" --event PreToolUse', True),
+    ],
+)
+def test_windows_hooks_dir_claim_reads_the_volume_and_dot_dot(tmp_path, monkeypatch, data_dir, command, reported):
+    # GAP-2116: the doctor's Windows leg passes a word to Setup's hooks-dir
+    # claim only when Setup's claim (hookCommandInWindowsDir) takes it: the
+    # same volume, with . and .. resolved. The paths are text; none is opened.
+    from defenseclaw import hook_integrity
+
+    config = tmp_path / "settings.json"
+    hook = {"type": "command", "command": command, "timeout": 30}
+    config.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [hook]}]}}), encoding="utf-8")
+    monkeypatch.setattr(hook_integrity, "_hook_config_paths", lambda _cfg, _connector: [config])
+    problems = edited_hook_problems(SimpleNamespace(data_dir=data_dir), "claudecode")
+    assert bool(problems) is reported, problems
+
+
+@pytest.mark.parametrize(
+    ("name", "want"),
+    [
+        ("C:\\a\\hooks", ("c:", "/a/hooks")),
+        ("c:/A/./b/../Hooks/", ("c:", "/a/hooks")),
+        ("C://a//b", ("c:", "/a/b")),
+        ("\\\\Srv\\Share\\a\\..\\b", ("//srv/share", "/b")),
+        ("\\\\?\\UNC\\srv\\share\\a", ("//srv/share", "/a")),
+        ("\\\\?\\C:\\a\\b", ("c:", "/a/b")),
+        ("\\\\.\\C:\\a\\b", ("c:", "/a/b")),
+        ("\\\\?\\C:\\a\\..\\b", None),
+        ("\\\\?\\C:\\a\\\\b", None),
+        ("C:\\a\\.. \\b", None),
+        ("C:\\a\\hooks.\\b", None),
+        ("C:a\\b", None),
+        ("\\a\\b", None),
+    ],
+)
+def test_windows_resolved_path_mirrors_go(name, want):
+    # windowsResolvedPath (internal/gateway/connector/claudecode_foreign_hook.go).
+    from defenseclaw.hook_integrity import _windows_resolved_path
+
+    assert _windows_resolved_path(name) == want
+
+
 @pytest.mark.parametrize("connector", ["copilot", "hermes", "claudecode"])
 @pytest.mark.parametrize(
     "edit",

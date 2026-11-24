@@ -3086,21 +3086,6 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	return scriptHasMarker(command)
 }
 
-// hookCommandInWindowsDir reports whether command's first word is a Windows
-// path inside dir, a Windows path too, compared as the doctor's Windows leg
-// compares them (windowsAbsolutePathAsPOSIX: either separator, any case, no
-// volume). On a Windows host the hooks dir is a backslash path, so the
-// hooks-dir claim above never matched a handler there and Setup kept one the
-// doctor reported, then failed its final check (GAP-1981).
-func hookCommandInWindowsDir(command, dir string) bool {
-	posixDir, ok := windowsAbsolutePathAsPOSIX(dir)
-	if !ok {
-		return false
-	}
-	word, _, ok := posixHookCommandSplit(windowsHookScriptCommandAsPOSIX(command))
-	return ok && strings.HasPrefix(word, strings.TrimSuffix(posixDir, "/")+"/")
-}
-
 // isClaudeCodeNativeExecHook recognizes the shell-free Windows hook shape only
 // when its executable is the active DefenseClaw launcher or a narrowly scoped
 // legacy install path. A matching basename is not ownership: another product
