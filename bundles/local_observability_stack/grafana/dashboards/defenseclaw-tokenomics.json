@@ -516,7 +516,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "expr": "sum((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]) or (defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "cost"
         }
@@ -568,7 +568,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (kind) (increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "expr": "sum by (kind) ((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]) or (defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "{{kind}}"
         }
@@ -637,7 +637,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (model) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "expr": "sum by (model) ((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]) or (defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "{{model}}"
         }
@@ -693,7 +693,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (route_decision) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "expr": "sum by (route_decision) ((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]) or (defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "{{route_decision}}"
         }
@@ -749,7 +749,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (connector) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "expr": "sum by (connector) ((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]) or (defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "{{connector}}"
         }
@@ -805,7 +805,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (profile) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "expr": "sum by (profile) ((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]) or (defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "{{profile}}"
         }
@@ -960,7 +960,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"}[$__rate_interval])) / sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"}[$__rate_interval]))",
+          "expr": "sum((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"}[$__rate_interval]) or (defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"} unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"cache_read\"} offset $__interval))) / sum((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"}[$__rate_interval]) or (defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"} unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"input|cache_read|cache_creation\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "cache-read share"
         }
@@ -1012,7 +1012,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"}[$__rate_interval])) / sum(increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"}[$__rate_interval]))",
+          "expr": "sum((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"}[$__rate_interval]) or (defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"} unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=\"reasoning\"} offset $__interval))) / sum((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"}[$__rate_interval]) or (defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"} unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\",kind=~\"output|reasoning\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "reasoning share"
         }
@@ -1389,7 +1389,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (provider) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "expr": "sum by (provider) ((increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]) or (defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} unless defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__interval)))",
           "refId": "A",
           "legendFormat": "{{provider}}"
         }
@@ -1578,7 +1578,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(increase(defenseclaw_tokenomics_dropped_total[$__rate_interval]))",
+          "expr": "sum((increase(defenseclaw_tokenomics_dropped_total[$__rate_interval]) or (defenseclaw_tokenomics_dropped_total unless defenseclaw_tokenomics_dropped_total offset $__interval)))",
           "refId": "A",
           "legendFormat": "dropped"
         }

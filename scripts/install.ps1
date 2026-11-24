@@ -4248,9 +4248,9 @@ function Save-RolledBackData {
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
     $bytes = Get-TreeSize $kept
-    $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
+    $what = if ($label -eq "rolled-back") { "the data written while $version ran" } else { "the audit history DefenseClaw $version recorded" }
     Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
-    Write-Info "It is not used again; once you no longer need its audit history, remove it with: cmd /c rd /s /q `"$kept`""
+    Write-Info "It is not used again; once you no longer need it, remove it with: cmd /c rd /s /q `"$kept`""
 }
 
 function Save-Live([string]$Slot) {

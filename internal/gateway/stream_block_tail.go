@@ -70,18 +70,23 @@ func anthropicStreamMark(data string) streamMark {
 	var ev struct {
 		Type  string `json:"type"`
 		Index *int   `json:"index"`
-		Block struct {
-			Type string `json:"type"`
-		} `json:"content_block"`
+		// Block stays raw: a content_block that is not an object (null, a
+		// string) must still mark the block the event opens, as a block of
+		// no known call type (GAP-1768).
+		Block json.RawMessage `json:"content_block"`
 	}
 	if json.Unmarshal([]byte(data), &ev) != nil {
 		return m
 	}
+	var block struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(ev.Block, &block)
 	switch {
 	case ev.Type == "message_start":
 		m.msgStart = true
 	case ev.Type == "content_block_start" && ev.Index != nil && *ev.Index >= 0:
-		m.start, m.call = *ev.Index, isCallType(ev.Block.Type)
+		m.start, m.call = *ev.Index, isCallType(block.Type)
 	case ev.Type == "content_block_stop" && ev.Index != nil && *ev.Index >= 0:
 		m.stop = *ev.Index
 	}

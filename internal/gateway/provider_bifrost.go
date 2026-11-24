@@ -179,25 +179,60 @@ func evictOldestBifrostTenantLocked() {
 	}
 	if entry, ok := bifrostTenants[oldestKey]; ok {
 		delete(bifrostTenants, oldestKey)
-		// An entry without a client has nothing to shut down. Calling
-		// Shutdown on nil took a hardware access violation on a fresh
-		// goroutine, which recover() turned into a panic; on Windows hosts
-		// with large exception frames (AMX) the kernel writes that frame
-		// below the 8 KiB goroutine stack into the neighbouring heap, and a
-		// later GC dies on the corrupted span (golang/go#81238,
-		// rel-1-0-6:GAP-0550).
-		if entry == nil || entry.client == nil || shutdownEvictedBifrostClient == nil {
-			return
+		shutdownBifrostTenantEntry(entry)
+	}
+}
+
+// shutdownBifrostTenantEntry tears down the client of an entry that was just
+// removed from the cache. Caller holds bifrostTenantsMu (write lock).
+func shutdownBifrostTenantEntry(entry *bifrostTenantEntry) {
+	// An entry without a client has nothing to shut down. Calling
+	// Shutdown on nil took a hardware access violation on a fresh
+	// goroutine, which recover() turned into a panic; on Windows hosts
+	// with large exception frames (AMX) the kernel writes that frame
+	// below the 8 KiB goroutine stack into the neighbouring heap, and a
+	// later GC dies on the corrupted span (golang/go#81238,
+	// rel-1-0-6:GAP-0550).
+	if entry == nil || entry.client == nil || shutdownEvictedBifrostClient == nil {
+		return
+	}
+	// Shutdown asynchronously so we don't hold the write
+	// lock across an SDK teardown that may block on
+	// in-flight streams. The SDK's Shutdown is documented
+	// as safe to call once and is a no-op on subsequent
+	// invocations.
+	go func(c *bifrost.Bifrost) {
+		defer func() { _ = recover() }()
+		shutdownEvictedBifrostClient(c)
+	}(entry.client)
+}
+
+// bifrostTenantIdleTTL is how long a tenant client may go unused before the
+// cache shuts it down. Each client holds schemas.DefaultConcurrency (1000)
+// idle request workers, and a rotated key or a changed base_url never asks
+// for the old client again, so before this the old client (and its workers)
+// lived until 256 newer tenants pushed it out (GAP-1760). The request timeout
+// is 120 s, so no request is in flight on a client idle for this long.
+const bifrostTenantIdleTTL = 30 * time.Minute
+
+// bifrostTenantSweepEvery rate-limits the idle sweep on the cache-hit path.
+const bifrostTenantSweepEvery = time.Minute
+
+// bifrostTenantsLastSweep is when dropIdleBifrostTenantsLocked last ran. Guarded
+// by bifrostTenantsMu.
+var bifrostTenantsLastSweep time.Time
+
+// dropIdleBifrostTenantsLocked removes and shuts down every tenant client that
+// was last used bifrostTenantIdleTTL or longer before now. Caller must hold
+// bifrostTenantsMu (write lock).
+func dropIdleBifrostTenantsLocked(now time.Time) {
+	bifrostTenantsLastSweep = now
+	for k, e := range bifrostTenants {
+		if e == nil || now.Sub(e.lastUsed) < bifrostTenantIdleTTL {
+			continue
 		}
-		// Shutdown asynchronously so we don't hold the write
-		// lock across an SDK teardown that may block on
-		// in-flight streams. The SDK's Shutdown is documented
-		// as safe to call once and is a no-op on subsequent
-		// invocations.
-		go func(c *bifrost.Bifrost) {
-			defer func() { _ = recover() }()
-			shutdownEvictedBifrostClient(c)
-		}(entry.client)
+		delete(bifrostTenants, k)
+		shutdownBifrostTenantEntry(e)
 	}
 }
 
@@ -578,8 +613,14 @@ func getBifrostClient(
 	defer bifrostTenantsMu.Unlock()
 	if e, ok := bifrostTenants[tk]; ok {
 		e.lastUsed = now
+		if now.Sub(bifrostTenantsLastSweep) >= bifrostTenantSweepEvery {
+			dropIdleBifrostTenantsLocked(now)
+		}
 		return e.client, nil
 	}
+	// A miss is a new or rotated tenant: release the clients nobody asks for
+	// any more before adding another.
+	dropIdleBifrostTenantsLocked(now)
 	if len(bifrostTenants) >= bifrostTenantsMaxSize {
 		evictOldestBifrostTenantLocked()
 	}

@@ -6612,6 +6612,15 @@ def _narrow_goal_connectors(
             else field
             for field in fields
         )
+    if goal is not None and goal.id == "add" and opening:
+        # With several agents active the row opened on the first one in the
+        # alphabet (amp), so Ctrl+R set up an agent nobody picked (GAP-2052).
+        # With one active agent the row keeps it; with none it already waits.
+        if len(set(_active_connector_names_for_setup(cfg))) > 1:
+            return tuple(
+                replace(field, value="", default="") if field.label == "Connector" and field.kind == "choice" else field
+                for field in fields
+            )
     if goal is None or goal.id not in _CONFIGURED_CONNECTOR_GOALS:
         return tuple(fields)
     configured = tuple(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))

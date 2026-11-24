@@ -202,3 +202,56 @@ func closeBifrostTenantsAfter(t *testing.T) {
 		}
 	})
 }
+
+// GAP-1760: a tenant client nobody asks for any more (a rotated key, a changed
+// base_url) was shut down only when 256 newer tenants pushed it out, and held
+// 1000 idle request workers until then. A new tenant now releases the clients
+// that have been idle for bifrostTenantIdleTTL; a fresh one stays.
+func TestNewBifrostTenantReleasesIdleClients(t *testing.T) {
+	closeBifrostTenantsAfter(t)
+	shutdowns := make(chan *bifrost.Bifrost, 4)
+	originalShutdown := shutdownEvictedBifrostClient
+	shutdownEvictedBifrostClient = func(c *bifrost.Bifrost) { shutdowns <- c }
+	t.Cleanup(func() { shutdownEvictedBifrostClient = originalShutdown })
+
+	idle := &bifrost.Bifrost{}
+	fresh := &bifrost.Bifrost{}
+	idleKey := tenantKey{provider: "openai", keyID: "idle-old-key"}
+	freshKey := tenantKey{provider: "openai", keyID: "fresh-key"}
+	bifrostTenantsMu.Lock()
+	bifrostTenants[idleKey] = &bifrostTenantEntry{client: idle, lastUsed: time.Now().Add(-2 * time.Hour)}
+	bifrostTenants[freshKey] = &bifrostTenantEntry{client: fresh, lastUsed: time.Now().Add(-time.Minute)}
+	bifrostTenantsMu.Unlock()
+	t.Cleanup(func() {
+		bifrostTenantsMu.Lock()
+		delete(bifrostTenants, idleKey)
+		delete(bifrostTenants, freshKey)
+		bifrostTenantsMu.Unlock()
+	})
+
+	// A request for a tenant that is not cached (a rotated key).
+	if _, err := getBifrostClient(schemas.OpenAI, "sk-rotated-key", "http://127.0.0.1:1", "gpt-x", tlsOverrides{}, nil, nil, nil, nil); err != nil {
+		t.Fatalf("getBifrostClient: %v", err)
+	}
+
+	select {
+	case got := <-shutdowns:
+		if got != idle {
+			t.Fatalf("Shutdown called with %p, want the idle client %p", got, idle)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the idle tenant client was not shut down when a new tenant was added")
+	}
+	select {
+	case got := <-shutdowns:
+		t.Fatalf("Shutdown called again with %p; the fresh client must stay", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	bifrostTenantsMu.RLock()
+	_, idleStill := bifrostTenants[idleKey]
+	_, freshStill := bifrostTenants[freshKey]
+	bifrostTenantsMu.RUnlock()
+	if idleStill || !freshStill {
+		t.Fatalf("cache after the sweep: idle kept=%v (want false), fresh kept=%v (want true)", idleStill, freshStill)
+	}
+}

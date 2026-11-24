@@ -129,8 +129,22 @@ class FieldEditorScreen(GuardedModalScreen[str | None]):
             yield Static("", id="field-editor-error")
             yield Static(keys, id="field-editor-keys")
 
+    def _text_box(self) -> Input | None:
+        """The editor's Input, or None once the screen is being torn down.
+
+        A key queued behind Esc or Ctrl+C can reach a screen whose widgets are
+        already gone; every handler must then close quietly (GAP-1995).
+        """
+
+        try:
+            return self.query_one("#field-editor-input", Input)
+        except NoMatches:
+            return None
+
     def on_mount(self) -> None:
-        field_input = self.query_one("#field-editor-input", Input)
+        field_input = self._text_box()
+        if field_input is None:
+            return
         field_input.focus()
         field_input.cursor_position = len(field_input.value)
 
@@ -142,9 +156,8 @@ class FieldEditorScreen(GuardedModalScreen[str | None]):
         opened this editor is handled; the app hands them over here.
         """
 
-        try:
-            field_input = self.query_one("#field-editor-input", Input)
-        except NoMatches:
+        field_input = self._text_box()
+        if field_input is None:
             self._value += text
             return
         field_input.insert_text_at_cursor(text)
@@ -155,7 +168,12 @@ class FieldEditorScreen(GuardedModalScreen[str | None]):
         self.action_commit()
 
     def action_commit(self) -> None:
-        value = self.query_one("#field-editor-input", Input).value
+        field_input = self._text_box()
+        if field_input is None:
+            # Nothing to commit: close without a value, as Esc does.
+            self.dismiss(None)
+            return
+        value = field_input.value
         if self._validator is not None:
             try:
                 error = self._validator(value)
@@ -172,8 +190,9 @@ class FieldEditorScreen(GuardedModalScreen[str | None]):
     def action_toggle_reveal(self) -> None:
         if not self._password:
             return
-        field_input = self.query_one("#field-editor-input", Input)
-        field_input.password = not field_input.password
+        field_input = self._text_box()
+        if field_input is not None:
+            field_input.password = not field_input.password
 
     def on_click(self, event: events.Click) -> None:
         if event.widget is self:
@@ -182,4 +201,7 @@ class FieldEditorScreen(GuardedModalScreen[str | None]):
 
     def _set_error(self, message: str) -> None:
         self.error = message
-        self.query_one("#field-editor-error", Static).update(rich_escape(message))
+        try:
+            self.query_one("#field-editor-error", Static).update(rich_escape(message))
+        except NoMatches:
+            pass
