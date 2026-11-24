@@ -24,7 +24,9 @@ import (
 // persistence.shell_profile_write; ~/.bashrc, the absolute path and
 // `cd ~ && echo x >> .bashrc` alerted on both. The managed reading must be
 // at least the per-user one for every relative spelling, and for the
-// GAP-0690 function row that the relative form hid on managed. The controls stay allowed on both: a write of another file
+// GAP-0690 function row that the relative form hid on managed, and the
+// function rows with an unresolved command in the body (substrate-1:GAP-1091).
+// The controls stay allowed on both: a write of another file
 // in the home, a read of .bashrc, and a project's own .bashrc, which is not
 // the user's profile.
 func TestGAP1090ManagedRelativeShellProfileWriteMatchesPerUser(t *testing.T) {
@@ -50,16 +52,25 @@ func TestGAP1090ManagedRelativeShellProfileWriteMatchesPerUser(t *testing.T) {
 		{"R7", "h", "tee -a .bashrc < /dev/null", true},
 		{"F0690", "h", "f(){ test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc", false},
 		// The same with an unresolved command in the body (GAP-0693 $r,
-		// GAP-0694 "$@", GAP-0711 eval and $y) is still a managed allow
-		// where per-user alerts: the reading in the client's directory gives
-		// only the unknown tier for them, not the profile write
-		// (substrate-1:GAP-1091, open). With ~/.bashrc they match.
+		// GAP-0694 "$@", GAP-0711 eval and $y): per-user, the unknown tier of
+		// the unread part puts the call under the cap floor, whose piece
+		// `echo x >> .bashrc` is judged alone in the home. The managed reading
+		// in the client's directory must run that floor too
+		// (substrate-1:GAP-1091). The ~/.bashrc forms below already matched.
+		{"F0693", "h", "f(){ cd /tmp; $r ~; }; f && echo x >> .bashrc", true},
+		{"F0694", "h", "f(){ cd /tmp; \"$@\"; }; f cd && echo x >> .bashrc", true},
+		{"F0711a", "h", "f(){ cd /tmp; eval \"$c\"; }; f && echo x >> .bashrc", true},
+		{"F0711b", "h", "f(){ $y; }; f && echo x >> .bashrc", true},
 		{"T0693", "h", "f(){ cd /tmp; $r ~; }; f && echo x >> ~/.bashrc", false},
 		{"T0711b", "h", "f(){ $y; }; f && echo x >> ~/.bashrc", false},
 		{"N1", "h", "echo x >> notes.txt", false},
 		{"N2", "h", "cat .bashrc", false},
 		{"N3", "p", "echo x >> .bashrc", false},
 		{"N4", "h", "echo x >> project/notes.txt", false},
+		// GAP-1091 controls: the same call on an ordinary file, and on a
+		// project's own profile-named file, stays allowed on both.
+		{"N5", "h", "f(){ $y; }; f && echo x >> notes.txt", false},
+		{"N6", "p", "f(){ $y; }; f && echo x >> .bashrc", false},
 	}
 	benign := func(r row) bool { return strings.HasPrefix(r.id, "N") }
 	payloads := make([][]byte, 0, 2*len(rows))
