@@ -61,11 +61,16 @@ func TestGAP0401SubstrateMetricsLeaveThroughTheOTLPExporter(t *testing.T) {
 
 	// first_hook_after_resume: the controller saw the actor suspended, so
 	// its next hook call is its first after the resume (GAP-0486).
+	// The leader decides it once this replica synced twice (GAP-0486).
 	relayStore, relayClient := substrateRelayLeader(t)
+	relayTaker := &telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}
+	f.api.substrateState().cfg.Relay = relayTaker
 	relayStore.Add(telemetryrelay.Record{Kind: telemetryrelay.KindLifecycle, Lifecycle: chainstate.LifecycleSuspended, At: time.Now().Add(-time.Second),
 		Atespace: "eng-web", Actor: "alice-1", UID: subUID1, Connector: "claudecode"})
-	if err := (&telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}).TakeOnce(context.Background()); err != nil {
-		t.Fatal(err)
+	for range 2 {
+		if err := relayTaker.TakeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// hook_rtt: a hook call; rate_limited: warm-up pings over the budget.
 	f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice",
@@ -86,7 +91,7 @@ func TestGAP0401SubstrateMetricsLeaveThroughTheOTLPExporter(t *testing.T) {
 		telemetryrelay.Record{Kind: telemetryrelay.KindCount, Metric: telemetryrelay.MetricPolicyConflicts, Value: 1},
 		telemetryrelay.Record{Kind: telemetryrelay.KindGauge, Metric: telemetryrelay.MetricUnattestedTemplates, Value: 2},
 	)
-	if err := (&telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}).TakeOnce(context.Background()); err != nil {
+	if err := relayTaker.TakeOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// policy_lag: a launcher create.

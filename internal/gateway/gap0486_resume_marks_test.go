@@ -7,7 +7,6 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -15,9 +14,9 @@ import (
 )
 
 // substrate-1 GAP-0486: the audit row of the first hook call after a resume
-// says so; other rows do not. A call served after the suspend but before its
-// record arrived was the first one, so no later call is marked; and the
-// marks stay bounded.
+// says so; other rows do not, nor does one whose claim the leader refused
+// or that is still unanswered. Which call is the first is the leader's
+// decision (telemetryrelay TestGAP0486Leader*).
 func TestGAP0486ResumeMarks(t *testing.T) {
 	key, err := sandboxreg.SubstrateKey("eng-web", subUID2)
 	if err != nil {
@@ -27,32 +26,27 @@ func TestGAP0486ResumeMarks(t *testing.T) {
 	if _, ok := substrateHookAuditExtra(ctx)["substrate_first_hook_after_resume"]; ok {
 		t.Fatal("an ordinary hook row is marked")
 	}
-	if got := substrateHookAuditExtra(withFirstHookAfterResume(ctx))["substrate_first_hook_after_resume"]; got != "true" {
+	if got := substrateHookAuditExtra(withFirstHookAfterResume(ctx, gap0486Claimed(true)))["substrate_first_hook_after_resume"]; got != "true" {
 		t.Fatalf("the first hook row after a resume carries %q", got)
 	}
-
-	var m substrateResumeMarks
+	if _, ok := substrateHookAuditExtra(withFirstHookAfterResume(ctx, gap0486Claimed(false)))["substrate_first_hook_after_resume"]; ok {
+		t.Fatal("a refused claim marked the row")
+	}
+	pending := &substrateResumeClaim{done: make(chan struct{})}
 	t0 := time.Now()
-	m.suspendedAt("u1", t0)
-	if m.hook("u1", t0) || !m.hook("u1", t0.Add(time.Second)) || m.hook("u1", t0.Add(2*time.Second)) {
-		t.Fatal("want exactly the first call that started after the suspend marked")
+	if pending.isFirst() || time.Since(t0) > 5*resumeClaimWait {
+		t.Fatalf("an unanswered claim marked the row, or waited %v (bound %v)", time.Since(t0), resumeClaimWait)
 	}
-	// The record arrives after the first call was served: no later mark.
-	m.hook("u2", t0.Add(3*time.Second))
-	m.suspendedAt("u2", t0.Add(2*time.Second))
-	if m.hook("u2", t0.Add(4*time.Second)) {
-		t.Fatal("a later call was marked as the first after the resume")
+	pending.ok = true
+	close(pending.done)
+	if pending.isFirst() {
+		t.Fatal("a claim answered after the row was written changed the answer")
 	}
-	// A deleted actor is forgotten; the memory is bounded.
-	m.suspendedAt("u3", t0)
-	m.forget("u3")
-	if m.hook("u3", t0.Add(time.Second)) {
-		t.Fatal("a deleted actor kept its mark")
-	}
-	for i := range maxSubstrateResumeActors + 10 {
-		m.hook(fmt.Sprintf("a%d", i), t0.Add(time.Duration(i)))
-	}
-	if n := len(m.lastHook); n > maxSubstrateResumeActors {
-		t.Fatalf("the marks remember %d actors, bound %d", n, maxSubstrateResumeActors)
-	}
+}
+
+func gap0486Claimed(first bool) *substrateResumeClaim {
+	c := &substrateResumeClaim{done: make(chan struct{}), ok: first}
+	close(c.done)
+	return c
+
 }

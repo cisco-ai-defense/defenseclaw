@@ -36,7 +36,6 @@ func (a *APIServer) recordSubstrateRelay(ctx context.Context, b telemetryrelay.T
 		switch r.Kind {
 		case telemetryrelay.KindLifecycle:
 			a.emitSubstrateLifecycleV8(ctx, r)
-			a.noteSubstrateResume(r)
 		case telemetryrelay.KindEgress:
 			a.emitSubstrateEgressV8(ctx, r)
 		case telemetryrelay.KindAskClosed:
@@ -50,23 +49,6 @@ func (a *APIServer) recordSubstrateRelay(ctx context.Context, b telemetryrelay.T
 	}
 	if b.Dropped > 0 {
 		fmt.Fprintf(os.Stderr, "[substrate] telemetry relay: the leader dropped %d records it could not hand on in time\n", b.Dropped)
-	}
-}
-
-// noteSubstrateResume keeps what the first-hook-after-resume mark needs
-// from a lifecycle record (GAP-0486).
-func (a *APIServer) noteSubstrateResume(r telemetryrelay.Record) {
-	st := a.substrateState()
-	if st == nil {
-		return
-	}
-	switch r.Lifecycle {
-	case chainstate.LifecycleSuspended:
-		st.resumes.suspendedAt(r.UID, r.At)
-	case chainstate.LifecycleResumed:
-		st.resumes.resumedAt(r.UID, r.At)
-	case chainstate.LifecycleDeleted:
-		st.resumes.forget(r.UID)
 	}
 }
 

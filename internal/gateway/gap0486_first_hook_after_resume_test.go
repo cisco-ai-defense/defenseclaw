@@ -6,7 +6,6 @@
 package gateway
 
 import (
-	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -25,15 +24,16 @@ import (
 // it (the docs said so).
 func TestGAP0486FirstHookAfterResumeIsRecordedOnce(t *testing.T) {
 	runtime, capture := newProxyGeneratedMetricRuntime(t)
-	f := newSubstrateFixture(t)
-	f.api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 	relayStore, relayClient := substrateRelayLeader(t)
+	f := newSubstrateFixture(t, func(sc *SubstrateConfig) { sc.Relay = &telemetryrelay.Taker{Leader: relayClient} })
+	f.api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 	relay := func(recs ...telemetryrelay.Record) {
 		t.Helper()
 		relayStore.Add(recs...)
-		if err := (&telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}).TakeOnce(context.Background()); err != nil {
-			t.Fatal(err)
-		}
+		// Two relay passes: the leader hands the suspended set out, and
+		// this replica acknowledges it (GAP-0486).
+		gap0486Take(t, f)
+		gap0486Take(t, f)
 	}
 	lifecycle := func(event string, at time.Time) telemetryrelay.Record {
 		return telemetryrelay.Record{Kind: telemetryrelay.KindLifecycle, Lifecycle: event, At: at,

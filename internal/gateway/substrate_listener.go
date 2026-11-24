@@ -364,8 +364,6 @@ type substrateState struct {
 	pending    map[string]int
 	pendingOld map[string]int
 
-	// resumes marks each actor's first hook call after a resume (GAP-0486).
-	resumes substrateResumeMarks
 	// tokens remembers cluster-wide actor token refusals (the key set,
 	// the issuer, the control API), which /info reports so a launcher
 	// never calls a task finished whose every call was refused (GAP-0194).
@@ -805,16 +803,19 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		w.Header().Set(substrateModeHeader, substrateMode(reg))
 		w.Header().Set(substrateFailModeHeader, substrateFailMode(st.cfg, reg))
 		hook := route.class == sandboxauth.RouteHook && r.Method == http.MethodPost
-		first := hook && st.resumes.hook(actor.UID, start)
-		if first {
-			ctx = withFirstHookAfterResume(ctx)
+		var claim *substrateResumeClaim
+		if hook && st.cfg.Relay != nil && st.cfg.Relay.Resumes().Hook(actor.UID, start) {
+			// Maybe its first hook call after a resume: the leader decides,
+			// while the call is served (GAP-0486).
+			claim = startSubstrateResumeClaim(st.cfg.Relay, actor.UID, start)
+			ctx = withFirstHookAfterResume(ctx, claim)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 		if hook {
 			// A hook call; the kit's GET warm-up pings are not counted.
 			d := time.Since(start)
 			a.recordSubstrateHookRTT(d)
-			if first {
+			if claim.isFirst() {
 				a.recordSubstrateFirstHookAfterResume(d)
 			}
 		}
