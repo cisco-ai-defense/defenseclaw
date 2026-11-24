@@ -34,8 +34,9 @@ not a claim that all behavior is contained in one file.
   do not create an endpoint-local parallel schema.
 - When a hook inspects connector event content that has no canonical
   prompt/tool companion event, project the normalized telemetry copy onto the
-  canonical hook decision only when the Cisco AI Defense hook lane submitted
-  it. For Claude Code `StopFailure`, normalize echoed block messages before
+  canonical hook decision only when `guardrail.include_hook_event_content` is
+  on (off by default) and the Cisco AI Defense hook lane submitted it. The key
+  never changes what is inspected or the verdict. For Claude Code `StopFailure`, normalize echoed block messages before
   both submission and projection, and retain that evidence on the hook decision
   even when an equal model-response companion exists because destinations may
   collect either bucket independently. When the cloud returns no redaction

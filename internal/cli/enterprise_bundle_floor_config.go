@@ -95,6 +95,7 @@ var newerConfigKeys = []struct {
 	{"enterprise.openshell.allow_downgrade", [3]int{1, 0, 11}},
 	{"ai_discovery.include_skill_content_hashes", [3]int{1, 0, 11}},
 	{"ai_discovery.include_skill_manifests", [3]int{1, 0, 11}},
+	{"guardrail.include_hook_event_content", [3]int{1, 0, 11}},
 	{"guardrail.connectors.*.cascade", [3]int{1, 0, 10}},
 	{"guardrail.profiles.*.cascade", [3]int{1, 0, 10}},
 	{"guardrail.profiles.*.connectors.*.cascade", [3]int{1, 0, 10}},
