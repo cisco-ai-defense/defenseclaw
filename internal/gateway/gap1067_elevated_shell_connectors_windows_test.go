@@ -46,15 +46,10 @@ func TestGAP1067ShellConnectorsNeverWeakerThanClaudeCodePowerShellOnWindows(t *t
 		"hermes/terminal": true, "kiro/v3-execute_pwsh": true, "antigravity/run_command": true,
 	}
 	shapeParityTiers(t, func(t *testing.T, p gap0437Pack) {
-		handlers := map[string]http.HandlerFunc{}
-		handler := func(conn string) http.HandlerFunc {
-			if handlers[conn] == nil {
-				srv := gap0437Server(t, p, conn, "action")
-				installToolCallCorpusProfileConnector(t, conn, p.pack)
-				handlers[conn] = srv.handleAgentHook(conn)
-			}
-			return handlers[conn]
-		}
+		// The routes as the native-shape parity tests serve them (OpenClaw
+		// asks the inspect route, not a hook route).
+		handlers := shapeParityHandlers(t, p)
+		handler := func(conn string) http.HandlerFunc { return handlers[conn] }
 		for id, command := range fixture {
 			args := map[string]any{"command": command}
 			for _, cwd := range []string{outside, inside} {
@@ -73,7 +68,7 @@ func TestGAP1067ShellConnectorsNeverWeakerThanClaudeCodePowerShellOnWindows(t *t
 				}
 				for name := range routes {
 					if !seen[name] {
-						t.Errorf("%s: route %s not rendered by shapeParityNative/More; the pin no longer covers it", p.name, name)
+						t.Errorf("%s: route %s not rendered by shapeParityNative or shapeParityNativeMore; the pin no longer covers it", p.name, name)
 					}
 				}
 			}
