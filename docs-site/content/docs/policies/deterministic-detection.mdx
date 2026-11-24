@@ -375,7 +375,7 @@ gate must accept it, and the active profile (or the connector's
 Profiles change the disposition of accepted findings; they do not make an
 incomplete proof complete.
 
-What each finding severity does depends on the pack's block and alert levels, which are listed in [Thresholds](/docs/policies/thresholds#rule-pack-default-posture). In short: every pack blocks CRITICAL; `default` and `permissive` alert on lower severities and `strict` also blocks MEDIUM and HIGH.
+What each finding severity does depends on the pack's block and alert levels, which are listed in [Thresholds](/docs/policies/thresholds#rule-pack-default-posture). In short: every pack blocks CRITICAL. `default` alerts on MEDIUM and HIGH, `permissive` alerts on HIGH only, and `strict` also blocks HIGH and MEDIUM and alerts on LOW.
 
 Connector capability still controls whether `block` can become a
 native deny; unsupported surfaces retain the finding and audit action without
@@ -518,8 +518,7 @@ CodeGuard scans PowerShell (`.ps1`, `.psm1`), batch (`.bat`, `.cmd`), `.bash`, `
 
 **Evaluation limit.** DefenseClaw judges each command of a shell call on its own, up to 128 commands
 in one call (commands joined with `;`, `&&`, `||` or `|`, and the commands inside bodies). A call
-with more commands, or one the reader cannot analyse (for example a PowerShell statement it cannot
-parse before the rest), raises rule `ACTION-COMPOUND-LIMIT` ("Shell command exceeds policy
+with more commands, or one that runs past a reading bound (nesting too deep to read, for example), raises rule `ACTION-COMPOUND-LIMIT` ("Shell command exceeds policy
 evaluation limit"), whatever its length, up to the 1 MiB hook payload cap. Such a call proves no
 target. With the `default` and `permissive` packs, per-user and managed, the call runs with a visible
 alert that names the rule, an audit record with `decision=alert`, and the LLM judge decides where it
@@ -527,12 +526,19 @@ is configured. With the `strict` pack, managed strict included, action mode bloc
 proves a protected target in the same call (a DefenseClaw state write, a file the call names) decides
 on its own in every profile; a write the reader resolves into DefenseClaw's own state folder
 (`~/.defenseclaw`) is self-protection (`tamper.detector_state_write`, see [Modes](/docs/guardrail/packs-and-modes#modes)). A call that only mentions the folder name, next to
-a statement the reader cannot analyse, proves no target and is judged like any other limit-only call. **Known limit:** with `default` and `permissive`, a statement the reader
-cannot analyse can hide a write to a protected file in the same call; use `strict` where that
+a statement past the limit, proves no target and is judged like any other limit-only call. **Known limit:** with `default` and `permissive`, a statement past
+the limit can hide a write to a protected file in the same call; use `strict` where that
 matters. In observe mode the call raises the alert and runs. Split a long command into several
 calls, or put it in a script file and run the script.
 
-**Operand limit.** DefenseClaw also resolves at most 1024 operands and redirection targets of one command,
+**Bodies that are not known before they run.** A shell body that exists only at run time, such as
+`bash -c "$BODY"`, is not an evaluation limit. The call raises an `ACTION-PARSE-FAILURE` alert in every
+pack, `strict` included, and runs: this finding never blocks. What the rest of the call names is still judged.
+Use application control where such calls must be stopped. A PowerShell call that is only partly read is
+judged separately, not under `ACTION-COMPOUND-LIMIT`: it gets its own alert in `default` and `permissive` and
+a block in `strict`.
+
+**Operand limit.** DefenseClaw also resolves at most 1024 operands and redirection targets of one shell call,
 counted over all its statements, with the file system. A command with more operands is unresolved. Every
 word is still matched as text, as the shell decodes it (quotes and backslashes removed): a protected file or
 link that the command names, directly or through a value DefenseClaw knows, or among the first 1024

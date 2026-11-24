@@ -113,7 +113,7 @@ Generic `curl` and `wget` pipelines into a shell are off in `default` and
 
 In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to `authorized_keys`, private-key reads and writes to instruction files follow the action-mode rules in [deterministic detection](/docs/policies/deterministic-detection#action-mode-rule-details); in short, an instruction-file write is blocked in action mode by `default` and `strict` and reported by `permissive`.
 
-**Shell evaluation limits.** A shell call with more than 128 commands, or more than 1024 operands in one command, raises the rule `ACTION-COMPOUND-LIMIT`. The `default` and `permissive` packs alert and let the call run; `strict` blocks it in action mode. How the limits work, and how to split a long command, is in [deterministic detection](/docs/policies/deterministic-detection#evaluation-and-operand-limits).
+**Shell evaluation limits.** A shell call with more than 128 commands, or more than 1024 operands and redirection targets across all its commands together, raises the rule `ACTION-COMPOUND-LIMIT`. The `default` and `permissive` packs alert and let the call run; `strict` blocks it in action mode. How the limits work, and how to split a long command, is in [deterministic detection](/docs/policies/deterministic-detection#evaluation-and-operand-limits).
 
 ## What `setup guardrail` actually writes
 
