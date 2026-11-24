@@ -54,6 +54,34 @@ func TestGAP2035FloorCheckRefusesADowngradeOverNewerConfigKeys(t *testing.T) {
 	}
 }
 
+// GAP-2069: the package scripts append " Nothing was changed." to the
+// refusal, which ran into the last sentence of the config and route refusals
+// ("... then install the older package again Nothing was changed."). Every
+// floor-check refusal ends with a full stop, so each platform prints the
+// same two sentences.
+func TestGAP2069FloorCheckRefusalsEndWithAFullStop(t *testing.T) {
+	d := newRouteFloorDevice(t)
+	writeFloorCheckConfig(t, "deployment_mode: managed_enterprise\nai_discovery:\n  include_skill_manifests: true\n")
+	msg := refusedWithFloorExit(t, d.floorCheck("1.0.10"), "config_newer_than_release")
+	if !strings.HasSuffix(msg, "then install the older package again.") {
+		t.Fatalf("config refusal = %q; want it to end with \"install the older package again.\"", msg)
+	}
+	if got := msg + " Nothing was changed."; !strings.Contains(got, "again. Nothing was changed.") {
+		t.Fatalf("script-joined text = %q; want the two sentences apart", got)
+	}
+	writeFloorCheckConfig(t, "ai_discovery: [unclosed\n")
+	msg = refusedWithFloorExit(t, d.floorCheck("1.0.10"), "could not be read")
+	if !strings.HasSuffix(msg, "install the older package again.") {
+		t.Fatalf("unreadable-config refusal = %q; want a full stop at the end", msg)
+	}
+	routed := newRouteFloorDevice(t)
+	routed.routed = []string{"claudecode"}
+	msg = refusedWithFloorExit(t, routed.floorCheck("1.0.9"), "route_only_downgrade_refused")
+	if !strings.HasSuffix(msg, ".") || strings.HasSuffix(msg, "..") {
+		t.Fatalf("route refusal = %q; want exactly one full stop at the end", msg)
+	}
+}
+
 func TestGAP2035FloorCheckNewerConfigKeyShapes(t *testing.T) {
 	for _, test := range []struct {
 		name, body, version string
