@@ -620,3 +620,37 @@ def test_unit_check_fails_on_diagnostics_outside_the_allow_list(tmp_path: Path) 
     assert result.returncode == 1, result.stdout
     assert "UNITS-PASSED" not in result.stdout
     assert "unit diagnostics outside the systemd 239 allow list" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_lane_detect_checks_wait_out_a_busy_lifecycle_lock(tmp_path: Path) -> None:
+    # GAP-2118: the apply job's ensure --reason path can still hold the
+    # lifecycle lock during the MDM checks, and detect.sh then prints busy
+    # (an MDM retries later). The --require-security-complete check took one
+    # sample and failed the pkg lane on busy. Every detect.sh check of the
+    # lane must retry busy through detect_settled.
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    calls = re.findall(r"^\s*detected=\$\((detect_\w+)", lane, re.MULTILINE)
+    assert calls, "the lane has no detect.sh checks"
+    assert set(calls) == {"detect_settled"}, calls
+
+    helpers = re.search(r"^detect_value\(\) \{\n.*?^\}\n.*?^detect_settled\(\) \{\n.*?^\}\n",
+                        lane, re.MULTILINE | re.DOTALL)
+    assert helpers, "the lane has no detect_value/detect_settled helpers"
+    count = tmp_path / "count"
+    detect = tmp_path / "detect.sh"
+    detect.write_text(
+        '#!/bin/sh\nn=$(cat "$COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$COUNT"\n'
+        '[ "$n" -le 2 ] && { echo busy; exit 4; }\necho "$*" >"$COUNT.args"; echo unhealthy; exit 1\n',
+        encoding="utf-8",
+    )
+    script = helpers.group(0).replace("sleep 2", "sleep 0") + (
+        'detected=$(detect_settled --require-security-complete --min-version 9.9.9)\n'
+        'printf "%s\\n" "$detected"\n'
+    )
+    env = {**os.environ, "detect": str(detect), "COUNT": str(count)}
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "unhealthy"
+    assert count.read_text().strip() == "3"
+    assert "--require-security-complete --min-version 9.9.9" in (tmp_path / "count.args").read_text()

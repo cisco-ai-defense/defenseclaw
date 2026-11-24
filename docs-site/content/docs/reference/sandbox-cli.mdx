@@ -1096,6 +1096,11 @@ would not start. Without a name, a red `Telemetry` row appears when the
 audit recorder refused sandbox records since the daemon started, with the
 count and the last error.
 
+When sandboxes are off, `sandbox status` names the reason for your primary
+connector: your organization's profiles match per connector, so the answer is
+the one for the agent your configuration names as primary. `sandbox run` names
+the reason for the agent you run.
+
 ```bash
 defenseclaw sandbox status
 defenseclaw sandbox status myapp-7f3a --output json
@@ -1249,8 +1254,14 @@ its port unless it is 443, and an IPv6 address with its port is bracketed
 `unblock` command. A large upload is a ⚠ report (`⚠ large upload to
 files.example.net (more than 25 MiB)`), or with
 [the large-upload block](/docs/sandboxes/policy-packs) on, a ✗
-that names the threshold. `-f` follows the feed. Each event has a sequence
-number, and `--since` starts after one.
+that names the threshold. `-f` follows the feed. While sandboxes are off for
+your account (your organization turned them off, your profile does not allow
+them, another account is using them, or the organization manages the setting),
+`-f` prints the same reason `sandbox status` gives and exits `1` at once,
+without waiting for the feed. When only the installed OpenShell cannot run a
+sandbox, `-f` follows the feed of the sandboxes that still run. When the daemon
+just stops, it says so. Each event has a sequence number,
+and `--since` starts after one.
 
 ```bash
 defenseclaw sandbox activity -f
