@@ -38,8 +38,14 @@ func tixgSend(t *testing.T, c *websocket.Conn, s string) {
 	}
 }
 
-func tixgExpectErr(t *testing.T, agent *websocket.Conn, id any, code float64, substr string) {
+// tixgExpectErr reads the bridge's error answer to the message just sent.
+// A message the bridge forwarded to the laptop instead fails by name
+// (tixgLaptopUntilBarrier), not on a read timeout.
+func tixgExpectErr(t *testing.T, agent, laptop *websocket.Conn, id any, code float64, substr string) {
 	t.Helper()
+	if seen := tixgLaptopUntilBarrier(t, agent, laptop); len(seen) > 0 {
+		t.Fatalf("the bridge forwarded %q to the laptop, want it refused with id %v code %v %q", seen, id, code, substr)
+	}
 	m := tixgRead(t, agent)
 	e, _ := m["error"].(map[string]any)
 	msg, _ := e["message"].(string)
@@ -91,23 +97,23 @@ func TestMCPBridgeJudgesPromptAndCompletionArguments(t *testing.T) {
 	cmd, _ := json.Marshal(tixgCommand)
 	// The parity anchor: the shipped rule denies the tools/call.
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":`+tixgBlockedArgs+`}}`)
-	tixgExpectErr(t, agent, float64(1), -32001, "CMD-RM-RF")
+	tixgExpectErr(t, agent, laptop, float64(1), -32001, "CMD-RM-RF")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"x","arguments":{"command":`+string(cmd)+`}}}`)
-	tixgExpectErr(t, agent, float64(2), -32001, "notes.prompts_get: matched: CMD-RM-RF")
+	tixgExpectErr(t, agent, laptop, float64(2), -32001, "notes.prompts_get: matched: CMD-RM-RF")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":3,"method":"completion/complete","params":{"ref":{"type":"ref/prompt","name":"x"},"argument":{"name":"command","value":`+string(cmd)+`}}}`)
-	tixgExpectErr(t, agent, float64(3), -32001, "notes.completion_complete: matched: CMD-RM-RF")
+	tixgExpectErr(t, agent, laptop, float64(3), -32001, "notes.completion_complete: matched: CMD-RM-RF")
 	// The context arguments are read too, also when the completed argument
 	// has the same name.
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":4,"method":"completion/complete","params":{"ref":{"type":"ref/prompt","name":"x"},"argument":{"name":"topic","value":"q"},"context":{"arguments":{"command":`+string(cmd)+`}}}}`)
-	tixgExpectErr(t, agent, float64(4), -32001, "CMD-RM-RF")
+	tixgExpectErr(t, agent, laptop, float64(4), -32001, "CMD-RM-RF")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":5,"method":"completion/complete","params":{"ref":{"type":"ref/prompt","name":"x"},"argument":{"name":"command","value":"ls"},"context":{"arguments":{"command":`+string(cmd)+`}}}}`)
-	tixgExpectErr(t, agent, float64(5), -32001, "CMD-RM-RF")
+	tixgExpectErr(t, agent, laptop, float64(5), -32001, "CMD-RM-RF")
 	// Arguments that are not the object the spec gives are refused, never
 	// judged as no arguments.
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":6,"method":"prompts/get","params":{"name":"x","arguments":[`+string(cmd)+`]}}`)
-	tixgExpectErr(t, agent, float64(6), -32600, "invalid_message: ")
+	tixgExpectErr(t, agent, laptop, float64(6), -32600, "invalid_message: ")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":7,"method":"completion/complete","params":{"ref":{"type":"ref/prompt","name":"x"},"argument":{"value":`+string(cmd)+`}}}`)
-	tixgExpectErr(t, agent, float64(7), -32600, "invalid_message: ")
+	tixgExpectErr(t, agent, laptop, float64(7), -32600, "invalid_message: ")
 
 	// Benign controls reach the laptop.
 	benign := []string{
@@ -154,7 +160,7 @@ func TestMCPBridgeLargeArgumentsAreJudged(t *testing.T) {
 		for _, after := range []bool{false, true} {
 			id++
 			tixgSend(t, agent, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"read_file","arguments":%s}}`, id, tixgPadded(n, after)))
-			tixgExpectErr(t, agent, float64(id), -32001, "CMD-RM-RF")
+			tixgExpectErr(t, agent, laptop, float64(id), -32001, "CMD-RM-RF")
 		}
 	}
 	cmd, _ := json.Marshal(tixgCommand)
@@ -175,13 +181,13 @@ func TestMCPBridgeLargeArgumentsAreJudged(t *testing.T) {
 	for _, args := range others {
 		id++
 		tixgSend(t, agent, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"read_file","arguments":%s}}`, id, args))
-		tixgExpectErr(t, agent, float64(id), -32001, "CMD-RM-RF")
+		tixgExpectErr(t, agent, laptop, float64(id), -32001, "CMD-RM-RF")
 	}
 	// The judged reads inherit it.
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":"r1","method":"resources/read","params":`+strings.Replace(tixgPadded(70<<10, false), `{`, `{"uri":"file:///notes/a.txt",`, 1)+`}`)
-	tixgExpectErr(t, agent, "r1", -32001, "CMD-RM-RF")
+	tixgExpectErr(t, agent, laptop, "r1", -32001, "CMD-RM-RF")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":"p1","method":"prompts/get","params":{"name":"x","arguments":`+tixgPadded(200<<10, true)+`}}`)
-	tixgExpectErr(t, agent, "p1", -32001, "CMD-RM-RF")
+	tixgExpectErr(t, agent, laptop, "p1", -32001, "CMD-RM-RF")
 
 	// Benign large calls are carried, with an alert row that names the
 	// bound, as the hook path records a truncated reading.
@@ -267,19 +273,19 @@ func TestMCPBridgeNotificationAllowList(t *testing.T) {
 		tixgSend(t, agent, s)
 	}
 	tixgSend(t, agent, `{"jsonrpc":"2.0","method":"notifications/initialized","ID":5}`)
-	tixgExpectErr(t, agent, nil, -32600, "invalid_message: ")
+	tixgExpectErr(t, agent, laptop, nil, -32600, "invalid_message: ")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","method":"Notifications/Initialized"}`)
-	tixgExpectErr(t, agent, nil, -32600, "invalid_message: the JSON-RPC method is not exactly notifications/initialized")
+	tixgExpectErr(t, agent, laptop, nil, -32600, "invalid_message: the JSON-RPC method is not exactly notifications/initialized")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","Id":"s1","result":{}}`)
-	tixgExpectErr(t, agent, nil, -32600, "invalid_message: ")
+	tixgExpectErr(t, agent, laptop, nil, -32600, "invalid_message: ")
 	tixgSend(t, agent, `{"jsonrpc":"2.0","id":"s2","Error":{"code":1,"message":"x"}}`)
-	tixgExpectErr(t, agent, "s2", -32600, "invalid_message: ")
+	tixgExpectErr(t, agent, laptop, "s2", -32600, "invalid_message: ")
 	tixgSend(t, agent, `"tools/call"`)
-	tixgExpectErr(t, agent, nil, -32600, "invalid_message: the MCP message is not one JSON-RPC object")
+	tixgExpectErr(t, agent, laptop, nil, -32600, "invalid_message: the MCP message is not one JSON-RPC object")
 	tixgSend(t, agent, `7`)
-	tixgExpectErr(t, agent, nil, -32600, "invalid_message: the MCP message is not one JSON-RPC object")
+	tixgExpectErr(t, agent, laptop, nil, -32600, "invalid_message: the MCP message is not one JSON-RPC object")
 	tixgSend(t, agent, `[{"jsonrpc":"2.0","id":1,"method":"ping"}]`)
-	tixgExpectErr(t, agent, nil, -32600, "invalid_message: JSON-RPC batches are not bridged")
+	tixgExpectErr(t, agent, laptop, nil, -32600, "invalid_message: JSON-RPC batches are not bridged")
 
 	benign := []string{
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
@@ -328,11 +334,11 @@ func TestSubstrateMCPCutKeepsWholeWords(t *testing.T) {
 	}{
 		{"rm -rf /home/me/build", 8, false, "rm -rf"},
 		{"rm -rf /home/me/build", 7, false, "rm -rf "},
-		{"build/me/home/ -rf rm", 8, true, " -rf rm"},
+		{"build/me/home/ -rf rm", 8, true, "x -rf rm"},
 		{"AAAAAAAAAA", 4, false, "AAAA"},
-		{"AAAAAAAAAA", 4, true, "AAAA"},
+		{"AAAAAAAAAA", 6, true, "AAAA"},
 		{"ééééé", 3, false, "é"},
-		{"ééééé", 3, true, "é"},
+		{"ééééé", 5, true, "é"},
 		{"short", 64, false, "short"},
 	} {
 		if got := substrateMCPCut(c.s, c.n, c.tail); got != c.want {
