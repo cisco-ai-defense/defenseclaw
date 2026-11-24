@@ -3,7 +3,10 @@
 
 package gateway
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestGAP2154LaneEnds: the readers report the providers' lane ends, a later
 // lane of the same choice ends the one it follows, and an end ends only its
@@ -11,7 +14,7 @@ import "testing"
 func TestGAP2154LaneEnds(t *testing.T) {
 	hasEnd := func(ps []responsePiece, choice int) bool {
 		for _, p := range ps {
-			if p.end && p.lane.choice == choice {
+			if p.end != laneEndNone && p.lane.choice == choice {
 				return true
 			}
 		}
@@ -37,7 +40,7 @@ func TestGAP2154LaneEnds(t *testing.T) {
 	if hasEnd(streamEventPieces(`{"choices":[{"index":0,"delta":{"content":"a"},"finish_reason":null}]}`, "openai"), 0) {
 		t.Errorf("a chat delta with no finish_reason ended its choice")
 	}
-	if ps := withWalkerPieces([]responsePiece{laneEndPiece(0)}, []string{"walker 7"}); len(ps) != 2 || !ps[1].end {
+	if ps := withWalkerPieces([]responsePiece{laneEndPiece(0)}, []string{"walker 7"}); len(ps) != 2 || ps[1].end == laneEndNone {
 		t.Errorf("the lane end must follow the walker's strings of its event: %+v", ps)
 	}
 
@@ -48,7 +51,13 @@ func TestGAP2154LaneEnds(t *testing.T) {
 		t.Fatal("open runs not held")
 	}
 	r.Add(answerPiece(0, "The answer."))
-	r.Add(laneEndPiece(1))
+	r.Add(messageEndPiece(1))
+	// The reasoning is parked (a lane switch, GAP-2162) until
+	// streamRunParkMax bytes of other text follow.
+	if !r.OpenSecret().open {
+		t.Fatal("a reasoning run parked by the answer was released at once")
+	}
+	r.Add(answerPiece(0, strings.Repeat("x", streamRunParkMax+1)))
 	if o := r.OpenSecret(); o.open {
 		t.Fatalf("the reasoning (answer of the same choice started) and choice 1 (ended) still hold: %+v", o)
 	}
@@ -57,14 +66,15 @@ func TestGAP2154LaneEnds(t *testing.T) {
 		t.Fatal("a run that starts after the end is not held")
 	}
 	r.Add(answerPiece(0, " Then 55"))
-	r.Add(laneEndPiece(0))
+	r.Add(messageEndPiece(0))
 	if !r.OpenSecret().open {
 		t.Fatal("ending choice 0 ended choice 1's run")
 	}
 	var tools responseText
 	tools.Add(toolInputPiece(0, 0, `{"n":4`))
 	tools.Add(toolInputPiece(0, 1, `{"path":"a"}`))
+	tools.Add(messageEndPiece(0))
 	if tools.OpenSecret().open {
-		t.Fatal("a tool call's run is held after a later tool call started")
+		t.Fatal("a tool call's run is held after the message ended")
 	}
 }
