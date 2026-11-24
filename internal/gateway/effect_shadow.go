@@ -1100,12 +1100,18 @@ func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier
 // pack without the class rule grades no class write, as it grades no plain
 // one, so the finding is dropped. The generation is read only when there is
 // such a finding.
+//
+// The call's own restricted finding on the same credential class folds into
+// a kept class finding, as the plain write's folds into the reader's
+// (decide.FoldsIntoLegacy); with no class rule in the pack it stands, so the
+// alias write keeps its restricted verdict (GAP-2114).
 func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *compiledRulePackCategories) []RuleFinding {
 	out := findings[:0]
+	var graded []string
 	for _, f := range findings {
 		// Only the class rule finding of a credential write: the call's
 		// effect.protected_target_<tier> finding has a credential proof too
-		// and keeps its own grading.
+		// and is folded or kept below.
 		if f.Proof.Kind != decide.KindRead && f.Proof.Source == decide.SourceEffects &&
 			(f.Proof.Target == decide.TargetCredential || f.Proof.Target == decide.TargetOtherHomeCredential) &&
 			f.RuleID != "" && f.RuleID == decide.RuleFor(f.Proof) {
@@ -1113,11 +1119,18 @@ func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *com
 			if severity == "" {
 				continue
 			}
+			graded = append(graded, f.Proof.Set)
 			f.Severity, f.Proof = severity, decide.Proof{}
 		}
 		out = append(out, f)
 	}
-	return out
+	if len(graded) == 0 {
+		return out
+	}
+	return slices.DeleteFunc(out, func(f RuleFinding) bool {
+		return f.RuleID == decide.RuleEffectRestricted && f.Proof.Source == decide.SourceEffects &&
+			f.Proof.Target == decide.TargetCredential && f.Proof.Set != "" && slices.Contains(graded, f.Proof.Set)
+	})
 }
 
 // effectRuleSeverity is the highest severity a generation (and each member

@@ -217,9 +217,8 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 // gets; a
 // write is a Known mutation proof of the member's class, which names the
 // class's 1.0.10 rule (decide.RuleFor) as the plain write of the member does
-// through that rule's own reader, never the restricted tier: a plain write
-// is restricted too, but that finding folds into the class rule
-// (decide.FoldsIntoLegacy), and an alias has no reader finding to fold into.
+// through that rule's own reader, and the restricted tier, which folds into
+// that rule finding as the plain write's does (withEffectClassWriteSeverity).
 // The memo holds only exact credential members (knownAliasCredential), and
 // every token is accounted (uses runs only then).
 func addEffectAliasUse(c *effectClass, result effects.Result, use effectAliasUse) {
@@ -234,8 +233,16 @@ func addEffectAliasUse(c *effectClass, result effects.Result, use effectAliasUse
 		c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		return
 	}
-	c.knownMutation = true
+	// A write is also the restricted tier of the member's class, as at T23:
+	// the plain write of the member is restricted too, and that finding folds
+	// into the class rule finding when the pack has the rule
+	// (withEffectClassWriteSeverity). In a pack without the class rule it
+	// stands, so the alias write keeps the T23 verdict (GAP-2114).
+	c.knownMutation, c.restricted = true, true
 	c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+	c.restrictedSets = dedupeStrings(append(c.restrictedSets, effectrules.SetCredentials))
+	c.writtenCredentialSets = dedupeStrings(append(c.writtenCredentialSets, proof.Set))
+	c.credentialAppend = c.credentialAppend || proof.Kind == decide.KindAppend
 }
 
 // effectExtractCut reports whether the extractor stopped at one of its
