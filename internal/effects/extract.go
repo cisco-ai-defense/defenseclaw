@@ -1841,7 +1841,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 			return
 		}
-		code, ok, opq := powershellLaunchCode(inner[1:])
+		code, ok, opq := powershellLaunchCode(inner[0].Value, w.o.flavor(), inner[1:])
 		if opq {
 			w.opaqueExec(origin, cond)
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
@@ -4586,9 +4586,17 @@ var psHostValued = set("executionpolicy", "ep", "windowstyle", "w", "inputformat
 
 // powershellLaunchCode returns the PowerShell command text a powershell/pwsh
 // launch runs (a -Command / -EncodedCommand value or the positional tail). opaque
-// is true when the launch carries an option the parser does not know -- a
-// working directory, a script file, anything else -- so no text is trusted.
-func powershellLaunchCode(args []Word) (code string, ok, opaque bool) {
+// is true when the launch carries an option the parser cannot settle -- a
+// pwsh working directory with a positional file, an unknown option, or a
+// script file. Windows PowerShell 5.1 consumes -wd without moving a
+// positional body (native TST-16012, GAP-1557).
+func powershellLaunchCode(host string, flavor Flavor, args []Word) (code string, ok, opaque bool) {
+	// Windows PowerShell 5.1 accepts -wd/-WorkingDirectory as a valued
+	// parameter but leaves a positional command in the caller's cwd (native
+	// TST-16012, GAP-1557). pwsh 7 binds that positional as -File instead,
+	// so its existing opaque reading must remain. A bare host outside the
+	// Windows flavor has no proven edition and also keeps the opaque floor.
+	windows51 := flavor == FlavorWindows && psLeaf(host) == "powershell"
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !a.Static {
@@ -4616,13 +4624,19 @@ func powershellLaunchCode(args []Word) (code string, ok, opaque bool) {
 				return "", false, true // -Option:value is not modeled
 			}
 			switch {
+			case name == "wd" || len(name) >= 3 && strings.HasPrefix("workingdirectory", name):
+				if !windows51 || i+1 >= len(args) {
+					return "", false, true
+				}
+				i++ // 5.1 consumes the value but does not move the body
+				continue
 			case psHostSwitches[name]:
 				continue
 			case psHostValued[name]:
 				i++ // the value belongs to the option
 				continue
 			}
-			return "", false, true // -wd, -File, -Version-less abbreviations, anything unknown
+			return "", false, true // -File, -Version-less abbreviations, anything unknown
 		}
 		// a bare positional (incl. a lone "-" = read script from stdin, handled as
 		// opaque by the caller): the rest is a PowerShell command (review N8 K5/S5,
