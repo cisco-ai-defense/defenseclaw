@@ -446,11 +446,22 @@ func knownWrapperOption(wrapper, option string, valued []string) bool {
 // is uncertain, or a script nested past the limit, counts when one of its
 // words names one of programs.
 func RunsProgram(cmdline string, programs ...string) bool {
-	lexer := &shellLexer{}
-	lexer.parse(cmdline, 0)
+	return runsProgramAtDepth(cmdline, programs, 0, false)
+}
+
+// RunsProgramIncludingLaunchers also follows known command operands of
+// launchers such as find -exec and flock. Callers that only need shell-level
+// commands should use RunsProgram: a launcher child may not have the same
+// path and side effects as a direct command.
+func RunsProgramIncludingLaunchers(cmdline string, programs ...string) bool {
+	return runsProgramAtDepth(cmdline, programs, 0, true)
+}
+
+func runsProgramAtDepth(cmdline string, programs []string, depth int, includeLaunchers bool) bool {
 	names := func(text string) bool {
 		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
-			return unicode.IsSpace(r) || strings.ContainsRune("\"'`;&|(){}<>=", r)
+			return unicode.IsSpace(r) || r == 34 || r == 39 || r == 96 ||
+				strings.ContainsRune(";&|(){}<>=", r)
 		}) {
 			if slices.Contains(programs, programName(token)) {
 				return true
@@ -458,13 +469,149 @@ func RunsProgram(cmdline string, programs ...string) bool {
 		}
 		return false
 	}
+	if depth > maxShellNesting {
+		return names(cmdline)
+	}
+	lexer := &shellLexer{}
+	lexer.parse(cmdline, 0)
 	for _, command := range lexer.commands {
-		program, _, certain := resolveProgram(command.words)
+		program, args, certain := resolveProgram(command.words)
 		if slices.Contains(programs, program) || !certain && names(joinWords(command.words, false)) {
 			return true
 		}
+		if includeLaunchers {
+			for _, child := range launchedProgramTexts(program, args) {
+				if runsProgramAtDepth(child, programs, depth+1, true) {
+					return true
+				}
+			}
+		}
 	}
 	return lexer.truncated && names(cmdline)
+}
+
+// launchedProgramTexts reads the command position of programs that hand a
+// child command to the host. Words after a data delimiter are never programs.
+func launchedProgramTexts(program string, args []shellWord) []string {
+	switch program {
+	case "find":
+		var children []string
+		for i := 0; i < len(args); i++ {
+			switch args[i].text {
+			case "-exec", "-execdir", "-ok", "-okdir":
+				start := i + 1
+				i = start
+				for i < len(args) && args[i].text != ";" && args[i].text != "+" {
+					i++
+				}
+				// An unterminated -exec/-ok is an invalid find expression: it
+				// cannot launch the words it names.
+				if i < len(args) && start < i {
+					children = append(children, joinWords(args[start:i], true))
+				}
+			}
+		}
+		return children
+	case "su", "runuser":
+		for i, a := range args {
+			if a.text == "-c" || a.text == "--command" {
+				if i+1 < len(args) {
+					return []string{args[i+1].text}
+				}
+			}
+			if strings.HasPrefix(a.text, "--command=") {
+				return []string{strings.TrimPrefix(a.text, "--command=")}
+			}
+		}
+	case "flock":
+		for i := 0; i < len(args); i++ {
+			a := args[i].text
+			if a == "-c" || a == "--command" {
+				if i+1 < len(args) {
+					return []string{args[i+1].text}
+				}
+				return nil
+			}
+			if a == "-w" || a == "--timeout" {
+				i++
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			if i+1 < len(args) {
+				return []string{joinWords(args[i+1:], true)}
+			}
+			return nil
+		}
+	case "watch":
+		for i := 0; i < len(args); i++ {
+			a := args[i].text
+			if a == "-n" || a == "--interval" {
+				i++
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			return []string{scriptFrom(args[i:])}
+		}
+	case "chrt":
+		for i := 0; i < len(args); i++ {
+			a := args[i].text
+			if a == "-p" || a == "--pid" {
+				return nil
+			}
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			if launcherNumber(a) && i+1 < len(args) {
+				return []string{joinWords(args[i+1:], true)}
+			}
+			return nil
+		}
+	case "parallel":
+		for i := 0; i < len(args); i++ {
+			a := args[i].text
+			if a == ":::" || a == "::::" {
+				return nil
+			}
+			if a == "-j" || a == "--jobs" || a == "-a" || a == "--arg-file" {
+				i++
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			return []string{scriptFrom(args[i : i+1])}
+		}
+	case "systemd-run":
+		for i := 0; i < len(args); i++ {
+			a := args[i].text
+			switch a {
+			case "--unit", "--description", "--property", "--setenv", "--working-directory", "--machine", "--slice":
+				i++
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			return []string{joinWords(args[i:], true)}
+		}
+	}
+	return nil
+}
+
+func launcherNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // MayNameProgram reports whether cmdline may hold the name of one of
