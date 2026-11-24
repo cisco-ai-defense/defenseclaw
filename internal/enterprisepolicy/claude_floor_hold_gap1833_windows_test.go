@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // GAP-1833: the guardian runs PublishWindowsClaudeVersionFloor on every
@@ -87,6 +89,14 @@ func TestGAP1833UnchangedVersionFloorReconcileHoldsTheLockUnderTheSmokeBar(t *te
 	if worst := holds[len(holds)-1]; worst >= gap1833FloorHoldBar {
 		t.Errorf("the version floor reconcile held the Claude managed policy lock %s on an unchanged pass, at or above the %s bar", worst, gap1833FloorHoldBar)
 	}
+	// Most of a whole pass is the transient-name retry wait of the absent
+	// managed-settings.json read (about 230 ms of timer-rounded sleeps,
+	// before or under the lock). The same passes with those sleeps stubbed
+	// out compare the rest of the work across builds.
+	restoreSleep := safefile.SetTransientRetrySleepForTest(func(time.Duration) {})
+	_, whole = gap1833TimedFloorPasses(t, opts, locked, 50, nil, false)
+	restoreSleep()
+	t.Logf("GAP1833 version floor unchanged, retry sleeps stubbed: whole pass p50 %8s max %8s (n=%d)", whole[len(whole)/2], whole[len(whole)-1], len(whole))
 
 	// The changed-floor path: the drop-in is gone before each pass (drift),
 	// so every pass writes the floor and saves its record under the lock.
