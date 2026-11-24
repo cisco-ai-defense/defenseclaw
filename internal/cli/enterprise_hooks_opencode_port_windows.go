@@ -319,7 +319,7 @@ func windowsOpenCodePortAccountSignedOut(err error) bool {
 func windowsOpenCodePortUnknownEntry(sid, file string, err error) enterprisehooks.WindowsOpenCodePortUnknown {
 	fix := "repair the account file or profile"
 	if windowsOpenCodePortAccountSignedOut(err) {
-		fix = "sign in to that account; the guardian writes its port then"
+		fix = enterprisehooks.EnrolledUserSignedOutFix(err)
 	}
 	return enterprisehooks.WindowsOpenCodePortUnknown{SID: sid, Path: file, Reason: err.Error(), Fix: fix}
 }

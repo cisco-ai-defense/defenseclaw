@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unsafe"
@@ -27,6 +28,19 @@ var (
 	procWindowsLsaFreeReturnBuffer          = modWindowsSecur32.NewProc("LsaFreeReturnBuffer")
 	procWindowsAllocateLocallyUniqueID      = windows.NewLazySystemDLL("advapi32.dll").NewProc("AllocateLocallyUniqueId")
 	windowsEnterpriseS4UTargetTokenResolver = resolveWindowsEnterpriseS4UTargetToken
+)
+
+// The causes of a refused S4U logon that a sign-in to the account cannot fix
+// (GAP-1855). Every S4U failure is still ErrEnrolledUserSignedOut, so the
+// account stays pending, not a state error (GAP-1798); these name the fix.
+var (
+	// ErrS4UAccountUnresolved: Windows cannot map the SID to a user account
+	// (deleted, orphaned, or its domain cannot be reached).
+	ErrS4UAccountUnresolved = errors.New("enterprise hooks: Windows cannot resolve the account of the SID")
+	// ErrS4UUnavailable: this process cannot make an S4U logon at all (no
+	// SeTcbPrivilege, no LSA logon process, no authentication package, or
+	// only an identification token).
+	ErrS4UUnavailable = errors.New("enterprise hooks: this process cannot make an S4U logon")
 )
 
 const (
@@ -117,10 +131,10 @@ func resolveWindowsEnterpriseS4UTargetToken(target *windows.SID) (windows.Token,
 	}
 	account, domain, use, err := target.LookupAccount("")
 	if err != nil {
-		return 0, fmt.Errorf("enterprise hooks: look up account of SID %s: %w", target, err)
+		return 0, fmt.Errorf("enterprise hooks: look up account of SID %s: %w: %w", target, ErrS4UAccountUnresolved, err)
 	}
 	if use != windows.SidTypeUser {
-		return 0, fmt.Errorf("enterprise hooks: SID %s is not a user account", target)
+		return 0, fmt.Errorf("enterprise hooks: SID %s is not a user account: %w", target, ErrS4UAccountUnresolved)
 	}
 	computer, err := windows.ComputerName()
 	if err != nil {
@@ -183,7 +197,7 @@ func windowsS4ULogonToken(target *windows.SID, pkg, account, domain string) (win
 		uintptr(unsafe.Pointer(&mode)),
 	)
 	if err := windowsLSAStatus(r1); err != nil {
-		return 0, fmt.Errorf("enterprise hooks: register S4U logon process: %w", err)
+		return 0, fmt.Errorf("enterprise hooks: register S4U logon process: %w: %w", ErrS4UUnavailable, err)
 	}
 	defer procWindowsLsaDeregisterLogonProcess.Call(uintptr(lsa))
 	var pkgID uint32
@@ -193,7 +207,7 @@ func windowsS4ULogonToken(target *windows.SID, pkg, account, domain string) (win
 		uintptr(unsafe.Pointer(&pkgID)),
 	)
 	if err := windowsLSAStatus(r1); err != nil {
-		return 0, fmt.Errorf("enterprise hooks: look up %s for S4U: %w", pkg, err)
+		return 0, fmt.Errorf("enterprise hooks: look up %s for S4U: %w: %w", pkg, ErrS4UUnavailable, err)
 	}
 	source := windowsTokenSource{}
 	copy(source.SourceName[:], "DfnsClaw")
@@ -240,7 +254,7 @@ func windowsS4ULogonToken(target *windows.SID, pkg, account, domain string) (win
 		windows.TokenImpersonation,
 		&impersonation,
 	); err != nil {
-		return 0, fmt.Errorf("enterprise hooks: duplicate S4U token for SID %s: %w", target, err)
+		return 0, fmt.Errorf("enterprise hooks: duplicate S4U token for SID %s: %w: %w", target, ErrS4UUnavailable, err)
 	}
 	return impersonation, nil
 }
