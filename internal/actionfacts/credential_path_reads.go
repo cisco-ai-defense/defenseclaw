@@ -160,6 +160,46 @@ func (f Facts) PlaceCredentialPathReads(reported string) Facts {
 	return f
 }
 
+// ThinCredentialPathReads keeps, of a private record of more than whole
+// reads, the reads keep marks (keep returns one mark per read, in order) and
+// drops the others, for every copy of the facts (substrate-1:GAP-0674). The
+// caps stay as they are, the kept reads keep their order and are not
+// changed, and a record that had a read keeps at least one. A recursive
+// search of a deep tree has hundreds of reads of paths thousands of bytes
+// long, and the facts of the call are kept until its verdict is written,
+// behind every check of the call that comes after the resolve. The caller
+// marks the reads its checks can still tell apart; the record is never read
+// in full after that. A mark list of another length changes nothing.
+func (f Facts) ThinCredentialPathReads(whole int, keep func(reads []PathFact) []bool) {
+	l := f.credentialPaths
+	record := l.get()
+	if record == nil || len(record.reads) <= whole {
+		return
+	}
+	marks := keep(record.reads)
+	if len(marks) != len(record.reads) {
+		return
+	}
+	var reads []PathFact
+	for i, kept := range marks {
+		if kept {
+			reads = append(reads, record.reads[i])
+		}
+	}
+	if len(reads) == len(record.reads) {
+		return
+	}
+	if len(reads) == 0 {
+		reads = []PathFact{record.reads[0]}
+	}
+	thinned := &credentialPathRecord{reads: slices.Clip(reads), caps: record.caps}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.record == record {
+		l.record = thinned
+	}
+}
+
 // credentialPathWord is parse evidence the commands do not keep: an input
 // redirect's word, a variable's value, or a variable a word expands (argIndex
 // is the word's index in its simple command, -1 in an input redirect).
@@ -495,7 +535,9 @@ type credentialPathResolver struct {
 // (rel-1-0-10:GAP-1045, substrate-1:GAP-0674). Copies of the Facts share
 // it; it is safe for concurrent use.
 type credentialPathResult struct {
-	once    sync.Once
+	once sync.Once
+	// mu guards record once resolved: ThinCredentialPathReads replaces it.
+	mu      sync.Mutex
 	record  *credentialPathRecord
 	pending bool // the resolve has not run: the input below is its own
 	// The resolve's input, a copy of the parse's, dropped once resolved.
@@ -529,6 +571,8 @@ func (l *credentialPathResult) get() *credentialPathRecord {
 		}
 		l.pending, l.words, l.commands, l.paths = false, nil, nil, nil
 	})
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.record
 }
 

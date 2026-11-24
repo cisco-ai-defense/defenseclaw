@@ -1099,6 +1099,10 @@ func dispatchTrustedActionOnce(
 			findings = withBoundedTruncation(findings, set, request)
 		}()
 	}
+	// The record is whole only up to here: every later reader of it (the
+	// chain projection, the placement) sees the reads it can tell apart
+	// (substrate-1:GAP-0674).
+	thinCredentialPathReads(facts)
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
