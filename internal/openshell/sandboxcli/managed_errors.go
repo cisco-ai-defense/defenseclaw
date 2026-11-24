@@ -262,11 +262,7 @@ func (a *App) noteManaged(st *sandboxapi.Status) {
 // reason comes first, as `sandbox run` gives it. A status that is not
 // managed, or whose reason is the organization's switch, or a view that is
 // provisional, allows the account or is not given, is returned as it was
-// (GAP-2059). The managed object of the status it returns agrees with that
-// reason: Unavailable is the organization's text, or is empty for the profile's
-// refusal (the daemon's install text and its recovery step are dropped), so
-// a script reading `sandbox status --output json` gets one reason in both
-// places (GAP-2068).
+// (GAP-2059).
 //
 // The gateway answers a policy view only for a named connector (it refuses
 // a view that names none), and profiles match per connector. harness is the
@@ -303,14 +299,7 @@ func (a *App) accountStatus(ctx context.Context, st *sandboxapi.Status, harness 
 		m.Unavailable = sandboxapi.OrganizationOffReason
 	} else {
 		m.AccountDenied = true
-		// The profile outranks the install (Status.ManagedOff), so
-		// the daemon's install text no longer says why sandboxes are off:
-		// drop it, as the one reason the JSON carries is the profile's
-		// (GAP-2068). The field is omitempty, so the schema is unchanged.
-		m.Unavailable = ""
 	}
-	// Recovery is what to do about the install text it came with.
-	m.Recovery = ""
 	out.Managed = &m
 	a.managedSeen = &m
 	return &out

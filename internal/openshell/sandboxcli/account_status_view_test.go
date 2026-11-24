@@ -120,8 +120,11 @@ func TestAccountViewIsAskedForAConnectorTheGatewayKnows(t *testing.T) {
 // top (reason) and kept the daemon's install text in managed.unavailable
 // beside it, so a script reading that field got the wrong reason. The
 // managed object agrees with the reason: it carries the organization's text
-// for an organization-off account, and no install text (nor its recovery
-// step) for a profile deny. The keys stay the same, so the schema holds.
+// for an organization-off account, and the profile's refusal (never "", which
+// means sandboxes can run) with no install recovery step for a profile deny.
+// It does so for a daemon that has not settled its view of the account and
+// for one that has (it sets AccountDenied itself). The keys stay the same,
+// so the schema holds.
 func TestStatusJSONManagedUnavailableAgreesWithTheAccountReason(t *testing.T) {
 	withManagedHost(t)
 	read := func(t *testing.T, ta *testApp) (reason, unavailable, recovery string) {
@@ -149,8 +152,33 @@ func TestStatusJSONManagedUnavailableAgreesWithTheAccountReason(t *testing.T) {
 		if !strings.Contains(reason, profilePhrase) {
 			t.Fatalf("reason = %q, want the profile's refusal", reason)
 		}
-		if unavailable != "" || recovery != "" {
-			t.Errorf("managed.unavailable = %q, managed.recovery = %q; want the daemon's install text dropped next to reason %q", unavailable, recovery, reason)
+		if unavailable != sandboxapi.AccountNotAllowedReason || recovery != "" {
+			t.Errorf("managed.unavailable = %q, managed.recovery = %q; want the profile's refusal and no install recovery next to reason %q", unavailable, recovery, reason)
+		}
+	})
+	// A daemon that has settled its view of the account sets AccountDenied
+	// itself and still sends the install text (managedStatusFor), so
+	// accountStatus returns early: the managed object still agrees (RV-111D).
+	t.Run("settled daemon, profile denies sandboxes", func(t *testing.T) {
+		ta, _ := profileRefusedFixture(t, "claudecode")
+		ta.daemon.status.Managed.AccountDenied = true
+		ta.daemon.status.Managed.Recovery = "stop the OpenShell gateway and run the migration"
+		reason, unavailable, recovery := read(t, ta)
+		if !strings.Contains(reason, profilePhrase) {
+			t.Fatalf("reason = %q, want the profile's refusal", reason)
+		}
+		if unavailable != sandboxapi.AccountNotAllowedReason || recovery != "" {
+			t.Errorf("managed.unavailable = %q, managed.recovery = %q; want the profile's refusal and no install recovery next to reason %q", unavailable, recovery, reason)
+		}
+	})
+	t.Run("settled daemon, organization turned sandboxes off", func(t *testing.T) {
+		ta, _ := profileRefusedFixture(t, "claudecode")
+		ta.daemon.status.Managed.AccountDenied = true
+		ta.daemon.status.Managed.Unavailable = sandboxapi.OrganizationOffReason
+		ta.daemon.status.Managed.Recovery = "stop the OpenShell gateway and run the migration"
+		reason, unavailable, recovery := read(t, ta)
+		if !strings.Contains(reason, orgPhrase) || unavailable != sandboxapi.OrganizationOffReason || recovery != "" {
+			t.Errorf("reason = %q, managed.unavailable = %q, managed.recovery = %q; want the organization's reason and no install recovery", reason, unavailable, recovery)
 		}
 	})
 	t.Run("organization turned sandboxes off", func(t *testing.T) {

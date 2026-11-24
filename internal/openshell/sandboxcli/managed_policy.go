@@ -867,11 +867,22 @@ func (a *App) managedInstallPending(m *sandboxapi.ManagedStatus) bool {
 // is the one line the text status, `sandbox run` and `sandbox doctor` give
 // (Status.OffMessage, from Status.ManagedOff), not the daemon's own words,
 // which name another account's gateway whatever the reason (GAP-2055).
+//
+// The managed object agrees with that reason too, whichever way the status
+// came to refuse the account: from the daemon that has settled its view of
+// the account (it sets AccountDenied itself and still carries the install
+// text), or from a daemon that has not and the CLI's own view of the account
+// (accountStatus). A closed reason leaves no install recovery step in
+// managed.recovery, and for the profile managed.unavailable is the profile's
+// refusal, not the install text. It is never "", which means sandboxes can
+// run (sandboxapi.ManagedStatus.Unavailable). The keys stay the same, so the
+// schema holds (GAP-2068).
 func neutralStatus(st *sandboxapi.Status) *sandboxapi.Status {
 	if st == nil || st.Managed == nil {
 		return st
 	}
-	off := st.ManagedOff() != sandboxapi.ManagedOffNone
+	kind := st.ManagedOff()
+	off := kind != sandboxapi.ManagedOffNone
 	if st.GatewayElsewhere == "" && !off {
 		return st
 	}
@@ -881,6 +892,14 @@ func neutralStatus(st *sandboxapi.Status) *sandboxapi.Status {
 	}
 	if off {
 		out.Reason = out.OffMessage()
+	}
+	if kind == sandboxapi.ManagedOffOrganization || kind == sandboxapi.ManagedOffProfile {
+		m := *st.Managed
+		if kind == sandboxapi.ManagedOffProfile {
+			m.Unavailable = sandboxapi.AccountNotAllowedReason
+		}
+		m.Recovery = ""
+		out.Managed = &m
 	}
 	return &out
 }
