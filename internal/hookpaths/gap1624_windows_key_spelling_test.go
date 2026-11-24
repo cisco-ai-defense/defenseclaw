@@ -35,8 +35,21 @@ func TestGAP1624WindowsKeySpellingKeepsTheMention(t *testing.T) {
 		`echo marker >> "$out"; printf '%s' ` + key,
 		`echo marker >> "$out"; printf '%s' "` + key + `"`,
 	} {
-		if got := ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got == "" {
-			t.Errorf("%q: no protected-target decision", command)
+		// The one decision of the persistence rule, not any non-empty
+		// answer (GAP-1628).
+		if got := ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got != "protected-target" {
+			t.Errorf("%q: decision %q, want protected-target", command, got)
+		}
+	}
+	// The twin: the same shape that names a file the rule does not protect
+	// is no decision, so the rows above hold because of the key they name.
+	other := filepath.Join(cwd, "notes.txt")
+	for _, command := range []string{
+		`echo marker >> "$out"; printf '%s' ` + other,
+		`echo marker >> "$out"; printf '%s' "` + other + `"`,
+	} {
+		if got := ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got != "" {
+			t.Errorf("%q: decision %q for a file the rule does not protect", command, got)
 		}
 	}
 }
