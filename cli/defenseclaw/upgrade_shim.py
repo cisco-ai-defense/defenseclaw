@@ -49,6 +49,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
@@ -1343,10 +1344,69 @@ def _log_opened_by(logs: str, known: dict[str, int], pid: int, scanned: dict[str
     return False
 
 
-def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[str, int]) -> tuple[bool, int | None]:
-    """Wait until the started installer opens its install log or ends.
+# The Windows installer checks that nothing runs from the venv before it
+# changes anything (Wait-VenvFree), and this process and its console launchers
+# run from it. A downgrade's controller does that check before it opens a log,
+# so a shim that waited for the log there kept them running and the two waited
+# on each other until the installer gave up: "DefenseClaw is in use by
+# defenseclaw.exe, defenseclaw.exe, python.exe" (GAP-2117). So the shim hands
+# over: DC_INSTALLER_HANDOFF names this process (pid and creation time) and a
+# named event; the installer sets the event, which lets the shim exit, and waits
+# for exactly that process before its check. Nothing is left out of the check.
+_HANDOFF_ENV = "DC_INSTALLER_HANDOFF"
+_HANDOFF_EVENT_PREFIX = "Local\\DefenseClaw-installer-handoff-"
+_ERROR_ALREADY_EXISTS = 183
 
-    Returns (log opened, exit code or None while it still runs). It gives up
+
+def _installer_handoff() -> tuple[str, Callable[[], bool]] | None:
+    """The handoff for a started Windows installer: (its DC_INSTALLER_HANDOFF value, whether the event is set).
+
+    None where it cannot be made (no Windows API): the installer then gets no
+    handoff, and the shim waits for its log as before.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (ImportError, AttributeError, OSError):
+        return None
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CreateEventW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR)
+    kernel32.CreateEventW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    times = [wintypes.FILETIME() for _ in range(4)]
+    if not kernel32.GetProcessTimes(kernel32.GetCurrentProcess(), *(ctypes.byref(item) for item in times)):
+        return None
+    created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+    name = _HANDOFF_EVENT_PREFIX + os.urandom(16).hex()
+    event = kernel32.CreateEventW(None, True, False, name)
+    if not event:
+        return None
+    if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
+        # Another process made this name first: its event is not ours to wait on.
+        kernel32.CloseHandle(event)
+        return None
+    # The handle stays open until this process exits, so the event lives as long as the shim.
+    return f"{os.getpid()}:{created}:{name}", lambda: kernel32.WaitForSingleObject(event, 0) == 0
+
+
+def _await_installer_log(
+    proc: subprocess.Popen[bytes],
+    logs: str,
+    known: dict[str, int],
+    handed_off: Callable[[], bool] | None = None,
+) -> tuple[bool, int | None]:
+    """Wait until the started installer opens its install log, takes the handoff, or ends.
+
+    Returns (started, exit code or None while it still runs): started is an
+    open log or a taken handoff (*handed_off* returns True once the installer
+    set the event; it then waits for this process to exit). It gives up
     waiting after ``_INSTALLER_LOG_WAIT`` seconds, which outlasts the
     installer's own 300-second wait for an earlier uninstall and its 120-second
     error window; the caller reports an installer that still runs then as
@@ -1358,6 +1418,8 @@ def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[s
         rc = proc.poll()
         if _log_opened_by(logs, known, proc.pid, scanned):
             return True, rc
+        if handed_off is not None and handed_off():
+            return True, proc.poll()
         if rc is not None:
             return False, rc
         if time.monotonic() >= deadline:
@@ -1407,12 +1469,18 @@ def _run_installer(
         # The installer deletes the directory it runs from; keep a verified
         # copy elsewhere for the recovery command of a failed run.
         recovery = _stage_recovery_copy(path)
+        # The installer waits for this process to exit before it checks the
+        # venv, so a downgrade's controller does not wait on it (GAP-2117).
+        handoff = _installer_handoff()
+        installer_env = dict(env)
+        if handoff:
+            installer_env[_HANDOFF_ENV] = handoff[0]
         try:
             proc = subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                 cwd=workdir,
-                env=env,
+                env=installer_env,
             )
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -1425,7 +1493,7 @@ def _run_installer(
         # opens its log only after it has the install lock, and an installer
         # that ends before then leaves nothing but a window that closes.
         print(f"  → Waiting for the installer to open its log (up to {int(_INSTALLER_LOG_WAIT)} s)...", flush=True)
-        opened, rc = _await_installer_log(proc, logs, known)
+        opened, rc = _await_installer_log(proc, logs, known, handoff[1] if handoff else None)
         if opened:
             # An open log is a start, not a result: the installer may still
             # fail and delete the folder it runs from, so the verified copy

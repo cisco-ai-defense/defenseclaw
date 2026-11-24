@@ -542,6 +542,45 @@ def test_windows_rollback_whose_installer_opens_its_log_keeps_the_new_window_not
     assert len(polls) == 3
 
 
+def test_windows_installer_that_takes_the_handoff_lets_the_cli_exit_before_any_log(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-2117: a downgrade's controller checks the venv before it opens a
+    # log, and the shim, still waiting for that log, kept the CLI running from
+    # the venv: the installer refused "in use by defenseclaw.exe,
+    # defenseclaw.exe, python.exe". The installer sets the handoff event
+    # instead, and the shim returns while the installer still runs.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    value = "4100:134080000000000000:Local\\DefenseClaw-installer-handoff-" + "0" * 32
+    polls: list[int] = []
+    monkeypatch.setattr(upgrade_shim, "_installer_handoff", lambda: (value, lambda: len(polls) >= 2))
+    envs: list[dict[str, str]] = []
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        envs.append(kwargs["env"])  # type: ignore[arg-type]
+        return _child(lambda: polls.append(1))
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    captured = capsys.readouterr()
+    assert "The installer continues in a new window" in captured.out, captured
+    # Two polls, then the exit code read at the handoff: no log was needed.
+    assert len(polls) == 3
+    assert envs[0][upgrade_shim._HANDOFF_ENV] == value
+    # Only the installer takes the handoff, never another process the shim starts.
+    assert all(upgrade_shim._HANDOFF_ENV not in env for env in envs[1:])
+
+
+def test_windows_installer_handoff_is_not_made_without_the_windows_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shim then waits for the installer's log, as before GAP-2117.
+    import ctypes
+
+    monkeypatch.delattr(ctypes, "WinDLL", raising=False)
+    assert upgrade_shim._installer_handoff() is None
+
+
 def test_windows_installer_that_appends_to_a_same_second_log_has_opened_its_log(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
