@@ -830,7 +830,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		switch {
 		case serr != nil && managed:
 			c.Status, c.Detail = openshell.StatusFail, "your sandbox service does not answer: "+managedDaemonError(serr)
-			c.Fix = &openshell.Fix{Summary: managedServiceFix}
+			c.Fix = &openshell.Fix{Summary: managedServiceFix()}
 		case serr != nil:
 			c.Status, c.Detail = openshell.StatusFail, apiError(serr).Error()
 			c.Fix = &openshell.Fix{Summary: "start the daemon", Command: "defenseclaw-gateway start"}
@@ -900,7 +900,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 	} else {
 		c.Status, c.Detail = openshell.StatusFail, err.Error()
 		if managed {
-			c.Fix = &openshell.Fix{Summary: managedServiceFix}
+			c.Fix = &openshell.Fix{Summary: managedServiceFix()}
 		}
 	}
 	p.check = c
@@ -925,8 +925,24 @@ func dockerGroupMissingRow(managed bool) (openshell.CheckStatus, string, *opensh
 // managedServiceFix is the way on when a managed computer's sandbox service
 // does not answer: the organization installs it, and every sandbox command
 // starts it.
-const managedServiceFix = "your organization installs this service and every sandbox command starts it: if it still does not answer, " +
-	sandboxapi.RequestAccessFallback + " with this output"
+//
+// Only the launcher (`defenseclaw`, the managed symlink to
+// defenseclaw-gateway) starts the service: the same sandbox command run as
+// defenseclaw-gateway, by its path, does not, and it said every sandbox
+// command starts it (rel-1-0-10:GAP-1937).
+func managedServiceFix() string {
+	if LauncherStartsService {
+		return "your organization installs this service and every sandbox command starts it: if it still does not answer, " +
+			sandboxapi.RequestAccessFallback + " with this output"
+	}
+	return "your organization installs this service, and only the `defenseclaw sandbox` commands start it: " +
+		"run this as `defenseclaw sandbox …`; if it still does not answer, " + sandboxapi.RequestAccessFallback + " with this output"
+}
+
+// LauncherStartsService is set by the managed launcher, whose sandbox
+// commands start the account's sandbox service (internal/cli
+// launcherSandboxPreRun); managedServiceFix says so only then.
+var LauncherStartsService bool
 
 // managedDaemonError is why a managed computer's sandbox service did not
 // answer, without the HTTP request the client made (`Get "http://…": `).

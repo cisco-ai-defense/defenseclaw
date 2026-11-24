@@ -111,6 +111,12 @@ type Status struct {
 	Pack    string      `json:"pack,omitempty"`
 	Profile string      `json:"profile,omitempty"`
 	Admin   AdminStatus `json:"admin"`
+	// ImageBase and HarnessVersions are the openshell.image base and
+	// harness_versions the daemon builds harness images with: a managed
+	// computer's launcher builds `sandbox image build` with them too, on
+	// the base its runs use (rel-1-0-10:GAP-2064).
+	ImageBase       string            `json:"image_base,omitempty"`
+	HarnessVersions map[string]string `json:"harness_versions,omitempty"`
 	// Sandboxes counts the DefenseClaw sandboxes; Running those Ready.
 	Sandboxes int `json:"sandboxes"`
 	Running   int `json:"running"`
