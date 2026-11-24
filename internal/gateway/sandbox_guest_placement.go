@@ -1319,19 +1319,13 @@ func (memo *guestCDMemo) reading(text string) guestCDReading {
 	if reading, ok := memo.texts[text]; ok {
 		return reading
 	}
-	reading := readGuestCD(text, memo.home)
-	memo.texts[text] = reading
-	return reading
-}
-
-// readGuestCD reads, lexically, the cd of a command text by its parse
-// (guestCDMemo.reading reads a text of another program without one).
-func readGuestCD(text, home string) (reading guestCDReading) {
+	var reading guestCDReading
 	if call, ok := guestCall(text); ok {
-		program, static := hookpaths.StaticWord(call.Args[0], home)
+		program, static := hookpaths.StaticWord(call.Args[0], memo.home)
 		reading.changes = static && (program == "cd" || program == "pushd" || program == "popd")
-		reading.operand, reading.moves = guestCallCDOperand(call, home)
+		reading.operand, reading.moves = guestCallCDOperand(call, memo.home)
 	}
+	memo.texts[text] = reading
 	return reading
 }
 
