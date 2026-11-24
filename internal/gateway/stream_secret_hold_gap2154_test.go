@@ -90,9 +90,10 @@ func gap2154Rows(t *testing.T, path, tier, pack string, managed bool) []gap1265R
 
 // TestGAP2154EndedLaneEndsItsRun: on the /llm, raw forward and passthrough
 // (OpenAI chat: a choice's finish_reason; Anthropic: a thinking block's
-// content_block_stop) routes, in every tier, the rest of a reply is not
-// held behind a run whose lane has ended, and a card that ends its lane is
-// still blocked with none of it out.
+// content_block_stop) routes, in every tier, a card that ends its lane is
+// blocked with none of it out. OpenAI streams later answer text live. An
+// unresolved Anthropic thinking run and its later answer remain queued in
+// wire order, preserving the signed thinking bytes (GAP-2170).
 func TestGAP2154EndedLaneEndsItsRun(t *testing.T) {
 	paths := gap0429PathsNamed(t, "llm", "raw-forward", "passthrough/"+gap0429OpenAIChat.name, "passthrough/anthropic")
 	for _, path := range paths {
@@ -123,8 +124,16 @@ func TestGAP2154EndedLaneEndsItsRun(t *testing.T) {
 					if res.blocked || !strings.Contains(res.got, gap2154End) {
 						t.Errorf("%s: a benign reply was cut or blocked (blocked=%v, %d bytes, end present=%v)", name, res.blocked, len(res.got), strings.Contains(res.got, gap2154End))
 					}
-					if row.name == "ended-lane-freeze" && !strings.Contains(res.snapRaw, gap2154Alpha) {
-						t.Errorf("%s: the answer's first piece was still held behind the ended lane when its second piece was read (client had %d bytes)", name, len(res.snapRaw))
+					if row.name == "ended-lane-freeze" {
+						if path.name == "passthrough/anthropic" {
+							// Thinking can be signed. Its unresolved run and the following
+							// answer remain queued in wire order until the verdict.
+							if strings.Contains(res.snapRaw, gap2154Alpha) || !strings.Contains(res.bodyRaw, "total 42") {
+								t.Errorf("%s: signed thinking was released early or changed", name)
+							}
+						} else if !strings.Contains(res.snapRaw, gap2154Alpha) {
+							t.Errorf("%s: the answer's first piece was still held behind the ended lane when its second piece was read (client had %d bytes)", name, len(res.snapRaw))
+						}
 					}
 				}
 			}
