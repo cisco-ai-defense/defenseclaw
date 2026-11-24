@@ -172,9 +172,10 @@ func (r *responseText) Add(p responsePiece) {
 //
 // Only the end of the choice or the message (laneEndMessage: a chat or
 // Gemini finish reason, Anthropic message_delta or message_stop, Responses
-// completed, incomplete or failed, Converse messageStop) ends a run at once
-// (rel-1-0-10:GAP-2162). The end of a block and a lane switch (laneEndBlock,
-// laneMoved) park it: the same lane can resume in a later block (text on
+// completed, incomplete or failed, Converse messageStop) and the answer, a
+// refusal or code after the reasoning (laneMoved) end a run at once
+// (rel-1-0-10:GAP-2162). The end of a block and a switch to a tool call
+// (laneEndBlock, laneMoved) park it: the same lane can resume in a later block (text on
 // both sides of a tool call, interleaved thinking blocks, Responses summary
 // parts), and a run ended there let the first part of a token or a card
 // cut by the block go out, while the rest, resumed past the end, was not
@@ -205,15 +206,25 @@ func (r *responseText) endChoice(choice int, message bool) {
 	}
 }
 
-// laneMoved parks the lanes of l's choice that l follows in stream order.
+// laneMoved ends or parks the lanes of l's choice that l follows in stream
+// order. The answer, a refusal or code after the reasoning ends the
+// reasoning's run (GAP-2154): parking it held the start of the answer, up
+// to streamRunParkMax, whenever the thinking ended in a number (GAP-2162
+// round 3), where the parent and rel/1.0.10 streamed it live. A secret cut
+// there is still held whole: the lanes are read joined by a line feed, so
+// a card's later digits open a run in the answer and hold the reply, and a
+// token never spans the line feed. A tool call after the reasoning or after
+// another tool call parks the run.
 func (r *responseText) laneMoved(l responseLane) {
 	for k, i := range r.index {
 		if k.choice != l.choice || k == l {
 			continue
 		}
-		reasoningDone := k.field == responseFieldReasoning && l.field != responseFieldReasoning && l.field != responseFieldOther
-		toolDone := k.field == responseFieldToolInput && l.field == responseFieldToolInput && k.part < l.part
-		if reasoningDone || toolDone {
+		switch {
+		case k.field == responseFieldReasoning && (l.field == responseFieldAnswer || l.field == responseFieldRefusal || l.field == responseFieldCode):
+			r.endLane(i)
+		case k.field == responseFieldReasoning && l.field == responseFieldToolInput,
+			k.field == responseFieldToolInput && l.field == responseFieldToolInput && k.part < l.part:
 			r.parkLane(i)
 		}
 	}

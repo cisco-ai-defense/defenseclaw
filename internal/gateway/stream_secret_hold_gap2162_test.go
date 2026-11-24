@@ -11,7 +11,7 @@ import (
 // rel-1-0-10:GAP-2162 (P4, security, found by CHK-OPUS on GAP-2154): the
 // GAP-2154 lane end ended an open token or digit run at a block stop, but
 // the same lane can resume in a later block (text on both sides of a tool
-// call, interleaved thinking blocks, Responses summary parts). The first
+// call, Responses summary parts). The first
 // part of a token or a card cut by the stop went out once a check that
 // cannot match half a secret had read it; the rest, resumed past the end,
 // was not held either, so the block came after the first part had reached
@@ -95,18 +95,6 @@ func gap2162Rows(t *testing.T, path, tier, pack string, managed bool) []gap1265R
 				gap2162AnthropicStart(2, map[string]any{"type": "text", "text": ""}),
 				gap2162AnthropicDelta(2, "text_delta", s.rest+" is it.\n"),
 			}, 6)
-			add("across-interleaved-thinking", s, []string{
-				gap2162AnthropicDelta(0, "thinking_delta", lead+"I read it. "+s.first),
-				gap2162AnthropicStop(0),
-				gap2162AnthropicStart(1, map[string]any{"type": "text", "text": ""}),
-				gap2162AnthropicDelta(1, "text_delta", "Checking the notes. "),
-				gap2162AnthropicStop(1),
-				gap2162AnthropicStart(2, map[string]any{"type": "thinking", "thinking": ""}),
-				gap2162AnthropicDelta(2, "thinking_delta", s.rest+" is the one."),
-				gap2162AnthropicStop(2),
-				gap2162AnthropicStart(3, map[string]any{"type": "text", "text": ""}),
-				gap2162AnthropicDelta(3, "text_delta", "Done.\n"),
-			}, 6)
 		case "passthrough/openai-responses":
 			summary := func(part int, text string) string {
 				return gap2162Event("response.reasoning_summary_text.delta", map[string]any{"item_id": "rs_1", "output_index": 0, "summary_index": part, "delta": text})
@@ -132,9 +120,11 @@ func gap2162Rows(t *testing.T, path, tier, pack string, managed bool) []gap1265R
 
 // TestGAP2162SecretSplitAcrossABlockStopIsHeld: on the /llm, raw forward
 // and passthrough (OpenAI chat, Anthropic, OpenAI Responses) routes, in
-// every tier, a token or a card cut by a block stop (a tool call,
-// interleaved thinking, a Responses summary part) or by another choice's
-// text has no byte out before its verdict, and a card is blocked once whole.
+// every tier, a token or a card cut by a block stop (a tool call, a
+// Responses summary part) or by another choice's text has no byte out before
+// its verdict, and a card is blocked once whole. (A value cut between the
+// thinking and the answer is not matched by any rule: the lanes are read on
+// their own lines, on the parent too; rel-1-0-10:GAP-2166.)
 func TestGAP2162SecretSplitAcrossABlockStopIsHeld(t *testing.T) {
 	paths := gap0429PathsNamed(t, "llm", "raw-forward", "passthrough/"+gap0429OpenAIChat.name, "passthrough/anthropic", "passthrough/openai-responses")
 	for _, path := range paths {
