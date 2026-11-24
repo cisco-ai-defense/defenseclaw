@@ -23,8 +23,8 @@ import (
 // path resolver places ~ by the PowerShell provider rule (internal/effects
 // placeWindows). This Linux-host emulation is green at the base too (the
 // legacy reader places these spellings here); it pins the effects lane on
-// them. The native fail-before is TestGAP1138PowerShellWriteSpellings with
-// its GAP-1191 waiver removed (gap1138_dotnet_file_opens_windows_test.go).
+// them. GAP-1191 itself stays open: natively the managed-peer cells of
+// TestGAP1138PowerShellWriteSpellings still need its waiver.
 func TestGAP1191ManagedWindowsPlacesRelativeAndTildeStateWrites(t *testing.T) {
 	gap0589WindowsHost(t)
 	const home, cwd = `C:\Users\alice`, `C:\Users\alice\proj`

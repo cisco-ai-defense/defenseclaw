@@ -48,10 +48,6 @@ func TestGAP1138DotNetFileOpensDevinAndAntigravity(t *testing.T) {
 // it) and a path relative to the working directory, for the write cmdlets,
 // the redirect and the .NET writes and opens of the shared reader.
 func TestGAP1138PowerShellWriteSpellings(t *testing.T) {
-	// The shipped effects lane judges beside the readers (a test has no live
-	// generation, so it is off unless set): the managed-peer relative and ~
-	// cells are placed by its path resolver (rel-1-0-10:GAP-1191).
-	useDefaultEffectsLane(t)
 	var forms []gap1138Form
 	for _, form := range gap1115Forms {
 		switch form.id {
@@ -76,7 +72,18 @@ func TestGAP1138PowerShellWriteSpellings(t *testing.T) {
 			return nil
 		}
 		return []string{"$env:USERPROFILE", "~", "relative"}
-	}, nil) // a managed gateway places the relative and ~ spellings too (rel-1-0-10:GAP-1191)
+	}, func(peer bool, target gap1138Target, spelling string) string {
+		// A managed gateway does not place the relative and ~ spellings of
+		// the state the PowerShell reading names (also for the writes before
+		// GAP-1138): rel-1-0-10:GAP-1191. Native at det111/train-pwsh with
+		// the shipped effects lane: the cmdlet cells alert without the state
+		// rule and the .NET cells allow (no effects lowering of a relative
+		// .NET path, no state attribution), so the waiver stays.
+		if peer && target.name == "DefenseClaw state" && (spelling == "relative" || spelling == "~") {
+			return "rel-1-0-10:GAP-1191"
+		}
+		return ""
+	})
 }
 
 // gap1138WindowsRun judges forms through each connector of conns, for every
