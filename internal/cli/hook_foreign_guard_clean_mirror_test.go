@@ -62,28 +62,73 @@ func TestForeignGuardCleanSessionOutageHookTime(t *testing.T) {
 	for _, id := range []string{"copilot", "cursor", "devin", "opencode"} {
 		for _, tc := range cleanOutageCases() {
 			t.Run(id+"/"+tc.name, func(t *testing.T) {
-				fixture := newCleanOutageFixture(t, id, tc)
-				event := tc.event
-				if event == "" {
-					event = outageGuardCallFor(id).Event
-				}
-				if id == "opencode" && tc.event == "sessionStart" {
-					event = "session.start"
-				}
-				payload := cleanOutagePayload(t, fixture, event)
-				opts := hookexec.Options{Connector: id, Event: event, ManagedEnterprise: true, FailMode: "open",
-					Home: filepath.Join(fixture.home, "managed-data"), Stdin: bytes.NewReader(payload), Stderr: &bytes.Buffer{}}
-				hookcli.ApplyEnterpriseForeignHookGuard(&opts)
-				if id == "opencode" && event != "tool.execute.before" {
+				blocked, reason, guarded := cleanOutageHookTimeBlocked(t, id, tc)
+				if !guarded {
 					return // the plugin's lifecycle events are not guarded at hook time
 				}
-				blocked := opts.ManagedRuntimeFailure != ""
 				if blocked != tc.wantGuardBlock {
-					t.Fatalf("guard blocked %v (%q), want %v", blocked, opts.ManagedRuntimeFailure, tc.wantGuardBlock)
+					t.Fatalf("guard blocked %v (%q), want %v", blocked, reason, tc.wantGuardBlock)
 				}
 			})
 		}
 	}
+}
+
+// GAP-1788: the guard also scans the process working directory and its
+// ancestors up to a git root or a home. A test binary run from a tree with
+// no .git (the native Windows gate runs a copied tree under the account
+// profile) therefore reached the real account's .cursor\hooks.json and
+// blocked the rows that expect an outage allow. The fixture moves the
+// process into an empty repository of its own, so these rows hold wherever
+// the process starts, not by the luck of the account that runs them.
+func TestCleanOutageFixtureIgnoresHooksAboveTheProcessFolder(t *testing.T) {
+	outer := t.TempDir()
+	process := filepath.Join(outer, "tree", "pkg")
+	if err := os.MkdirAll(process, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(outer, ".cursor", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooks, []byte(`{"version":1,"hooks":{"preToolUse":[{"command":"/tmp/x.sh"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(process)
+	tc := cleanOutageCases()[0]
+	if tc.wantGuardBlock {
+		t.Fatal("the first outage row must be an allow")
+	}
+	blocked, reason, guarded := cleanOutageHookTimeBlocked(t, "cursor", tc)
+	if !guarded {
+		t.Fatal("cursor is guarded at hook time")
+	}
+	if blocked {
+		t.Fatalf("a hook file above the process folder blocked the row: %q", reason)
+	}
+}
+
+// cleanOutageHookTimeBlocked runs one guarded hook call of connector id and
+// reports whether the guard refused it. guarded is false for an OpenCode
+// lifecycle event, which the guard never sees at hook time.
+func cleanOutageHookTimeBlocked(t *testing.T, id string, tc cleanOutageCase) (blocked bool, reason string, guarded bool) {
+	t.Helper()
+	fixture := newCleanOutageFixture(t, id, tc)
+	event := tc.event
+	if event == "" {
+		event = outageGuardCallFor(id).Event
+	}
+	if id == "opencode" && tc.event == "sessionStart" {
+		event = "session.start"
+	}
+	payload := cleanOutagePayload(t, fixture, event)
+	opts := hookexec.Options{Connector: id, Event: event, ManagedEnterprise: true, FailMode: "open",
+		Home: filepath.Join(fixture.home, "managed-data"), Stdin: bytes.NewReader(payload), Stderr: &bytes.Buffer{}}
+	hookcli.ApplyEnterpriseForeignHookGuard(&opts)
+	if id == "opencode" && event != "tool.execute.before" {
+		return false, "", false
+	}
+	return opts.ManagedRuntimeFailure != "", opts.ManagedRuntimeFailure, true
 }
 
 // The --foreign-hook-check path (OpenCode, Amp and the Hermes hook) has no
