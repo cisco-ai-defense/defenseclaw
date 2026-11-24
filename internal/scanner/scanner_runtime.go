@@ -68,7 +68,10 @@ func (e scannerNotFoundError) Is(target error) bool { return target == ErrScanne
 // unavailable.
 func Unavailable(err error) bool {
 	return errors.Is(err, ErrScannerNotFound) || errors.Is(err, exec.ErrNotFound) ||
-		errors.Is(err, ErrScannerRuntimeUnavailable) || errors.Is(err, processutil.ErrContainmentUnavailable)
+		errors.Is(err, ErrScannerRuntimeUnavailable) || errors.Is(err, processutil.ErrContainmentUnavailable) ||
+		// A sidecar scan past its timeout follows the fail mode as an outage
+		// does (GAP-0477), never an allow.
+		errors.Is(err, ErrScanTimeout)
 }
 
 // runtimeSettings is scanners.mcp_scanner as JSON with config.yaml's keys,

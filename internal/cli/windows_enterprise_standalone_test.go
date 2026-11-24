@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -4314,7 +4315,7 @@ func TestWindowsCursorRepairPlannerRefusesALinkedRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
+		testenv.Symlink(t, target, config.MigrationRecordPath(path))
 		windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
 			return managed.StandaloneLayout{ConfigPath: path}, nil
 		}

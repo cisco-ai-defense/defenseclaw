@@ -98,10 +98,13 @@ type SubstrateConfig struct {
 	// Interactive is the port forward and MCP bridge switches (B3).
 	Interactive SubstrateInteractiveConfig `mapstructure:"interactive" yaml:"interactive,omitempty"`
 	RateLimits  SubstrateRateLimitsConfig  `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc     SubstrateExtprocConfig     `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM         SubstrateLLMConfig         `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress      SubstrateEgressConfig      `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets     []SubstrateSecret          `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// Usage is per-person and per-actor model spend through the leader
+	// (substrate_usage.go).
+	Usage   SubstrateUsageConfig   `mapstructure:"usage" yaml:"usage,omitempty"`
+	Extproc SubstrateExtprocConfig `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM     SubstrateLLMConfig     `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress  SubstrateEgressConfig  `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets []SubstrateSecret      `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// SelfServiceSecrets is how people bind their own secrets (B1 2.5).
 	SelfServiceSecrets SubstrateSelfServiceSecretsConfig `mapstructure:"self_service_secrets" yaml:"self_service_secrets,omitempty"`
 	// SecretTemplates is the admin catalog of templates people bind their
@@ -118,6 +121,9 @@ type SubstrateConfig struct {
 	// Activity is the agent state in list and status and the notification
 	// switch (substrate_activity.go).
 	Activity SubstrateActivityConfig `mapstructure:"activity" yaml:"activity,omitempty"`
+	// Skills is the gateway's scan of skill folders an agent adds while it
+	// runs (B5.4, GAP-0477).
+	Skills SubstrateSkillsConfig `mapstructure:"skills" yaml:"skills,omitempty"`
 }
 
 // Self-service secret modes (substrate.self_service_secrets.mode).
@@ -358,6 +364,13 @@ type SubstrateIdentityConfig struct {
 	// administrators on the admin listener. The gateway's --admin-groups
 	// flag adds to them.
 	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
+	// KubeSignIn false turns the Kubernetes sign-in off (nil = on). It
+	// applies only with no oidc.issuer on an install that is not managed
+	// (Config.SubstrateKubeSignIn). The gateway's --no-kube-sign-in flag
+	// turns it off too. The gateway reads it at start only (restart it after
+	// a change), and routing.admin users entries match against the issuers
+	// people can sign in with then (GAP-0939, GAP-0968).
+	KubeSignIn *bool `mapstructure:"kube_sign_in" yaml:"kube_sign_in,omitempty"`
 	// Revocation is the list of ended sign-ins (B5.1): logout, logout
 	// --all and admin revoke.
 	Revocation SubstrateRevocationConfig `mapstructure:"revocation" yaml:"revocation,omitempty"`
@@ -1345,10 +1358,21 @@ func (s *SubstrateConfig) Validate() error {
 			bad("unattended.ask_timeout", "%q must be a Go duration over 0 and at most 24h", v)
 		}
 	}
+	if v := s.Skills.Scan.Timeout; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 || d > MaxSubstrateSkillScanTimeout {
+			bad("skills.scan.timeout", "%q must be a Go duration over 0 and at most 10m", v)
+		}
+	}
+	if v := s.Skills.PendingWait; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 || d > MaxSubstrateSkillPendingWait {
+			bad("skills.pending_wait", "%q must be a Go duration over 0 and at most 8s (under the kit's 9 s first attempt)", v)
+		}
+	}
 	if r := s.Unattended.TelemetrySampling; r != nil && (*r < 0 || *r > 1) {
 		bad("unattended.telemetry_sampling", "%v is outside 0-1", *r)
 	}
 	s.Interactive.validate(bad)
+	s.Usage.validate(bad)
 	if s.RateLimits.PerActorRPS < 0 {
 		bad("rate_limits.per_actor_rps", "must not be negative")
 	}
@@ -1715,7 +1739,9 @@ const substrateWorkloadSubjectHint = `%q must be exact or end in ":*" or "/*" (f
 
 func httpsURL(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
+	// '#' and '?' anywhere, empty ones too: the person key is
+	// issuer#subject, so an issuer ending in '#' would be ambiguous.
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && !strings.ContainsAny(raw, "#?")
 }
 
 // SubstrateVersionRange is a space-separated list of comparisons, every one
@@ -1800,4 +1826,62 @@ func (r SubstrateVersionRange) Contains(version string) bool {
 		}
 	}
 	return true
+}
+
+// SubstrateSkillsConfig is the gateway's scan of skill folders an agent adds
+// while it runs (B5.4, GAP-0477): the chart's scanner sidecar runs the
+// laptop's skill-scanner on each folder the kit attaches.
+type SubstrateSkillsConfig struct {
+	Scan SubstrateSkillsScanConfig `mapstructure:"scan" yaml:"scan,omitempty"`
+	// PendingWait is how long one hook post waits for the scans of its skill
+	// folders, in every tier: one deadline for the post, the wait for a scan
+	// slot and every folder included (default 8s, at most 8s: under the
+	// kit's 9 s first attempt, so every post is answered; GAP-0980,
+	// GAP-0982). Past it the folder is still being checked and its scan goes
+	// on (Scan.Timeout): the OSS tiers ask or allow it with an alert; managed
+	// installs and the strict tier refuse every tool call until it has a
+	// verdict. The kit sends it again with its next hook.
+	PendingWait string `mapstructure:"pending_wait" yaml:"pending_wait,omitempty"`
+}
+
+// SubstrateSkillsScanConfig turns the scanner sidecar on or off and bounds
+// one scan.
+type SubstrateSkillsScanConfig struct {
+	// Enabled uses the scanner sidecar (nil = on). Off: no folder is scanned
+	// and the fail mode decides, as before the sidecar (managed installs and
+	// the strict tier refuse every new skill). This is the admin-off switch.
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// Timeout bounds one folder's scan (default 20s, at most 10m); past it
+	// the fail mode decides (reason skill_scan_timeout).
+	Timeout string `mapstructure:"timeout" yaml:"timeout,omitempty"`
+}
+
+const (
+	DefaultSubstrateSkillScanTimeout = 20 * time.Second
+	MaxSubstrateSkillScanTimeout     = 10 * time.Minute
+	DefaultSubstrateSkillPendingWait = 8 * time.Second
+	MaxSubstrateSkillPendingWait     = 8 * time.Second
+)
+
+// SkillScanEnabled says whether the gateway scans skill folders (default on).
+func (s SubstrateConfig) SkillScanEnabled() bool {
+	return s.Skills.Scan.Enabled == nil || *s.Skills.Scan.Enabled
+}
+
+// EffectiveSkillScanTimeout is skills.scan.timeout, bounded.
+func (s SubstrateConfig) EffectiveSkillScanTimeout() time.Duration {
+	d := durationOr(s.Skills.Scan.Timeout, DefaultSubstrateSkillScanTimeout)
+	if d <= 0 || d > MaxSubstrateSkillScanTimeout {
+		return DefaultSubstrateSkillScanTimeout
+	}
+	return d
+}
+
+// EffectiveSkillPendingWait is skills.pending_wait, bounded.
+func (s SubstrateConfig) EffectiveSkillPendingWait() time.Duration {
+	d := durationOr(s.Skills.PendingWait, DefaultSubstrateSkillPendingWait)
+	if d <= 0 || d > MaxSubstrateSkillPendingWait {
+		return DefaultSubstrateSkillPendingWait
+	}
+	return d
 }

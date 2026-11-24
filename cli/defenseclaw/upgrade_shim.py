@@ -142,6 +142,11 @@ NEWER_CONFIG_KEYS = (
     ("notifications.substrate", (1, 0, 11)),
     # Under substrate (1.0.10), so a downgrade to 1.0.10 kept it (GAP-2035).
     ("substrate.bundles.oci", (1, 0, 11)),
+    # The same: 1.0.10 has substrate and refuses these (fold of the skill scan,
+    # sign-in and spend/usage units; test_every_key_new_since_1_0_10 lists them).
+    ("substrate.identity.kube_sign_in", (1, 0, 11)),
+    ("substrate.skills", (1, 0, 11)),
+    ("substrate.usage", (1, 0, 11)),
     # The same: 1.0.10 has substrate, substrate.admin, .egress and .identity, all
     # closed, and refuses these 1.0.11 blocks under them (GAP-1066).
     ("substrate.activity", (1, 0, 11)),

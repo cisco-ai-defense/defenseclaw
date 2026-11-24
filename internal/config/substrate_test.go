@@ -65,6 +65,7 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateServicesConfig{}, []string{"substrate", "services"}},
 		{SubstrateUnattendedConfig{}, []string{"substrate", "unattended"}},
 		{SubstrateRateLimitsConfig{}, []string{"substrate", "rate_limits"}},
+		{SubstrateUsageConfig{}, []string{"substrate", "usage"}},
 		{SubstrateExtprocConfig{}, []string{"substrate", "extproc"}},
 		{SubstrateExtprocUIDConfig{}, []string{"substrate", "extproc", "uid"}},
 		{SubstrateExtprocChainConfig{}, []string{"substrate", "extproc", "chain"}},
@@ -153,6 +154,7 @@ substrate:
     idle_close: 30m
   rate_limits: {per_actor_rps: 20, per_atespace_rps: 500}
   activity: {status_window: 30s, notifications: "off"}
+  usage: {enabled: true, sync_interval: 10s}
   extproc:
     enabled: true
     failure_mode: closed

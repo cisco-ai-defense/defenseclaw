@@ -149,6 +149,19 @@ type WireError struct {
 
 func (e *WireError) Error() string { return "leader: " + e.Code + ": " + e.Message }
 
+// MessageUndecodable is the bad_request message of a body the method's
+// strict decoder refuses, for example a field this leader's version does not
+// know.
+const MessageUndecodable = "body does not decode"
+
+// IsUndecodable reports a leader's refusal of a body it could not decode.
+// A follower newer than its leader sees it when it sends a field the leader
+// does not know yet (GAP-0943).
+func IsUndecodable(err error) bool {
+	var we *WireError
+	return errors.As(err, &we) && we.Code == CodeBadRequest && we.Message == MessageUndecodable
+}
+
 // IsNotLeader reports the not_leader refusal.
 func IsNotLeader(err error) bool {
 	var we *WireError
@@ -166,7 +179,7 @@ func Typed[In, Out any](fn func(ctx context.Context, in In) (Out, error)) Handle
 			dec := json.NewDecoder(bytes.NewReader(body))
 			dec.DisallowUnknownFields()
 			if err := dec.Decode(&in); err != nil {
-				return nil, &WireError{Code: CodeBadRequest, Message: "body does not decode"}
+				return nil, &WireError{Code: CodeBadRequest, Message: MessageUndecodable}
 			}
 		}
 		out, err := fn(ctx, in)

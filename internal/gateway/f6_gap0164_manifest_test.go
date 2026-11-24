@@ -64,8 +64,8 @@ func TestGAP0164BigAttestedSkillIsTrustedByItsManifest(t *testing.T) {
 			t.Fatalf("post %d: no receipt for the attested folder: %s", i+1, out)
 		}
 	}
-	if len(r.scan.scanned) != 0 || len(r.alerts) != 0 {
-		t.Fatalf("scanned %v alerts %+v", r.scan.scanned, r.alerts)
+	if got := r.scan.dirs(); len(got) != 0 || len(r.alerts) != 0 {
+		t.Fatalf("scanned %v alerts %+v", got, r.alerts)
 	}
 }
 

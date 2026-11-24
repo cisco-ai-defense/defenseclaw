@@ -59,22 +59,46 @@ func (st *substrateState) substrateSkillWriteRefusal(ctx context.Context, env su
 			attached = append(attached, attest.AttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 		}
 	}
+	var until <-chan struct{}
 	for _, a := range attest.HookAssets(env.Payload, attached) {
 		if a.Kind != config.AdmissionTypeSkill {
 			continue
+		}
+		if until == nil {
+			var cancel context.CancelFunc
+			until, cancel = st.skillPostUntil(ctx, true)
+			defer cancel()
 		}
 		files := make([]SubstrateAttachedFile, 0, len(a.Files))
 		for _, f := range a.Files {
 			files = append(files, SubstrateAttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 		}
-		blocked, reason, err := st.cfg.Skills.ScanSkillFolder(ctx, a.Name, a.Path, files)
+		res := st.scanSkillFolder(ctx, until, st.blocksUnscanned(env.Connector), a.Name, a.Path, files)
+		blocked, reason, err := res.blocked, res.reason, res.err
 		switch {
-		case err != nil:
-			why := "a skill the agent is writing (" + a.Name + ") could not be scanned"
-			if errors.Is(err, ErrSubstrateSkillScannerUnavailable) {
-				why += ": no skill scanner can run in the gateway"
+		case errors.Is(err, errSkillPending), errors.Is(err, errSkillScannerBusy):
+			// B5.4 skill_pending: still scanning at the post's deadline
+			// (GAP-0980), or no scan slot. Managed installs and the strict tier
+			// refuse the write (the agent writes again and gets the verdict);
+			// the OSS tiers allow it with an alert, as before.
+			block := st.blocksUnscanned(env.Connector)
+			outcome, sev := "allowed", "MEDIUM"
+			if block {
+				outcome, sev = "refused", "HIGH"
 			}
-			if q := st.substrateRefuseOrAlert(ctx, env.Connector, a.Path, why, env.Facts); q != nil {
+			code, why := skillScanErrCode(err)
+			st.auditSkill(ctx, AuditSkillPending, sev, env.Connector, a.Path, env.Facts, map[string]any{"reason": code, "waited_ms": res.waited.Milliseconds(), "outcome": outcome})
+			if block {
+				if code == SkillReasonScannerBusy {
+					return "DefenseClaw refused writing the skill " + a.Name + ": " + why + "; try again in a few seconds"
+				}
+				return skillPendingMessage(a.Name)
+			}
+			st.alertOnce(ctx, "MEDIUM", "Substrate skill write allowed while its scan runs: "+a.Name, a.Path, env.Facts, nil)
+		case err != nil:
+			code, why0 := skillScanErrCode(err)
+			why := "a skill the agent is writing (" + a.Name + ") could not be scanned: " + why0
+			if q := st.substrateRefuseOrAlert(ctx, env.Connector, a.Path, why, code, env.Facts); q != nil {
 				return "DefenseClaw refused writing the skill " + a.Name + ": " + q.Reason
 			}
 		case blocked:

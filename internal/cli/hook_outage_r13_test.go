@@ -4,7 +4,7 @@
 package cli
 
 import (
-	"os"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"path/filepath"
 	"testing"
 )
@@ -45,13 +45,9 @@ func TestOpenClawOutageShadowedBuiltinsFollowCallsAndLoopPasses(t *testing.T) {
 func TestOpenClawOutageFunctionEffectsKeepQuotedValuesAndPrefixCalls(t *testing.T) {
 	root, protected, ordinary := outageR10Fixture(t, "home")
 	spaced := filepath.Join(ordinary, "config link")
-	if err := os.Symlink(protected, spaced); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, spaced)
 	spacedOrdinary := filepath.Join(ordinary, "notes link")
-	if err := os.Symlink(filepath.Join(ordinary, "notes.txt"), spacedOrdinary); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, filepath.Join(ordinary, "notes.txt"), spacedOrdinary)
 	cases := []struct {
 		name, command, want string
 		environment         map[string]interface{}

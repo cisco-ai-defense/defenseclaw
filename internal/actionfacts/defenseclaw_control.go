@@ -1481,6 +1481,12 @@ var (
 		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
 		"publish": true, "keygen": true, "serve": true, "admin": true, "port": true,
 		"recover": true, "templates": true,
+		// scan-worker is the hidden, pod-only command the skill scanner sidecar runs
+		// inside its own pod (read-only root, private /tmp and /dev/shm). It is
+		// never typed by a person and it starts a scanner process, so it is a
+		// control, never a read (the same ruling as the other registered
+		// Substrate verbs that run something).
+		"scan-worker": true,
 	}
 )
 

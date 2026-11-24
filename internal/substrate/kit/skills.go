@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
@@ -38,11 +40,15 @@ import (
 //
 // Gateway answer fields: "substrate_quarantine": [{"path", "reason"}],
 // "substrate_scanned": [{"path", "fp", "receipt"}], "substrate_unscanned":
-// [{"path", "fp"}]. The kit acts only on folders it listed in that call.
+// [{"path", "fp"}], "substrate_pending": [{"path", "fp"}] (managed and
+// strict: still being scanned, every tool call is refused until it has a
+// verdict). The kit acts only on folders it listed in that call.
 
 const (
 	// SkillQuarantineField is the answer field naming blocked folders.
 	SkillQuarantineField = "substrate_quarantine"
+	// SkillPendingField is the answer field naming held folders (GAP-0980).
+	SkillPendingField = "substrate_pending"
 	// RoleSkillFile is the attached-file role of a skill folder's file.
 	RoleSkillFile = "skill_file"
 
@@ -72,9 +78,13 @@ var skillScanEvents = map[string]bool{
 	"PostToolUse": true, "postToolUse": true, "SessionStart": true, "sessionStart": true, "Stop": true, "stop": true,
 }
 
-// skillRoots are the directories whose subfolders an agent loads as skills:
-// in the home and the project, and every skills folder of an installed
-// Claude Code plugin (~/.claude/plugins/.../skills, also the project's).
+// skillRoots are the directories whose subfolders an agent loads as skills,
+// read from the one connector table (agentpaths, GAP-0788; it replaced the
+// kit's own list of .claude, .codex and .agents, which missed the Cursor,
+// Copilot, Devin, Amp, Antigravity, OpenCode and Hermes folders): the home,
+// config and absolute roots first, then the project's, each followed by the
+// skills folders found inside that side's plugin folders. Command folders
+// hold single files, not skill folders, and are left out.
 func skillRoots(home, cwd string) []string {
 	var roots []string
 	seen := map[string]bool{}
@@ -84,23 +94,69 @@ func skillRoots(home, cwd string) []string {
 			roots = append(roots, r)
 		}
 	}
-	for _, base := range []string{home, cwd} {
-		if base == "" || !filepath.IsAbs(base) {
-			continue
+	entries := agentpaths.ActorEntries()
+	for _, project := range []bool{false, true} {
+		var plugins []string
+		for _, e := range entries {
+			if (e.Base == agentpaths.Project) != project || e.Kind == agentpaths.Commands {
+				continue
+			}
+			for _, dir := range actorDirs(e, home, cwd) {
+				if e.Kind == agentpaths.Plugins {
+					plugins = append(plugins, dir)
+				} else {
+					add(dir)
+				}
+			}
 		}
-		for _, rel := range []string{".claude/skills", ".codex/skills", ".agents/skills"} {
-			add(filepath.Join(base, rel))
-		}
-		plugins := filepath.Join(base, ".claude", "plugins")
-		found, complete := pluginSkillRoots(plugins)
-		for _, r := range found {
-			add(r)
-		}
-		if !complete {
-			add(plugins) // stands in for the plugin skill roots not found
+		searched := map[string]bool{}
+		for _, dir := range plugins {
+			if searched[dir] {
+				continue
+			}
+			searched[dir] = true
+			found, complete := pluginSkillRoots(dir)
+			for _, r := range found {
+				add(r)
+			}
+			if !complete {
+				add(dir) // stands in for the plugin skill roots not found
+			}
 		}
 	}
 	return roots
+}
+
+// actorDirs resolves one table entry in the actor. A Config entry is looked
+// at both under the default config home and under the vendor variable's
+// folder (CLAUDE_CONFIG_DIR, CODEX_HOME, HERMES_HOME, OPENCODE_CONFIG_DIR)
+// when one is set: the agent may have been started with either.
+func actorDirs(e agentpaths.ActorEntry, home, cwd string) []string {
+	rel := filepath.FromSlash(e.Rel)
+	switch e.Base {
+	case agentpaths.Home:
+		if filepath.IsAbs(home) {
+			return []string{filepath.Join(home, rel)}
+		}
+	case agentpaths.Project:
+		if filepath.IsAbs(cwd) {
+			return []string{filepath.Join(cwd, rel)}
+		}
+	case agentpaths.Abs:
+		return []string{rel}
+	case agentpaths.Config:
+		var out []string
+		if filepath.IsAbs(home) {
+			out = append(out, filepath.Join(home, filepath.FromSlash(e.ConfigRel), rel))
+		}
+		if e.ConfigEnv != "" {
+			if v := strings.TrimSpace(os.Getenv(e.ConfigEnv)); filepath.IsAbs(v) {
+				out = append(out, filepath.Join(filepath.Clean(v), rel))
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // pluginSkillRoots finds the folders named skills below a plugins folder
@@ -403,6 +459,10 @@ type skillAnswer struct {
 	Unscanned []struct {
 		Path string `json:"path"`
 	} `json:"substrate_unscanned"`
+	Pending []struct {
+		Path string `json:"path"`
+		FP   string `json:"fp"`
+	} `json:"substrate_pending"`
 }
 
 // applySkillAnswer acts on a 2xx answer to a post that listed the folders in
@@ -616,6 +676,138 @@ func stuckSkillsInReach(home string) []string {
 		writeStuckSkills(home, left)
 	}
 	return left
+}
+
+// skillPendingName is the kit's record of folders a pass left with no
+// verdict (GAP-0980): a managed post that was never answered (its attached
+// folders), or folders the gateway named substrate_pending (managed and
+// strict hold them while the scan runs). While one is in reach every
+// PreToolUse call runs the skill pass, whatever the tool or connector, so
+// the gateway sees the folder and refuses the call while it is held; a call
+// whose pass goes unanswered too is refused (skillPendingRefusal). No record
+// (the usual case) adds no work beyond one missing-file read.
+const skillPendingName = "skill-pending.json"
+
+func skillPendingPath(home string) string {
+	return filepath.Join(home, ".defenseclaw", skillPendingName)
+}
+
+func readSkillPending(home string) map[string]string {
+	m := map[string]string{}
+	if home == "" {
+		return m
+	}
+	if b, err := os.ReadFile(skillPendingPath(home)); err == nil && len(b) < 1<<20 {
+		_ = json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+func writeSkillPending(home string, m map[string]string) {
+	p := skillPendingPath(home)
+	if len(m) == 0 {
+		_ = os.Remove(p)
+		return
+	}
+	b, err := json.Marshal(m)
+	if err != nil || os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
+	}
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, p)
+	}
+}
+
+// skillsPendingInReach is the recorded folders the agent can still reach;
+// the record keeps only those.
+func skillsPendingInReach(home string) []string {
+	if home == "" {
+		return nil
+	}
+	if _, err := os.Lstat(skillPendingPath(home)); err != nil {
+		return nil
+	}
+	m := readSkillPending(home)
+	var left []string
+	for d := range m {
+		if folderInReach(d) {
+			left = append(left, d)
+		} else {
+			delete(m, d)
+		}
+	}
+	if len(left) == 0 {
+		writeSkillPending(home, nil)
+	}
+	sort.Strings(left)
+	return left
+}
+
+// updateSkillPending updates the record after a pass post that listed the
+// folders in listed and attached those in attached. answered: the gateway
+// answered the call (2xx, or 403 refused): a listed folder is recorded when
+// the answer names it pending and dropped otherwise (scanned, refused and
+// moved, or no hold). Not answered (no answer inside the kit's budget):
+// managed records the folders it attached, which have no verdict. It returns
+// the recorded folders still in reach.
+func updateSkillPending(home string, answer []byte, answered bool, listed map[string]string, attached []string, managed bool) []string {
+	if home == "" || listed == nil {
+		return nil
+	}
+	m := readSkillPending(home)
+	n := len(m)
+	if answered {
+		var a skillAnswer
+		_ = json.Unmarshal(answer, &a)
+		held := map[string]string{}
+		for _, p := range a.Pending {
+			if _, ok := listed[p.Path]; ok {
+				held[p.Path] = p.FP
+			}
+		}
+		for d := range listed {
+			if fp, ok := held[d]; ok {
+				m[d] = fp
+			} else {
+				delete(m, d)
+			}
+		}
+	} else if managed {
+		for _, d := range attached {
+			m[d] = listed[d]
+		}
+	}
+	if len(m) == 0 && n == 0 {
+		return nil
+	}
+	var left []string
+	for d := range m {
+		if folderInReach(d) {
+			left = append(left, d)
+		} else {
+			delete(m, d)
+		}
+	}
+	sort.Strings(left)
+	if len(left) > maxStuckSkills {
+		for _, d := range left[maxStuckSkills:] {
+			delete(m, d)
+		}
+		left = left[:maxStuckSkills]
+	}
+	writeSkillPending(home, m)
+	return left
+}
+
+// skillPendingRefusal is the reason a PreToolUse call is refused when its
+// pass for held folders went unanswered (GAP-0980).
+func skillPendingRefusal(dirs []string) string {
+	names := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		names = append(names, strconv.Quote(filepath.Base(d)))
+	}
+	return strings.Join(names, ", ") + " is still being scanned; DefenseClaw refuses tool calls until the scan finishes. Try again in a few seconds."
 }
 
 // folderInReach reports whether the agent can still use dir: it exists and is

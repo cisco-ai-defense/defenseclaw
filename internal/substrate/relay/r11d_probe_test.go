@@ -25,7 +25,7 @@ func TestR11DBusyBackgroundToolKeepsHungAgentAlive(t *testing.T) {
 	var log eventLog
 	start := time.Now()
 	end := runWithin(t, 40*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(script), TaskRequest{Prompt: "p"},
+		return RunHeadless(context.Background(), shConfig(script), TaskRequest{Prompt: "p"},
 			HeadlessOptions{Stall: 3 * time.Second, Tick: 500 * time.Millisecond}, log.emit)
 	})
 	t.Logf("R11D busy background tool, silent agent, stall 3s: %+v after %s", end, time.Since(start))

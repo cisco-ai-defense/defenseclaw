@@ -20,6 +20,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -162,8 +163,17 @@ type SubstrateConfig struct {
 	// subject matches and its profile (SubstrateWorkloadEntry over the live
 	// config); nil leaves the workload answer out of the actor list.
 	WorkloadEntry func(subject string) (entry, profile string)
-	// Usage answers own-only usage (stream 10 seam; nil: 501).
+	// Usage answers the usage API (own rows; an administrator's all=1 reads
+	// every owner). Nil: 501 usage_unavailable.
 	Usage SubstrateUsage
+	// UsageDisabled is substrate.usage.enabled: false: the usage API answers
+	// 501 usage_disabled, and the replica counts no spend on the leader.
+	UsageDisabled bool
+	// SpendLeader moves this replica's budget spend and usage onto the
+	// leader (nil: not a cluster replica, or usage disabled).
+	SpendLeader SubstrateSpendLeader
+	// UsageSyncInterval is substrate.usage.sync_interval (0: the default).
+	UsageSyncInterval time.Duration
 	// Bundles applies and shows signed policy bundles (nil: 501).
 	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
@@ -187,6 +197,9 @@ type SubstrateConfig struct {
 	// template "atespace/name" (the controller's verdict): a folder with one
 	// of them is trusted without a scan (GAP-0164). Nil trusts none.
 	TemplateSkills func(ctx context.Context, template string) ([]string, error)
+	// SkillScanLimits returns skills.scan.timeout and skills.pending_wait
+	// (B5.4); nil or 0 waits for the whole scan.
+	SkillScanLimits func() (timeout, pendingWait time.Duration)
 	// SkillReceiptKey signs skill scan receipts; every replica must have the
 	// same key (derived from the shared chain key). Empty: a random key per
 	// process, so receipts hold only on the replica that gave them.
@@ -351,6 +364,12 @@ type substrateState struct {
 	// logOut is the gateway log (stderr); now is the clock. Tests set both.
 	logOut io.Writer
 	now    func() time.Time
+	// budget is the BUDGET cell of an agent (substrateActorBudget); nil
+	// when the server has no live config.
+	budget func(reg registry.Registration) string
+	// readBudgets reads the budget keys of regs before a view
+	// (substrateReadBudgetKeys); nil with budget.
+	readBudgets func(ctx context.Context, regs []registry.Registration)
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.
@@ -358,6 +377,20 @@ type substrateState struct {
 	receiptShared bool
 	// alert raises an audit alert (the API server's logger).
 	alert func(ctx context.Context, severity, summary string, details map[string]any)
+	// action writes one skill audit row (B5.4: substrate.skill.*).
+	action func(ctx context.Context, action, severity string, details map[string]any)
+	// scanMu guards scans, the skill scans in flight (B5.4 pending), their
+	// count per actor UID (GAP-0932) and scanFree, closed when one ends.
+	scanMu     sync.Mutex
+	scans      map[string]*skillScanCall
+	scanActors map[string]int
+	scanFree   chan struct{}
+	// scanKept is the outcome of a managed or strict scan that ended after
+	// its post stopped waiting (a held folder, GAP-0980), for the next post
+	// of that content, and heldSince is when that content was first held:
+	// a hold ends at skills.scan.timeout, whatever the scanner does.
+	scanKept  map[string]skillScanKept
+	heldSince map[string]time.Time
 	// alerted is alertOnce's memory (substrate_skills.go).
 	alertMu    sync.Mutex
 	alerted    map[string]bool
@@ -418,9 +451,25 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 			return fmt.Errorf("substrate: skill receipt key: %w", err)
 		}
 	}
+	st.budget = func(reg registry.Registration) string {
+		now := time.Now()
+		if st.now != nil {
+			now = st.now()
+		}
+		return substrateActorBudget(a.liveConfig(), reg, now)
+	}
+	st.readBudgets = func(ctx context.Context, regs []registry.Registration) {
+		substrateReadBudgetKeys(ctx, a.liveConfig(), regs)
+	}
 	st.audit = func(ctx context.Context, severity, summary string, details map[string]any) {
 		if a.logger != nil {
 			_ = a.logger.LogAlertCtx(ctx, "substrate", severity, summary, details)
+		}
+	}
+	st.action = func(ctx context.Context, action, severity string, details map[string]any) {
+		if a.logger != nil {
+			raw, _ := json.Marshal(details)
+			_ = a.logger.LogActionCtxSeverity(ctx, action, fmt.Sprint(details["folder"]), string(raw), severity)
 		}
 	}
 	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {

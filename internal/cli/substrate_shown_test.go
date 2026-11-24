@@ -42,7 +42,7 @@ func TestSubstrateShownValuesCannotForgeLines(t *testing.T) {
 func TestSubstrateJSONEscapesHiddenCharacters(t *testing.T) {
 	evil := "a\u009b2J\u202egnp.exe\u200b\x7f"
 	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
-		"GET usage": jsonReply(map[string]any{"note": evil}),
+		"GET usage": jsonReply(map[string]any{"by": "actor", "rows": []map[string]any{{"key": evil}}}),
 	}}
 	useFakeAdmin(t, f)
 	out, _, err := runSubstrate(t, newSubstrateUsageCmd(), "--json")
@@ -54,9 +54,9 @@ func TestSubstrateJSONEscapesHiddenCharacters(t *testing.T) {
 			t.Errorf("JSON printed %U as it is: %q", r, out)
 		}
 	}
-	var back map[string]any
-	if err := json.Unmarshal([]byte(out), &back); err != nil || back["note"] != evil {
-		t.Errorf("the JSON must still mean the same: %v %q", err, back["note"])
+	var back api.UsageAnswer
+	if err := json.Unmarshal([]byte(out), &back); err != nil || len(back.Rows) != 1 || back.Rows[0].Key != evil {
+		t.Errorf("the JSON must still mean the same: %v %+v", err, back.Rows)
 	}
 }
 

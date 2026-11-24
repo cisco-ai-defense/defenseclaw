@@ -18,7 +18,7 @@ func r11Run(t *testing.T, script string, o HeadlessOptions, limit time.Duration)
 	var log eventLog
 	start := time.Now()
 	end := runWithin(t, limit, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(script), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), shConfig(script), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	return end, time.Since(start)
 }
