@@ -169,12 +169,6 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 					// at rel).
 					continue
 				}
-				if p.managed && route == "copilot" && (r.id == "benign-append" || r.id == "benign-project") {
-					// A Copilot managed-peer append after a cd that may
-					// fail is an unresolved write target:
-					// rel-1-0-10:GAP-1157 (same at rel).
-					continue
-				}
 				// A gateway of its own for each call: gap1150Post sends one
 				// tool use id, and a second call with it on one gateway is a
 				// correlation collision (as in the GAP-1228 test).

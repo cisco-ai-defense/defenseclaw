@@ -1066,6 +1066,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// walk of the command); a write after a cd is judged by the other readers
 	// at the folder it reaches (actionfacts working_folder.go), so a link
 	// operation this walk cannot place never makes it an unproven link write.
+	ownFacts := facts
 	facts = facts.AtHookFolder()
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
@@ -1413,7 +1414,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 						return false
 					}
 					unresolved := !windowsLocationOrdinaryWriteTarget(target)
-					if !unresolved {
+					if !unresolved || powerShellReadingPlacesEveryWrite(request, ownFacts, target, isProtected) {
+						// A Copilot powershell call that places this write in
+						// ordinary files only (rel-1-0-10:GAP-1157).
 						return false
 					}
 					if request.unresolvedTarget != nil {
