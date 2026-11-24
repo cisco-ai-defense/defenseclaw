@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR104ExistingProtectedLinkWriters(t *testing.T) {
@@ -29,12 +30,8 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, filepath.Join(cwd, "alias"))
+	testenv.Symlink(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink"))
 	if err := os.WriteFile(filepath.Join(cwd, "payload"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -121,9 +118,7 @@ func TestR104BoundedProtectedLinkWriter(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, filepath.Join(cwd, "alias"))
 	for _, command := range []string{
 		`printf -v f %s alias; echo marker >> "$f"`,
 		`printf -v f '%s%s' ali as; echo marker >> "$f"`,

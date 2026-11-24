@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // homeGlobRow is one shell call made at the home folder of a per-user
@@ -73,9 +74,7 @@ func TestUnquotedGlobAtHomeMatchesAcrossOS(t *testing.T) {
 						}
 					}
 					if row.alias {
-						if err := os.Symlink(filepath.Dir(keys), filepath.Join(home, "keysdir")); err != nil {
-							t.Fatal(err)
-						}
+						testenv.Symlink(t, filepath.Dir(keys), filepath.Join(home, "keysdir"))
 					}
 					t.Setenv("HOME", home)
 					t.Setenv("USERPROFILE", home)

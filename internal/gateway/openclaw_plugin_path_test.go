@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // In the separate-user layout the plugin credential may only scan paths of
@@ -34,9 +36,7 @@ func TestOpenClawPathUnderAny(t *testing.T) {
 		}
 	}
 	link := filepath.Join(home, "skills", "escape")
-	if err := os.Symlink(other, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, other, link)
 	roots := []string{home}
 	cases := map[string]bool{
 		filepath.Join(home, "skills", "s1"): true,

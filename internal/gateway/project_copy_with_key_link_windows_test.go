@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A copy of a project folder that holds a link to the keys file, run in the
@@ -35,9 +36,7 @@ func TestEnvChdirProjectCopyWithKeyLinkMatchesLinuxOnWindows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.FromSlash("../.ssh/authorized_keys"), filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, filepath.FromSlash("../.ssh/authorized_keys"), filepath.Join(project, "keylink"))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	for _, row := range []struct {

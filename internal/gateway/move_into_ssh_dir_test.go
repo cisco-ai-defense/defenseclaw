@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A move that renames or replaces the .ssh directory or an authorized-keys
@@ -101,9 +102,7 @@ func TestR105MoveIntoSSHDirectoryBlocksOnManaged(t *testing.T) {
 					links[filepath.Join(state, "config.yaml")] = filepath.Join(dot, "dc.yaml")
 				}
 				for link, target := range links {
-					if err := os.Symlink(target, link); err != nil {
-						t.Fatal(err)
-					}
+					testenv.Symlink(t, target, link)
 				}
 				t.Setenv("HOME", home)
 				command := strings.NewReplacer("{E}", filepath.ToSlash(ext)).Replace(row.command)

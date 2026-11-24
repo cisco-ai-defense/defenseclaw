@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestConfigWriterRefusesAnUnloadableRuleReference: a rule ID the generation
@@ -39,9 +40,7 @@ func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The installed layout: <data_dir>/policies holds the built-in packs.
-	if err := os.Symlink(policies, filepath.Join(dir, "policies")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, policies, filepath.Join(dir, "policies"))
 	if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\nobservability: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

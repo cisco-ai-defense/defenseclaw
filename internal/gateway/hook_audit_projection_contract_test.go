@@ -14,8 +14,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+// lookProjectionPython finds python3 or python on PATH, passing over the
+// Microsoft Store aliases under WindowsApps: they start the Store instead of
+// Python and exit 9009 "Python was not found", so an account without Python
+// failed the test instead of skipping it (GAP-2158).
+func lookProjectionPython() string {
+	for _, name := range []string{"python3", "python"} {
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if dir == "" || runtime.GOOS == "windows" && strings.Contains(strings.ToLower(dir), `\microsoft\windowsapps`) {
+				continue
+			}
+			if found, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+				return found
+			}
+		}
+	}
+	return ""
+}
 
 // TestConnectorContractProjectionReadsACompactStore builds the store a
 // per-user Claude Code session writes since S8 R4 (#1384): a benign allow
@@ -25,13 +45,7 @@ import (
 // scripts/live-connector-e2e/project-audit-events.py; at rel 7f32dbb3a0 it
 // failed every connector with "indexed payload_json is not text".
 func TestConnectorContractProjectionReadsACompactStore(t *testing.T) {
-	python := ""
-	for _, name := range []string{"python3", "python"} {
-		if found, err := exec.LookPath(name); err == nil {
-			python = found
-			break
-		}
-	}
+	python := lookProjectionPython()
 	if python == "" {
 		t.Skip("no Python interpreter to run the projection script")
 	}

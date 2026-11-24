@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestFindActionVariants pins that a find call writes only through an
@@ -30,9 +32,7 @@ func TestFindActionVariants(t *testing.T) {
 		}
 	}
 	link := filepath.Join(h.ext, "linked-hook")
-	if err := os.Symlink(hook, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, hook, link)
 	rows := []hookConfigShellRow{
 		{"fprint onto the hook", "find . -fprint " + hook, "block"},
 		{"fprint0 onto the hook", "find . -fprint0 " + hook, "block"},

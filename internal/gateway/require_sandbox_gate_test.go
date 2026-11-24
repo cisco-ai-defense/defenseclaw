@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // requireSandboxAuditField is the value of key on the last connector-hook
@@ -184,9 +185,7 @@ func TestSandboxPrerequisiteRecord(t *testing.T) {
 	}
 	ready := write("ready.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":true}`)
 	link := filepath.Join(dir, "link.json")
-	if err := os.Symlink(ready, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, ready, link)
 	docker := &config.Config{}
 	docker.OpenShell.Enabled = true
 	setup := &config.Config{}

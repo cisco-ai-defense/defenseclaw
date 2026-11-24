@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestR107WindowsManagedLinkFormsCorpus: the vsweep8 managed Windows forms
@@ -37,15 +38,11 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(ext, "y")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, state, filepath.Join(ext, "y"))
 	if out, err := exec.Command("cmd", "/c", "mklink", filepath.Join(project, "keylink"), keys).CombinedOutput(); err != nil {
 		t.Fatalf("keylink: %v %s", err, out)
 	}
-	if err := os.Symlink(state, filepath.Join(project, "dclink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, state, filepath.Join(project, "dclink"))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	okWin := strings.ReplaceAll(ok, `\`, `\\`)
