@@ -2723,10 +2723,14 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 		// own read did not answer: the target cannot be placed against the
 		// state then (rel-1-0-10:GAP-1805). A home that resolves to nothing
 		// for another reason proves nothing and refuses nothing.
-		if !homeOK {
-			return home.unanswered
+		refused := home.unanswered
+		if homeOK {
+			refused = unanswered
 		}
-		return unanswered
+		if refused {
+			noteStateUnanswered()
+		}
+		return refused
 	}
 	relative, err := filepath.Rel(activeHome, resolved)
 	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
@@ -2756,7 +2760,11 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	}
 	info, err := pathStat(resolved)
 	if err != nil {
-		return localReadUnanswered(resolved, err)
+		if localReadUnanswered(resolved, err) {
+			noteStateUnanswered()
+			return true
+		}
+		return false
 	}
 	if !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
@@ -2790,11 +2798,11 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 func ResolveActiveStateHardlinkTarget(value, home string) (state string, same, complete bool) {
 	resolved, ok, unanswered := resolveWriteTargetWhy(value)
 	if !ok {
-		return "", false, !unanswered
+		return "", false, !stateReadUnanswered(unanswered)
 	}
 	info, err := pathStat(resolved)
 	if err != nil {
-		return "", false, !localReadUnanswered(resolved, err)
+		return "", false, !stateReadUnanswered(localReadUnanswered(resolved, err))
 	}
 	if !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return "", false, true
@@ -2803,7 +2811,7 @@ func ResolveActiveStateHardlinkTarget(value, home string) (state string, same, c
 	// the file either (rel-1-0-10:GAP-1805).
 	activeRoot, ok, rootUnanswered := resolveWriteTargetWhy(filepath.Join(home, ".defenseclaw"))
 	if !ok {
-		return "", false, !rootUnanswered
+		return "", false, !stateReadUnanswered(rootUnanswered)
 	}
 	files, unanswered := activeStateIdentities(activeRoot)
 	for _, file := range files {
@@ -2817,7 +2825,16 @@ func ResolveActiveStateHardlinkTarget(value, home string) (state string, same, c
 			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true, true
 		}
 	}
-	return "", false, !unanswered
+	return "", false, !stateReadUnanswered(unanswered)
+}
+
+// stateReadUnanswered notes an unanswered read on the hook call
+// (noteStateUnanswered) and returns it.
+func stateReadUnanswered(unanswered bool) bool {
+	if unanswered {
+		noteStateUnanswered()
+	}
+	return unanswered
 }
 
 // The identity index of one active state tree is built at most once per

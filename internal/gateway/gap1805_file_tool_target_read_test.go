@@ -6,6 +6,8 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,7 +23,9 @@ import (
 // not answer in time is now not proved free of the state there either, as in
 // linkedActiveStateWrite (GAP-1804). Idle targets keep their answers: a link
 // into the state is refused, an ordinary file and a hard link (the hard-link
-// check's) are not this check's.
+// check's) are not this check's. The finding of a refusal whose cause is the
+// unanswered read says so (retry) instead of the state-write reason, and is
+// tagged state-check-unanswered.
 func TestGAP1805FileToolTargetReadUnansweredIsRefused(t *testing.T) {
 	root := t.TempDir()
 	home, cwd := filepath.Join(root, "home"), filepath.Join(root, "project")
@@ -79,14 +83,27 @@ func TestGAP1805FileToolTargetReadUnansweredIsRefused(t *testing.T) {
 			if _, ok := hookpaths.ResolveWriteTarget(filepath.Join(cwd, "primer")); !ok {
 				t.Fatal("idle primer not resolved")
 			}
+			// One hook call, as trusted dispatch runs: its refusal names
+			// its cause.
+			endCall := hookpaths.HookCall()
 			holding.Store(row.hold)
 			got := fileToolWriteThroughLinkToState(facts, trustedActionRequest{})
 			holding.Store(false)
+			finding := withProvenActiveStateMutation(trustedActionRequest{}, nil)
+			endCall()
 			if row.hold && held.Load() == 0 {
 				t.Fatal("the target folder read was never held (vacuous)")
 			}
 			if got != row.want {
 				t.Errorf("fileToolWriteThroughLinkToState(%s) = %v, want %v", row.target, got, row.want)
+			}
+			// The refusal of an unanswered read says the target could not
+			// be checked in time (retry) and is tagged so it can be counted
+			// apart; any other keeps the state-write reason.
+			unanswered := len(finding) == 1 && slices.Contains(finding[0].Tags, "state-check-unanswered") &&
+				strings.Contains(finding[0].Title, "could not check this write target in time")
+			if len(finding) != 1 || unanswered != row.hold {
+				t.Errorf("state finding %+v: names the unanswered read %v, want %v", finding, unanswered, row.hold)
 			}
 		})
 	}

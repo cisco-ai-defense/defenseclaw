@@ -2138,6 +2138,14 @@ func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedA
 // tamper.detector_state_write finding of a proven mutation of the active
 // state: the one finding observe mode still blocks on where the pack blocks
 // it (provenActiveStateMutation).
+// stateCheckUnansweredTitle and stateCheckUnansweredTag name a state-write
+// refusal whose only cause is a local read that did not answer in time
+// (hookpaths.StateCheckUnanswered).
+const (
+	stateCheckUnansweredTitle = "DefenseClaw could not check this write target in time (a local folder read did not answer); retry the command"
+	stateCheckUnansweredTag   = "state-check-unanswered"
+)
+
 func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
 	// This protection belongs to the gateway. A selected pack may omit or
@@ -2178,6 +2186,14 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 	finding.Severity = severity
 	finding.Title = canonical.Title
 	finding.Tags = canonical.Tags
+	if hookpaths.StateCheckUnanswered() {
+		// The target was refused because a local read it needed did not
+		// answer in time, not because it is known to be state: say so, so
+		// the user retries, and tag the row so these refusals can be
+		// counted apart (rel-1-0-10:GAP-1805).
+		finding.Title = stateCheckUnansweredTitle
+		finding.Tags = append(slices.Clone(canonical.Tags), stateCheckUnansweredTag)
+	}
 	finding.enforcement = findingEnforcementDetectionOnly
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed

@@ -167,6 +167,11 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
+	// stateUnanswered is set when a write target was not proved free of the
+	// DefenseClaw state because a local read it needed did not answer in
+	// time (StateCheckUnanswered). Atomic: the checks run on any goroutine of
+	// the call.
+	stateUnanswered atomic.Bool
 	// budgetCuts counts the share waits of the call that its budget cut
 	// short (askNetworkShare). Such a read is not the answer of the file
 	// system: the share may answer a moment later in the same call. The
@@ -999,6 +1004,25 @@ type CallState struct {
 	globCut                              bounded.CapSet
 	scriptBytes, scripts                 int
 	budgetCuts                           uint64
+}
+
+// noteStateUnanswered marks the goroutine's hook call (none: nothing): a
+// write target was refused as not proved free of the state because a local
+// read it needed did not answer in time (rel-1-0-10:GAP-1805).
+func noteStateUnanswered() {
+	if call := currentHookCall(); call != nil {
+		call.stateUnanswered.Store(true)
+	}
+}
+
+// StateCheckUnanswered reports that the goroutine's hook call refused a
+// write target only as not proved free of the DefenseClaw state: a local read
+// the check needed did not answer in time. The caller names that cause, so
+// the user retries instead of reading a state-write reason for an ordinary
+// file (rel-1-0-10:GAP-1805).
+func StateCheckUnanswered() bool {
+	call := currentHookCall()
+	return call != nil && call.stateUnanswered.Load()
 }
 
 // HookCallState is the CallState of the hook call the goroutine runs.
