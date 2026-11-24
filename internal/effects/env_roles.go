@@ -72,6 +72,15 @@ var homeBlindPrograms = map[string]bool{
 	"unzip": true, "zip": true, "gzip": true, "gunzip": true, "zcat": true, "bzip2": true, "bunzip2": true, "bzcat": true,
 	"xz": true, "unxz": true, "xzcat": true, "find": true, "grep": true, "egrep": true, "fgrep": true, "uniq": true,
 	"xxd": true, "sort": true, "wc": true, "ls": true,
+	// The GNU coreutils, util-linux, binutils and diffutils filters of the
+	// table read their operands and stdin only, never a file under HOME
+	// (doas base64 ~/.aws/credentials, GAP-1494): an identity wrapper's HOME
+	// leaves their reads as known as cat's.
+	"base64": true, "cut": true, "comm": true, "join": true, "paste": true, "fold": true, "fmt": true,
+	"rev": true, "column": true, "expand": true, "unexpand": true, "strings": true, "od": true,
+	"hexdump": true, "md5sum": true, "sha1sum": true, "sha256sum": true, "sha512sum": true,
+	"cksum": true, "b2sum": true, "cmp": true, "diff": true, "du": true, "df": true, "stat": true,
+	"readlink": true, "realpath": true, "split": true, "csplit": true, "tr": true,
 }
 
 // shellSpecialVar reports a variable a shell itself reads at start or while
