@@ -69,3 +69,32 @@ func TestGAP2135OtherHomeReadProofExcludesOwnKeyAndIdentityUse(t *testing.T) {
 		})
 	}
 }
+
+// TestGAP2135DotTildePrefixesAreNotOtherHomes keeps literal ~. and ~..
+// directory names outside the other-account credential-read proof. Quoting the
+// same prefixes must keep the same allow verdict on both hook routes.
+func TestGAP2135DotTildePrefixesAreNotOtherHomes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX tilde spellings")
+	}
+	t.Setenv("HOME", "/home/active")
+	useEffectsRulesMode(t, "on")
+	for _, row := range []struct{ name, command string }{
+		{"dot", "cat ~./root/.ssh/id_rsa"},
+		{"dotdot", "cat ~../root/.ssh/id_rsa"},
+		{"quoted-dot", "cat '~.'/root/.ssh/id_rsa"},
+		{"quoted-dotdot", "cat '~..'/root/.ssh/id_rsa"},
+	} {
+		for _, tier := range boundedTestTiers {
+			for _, route := range r3PosixRoutesForReadRows() {
+				t.Run(row.name+"/"+tier.name+"/"+route.connector, func(t *testing.T) {
+					api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
+					action, severity := route.decide(t, api, "/home/active/proj", row.command)
+					if action != "allow" || severity != "NONE" {
+						t.Errorf("action/severity=%s/%s, want allow/NONE", action, severity)
+					}
+				})
+			}
+		}
+	}
+}
