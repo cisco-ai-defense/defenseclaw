@@ -54,6 +54,10 @@ type AdminVerdict struct {
 	RuleIDs     []string
 	BindRuleIDs []string
 	ChargeKeys  []string
+	// Enforce makes Deny and the gate refusals apply on an OSS host too:
+	// an actor call on a cluster gateway, which the administrator runs for
+	// many people (D4-1). A managed host always enforces.
+	Enforce bool
 }
 
 // GateTarget is a forwarded exit the evaluator checks (a routed backend or

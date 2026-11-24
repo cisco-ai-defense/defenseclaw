@@ -79,7 +79,7 @@ func TestStoreRetainsOpenedPathIdentityAcrossWorkingDirectoryChange(t *testing.T
 
 func TestStorePublishesReadinessOnlyAfterPragmasAndDurableWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
-	store, err := NewStore(path)
+	store, err := NewStore(realMigrationPath(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestStorePublishesReadinessOnlyAfterPragmasAndDurableWrite(t *testing.T) {
 }
 
 func TestStoreInitIsConcurrentAndIdempotent(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "audit.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestStoreInitIsConcurrentAndIdempotent(t *testing.T) {
 }
 
 func TestStoreInitRejectsMissingProtectedCorrectnessTable(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "missing-protected.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "missing-protected.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestStoreInitRejectsMissingProtectedCorrectnessTable(t *testing.T) {
 }
 
 func TestStoreInitRejectsMissingCorrelationIdentityClaimsTable(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "missing-correlation-claims.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "missing-correlation-claims.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

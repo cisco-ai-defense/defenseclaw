@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -217,6 +218,16 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			}
 		}
 		res, err = r.Skill.Scan(ctx, dir)
+		if ctx.Err() != nil {
+			// B5.4: a scan cut by its deadline or cancelled is not a verdict
+			// (and is never cached); the caller's fail mode decides.
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, scanner.ErrScanTimeout) {
+			// The sidecar's own timeout: the same, and the caller names it
+			// skill_scan_timeout, not a scanner outage (GAP-0934).
+			return nil, err
+		}
 		unavailable = err != nil && scanner.Unavailable(err)
 		if err != nil || res == nil {
 			res = failedScan(r.Skill.Name(), a.Name, err)
@@ -377,7 +388,11 @@ func writeAttached(dir string, files []AttachedFile) error {
 	return nil
 }
 
-var skillRootRE = regexp.MustCompile(`(?:^|/)(?:(?:\.claude|\.codex|\.agents|\.config/[a-z]+)/skills|\.claude/plugins/.+?/skills|\.codex/plugins/.+?/skills)/([^/]+)(?:/(.*))?$`)
+// skillRootRE and skillPathInCommand are built from the one connector table
+// (agentpaths, GAP-0788). They replace two hand lists of .claude, .codex and
+// .agents that drifted from the kit's roots and the laptop's; the 1.0.10
+// forms (.config/<name>/skills, <plugins>/.../skills) still match.
+var skillRootRE = regexp.MustCompile(`(?:^|/)(?:` + agentpaths.SkillRootPattern() + `)/([^/]+)(?:/(.*))?$`)
 
 // skillRelative returns the path of a skill file relative to its skill folder
 // ("SKILL.md", "scripts/run.sh").
@@ -393,7 +408,7 @@ func skillRelative(p string) string {
 }
 
 var (
-	skillPathInCommand = regexp.MustCompile(`(\S*(?:\.claude|\.codex|\.agents)/skills/[A-Za-z0-9._\-]+)(?:/(\S*))?`)
+	skillPathInCommand = regexp.MustCompile(`(\S*(?:` + agentpaths.SkillCommandPattern() + `)/[A-Za-z0-9._\-]+)(?:/(\S*))?`)
 	// The vendor CLIs' "mcp add" under any name (GAP-0185): the CLI run
 	// through node, npx, a quoted or split name. The literal vendor form
 	// (vendorMCPRE) also turns a command it cannot read into a refusal under

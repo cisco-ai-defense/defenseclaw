@@ -199,7 +199,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 		}
 		// The facts stay on the envelope (substrateEnvelopeFrom); the skill
 		// scan below reads the attached files from it.
-		ctx := context.WithValue(r.Context(), substrateEnvelopeKey{}, env)
+		ctx := withSkillPostStart(context.WithValue(r.Context(), substrateEnvelopeKey{}, env))
 		r = r.WithContext(ctx)
 		r.Body = io.NopCloser(bytes.NewReader(env.Payload))
 		r.ContentLength = int64(len(env.Payload))
@@ -222,7 +222,17 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				}
 				return
 			}
-			answer := withSubstrateAnswer(w, r, next, st.substrateSkills(ctx, env.Connector, env.Facts))
+			sk := st.substrateSkills(ctx, env.Connector, env.Facts)
+			if msg := st.substrateSkillUseGate(ctx, env, &sk); msg != "" {
+				st.logRefusal("%s", msg)
+				writeSubstrateSkillRefusal(w, msg, sk.held)
+				if reg, ok := substrateRegistrationFrom(ctx); ok {
+					body, _ := json.Marshal(map[string]string{"reason": kit.MCPRefusedCode, "message": msg})
+					st.substrateRecordDecision(ctx, reg, env.Event, body)
+				}
+				return
+			}
+			answer := withSubstrateAnswer(w, r, next, sk)
 			if reg, ok := substrateRegistrationFrom(ctx); ok {
 				st.substrateRecordDecision(ctx, reg, env.Event, answer)
 			}

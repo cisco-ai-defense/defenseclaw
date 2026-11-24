@@ -86,7 +86,7 @@ func (s *PluginScanner) DeclaredEntrypoints(ctx context.Context, manifests map[s
 	cmd.Stdin = bytes.NewReader(request)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := runScannerCommand(cmd); err != nil {
+	if err := contain(s.Contain, cmd); err != nil {
 		return nil, fmt.Errorf("scanner: list manifest entrypoints: %w (stderr=%s)", err, scannerFailureText(stderr.String()))
 	}
 	var reply struct {

@@ -4654,6 +4654,8 @@ class SubstrateIdentityConfig:
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
     # Groups whose members are Substrate administrators (GAP-0191).
     admin_groups: list[str] = field(default_factory=list)
+    # False turns the Kubernetes sign-in off (None = on, GAP-0939).
+    kube_sign_in: bool | None = None
 
 
 @dataclass
@@ -4673,6 +4675,13 @@ class SubstrateUnattendedConfig:
 class SubstrateRateLimitsConfig:
     per_actor_rps: float | None = None
     per_atespace_rps: float | None = None
+
+
+@dataclass
+class SubstrateUsageConfig:
+    # Go internal/config/substrate_usage.go: None = on; 1s-30s, None = 5s.
+    enabled: bool | None = None
+    sync_interval: str = ""
 
 
 @dataclass
@@ -4840,6 +4849,22 @@ class SubstrateBundlesConfig:
 
 
 @dataclass
+class SubstrateSkillsScanConfig:
+    # None = on (Go *bool); False is the admin-off switch.
+    enabled: bool | None = None
+    timeout: str = ""  # Go duration, default 20s, at most 10m
+
+
+@dataclass
+class SubstrateSkillsConfig:
+    """``substrate.skills``: the gateway's scan of skill folders an agent adds
+    while it runs (mirrors Go ``SubstrateSkillsConfig``)."""
+
+    scan: SubstrateSkillsScanConfig = field(default_factory=SubstrateSkillsScanConfig)
+    pending_wait: str = ""  # Go duration, default 8s, at most 8s (kit's 9 s first attempt); one deadline per hook post
+
+
+@dataclass
 class SubstrateConfig:
     """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
     ``SubstrateConfig``). Off by default and read only in the cluster; the
@@ -4866,6 +4891,7 @@ class SubstrateConfig:
     workspace_max_bytes: int | None = None
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
+    usage: SubstrateUsageConfig = field(default_factory=SubstrateUsageConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
     egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
@@ -4873,6 +4899,7 @@ class SubstrateConfig:
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
     bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
+    skills: SubstrateSkillsConfig = field(default_factory=SubstrateSkillsConfig)
 
 
 @dataclass
@@ -8141,6 +8168,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))
     limits = _mapping(raw.get("rate_limits"))
+    usage = _mapping(raw.get("usage"))
     extproc = _mapping(raw.get("extproc"))
     llm = _mapping(raw.get("llm"))
     egress = _mapping(raw.get("egress"))
@@ -8202,6 +8230,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 for w in ident.get("workload_oidc") or []
             ],
             admin_groups=_string_list(ident.get("admin_groups")),
+            kube_sign_in=_optional_bool(ident.get("kube_sign_in")),
         ),
         services=SubstrateServicesConfig(
             actor=str(services.get("actor", "") or ""),
@@ -8224,7 +8253,12 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
             per_atespace_rps=_optional_number(limits.get("per_atespace_rps"), float),
         ),
+        usage=SubstrateUsageConfig(
+            enabled=_optional_bool(usage.get("enabled")),
+            sync_interval=_duration_text(usage.get("sync_interval")),
+        ),
         extproc=_merge_substrate_extproc(extproc),
+        skills=_merge_substrate_skills(raw.get("skills")),
         llm=SubstrateLLMConfig(
             providers=_string_list(llm.get("providers")),
             credential=SubstrateLLMCredentialConfig(
@@ -8241,6 +8275,18 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
+    )
+
+
+def _merge_substrate_skills(raw: Any) -> SubstrateSkillsConfig:
+    raw = _mapping(raw)
+    scan = _mapping(raw.get("scan"))
+    return SubstrateSkillsConfig(
+        scan=SubstrateSkillsScanConfig(
+            enabled=_optional_bool(scan.get("enabled")),
+            timeout=_duration_text(scan.get("timeout")),
+        ),
+        pending_wait=_duration_text(raw.get("pending_wait")),
     )
 
 

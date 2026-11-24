@@ -1499,7 +1499,8 @@
     "path": "substrate usage",
     "use": "usage",
     "short": "Show what your agents used: model calls, tokens and cost",
-    "long": "Shows the model use of your agents, grouped the way the cluster reports it. You see only your own use.",
+    "long": "Shows the model use of your agents and what it cost, rolled up by agent (the default),\nmodel, batch, atespace, day, connector or provider. You see only your own use; an\nadministrator adds --all for everyone and --by person for one line per person.\nCalls whose model is not in the price table show no cost and are not in the total.",
+    "example": "  defenseclaw substrate usage\n  defenseclaw substrate usage --by model --since 24h\n  defenseclaw substrate usage --all --by person",
     "flags": [
       {
         "name": "all",
@@ -1512,6 +1513,12 @@
         "type": "string",
         "usage": "only this batch",
         "metavar": "ID"
+      },
+      {
+        "name": "by",
+        "type": "string",
+        "default": "actor",
+        "usage": "roll up by actor, model, batch, atespace, day, connector, provider or person (person needs --all)"
       },
       {
         "name": "context",
@@ -1532,6 +1539,12 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "since",
+        "type": "string",
+        "default": "7d",
+        "usage": "window, as \u003cn\u003eh or \u003cn\u003ed (at most 31d)"
       }
     ]
   },

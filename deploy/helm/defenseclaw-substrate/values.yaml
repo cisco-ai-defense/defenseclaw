@@ -183,6 +183,22 @@ gateway:
   resources:
     requests: {cpu: 250m, memory: 256Mi}
     limits: {memory: 1Gi}
+  # The skill scanner sidecar (Preview): skill-scanner and the plugin scanner
+  # of this release, in their own container of the gateway pod with no Secret
+  # mounts and no service-account token. It listens only on a 0600 unix
+  # socket in a shared in-memory folder; it has no port and no Service.
+  # enabled: false renders no sidecar, and every skill an agent adds while it
+  # runs follows the fail mode (a managed install refuses it).
+  skillScanner:
+    enabled: true
+    image:
+      repository: ghcr.io/cisco-ai-defense/defenseclaw-scanner
+      # Defaults to the chart's appVersion; the release sets the digest.
+      tag: ""
+      digest: ""
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 1Gi}
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -425,6 +441,17 @@ observability:
   # strict remove more, and a custom profile in
   # config.observability.redaction_profiles works too.
   redactionProfile: sensitive
+  # Cost for budgets and `defenseclaw substrate usage`. The gateway prices a
+  # call from observability.pricing in its config and compiles no price in,
+  # so the chart turns tokenomics on and, unless config.observability.pricing
+  # is set, seeds it from files/default-pricing.json (the reviewed table of
+  # bundles/pricing, copied here and checked by a test). enabled: false turns
+  # cost off: no spend, so no budget is counted and usage has no cost column.
+  # defaultPricing: false keeps the chart from seeding the table, for a
+  # cluster that sets its own prices.
+  tokenomics:
+    enabled: true
+    defaultPricing: true
   local:
     enabled: false
     image: otel/opentelemetry-collector-contrib:0.139.0

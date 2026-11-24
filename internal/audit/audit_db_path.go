@@ -129,6 +129,11 @@ func openHardenedAuditSQLite(dbPath string, hooks auditDBPathHooks) (*hardenedAu
 // retains that immutable identity for post-migration revalidation and
 // runtime-plan binding instead of reinterpreting a relative constructor path
 // after the process working directory changes.
+// auditStoreSeed is nil in every binary but the audit package's test binary,
+// which sets it to fill a new, empty store file from a migrated template
+// (GAP-0964). It runs after the path checks and before SQLite opens the file.
+var auditStoreSeed func(path string, secureClient bool)
+
 func openHardenedAuditSQLiteWithIdentity(
 	dbPath string,
 	hooks auditDBPathHooks,
@@ -151,6 +156,9 @@ func openHardenedAuditSQLiteWithIdentity(
 			prepared.close()
 			return nil, "", nil, fmt.Errorf("audit: pre-open path check: %w", err)
 		}
+	}
+	if auditStoreSeed != nil {
+		auditStoreSeed(prepared.path, hooks.secureClient)
 	}
 	pragmas := withPageCache(auditPragmasFor(hooks.secureClient), hooks.pageCacheKiB)
 	if hooks.schemaTolerant {

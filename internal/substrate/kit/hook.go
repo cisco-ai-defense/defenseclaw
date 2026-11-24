@@ -151,7 +151,10 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	}
 	var skillsSent map[string]string
 	var skillsAttached []string
-	if skillScanEvents[call.Event] || (env.Facts != nil && env.Facts.readsSkill) {
+	// GAP-0980: while a folder has no verdict yet, every PreToolUse call runs
+	// the pass (any tool, any connector), so the gateway refuses it while held.
+	pending := preToolEvents[call.Event] && len(skillsPendingInReach(o.home())) > 0
+	if pending || skillScanEvents[call.Event] || (env.Facts != nil && env.Facts.readsSkill) {
 		skillsSent, skillsAttached = o.attachSkills(&env, payload)
 	}
 	body, err := json.Marshal(env)
@@ -176,6 +179,17 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		send = defaultSend(o.Config)
 	}
 	resp, _, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
+	if skillsSent != nil {
+		answered := err == nil && (resp.Status == 403 || resp.Status >= 200 && resp.Status < 300)
+		left := updateSkillPending(o.home(), resp.Body, answered, skillsSent, skillsAttached, o.Config.Managed)
+		if pending && err != nil && len(left) > 0 {
+			// The pass for a folder with no verdict went unanswered: the
+			// folder may still be unscanned, so this call does not run,
+			// whatever the outage fail mode (GAP-0980).
+			call.FailMode = "closed"
+			return refuse(skillPendingRefusal(left))
+		}
+	}
 	if err == nil && resp.Status >= 200 && resp.Status < 300 && skillsSent != nil {
 		if moved := applySkillAnswer(o.home(), resp.Body, skillsSent, skillsAttached, time.Now()); len(moved) > 0 {
 			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders taken out of the agent's reach: %s\n", strings.Join(moved, ", "))

@@ -24,10 +24,10 @@ import (
 // answers (the J46 gateway outage) printed nothing and ran forever. The
 // relay now bounds it.
 
-func stallConfig(script string) kit.Config {
+func stallConfig(mode string, args ...string) kit.Config {
 	cfg := kit.DefaultConfig()
 	cfg.Relay.Connector = "claudecode"
-	cfg.Relay.Headless = []string{"sh", "-c", script, "{prompt}"}
+	cfg.Relay.Headless = agentArgv(mode, args...)
 	return cfg
 }
 
@@ -85,7 +85,7 @@ func TestSilentTaskIsEndedWithAReason(t *testing.T) {
 	}
 	start := time.Now()
 	end := runWithin(t, 20*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(`echo started; exec sleep 600`), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig("silent"), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if end.ExitCode != ExitStalled || !end.Stalled {
 		t.Fatalf("end %+v, want exit %d stalled", end, ExitStalled)
@@ -108,7 +108,7 @@ func TestStalledAgentThatIgnoresTermIsKilled(t *testing.T) {
 	var log eventLog
 	o := HeadlessOptions{Stall: 500 * time.Millisecond, Tick: 100 * time.Millisecond, Usage: flat}
 	end := runWithin(t, stopGrace+15*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(`trap "" TERM; while :; do sleep 1; done`), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig("ignore-term"), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if end.ExitCode != ExitStalled || !strings.Contains(end.Cause, "the gateway was not checked") {
 		t.Fatalf("end %+v", end)
@@ -118,9 +118,8 @@ func TestStalledAgentThatIgnoresTermIsKilled(t *testing.T) {
 func TestRetryNoticesAreNotProgress(t *testing.T) {
 	var log eventLog
 	o := HeadlessOptions{Stall: time.Second, Tick: 100 * time.Millisecond, Usage: flat}
-	script := `while :; do echo '{"type":"system","subtype":"api_retry","attempt":1}'; sleep 0.1; done`
 	end := runWithin(t, 20*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(script), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig("retry-loop"), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if !end.Stalled {
 		t.Fatalf("an agent that only retries was not ended: %+v", end)
@@ -128,11 +127,13 @@ func TestRetryNoticesAreNotProgress(t *testing.T) {
 }
 
 func TestOutputAndUsageAreProgress(t *testing.T) {
-	// Output every 200 ms for 2.5 s, then exit 0: never 1 s without output.
+	// Output every 200 ms for 5 s, then exit 0: never 4 s without output. The
+	// stand-in agent is the test binary, which under -race and load needs
+	// over a second to start, so the stall window is wider than a shell's.
 	var log eventLog
-	o := HeadlessOptions{Stall: time.Second, Tick: 100 * time.Millisecond, Usage: flat}
+	o := HeadlessOptions{Stall: 4 * time.Second, Tick: 100 * time.Millisecond, Usage: flat}
 	end := runWithin(t, 20*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(`i=0; while [ $i -lt 12 ]; do echo $i; sleep 0.2; i=$((i+1)); done`), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig("talk", "25"), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if end.Stalled || end.ExitCode != 0 {
 		t.Fatalf("a talking agent was ended: %+v", end)
@@ -142,7 +143,7 @@ func TestOutputAndUsageAreProgress(t *testing.T) {
 	busy := func(int) (Usage, bool) { return Usage{CPU: time.Duration(n.Add(1)) * time.Second}, true }
 	o = HeadlessOptions{Stall: time.Second, Tick: 100 * time.Millisecond, Usage: busy}
 	end = runWithin(t, 20*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(`sleep 2.5`), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig("sleep", "2500ms"), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if end.Stalled || end.ExitCode != 0 {
 		t.Fatalf("a busy silent agent was ended: %+v", end)
@@ -152,7 +153,7 @@ func TestOutputAndUsageAreProgress(t *testing.T) {
 	reading := func(int) (Usage, bool) { return Usage{IO: io.Add(stallIO)}, true }
 	o = HeadlessOptions{Stall: time.Second, Tick: 100 * time.Millisecond, Usage: reading}
 	end = runWithin(t, 20*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(`sleep 2.5`), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig("sleep", "2500ms"), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if end.Stalled || end.ExitCode != 0 {
 		t.Fatalf("a streaming silent agent was ended: %+v", end)
@@ -160,7 +161,7 @@ func TestOutputAndUsageAreProgress(t *testing.T) {
 }
 
 // stopAfter returns a file a test script writes a background child's PID
-// to (echo $! > file); the child is stopped by that exact PID when the test
+// to (the child-holds-output agent writes it); the child is stopped by that exact PID when the test
 // ends. A task that ends normally leaves its background children running,
 // and the tests left them behind (GAP-0246).
 func stopAfter(t *testing.T) string {
@@ -187,7 +188,7 @@ func TestTaskEndsWhenAChildKeepsItsOutputOpen(t *testing.T) {
 	o := HeadlessOptions{Usage: flat}
 	pidFile := stopAfter(t)
 	end := runWithin(t, drainBudget+10*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(`sleep 30 & echo $! > `+pidFile+`; echo bye; exit 4`), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig("child-holds-output", pidFile), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if end.ExitCode != 4 || !strings.Contains(log.text("stdout"), "bye") {
 		t.Fatalf("end %+v events %+v", end, log.ev)

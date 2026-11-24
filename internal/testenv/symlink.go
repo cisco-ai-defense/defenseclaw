@@ -30,7 +30,7 @@ func Symlink(t testing.TB, target, link string) {
 		return
 	}
 	if runtime.GOOS == "windows" && errors.Is(err, errorPrivilegeNotHeld) && os.Getenv("GITHUB_ACTIONS") != "true" {
-		t.Skipf("this account may not create a symbolic link (fixture %s): %v", link, err)
+		t.Skipf("this account lacks SeCreateSymbolicLinkPrivilege (turn on Developer Mode or run elevated) and cannot create the symbolic-link fixture %s: %v", link, err)
 	}
 	t.Fatal(err)
 }
