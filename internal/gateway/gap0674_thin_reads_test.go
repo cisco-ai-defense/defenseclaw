@@ -67,6 +67,9 @@ func TestGAP0674ThinReadsCensus(t *testing.T) {
 		"internal/actionfacts Facts.PlaceCredentialPathReads credentialPaths":    true,
 		"internal/actionfacts Facts.ThinCredentialPathReads credentialPaths":     true,
 		"internal/actionfacts DynamicRedirectTargetReduction credentialPaths":    true,
+		// analyze hands the call's wait for walk slots to the record
+		// (GAP-1083); it reads no read of it.
+		"internal/actionfacts analyze credentialPaths": true,
 		// Reflection over a Facts value (RV-T6C P4-2). clippedFacts sets only
 		// the slice fields it can set, never the record. The memos compare
 		// facts as a key (reflect.DeepEqual): a record that differs, thinned
