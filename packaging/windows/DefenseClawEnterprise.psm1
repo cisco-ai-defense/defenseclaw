@@ -14515,11 +14515,16 @@ function Set-DefenseClawManagedAcls {
         Set-DefenseClawPathAcl -Path $Layout.BrokerStateDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     }
     Set-DefenseClawPathAcl -Path $Layout.AuthorizationDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
+    # The enrolled-accounts record has the ledger's writer, owner and access
+    # list (GAP-1733), so it is re-stamped with it (GAP-1800).
     foreach ($authorizationFile in @(
         $Layout.AuthorizationLedgerPath,
         (Microsoft.PowerShell.Management\Join-Path `
             $Layout.AuthorizationDirectory `
-            'activation.json')
+            'activation.json'),
+        (Microsoft.PowerShell.Management\Join-Path `
+            $Layout.AuthorizationDirectory `
+            'enrolled-accounts.json')
     )) {
         if (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $authorizationFile `
@@ -27266,6 +27271,93 @@ function Remove-DefenseClawUnclaimedInstallPreparationIntent {
     }
 }
 
+function Complete-DefenseClawFailedInstallPreparation {
+    <#
+        GAP-1750: a standalone fresh Install that throws after it published its
+        preparation receipt, and maybe created InstallRoot or StateRoot, but
+        before a transaction bound that receipt (a refusal between
+        Initialize-DefenseClawTransactionManagedRoot and
+        New-DefenseClawTransaction), removes what it created in the same run,
+        the way the next Install or Uninstall PURGE=1 would. Only a receipt
+        that planned to create a root is cleaned: an Install over roots that
+        already existed keeps them and its receipt as before. A receipt bound
+        to a transaction, or a pending transaction, belongs to that
+        transaction's rollback and stays. A killed process still leaves the
+        receipt for the next run. If the clean-up fails, the folders and the
+        receipt stay and the failure document (rollback_leftovers) names them
+        with the commands that remove them. Never throws: the lifecycle error
+        stays the result. Returns what it did, for the caller and the tests.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return 'not-standalone'
+    }
+    try {
+        $intent = Get-DefenseClawInstallRollbackIntent `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        if ($null -eq $intent) {
+            return 'no-receipt'
+        }
+        if ([string]$intent.phase -cne 'preparing_layout' -or
+            -not [string]::IsNullOrWhiteSpace([string]$intent.snapshot_path) -or
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([string]$Layout.PendingPath))) {
+            return 'transaction-owned'
+        }
+        $plannedRoots = [Collections.Generic.List[string]]::new()
+        foreach ($claim in @(
+            @('InstallRoot', 'install_root_baseline_absent'),
+            @('StateRoot', 'state_root_baseline_absent')
+        )) {
+            if ([bool]$intent.([string]$claim[1])) {
+                $plannedRoots.Add([string]$Layout[[string]$claim[0]])
+            }
+        }
+        if ($plannedRoots.Count -eq 0) {
+            return 'roots-existed'
+        }
+    }
+    catch {
+        # An unreadable receipt is the next run's to authenticate, as before.
+        return 'unreadable-receipt'
+    }
+    try {
+        Complete-DefenseClawInstallRollbackIntent `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        Write-DefenseClawLifecyclePhase -Stage 'failed fresh install: removed the folders and the install receipt it created'
+        return 'removed'
+    }
+    catch {
+        $reason = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value ([string]$_.Exception.Message) `
+            -MaxLength 512
+        $left = [Collections.Generic.List[string]]::new()
+        foreach ($path in @($plannedRoots) + @([string]$Layout.InstallRollbackIntentPath)) {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+                $left.Add($path)
+            }
+        }
+        if ($left.Count -gt 0) {
+            Add-DefenseClawRollbackLeftovers -Report ([pscustomobject]@{
+                leftovers = @(
+                    ('the failed fresh install could not remove what it created (' + $reason + '): ' +
+                        ($left -join ', ') + '; run ' +
+                        (Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1')) +
+                        ', which removes them')
+                )
+            })
+        }
+        return 'left'
+    }
+}
+
 function Set-DefenseClawInstallRollbackIntentCommitState {
     param(
         [Parameter(Mandatory)]$Intent,
@@ -39158,8 +39250,9 @@ function Get-DefenseClawGuardianStateFiles {
     <#
         The guardian state files whose hold breaks a lifecycle run, measured
         natively (GAP-0977): the ledger (protected_targets.json), the activation
-        receipt, the cleanup ledger (a failed save aborts a guardian pass) and
-        the guardian state record. Every other file the guardian or its
+        receipt, the cleanup ledger (a failed save aborts a guardian pass), the
+        enrolled-accounts record (a pass that changes the enrolled set cannot
+        publish while it is held, GAP-1800) and the guardian state record. Every other file the guardian or its
         enumerator publishes did not stop a repair when it was held, and a file
         a standard account can open is never gated: that account could hold it
         and block every ensure and repair (N2). Mirrors
@@ -39170,7 +39263,7 @@ function Get-DefenseClawGuardianStateFiles {
     $candidates = [Collections.Generic.List[string]]::new()
     $authorization = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name AuthorizationDirectory)
     if (-not [string]::IsNullOrWhiteSpace($authorization)) {
-        foreach ($name in @('protected_targets.json', 'activation.json', 'user-cleanup.json')) {
+        foreach ($name in @('protected_targets.json', 'activation.json', 'user-cleanup.json', 'enrolled-accounts.json')) {
             $candidates.Add([IO.Path]::Combine($authorization, $name))
         }
     }
@@ -57841,6 +57934,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $lifecycleLock = Enter-DefenseClawLifecycleLock -Layout $layout
     # The vendor folders DefenseClaw touched, before an uninstall removes its
     # files (GAP-0704 rule i, review 3 L4).
+    # Set by a fresh Install once it publishes its preparation receipt; the
+    # catch below cleans that receipt up when the run fails before a
+    # transaction binds it (GAP-1750).
+    $installPreparationIntent = $null
     $touchedVendorFolders = [string[]]@()
     if ($Action -ceq 'Uninstall' -and (Test-DefenseClawStandaloneProfile)) {
         try {
@@ -58409,6 +58506,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         }
     }
     catch {
+        if ($Action -ceq 'Install' -and $null -ne $installPreparationIntent) {
+            # GAP-1750: before the evidence is read, so a clean-up that
+            # fails is named in rollback_leftovers.
+            [void](Complete-DefenseClawFailedInstallPreparation `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
+        }
         Add-DefenseClawRecoveryEvidenceToError -ErrorRecord $_ -Layout $layout
         if ($Action -ceq 'Uninstall') {
             # GAP-1042: a committed uninstall whose clean-up met a held file ends 1618, naming it.

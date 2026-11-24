@@ -255,14 +255,16 @@ def test_a_guardian_state_hold_is_found_before_anything_stops() -> None:
     assert transaction.rindex(condition, 0, gate) > transaction.index("$codexReadHolds = $null") - 1200
     assert "-Phase Gate" in _function_body(text, "Assert-DefenseClawGuardianStateNotHeld")
     # The class is the critical files only (the others did not stop a repair when held),
-    # and never a file a standard account can open (N2). The CLI list is the same four.
+    # and never a file a standard account can open (N2). The CLI list is the same five
+    # (the enrolled-accounts record since GAP-1800).
     files = _function_body(text, "Get-DefenseClawGuardianStateFiles")
-    for needle in ("'protected_targets.json', 'activation.json', 'user-cleanup.json'", "hook_guardian_state.json", "Test-DefenseClawGuardianStateFileUserOpenable"):
+    for needle in ("'protected_targets.json', 'activation.json', 'user-cleanup.json', 'enrolled-accounts.json'", "hook_guardian_state.json", "Test-DefenseClawGuardianStateFileUserOpenable"):
         assert needle in files, needle
     for gone in ("hook_guardian_*.json", "ManifestPath", "-Filter", "off-roster"):
         assert gone not in files, gone
     go = (ROOT / "internal" / "cli" / "windows_enterprise_guardian_state_held_windows.go").read_text(encoding="utf-8")
-    assert "[]string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, managed.HookGuardianUserCleanupFile}" in go
+    assert ("[]string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, "
+            "managed.HookGuardianUserCleanupFile, managed.HookGuardianEnrolledAccountsFile}") in go
     assert "[]string{hookGuardianStateFile}" in go and "windowsEnterpriseGuardianStateUserOpenable(path)" in go
     readable = _function_body(text, "Test-DefenseClawGuardianStateFileUserOpenable")
     # Any Allow entry with any access for a principal other than SYSTEM, Administrators

@@ -43,10 +43,13 @@ import subprocess
 from collections.abc import Iterator
 
 RESTART_COMMAND = "opencode service restart"
+STOP_COMMAND = "opencode service stop"
 _TIMEOUT = 30
 
 RESTARTED = "restarted"
 NOT_RESTARTED = "not-restarted"
+STOPPED = "stopped"
+NOT_STOPPED = "not-stopped"
 
 # OpenCode 2.2.5 serves the latest/dev/beta/next channels on 49374 and the
 # local channel on 49375; other channels get a port derived from their name.
@@ -114,6 +117,23 @@ def restart_if_running(binary: str) -> str:
         return ""
     done = _service(binary, "restart")
     return RESTARTED if done is not None and done.returncode == 0 else NOT_RESTARTED
+
+
+def stop_if_running(binary: str) -> str:
+    """Stop the account's background server when it runs (a full uninstall, GAP-1922).
+
+    Returns "" (no OpenCode V2, or no server running), ``STOPPED``, or
+    ``NOT_STOPPED`` (its state could not be read or the stop failed).
+    """
+    if not binary:
+        return ""
+    status = _service(binary, "status")
+    if status is None or status.returncode != 0:
+        return NOT_STOPPED
+    if status.stdout.strip().lower() in ("", "stopped"):
+        return ""
+    done = _service(binary, "stop")
+    return STOPPED if done is not None and done.returncode == 0 else NOT_STOPPED
 
 
 def account_port_candidates(account_id: int) -> Iterator[int]:
@@ -287,5 +307,12 @@ def report(outcome: str, *, what: str) -> None:
     elif outcome == NOT_RESTARTED:
         ux.warn(
             f"OpenCode's background server may still run the DefenseClaw plugin it loaded before: run "
-            f"'{RESTART_COMMAND}' (or 'opencode service stop')."
+            f"'{RESTART_COMMAND}' (or '{STOP_COMMAND}')."
+        )
+    elif outcome == STOPPED:
+        ux.ok(f"Stopped OpenCode's background server ({STOP_COMMAND}), so it {what}.")
+    elif outcome == NOT_STOPPED:
+        ux.warn(
+            f"OpenCode's background server may still run the DefenseClaw plugin it loaded before: "
+            f"run '{STOP_COMMAND}' before you install DefenseClaw again."
         )

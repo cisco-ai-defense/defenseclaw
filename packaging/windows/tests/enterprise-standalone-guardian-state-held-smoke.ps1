@@ -40,6 +40,7 @@ try {
             [IO.Path]::Combine($authorization, 'protected_targets.json'),
             [IO.Path]::Combine($authorization, 'activation.json'),
             [IO.Path]::Combine($authorization, 'user-cleanup.json'),
+            [IO.Path]::Combine($authorization, 'enrolled-accounts.json'),
             [IO.Path]::Combine($runtime, 'hook_guardian_state.json')
         )
         # Published too, but a hold on them did not stop a repair, or a standard

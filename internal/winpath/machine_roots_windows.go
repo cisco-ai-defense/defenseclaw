@@ -146,9 +146,11 @@ func readTrustedMachineRoot(key registry.Key, valueName, label string) (string, 
 	return ValidateTrustedMachineRoot(value, label)
 }
 
-// ValidateTrustedMachineRoot applies the fail-closed syntax, mounted-volume,
-// existence, and reparse-chain contract used for protected machine roots.
-func ValidateTrustedMachineRoot(value, label string) (string, error) {
+// validateTrustedMachineRootUncached is the full check behind
+// ValidateTrustedMachineRoot (machine_roots_cache_windows.go): the fail-closed
+// syntax, mounted-volume, existence, and reparse-chain contract used for
+// protected machine roots.
+func validateTrustedMachineRootUncached(value, label string) (string, error) {
 	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "%") {
 		return "", fmt.Errorf(
 			"trusted %s machine root is empty, padded, or environment-expanded",

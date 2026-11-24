@@ -38,10 +38,14 @@ var atomicTransformV2OwnerHealBeforeFileOpen func()
 // inventories, GAP-1827), and the file, a single-link regular file reached
 // without reparse points, is owned by LocalSystem, Administrators or
 // TrustedInstaller and has only the ACEs it inherited from that folder
-// (GAP-1672). A file the account moved in from elsewhere
-// keeps its own DACL (a SYSTEM-only file keeps its protected one), and the
-// account cannot re-propagate inheritance onto a file it has no WRITE_DAC
-// on, so only a file a privileged writer created in the folder qualifies.
+// (GAP-1672). The file DACL is the provenance: a file the account moved in
+// from elsewhere keeps its own DACL (a SYSTEM-only file keeps its protected
+// one), and the account cannot re-propagate inheritance onto a file it has
+// no WRITE_DAC on, so only a file a privileged writer created in a folder of
+// that shape qualifies. The folder check is not provenance (the account owns
+// the folder and can set it to that shape); it is kept so that a folder whose
+// current DACL is not the guardian shape, or carries a grant other than the
+// gateway read grant, is never healed in (GAP-1759, GAP-1827).
 // It then makes the
 // account the owner and adds an explicit full-control entry for it, keeping
 // every other entry and the file's inheritance state; the transaction's own

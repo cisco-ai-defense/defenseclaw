@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -60,7 +61,7 @@ func TestWindowsManagedRuntimeResolveRefusesNonSetupRootsWithoutWaiting(t *testi
 		// The setup ACEs, not protected (inherits from the parent).
 		{"unprotected", "D:(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", false},
 		// The exact setup shape on a folder another principal owns.
-		{"administrators owner", windowsSetupRelaxedDirectorySDDL, true},
+		{"administrators owner", managed.WindowsSetupRelaxedDirectorySDDL, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newWindowsRelaxResolveFixture(t)
@@ -88,7 +89,7 @@ func TestWindowsManagedRuntimeResolveRefusesNonSetupRootsWithoutWaiting(t *testi
 func TestWindowsManagedRuntimeResolveFailsClosedWhenSetupRelaxPersists(t *testing.T) {
 	setWindowsRelaxWaitForTest(t, 200*time.Millisecond)
 	fixture := newWindowsRelaxResolveFixture(t)
-	setWindowsRelaxTestDACL(t, fixture.hookDir, windowsSetupRelaxedDirectorySDDL)
+	setWindowsRelaxTestDACL(t, fixture.hookDir, managed.WindowsSetupRelaxedDirectorySDDL)
 	t.Cleanup(func() { resetWindowsRelaxTestDir(t, fixture.hookDir, fixture.target) })
 	started := time.Now()
 	_, err := ResolveWindowsManagedRuntimeGeneration(fixture.resolve)

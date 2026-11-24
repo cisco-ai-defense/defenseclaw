@@ -1048,9 +1048,11 @@ func enterpriseHookEnrolledAccounts(dataDir, authorizationDir string) func(sid s
 	}
 	authorization, exists, err := loadEnterpriseHookGuardianAuthorizationFile(
 		filepath.Join(authorizationDir, hookGuardianAuthorizationFile))
-	recorded, _, recordErr := loadEnterpriseHookEnrolledAccounts(authorizationDir)
+	recorded, recordErr := loadEnterpriseHookEnrolledAccounts(authorizationDir)
 	every := err != nil || recordErr != nil
-	if err == nil && !exists {
+	if err == nil && !exists && !every {
+		// Only when the enrolled-accounts record was read: an unreadable one
+		// counts every account even on a host with no ledger (GAP-1800).
 		_, activationExists, activationErr := loadEnterpriseHookGuardianActivationFile(
 			filepath.Join(authorizationDir, hookGuardianActivationFile))
 		_, stateExists, stateErr := loadEnterpriseHookGuardianState(dataDir)
@@ -2528,6 +2530,14 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 	if err != nil {
 		return err
 	}
+	if cfg != nil {
+		if problem := enterpriseHookEnrolledAccountsRecordProblem(managed.HookGuardianAuthorizationDir(cfg.DataDir)); problem != "" {
+			if notes == nil {
+				notes = &enterpriseHookNoteSet{}
+			}
+			notes.add(problem)
+		}
+	}
 	failures := run.Failures - len(run.Excused)
 	ok := failures == 0 && run.AuthorizationErr == nil
 	if enterpriseHookJSON {
@@ -2607,6 +2617,10 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 // view; tests replace it.
 var enterpriseHookClaudeOSAdminPolicyStatus = connector.ClaudeCodeOSAdminPolicyStatus
 
+// enterpriseHookClaudeOSAdminMergeCaveats is the connector's read-only list
+// of what a merging HKLM policy leaves to chance (GAP-1801); tests replace it.
+var enterpriseHookClaudeOSAdminMergeCaveats = connector.ClaudeCodeOSAdminPolicyMergeCaveats
+
 // enterpriseHooksReportClaudeHKLMPolicy reports, on Windows with an enrolled
 // Claude Code target, whether the HKLM Claude Code policy shadows the
 // DefenseClaw drop-in. A shadowing policy is a warning that names the fix:
@@ -2635,15 +2649,21 @@ func enterpriseHooksReportClaudeHKLMPolicy(report *enterpriseHookStatusReport, r
 	if !enrolled {
 		return
 	}
-	shadowed, merges, detail := enterpriseHookClaudeOSAdminPolicyStatus(connector.SetupOpts{
+	opts := connector.SetupOpts{
 		ManagedEnterprise: true,
 		AgentVersion:      agentVersion,
-	})
+	}
+	shadowed, merges, detail := enterpriseHookClaudeOSAdminPolicyStatus(opts)
 	report.ClaudePolicyShadowedByHKLM = shadowed
 	report.ClaudePolicyHKLMManagedSourcesMerge = merges
 	report.ClaudePolicyHKLMDetail = detail
 	if shadowed {
 		report.Warnings = append(report.Warnings, "claude_policy_shadowed_by_hklm: "+detail)
+	}
+	if merges {
+		for _, caveat := range enterpriseHookClaudeOSAdminMergeCaveats(opts) {
+			report.Warnings = append(report.Warnings, "claude_policy_hklm_merge_caveat: "+caveat)
+		}
 	}
 }
 

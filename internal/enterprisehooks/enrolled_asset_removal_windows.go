@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -25,6 +26,32 @@ func (e *enrolledUserSignedOutError) Error() string {
 func (e *enrolledUserSignedOutError) Is(target error) bool { return target == ErrEnrolledUserSignedOut }
 
 func (e *enrolledUserSignedOutError) Unwrap() error { return e.s4u }
+
+// EnrolledUserSignedOutFix is what an administrator does about a signed-out
+// failure (an ErrEnrolledUserSignedOut error), from what Windows answered to
+// the S4U logon (GAP-1855). Only a refused logon is fixed by a sign-in; an
+// account Windows cannot resolve and an S4U logon this process cannot make
+// say so, because a sign-in does not change them.
+func EnrolledUserSignedOutFix(err error) string {
+	switch {
+	case errors.Is(err, ErrS4UAccountUnresolved),
+		errors.Is(err, windows.ERROR_NONE_MAPPED),
+		errors.Is(err, windows.ERROR_NO_SUCH_USER),
+		errors.Is(err, windows.ERROR_TRUSTED_RELATIONSHIP_FAILURE),
+		errors.Is(err, windows.ERROR_TRUSTED_DOMAIN_FAILURE):
+		return "Windows cannot resolve this account (it was deleted, or its domain cannot be reached), " +
+			"so a sign-in does not fix it: remove the account's stale profile if the account is gone, " +
+			"or reconnect the computer to the account's domain"
+	case errors.Is(err, ErrS4UUnavailable),
+		errors.Is(err, windows.STATUS_PRIVILEGE_NOT_HELD),
+		errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD):
+		return "the guardian cannot make an S4U logon on this computer (it needs SeTcbPrivilege, which " +
+			"LocalSystem holds): run " +
+			managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone) +
+			" in an elevated PowerShell prompt; until then the file is written only while the account is signed in"
+	}
+	return "sign in to that account; the guardian writes its port then"
+}
 
 // RemoveEnrolledUserAsset deletes a quarantined skill or plugin folder in an
 // enrolled user's profile for the hook guardian (GAP-0202). It runs as that
