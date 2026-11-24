@@ -2933,9 +2933,16 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Connector = serverConnector
 	// The scanner may finish before the HTTP route applies cascade, mode,
-	// approval and install-window policy. Commit aliases only after those.
-	aliasPending := &effectAliasPending{}
-	req.aliasPending = aliasPending
+	// approval and install-window policy. Only session-scoped calls need a
+	// recorder: a needless one bypasses the trusted dispatch memo.
+	var aliasPending *effectAliasPending
+	if req.SessionID != "" && deferEffectAlias(trustedActionRequest{
+		Connector: serverConnector, sessionID: req.SessionID,
+		Input: actionfacts.Input{ActiveHome: hookActiveHome(r.Context())},
+	}) {
+		aliasPending = &effectAliasPending{}
+		req.aliasPending = aliasPending
+	}
 	// The judge keeps the session's task and calls under the connector the
 	// call is scoped to (judgeSessionKeyFor), the one the OpenClaw event
 	// router names for its own turns (GAP-0152).
