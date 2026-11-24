@@ -133,6 +133,16 @@ rows:
       floor: allow
       severity: MEDIUM
       ceiling: alert
+  - id: effect-read-other-home-ssh-private-key
+    source: DET111 GAP-2135 effect-proven other-home key read
+    per_user:
+      floor: allow
+      severity: HIGH
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: HIGH
+      ceiling: alert
   - id: read-other-home-ssh-private-key
     source: rel-1-0-10:PATH-SSH-KEY other home (GAP-0837)
     per_user:
