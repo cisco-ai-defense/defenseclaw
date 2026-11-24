@@ -3324,11 +3324,14 @@ func simplePwdSubstitution(subst *syntax.CmdSubst) bool {
 // A home that does not sit in such a folder tells nothing, and the prefix stays
 // unresolved. The directory-stack forms (~N, ~+N, ~-N, ~+, ~-) are never an
 // account name: bash takes them from the dirs list, PWD and OLDPWD
-// (directoryStackTildeName, rel-1-0-10:GAP-0887). macOS keeps root's home in
+// (directoryStackTildeName, rel-1-0-10:GAP-0887). The dot segments . and ..
+// are no account name either: no account can be named so, bash keeps ~. and
+// ~.. literal, and beside the home they name the homes folder itself or its
+// parent, not a home (rel-1-0-10:GAP-0948). macOS keeps root's home in
 // /var/root, not beside the others in /Users.
 func simpleOtherAccountHome(name, activeHome string) (string, bool) {
 	home := strings.TrimRight(activeHome, "/")
-	if home == "" || directoryStackTildeName(name) || !activeUserTildeName.MatchString(name) ||
+	if home == "" || directoryStackTildeName(name) || name == "." || name == ".." || !activeUserTildeName.MatchString(name) ||
 		strings.EqualFold(name, path.Base(home)) {
 		return "", false
 	}
