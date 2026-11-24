@@ -3720,6 +3720,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				OpenCodeServicePortRequired: runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && strings.EqualFold(target.Connector, "opencode"),
 				RouteOnly:                   enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr, true),
 			}
+			// The pass's own writes into this account's owned files do not
+			// cancel it (GAP-2176).
+			endAccountWork := enterpriseHookWatchAccountWork(ctx, resolved.home)
 			// Repair the user's objects as root before anything validates them.
 			err = repairEnterpriseHookUserTargetPlatform(target, opts)
 			if err == nil {
@@ -3788,6 +3791,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					reconcileEnterpriseForeignHooks(opts)
 				}
 			}
+			endAccountWork()
 		}
 		var deferredPending bool
 		retired := errors.Is(err, errEnterpriseHookProtectionRetired)
@@ -3879,7 +3883,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		func(index int, verifyErr error) {
 			recheck := rechecks[index]
 			row := &rows[recheck.row]
+			endAccountWork := enterpriseHookWatchAccountWork(ctx, recheck.opts.UserHome)
 			result, repaired, err := enterpriseHookRepairAfterVerifyFailure(ctx, recheck.target, recheck.opts, verifyErr)
+			endAccountWork()
 			if err == nil {
 				if repaired {
 					repairs++
@@ -4078,15 +4084,16 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	//
 	//   lastRowsHash   - SHA-256 of the reconcile row set. After each
 	//                    reconcile we compare against the previous
-	//                    hash; when unchanged we log a single
-	//                    reason=fsnotify_no_change line and skip
-	//                    re-arming the debounce timer even if events
-	//                    kept leaking past settleUntil (macOS
+	//                    hash; when unchanged the pass logs one
+	//                    no_change=true line and the next settle
+	//                    window is three times as long (macOS
 	//                    FSEvents can batch chmod events with several
-	//                    seconds of latency, which is longer than any
-	//                    reasonable settle window). This breaks the
-	//                    tail-chasing loop even under adverse fs
-	//                    event timing.
+	//                    seconds of latency). A Write that leaves an
+	//                    owned file unlike the last pass still
+	//                    reconciles.
+	//
+	// A pass's own writes made while it runs never cancel it: see
+	// enterprise_hooks_watch_active.go (GAP-2176).
 	settleUntil := time.Time{}
 	droppedInSettle := 0
 	var lastRowsHash string
@@ -4576,7 +4583,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					// pass so that account is inspected promptly.
 					workerActive, workerRepaired := activeWorkers.state(path)
 					if workerActive || ((workerRepaired || activeEvents[path] != 0) &&
-						enterpriseHookOwnedFileFingerprint(path) == priorLeft[path]) {
+						enterpriseHookOwnedFileFingerprint(path) == priorLeft[path]) ||
+						activeWorkers.workTail(path) {
 						activeEvents[path] |= event.Op
 						continue
 					}
@@ -4861,13 +4869,20 @@ type enterpriseHookWatchActiveWorkers struct {
 	mu         sync.RWMutex
 	owners     map[string][]string
 	targetKeys map[string]string
-	active     map[string]int
-	repaired   map[string]bool
+	// accounts lists the last pass's row keys per account (folded home),
+	// for the in-process reconcile's account marks.
+	accounts map[string][]string
+	active   map[string]int
+	repaired map[string]bool
+	// workLeft is each owned file's fingerprint as the in-process work on
+	// its account left it in this pass.
+	workLeft map[string]string
 }
 
 func newEnterpriseHookWatchActiveWorkers(prior enterpriseHookReconcileRun) *enterpriseHookWatchActiveWorkers {
 	w := &enterpriseHookWatchActiveWorkers{
 		owners: prior.WatchPathOwners, targetKeys: make(map[string]string, len(prior.Rows)),
+		accounts: make(map[string][]string, len(prior.Rows)),
 	}
 	for _, row := range prior.Rows {
 		home, connector := row.UserHome, row.Connector
@@ -4881,6 +4896,8 @@ func newEnterpriseHookWatchActiveWorkers(prior enterpriseHookReconcileRun) *ente
 		}
 		if id, key := enterpriseHookWatchTargetID(home, connector), enterpriseHookProtectedTargetKey(row); id != "" && key != "" {
 			w.targetKeys[id] = key
+			account := enterpriseHookWatchAccountID(home)
+			w.accounts[account] = append(w.accounts[account], key)
 		}
 	}
 	return w
