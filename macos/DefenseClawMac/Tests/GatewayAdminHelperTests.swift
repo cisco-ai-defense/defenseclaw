@@ -353,6 +353,27 @@ private enum GatewayAdminHelperTests {
             home: installation.descriptor, from: getuid(), to: (getuid(), getgid()), maximumEntries: 2,
             change: { _, _ in 0 })
         check(bounded.incomplete, "A walk over its entry budget must report itself incomplete")
+        // GAP-2003: a walk past its deadline stops where it is and says to
+        // repair again, so the helper answers inside the app's reply budget;
+        // the next repair returns the rest.
+        let late = try GatewayAdminOwnershipRepair.restore(
+            home: installation.descriptor, from: getuid(), to: (getuid(), getgid()), until: ContinuousClock.now,
+            change: { _, relative in fatalError("A walk past its deadline changed \(relative)") })
+        check(late.unfinished && late.incomplete && late.restored.isEmpty,
+              "A walk past its deadline must stop before it changes anything and report itself unfinished")
+        check(late.summary.contains("repair again"), "An unfinished repair must say to repair again: \(late.summary)")
+        let resumed = try GatewayAdminOwnershipRepair.restore(
+            home: installation.descriptor, from: getuid(), to: (getuid(), getgid()),
+            until: ContinuousClock.now.advanced(by: .seconds(60)), change: { _, _ in 0 })
+        check(!resumed.unfinished && !resumed.incomplete && resumed.restored.count == changed.count,
+              "A walk inside its deadline returns everything: \(resumed.restored)")
+        let lateConfig = GatewayAdminAgentConfigRepair.restore(
+            home: installation.descriptor, from: getuid(), to: (getuid(), getgid()), paths: ["hooks/nested/state.json"],
+            until: ContinuousClock.now, change: { _, relative in fatalError("A late agent config walk changed \(relative)") })
+        check(lateConfig.restored.isEmpty, "An agent config repair past its deadline changes nothing")
+        check(GatewayAdminPolicy.repairWalkSeconds > 0
+              && GatewayAdminPolicy.repairWalkSeconds + 30 <= GatewayAdminPolicy.repairReplySeconds,
+              "The helper's walk deadline must leave the reply time inside the app's budget")
         let untouched = try GatewayAdminOwnershipRepair.restore(
             home: installation.descriptor, from: getuid() &+ 1, to: (getuid(), getgid()),
             change: { _, relative in fatalError("A file of another owner was changed: \(relative)") })
