@@ -3061,3 +3061,28 @@ def test_ctrl_c_part_way_through_the_rule_pack_swap_puts_the_swapped_packs_back(
 
     assert {name: profile_digest(guardrail / name) for name in before} == before
     assert execs == []
+
+
+def test_a_windows_downgrade_whose_installer_ended_with_an_error_puts_the_rule_packs_back(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    guardrail, _ = _rule_pack_downgrade(tmp_path, monkeypatch, home)
+    before = {name: profile_digest(guardrail / name) for name in ("default", "strict")}
+    monkeypatch.delenv(upgrade_shim.LOCAL_DIR_ENV)
+    _serve_release(monkeypatch, tmp_path / "release-1.0.10")
+    _windows_downgrade(monkeypatch)
+
+    def ended(*args: object, **kwargs: object) -> int:
+        # What _run_installer raises when the installer window closed with exit code 1 before it opened its log.
+        error = upgrade_shim.ShimOutcomeUnknownError("the installer ended with exit code 1 before it opened its log")
+        error.installer_ended = True
+        raise error
+
+    monkeypatch.setattr(upgrade_shim, "_run_installer", ended)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 1
+
+    assert {name: profile_digest(guardrail / name) for name in before} == before
+    assert "rule packs default, strict are this release's again" in capsys.readouterr().out

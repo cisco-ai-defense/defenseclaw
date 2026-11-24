@@ -257,9 +257,13 @@ class ShimOutcomeUnknownError(ShimError):
     """The installer was started and ended, or is still running, with a result the shim cannot prove.
 
     The machine may have changed, so the failure must not say it did not.
+    ``installer_ended``: it ended with an exit code, so nothing is still
+    running and it restored the install it was replacing (the swapped rule
+    packs go back, as for any failed installer).
     """
 
     changed_nothing = False
+    installer_ended = False
 
 
 class ShimUsageError(ShimError):
@@ -557,8 +561,9 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         # With swapped rule packs the shim waits too: it puts them back when
         # the installer fails (an exec would leave no one to do it).
         rc = _run_installer(installer, args, workdir, newer=newer, rerun=rerun, wait=released or packs is not None)
-    except ShimOutcomeUnknownError:
-        outcome_unknown = True  # the installer may be running or may have changed things: leave the packs
+    except ShimOutcomeUnknownError as unknown:
+        # An installer that may still be running may have changed things: leave the packs.
+        outcome_unknown = not unknown.installer_ended
         raise
     finally:
         if packs is not None and rc != 0 and not outcome_unknown:
@@ -1634,7 +1639,7 @@ def _run_installer(
                 # picks the current controller again.
                 _drop_recovery_copy(recovery)
                 route = f"run this command again (the kept copy is not available):\n      {rerun}\n"
-            raise ShimOutcomeUnknownError(
+            ended = ShimOutcomeUnknownError(
                 f"the installer ended with exit code {rc} before it opened its log. It may have stopped before "
                 "changing anything, or later if it could not write its log, so the result is not known; the "
                 "reason was shown only in its window, which has closed. Check the install with: "
@@ -1642,6 +1647,8 @@ def _run_installer(
                 f"{route}"
                 "    The installer first restores an install it was replacing."
             )
+            ended.installer_ended = True
+            raise ended
         else:
             # Still running, so no result: the verified copy stays.
             raise ShimOutcomeUnknownError(
