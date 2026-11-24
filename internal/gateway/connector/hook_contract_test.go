@@ -91,7 +91,7 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 			{"hermes-hooks-v2", "0.21.0", "0.22.0", true, "v6", 23},
 		},
 		"antigravity": {{"antigravity-hooks-v2", "1.1.8", "", true, "v8", 5}},
-		"opencode":    {{"opencode-hooks-v2", "2.0.0", "2.3.0", false, "v7", 8}},
+		"opencode":    {{"opencode-hooks-v2", "2.0.0", "2.3.0", false, "v7", 9}},
 		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
 	}
 
