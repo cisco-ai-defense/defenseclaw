@@ -518,7 +518,7 @@ func (s *Splitter) Handler(plain http.Handler) http.Handler {
 			return
 		}
 		// The gateway sends nothing before the 101, but keep what was read.
-		pre, _ := rw.Reader.Peek(rw.Reader.Buffered())
+		pre, _ := rw.Peek(rw.Reader.Buffered())
 		tc := tls.Server(&prefixConn{Conn: c, prefix: bytes.NewReader(bytes.Clone(pre))}, s.conf)
 		err = tc.Handshake()
 		_ = c.SetDeadline(time.Time{})
