@@ -45,7 +45,8 @@ var windowsEnterpriseClaudeRegistryPolicyValue = func() (string, error) {
 // repair that enrols Claude Code while the Claude Code registry policy holds
 // a value that hides DefenseClaw's drop-in (rel-1-0-6:GAP-0409). A value that
 // sets managedSourcesBehavior: merge, carries only source-control keys, or
-// carries its own hooks table (checked at enrolment) is admitted (GAP-1731).
+// carries a hooks table that names a DefenseClaw hook or has its hook
+// arguments (checked at enrolment) is admitted (GAP-1731, GAP-1801, GAP-2175).
 // A hiding value makes Claude Code read it instead of DefenseClaw's
 // file-based managed drop-in, so the guardian can never publish
 // Claude Code coverage: the lifecycle used to stop after about seven minutes

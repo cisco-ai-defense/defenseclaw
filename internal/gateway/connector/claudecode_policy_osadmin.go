@@ -139,8 +139,8 @@ func ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, label string, opts SetupOpts
 
 // claudeCodeOSAdminDefersToGuardian reports a plain shadowing verdict that a
 // caller without the hook executable cannot make: the policy carries its own
-// hooks table that names a DefenseClaw hook, so it may be DefenseClaw's
-// matrix. The enrolment gate and the guardian's Claude Code rows check it
+// hooks table that names a DefenseClaw hook or has its hook arguments, so it
+// may be DefenseClaw's matrix. The enrolment gate and the guardian's Claude Code rows check it
 // against the installed hook. A table that names no DefenseClaw hook cannot
 // be the matrix and is not deferred: the Setup preflight refuses it before
 // anything changes (GAP-1801 (a)).
@@ -153,16 +153,43 @@ func claudeCodeOSAdminDefersToGuardian(source *claudeCodeSettingsSource, opts Se
 	return hasHooks && claudeCodeHooksTableNamesDefenseClaw(hooks)
 }
 
-// claudeCodeHooksTableNamesDefenseClaw reports whether any value in a hooks
-// table names DefenseClaw (its hook executable lives under a DefenseClaw
-// folder and is named defenseclaw-*). A table that cannot be encoded is
-// deferred, as before.
+// claudeCodeHooksTableNamesDefenseClaw reports whether a hooks table may hold
+// DefenseClaw's hook: a value names DefenseClaw (its hook executable lives
+// under a DefenseClaw folder and is named defenseclaw-*), or a handler has
+// DefenseClaw's hook arguments. Enrolment matches the handler's command by
+// file identity, so a matrix may name the installed hook by an alias (an 8.3
+// short path, a hard link) that carries no DefenseClaw text; deferring on the
+// arguments keeps the deferral a superset of what enrolment admits
+// (claudeCodeHandlerTargetsCurrentRuntime, GAP-2175). A table that cannot be
+// encoded is deferred, as before.
 func claudeCodeHooksTableNamesDefenseClaw(hooks interface{}) bool {
 	data, err := json.Marshal(hooks)
 	if err != nil {
 		return true
 	}
-	return strings.Contains(strings.ToLower(string(data)), "defenseclaw")
+	if strings.Contains(strings.ToLower(string(data)), "defenseclaw") {
+		return true
+	}
+	events, _ := hooks.(map[string]interface{})
+	for _, rawEntries := range events {
+		entries, _ := rawEntries.([]interface{})
+		for _, rawEntry := range entries {
+			entry, _ := rawEntry.(map[string]interface{})
+			handlers, _ := entry["hooks"].([]interface{})
+			for _, rawHandler := range handlers {
+				handler, ok := claudeCodeExecView(rawHandler).(map[string]interface{})
+				if !ok {
+					continue
+				}
+				args, ok := claudeCodeNativeExecArguments(handler)
+				if ok && (codexValueMatches(args, []string{"hook", "--connector", "claudecode"}) ||
+					codexValueMatches(args, []string{"hook", "--connector", "claudecode", "--enterprise-managed"})) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // claudeCodeOSAdminMergeCaveats names what a merging OS-admin policy leaves
@@ -214,8 +241,9 @@ func ClaudeCodeOSAdminPolicyMergeCaveats(opts SetupOpts) []string {
 // ClaudeCodeOSAdminPolicyPreflight is the Setup preflight's verdict on the raw
 // HKLM Settings value before anything is installed: nil when the value is
 // empty, carries only source-control keys, merges managed sources, or carries
-// a hooks table that names a DefenseClaw hook (checked at enrolment); otherwise
-// the refusal naming the fix (GAP-1731, GAP-1801).
+// a hooks table that names a DefenseClaw hook or has its hook arguments
+// (checked at enrolment); otherwise the refusal naming the fix (GAP-1731,
+// GAP-1801, GAP-2175).
 func ClaudeCodeOSAdminPolicyPreflight(raw, label string) error {
 	if strings.TrimSpace(raw) == "" {
 		return nil
