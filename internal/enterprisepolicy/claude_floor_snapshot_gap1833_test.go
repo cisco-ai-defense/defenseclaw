@@ -5,6 +5,7 @@ package enterprisepolicy
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -15,6 +16,12 @@ import (
 // starts (the pass that read everything under the lock): never a write or a
 // kept floor from what the change replaced.
 func TestGAP1833FloorChangedBetweenTheReadAndTheLockIsReadAgain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Publishing on a Windows host writes the floor owned by
+		// Administrators, which a standard token may not assign; the rows run
+		// on the Windows tree in TestGAP1833WindowsFloorChangedBetweenTheReadAndTheLockIsReadAgain.
+		t.Skip("on Windows the rows run on the Windows tree (TestGAP1833WindowsFloorChangedBetweenTheReadAndTheLockIsReadAgain)")
+	}
 	runGAP1833FloorRaces(t, func(t *testing.T) gap1833FloorEnv {
 		withHigherSources(t)
 		return gap1833FloorEnv{opts: testOptions(t), write: writeFile}
