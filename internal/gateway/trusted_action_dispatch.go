@@ -294,6 +294,10 @@ type trustedActionRequest struct {
 	// (effects.Options.Login), set at the outermost dispatch from the trusted
 	// identity (effectActiveLogin).
 	effectLogin string
+	// preservedHookConfigTargets is set by inspect for this call alone. The
+	// effect lane fills it from its one extraction; the legacy hook reader
+	// consults it only for the exact proven preserving targets.
+	preservedHookConfigTargets *effectKnownHookConfigTargets
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
 	// stateProofOnly limits the judgment to the rule that proves a write to

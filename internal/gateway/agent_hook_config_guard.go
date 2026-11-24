@@ -968,6 +968,15 @@ func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, af
 		if reason := codexHooksSwitchedOff(old, updated); reason != "" {
 			return reason
 		}
+		// Codex also registers the turn bridge in the top-level notify
+		// array. Dropping that entry disables a registered DefenseClaw
+		// callback even when [hooks] remains intact.
+		notifyAfter := agentHookConfigFingerprint(updated["notify"])
+		for entry, count := range agentHookConfigFingerprint(old["notify"]) {
+			if notifyAfter[entry] < count {
+				return "removes or changes DefenseClaw's notify entry"
+			}
+		}
 	case gatewayconnector.AgentHookConfigKiroSettings:
 		if old != nil && !reflect.DeepEqual(old["chat.defaultAgent"], updated["chat.defaultAgent"]) {
 			return "changes the Kiro default agent"
@@ -1111,6 +1120,12 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	out := append([]RuleFinding(nil), findings...)
 	add := func(ruleID, note, target string) {
+		if ruleID == agentHookConfigWriteRuleID && note == "" &&
+			request.preservedHookConfigTargets.preserves(target) {
+			// The effect reading proved this exact mixed-purpose config write
+			// keeps the registered hooks. Disable and opaque writes still grade.
+			return
+		}
 		if _, held := readingRuleSlot(out, ruleID); held {
 			return
 		}

@@ -131,6 +131,9 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	}
 	defer func() {
 		if recover() != nil {
+			if request.preservedHookConfigTargets != nil {
+				request.preservedHookConfigTargets.paths = nil
+			}
 			for i := range results {
 				results[i] = EffectShadowResult{Mode: string(mode), Tier: string(effectTierClean), Action: guardrailActionAllow}
 			}
@@ -173,6 +176,11 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	strict := request.StrictPolicy
 	text := effectReachText(call)
 	reachEnv := newEffectReachEnv(request.Input.ActiveHome, text)
+	var preservedHookConfigPaths map[string]struct{}
+	if mode == effectRulesOn && request.preservedHookConfigTargets != nil {
+		preservedHookConfigPaths = effectPreservedHookConfigPaths(result, facts, request.Input.ActiveHome)
+		reachEnv.preservedHookConfigPaths = preservedHookConfigPaths
+	}
 	for i, tier := range tiers {
 		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
 		for _, use := range aliasUses {
@@ -206,6 +214,9 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	}
 	if len(result.Unknowns) == 0 {
 		sessionEffectAliases.remember(request, result, facts, opts.Flavor)
+	}
+	if mode == effectRulesOn && request.preservedHookConfigTargets != nil {
+		request.preservedHookConfigTargets.paths = preservedHookConfigPaths
 	}
 	return finish("", len(result.Effects))
 }

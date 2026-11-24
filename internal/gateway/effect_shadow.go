@@ -8,10 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"net/url"
+	"os"
 	osuser "os/user"
 	pathpkg "path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -491,6 +494,22 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if len(known) == 0 && len(maybe) == 0 {
 			continue
 		}
+		// Mixed-purpose agent configs contain ordinary model and runtime
+		// settings beside DefenseClaw's hooks. A complete known write that
+		// preserves the registered entries is no hook mutation; the legacy
+		// readers still grade the call. Deletes, truncations and opaque data
+		// keep their effect grade (GAP-1478).
+		if fullyAccounted && len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 {
+			preserved := false
+			if env.preservedHookConfigPaths != nil {
+				_, preserved = env.preservedHookConfigPaths[effectHookConfigTargetKey(t.GetPath())]
+			} else {
+				preserved = effectKnownHookConfigWritePreservesRegistration(result, f, env.Home)
+			}
+			if preserved {
+				continue
+			}
+		}
 		mutating := mutatingEffectKind(kind)
 		unknownEffect := f.GetTargetState() != "known" || f.GetRoleState() != "known" || kind == string(effects.KindOpaque)
 		// Relevance: a mutation touching a protected set; a credential read; or
@@ -591,6 +610,114 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 	return c
 }
 
+// effectKnownHookConfigTargets is the per-call handoff from the one effect
+// extraction to the legacy hook reader. An absent map never skips a finding.
+type effectKnownHookConfigTargets struct {
+	paths map[string]struct{}
+}
+
+func effectHookConfigTargetKey(path string) string {
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if agentHookConfigFoldCase() {
+		path = strings.ToLower(path)
+	}
+	return path
+}
+
+func (targets *effectKnownHookConfigTargets) preserves(path string) bool {
+	if targets == nil {
+		return false
+	}
+	key := effectHookConfigTargetKey(path)
+	if key == "" {
+		return false
+	}
+	_, ok := targets.paths[key]
+	return ok
+}
+
+// effectPreservedHookConfigPaths records a target only if every effect on it
+// is a fully known write whose resulting document keeps registered hooks.
+// An unknown or incomplete extraction has no authority to relax a reader.
+func effectPreservedHookConfigPaths(result effects.Result, facts []*semanticpb.EffectFact, home string) map[string]struct{} {
+	safe := make(map[string]struct{})
+	if len(result.Unknowns) != 0 {
+		return safe
+	}
+	unsafe := make(map[string]struct{})
+	for _, fact := range facts {
+		target := fact.GetTarget()
+		if target.GetType() != "path" {
+			continue
+		}
+		key := effectHookConfigTargetKey(target.GetPath())
+		if key == "" {
+			continue
+		}
+		known, maybe, _ := effectProtectedSets(target, fact.GetKind())
+		if len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 &&
+			effectKnownHookConfigWritePreservesRegistration(result, fact, home) {
+			safe[key] = struct{}{}
+		} else {
+			unsafe[key] = struct{}{}
+		}
+	}
+	for key := range unsafe {
+		delete(safe, key)
+	}
+	return safe
+}
+
+// effectKnownHookConfigWritePreservesRegistration proves that the one
+// complete, literal write to a mixed-purpose config leaves DefenseClaw's
+// registered hooks intact. It reads the same bounded before/after document
+// contract as the 1.0.10 hook guard. Unknown data, missing reads and any
+// deletion or truncation keep the effect finding.
+func effectKnownHookConfigWritePreservesRegistration(result effects.Result, f *semanticpb.EffectFact, home string) bool {
+	if f == nil || (f.GetKind() != string(effects.KindWrite) && f.GetKind() != string(effects.KindAppend)) ||
+		f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 {
+		return false
+	}
+	i := int(f.GetIndex()) - 1
+	if i < 0 || i >= len(result.Effects) {
+		return false
+	}
+	e := result.Effects[i]
+	d := e.Data
+	if d == nil || (d.Kind != effects.DataLiteral && d.Kind != effects.DataHeredoc && d.Kind != effects.DataHereString &&
+		d.Kind != effects.DataArgument) || len(d.Sources) != 0 || d.Text == "" || d.Bytes != len(d.Text) {
+		return false
+	}
+	path := f.GetTarget().GetPath()
+	if path == "" {
+		return false
+	}
+	guard := newAgentHookConfigGuard("", home)
+	format := guard.format(path)
+	if format == "" {
+		return false
+	}
+	before, exists := guard.read(path)
+	if !exists {
+		// A failed or unreadable file is not proof of absence. Only a
+		// genuinely absent file has no registered entries to preserve.
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	after := []byte(d.Text)
+	if f.GetKind() == string(effects.KindAppend) {
+		if len(before)+len(after) > agentHookConfigMaxBytes {
+			return false
+		}
+		after = append(append([]byte(nil), before...), after...)
+	}
+	return agentHookConfigTurnsOff(format, before, exists, after, true) == ""
+}
+
 // factReach is the reach reason of one relevant fact: none for a known effect
 // on a known member; R-NAME for an unknown effect on a known member;
 // otherwise the basis of the first maybe match that holds (glob, unresolved
@@ -633,8 +760,9 @@ func factReach(f *semanticpb.EffectFact, known []string, unknownEffect bool, env
 // home, and whether the call turns dot matching on for its globs (bash
 // dotglob, zsh globdots or glob_dots).
 type effectReachEnv struct {
-	Home    string
-	DotGlob bool
+	Home                     string
+	DotGlob                  bool
+	preservedHookConfigPaths map[string]struct{}
 }
 
 func newEffectReachEnv(home, text string) effectReachEnv {
