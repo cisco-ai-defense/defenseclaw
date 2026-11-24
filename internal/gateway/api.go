@@ -4728,6 +4728,14 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
+			// A bounded number of hook calls are authenticated and
+			// evaluated at once; a call whose hook gave up while it
+			// waited is dropped here (GAP-0011, hook_admission.go).
+			release, admitted := a.admitHookCall(w, r, hookScope)
+			if !admitted {
+				return
+			}
+			defer release()
 			if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
 				if a.refuseUnverifiedSurface(w, r, route, hookScope) {
 					return
