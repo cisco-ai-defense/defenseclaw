@@ -8,7 +8,8 @@ import "testing"
 
 // GAP-0477: the gateway pod's skill scanner sidecar has no Secret, no token
 // and no port, shares only the scan folder with the gateway, and is not
-// rendered when gateway.skillScanner.enabled is false.
+// rendered unless gateway.skillScanner.enabled is true (off by default,
+// GAP-1103: a default install pulls only published images).
 func TestChartSkillScannerSidecar(t *testing.T) {
 	helm := helmBinary(t)
 	for _, tc := range []struct {
@@ -16,8 +17,10 @@ func TestChartSkillScannerSidecar(t *testing.T) {
 		extra  []string
 		want   bool
 	}{
-		{"default", nil, true},
-		{"managed", nil, true},
+		{"default", nil, false},
+		{"managed", nil, false},
+		{"default", []string{"--set", "gateway.skillScanner.enabled=true"}, true},
+		{"managed", []string{"--set", "gateway.skillScanner.enabled=true"}, true},
 		{"default", []string{"--set", "gateway.skillScanner.enabled=false"}, false},
 	} {
 		objs := decodeObjects(t, renderChart(t, helm, tc.values, tc.extra...))
