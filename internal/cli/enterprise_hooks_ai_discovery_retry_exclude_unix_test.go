@@ -7,12 +7,14 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
@@ -59,5 +61,26 @@ func TestStandaloneAIDiscoveryRetryDropsAnAccountExcludedSincePassStart(t *testi
 	record, err := readTestUserScanRecord(filepath.Join(b.dir, strconv.Itoa(bob.UID)+".json"))
 	if err != nil || record.UID != bob.UID || record.Holder != enterpriseHookAIDiscoveryHolder(bob) {
 		t.Fatalf("bob's record = %+v, %v; want it kept as it was", record, err)
+	}
+}
+
+// An account that only eligible-accounts.json put in the rows (no hook row
+// stands behind it) is dropped from a retry once the file no longer lists it;
+// an account with a hook row stays whatever the file says.
+func TestStandaloneAIDiscoveryRetryRowsFollowTheEligibleList(t *testing.T) {
+	previousLoad := enterpriseHookLoadEligibleAccounts
+	t.Cleanup(func() { enterpriseHookLoadEligibleAccounts = previousLoad })
+	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{{User: "carol", UID: 2003}}, nil
+	}
+	rows := []enterpriseHookReconcileRow{
+		{User: "alice", UID: 2001, Connector: "codex", OK: true},
+		{User: "bob", UID: 2002, OK: true},
+		{User: "carol", UID: 2003, OK: true},
+	}
+	run := enterpriseHookReconcileRun{Manifest: "/nonexistent/manifest.json"}
+	got := enterpriseHookAIDiscoveryRetryRows(context.Background(), io.Discard, run, rows)
+	if len(got) != 2 || got[0].User != "alice" || got[1].User != "carol" {
+		t.Fatalf("retry rows = %+v, want alice (hook row) and carol (still eligible); bob left the list", got)
 	}
 }

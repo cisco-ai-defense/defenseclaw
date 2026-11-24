@@ -319,8 +319,40 @@ func startEnterpriseHookAIDiscovery(ctx context.Context, stderr io.Writer, run e
 			state.Lock()
 			state.last = enterpriseHookAIDiscoveryNow()
 			state.Unlock()
+			rows = enterpriseHookAIDiscoveryRetryRows(ctx, stderr, run, rows)
 		}
 	}()
+}
+
+// enterpriseHookAIDiscoveryRetryRows is rows without the accounts that are
+// left out now. A retry runs up to about 70 s after its pass started, with the
+// rows copied then; an account that exclude_users or exempt_users has named
+// since, or that eligible-accounts.json no longer lists (a row that no hook row
+// stands behind, added by enterpriseHookEnrolledAccountRows), was scanned again
+// and got a fresh spool record. The retry pass drops it and its record goes with
+// the next prune. The other accounts are scanned and kept as before
+// (rel-1-0-10:GAP-2103).
+func enterpriseHookAIDiscoveryRetryRows(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun, rows []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx, enterpriseHookIdentitySpoolDirForConfig())
+	var eligible map[int]bool
+	if manifest := strings.TrimSpace(run.Manifest); manifest != "" && !enterpriseHookManifestEnrollment() {
+		if accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifest)); err == nil {
+			eligible = map[int]bool{}
+			for _, account := range accounts {
+				eligible[account.UID] = true
+			}
+		} else {
+			fmt.Fprintf(stderr, "[hook-guardian] eligible accounts: %v\n", err)
+		}
+	}
+	kept := make([]enterpriseHookReconcileRow, 0, len(rows))
+	for _, row := range rows {
+		if leftOut.has(row.UID, row.User) || (eligible != nil && row.Connector == "" && !eligible[row.UID]) {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	return kept
 }
 
 // enterpriseHookAIDiscoveryUnreadable reports whether report lists a skill
