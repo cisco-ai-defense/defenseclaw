@@ -563,20 +563,47 @@ func (a openLoopSpan) overlaps(b openLoopSpan) bool {
 	return !a.to.Before(b.from) && !b.to.Before(a.from)
 }
 
-// failingSpans is the window of each call behind a timing verdict: an
-// unanswered call's answer window, a slow call's wait. Other verdicts have
-// none.
-func (r openLoopResult) failingSpans(kind string, budget time.Duration) []openLoopSpan {
-	var out []openLoopSpan
+// without is the stream with the calls whose window overlaps one of spans set
+// aside: an answered call's wait, an unanswered call's answer window. A call
+// the launcher never issued stays offered and unanswered. left is how many
+// calls were set aside.
+func (r openLoopResult) without(spans []openLoopSpan) (rest openLoopResult, left int) {
+	rest = openLoopResult{offered: r.offered}
 	for _, c := range r.calls {
-		switch {
-		case kind == "unanswered" && !c.answered:
-			out = append(out, openLoopSpan{c.issued, c.issued.Add(openLoopWait)})
-		case kind == "slow" && c.answered && c.elapsed > budget:
-			out = append(out, openLoopSpan{c.issued, c.issued.Add(c.elapsed)})
+		w := openLoopSpan{c.issued, c.issued.Add(openLoopWait)}
+		if c.answered {
+			w.to = c.issued.Add(c.elapsed)
+		}
+		if openLoopAnyOverlap(w, spans) {
+			rest.offered--
+			left++
+			continue
+		}
+		rest.calls = append(rest.calls, c)
+		if c.answered {
+			rest.latencies = append(rest.latencies, c.elapsed)
 		}
 	}
-	return out
+	return rest, left
+}
+
+// openLoopTiming is what a timing verdict (unanswered or slow) is judged on
+// again once the calls a disk stall overlaps are set aside: the stream and
+// its p95 budget.
+type openLoopTiming struct {
+	got    openLoopResult
+	budget time.Duration
+}
+
+// passesWithout judges the stream again without the calls whose window
+// overlaps one of spans: it passes when the rest are answered at
+// openLoopMinAnswered or more and their p95 is inside the budget. It also
+// says what the rest showed.
+func (t openLoopTiming) passesWithout(spans []openLoopSpan) (bool, string) {
+	rest, left := t.got.without(spans)
+	ok := rest.answeredShare() >= openLoopMinAnswered && rest.percentile(95) <= t.budget
+	return ok, fmt.Sprintf("without the %d calls a counted disk stall overlaps: %d of %d answered (share %.3f, need %.2f), p95 %v (budget %v)",
+		left, len(rest.latencies), rest.offered, rest.answeredShare(), openLoopMinAnswered, rest.percentile(95).Round(time.Microsecond), t.budget.Round(time.Microsecond))
 }
 
 // openLoopAnswerer is the stand-in relay: it only answers.
@@ -732,11 +759,14 @@ func (p openLoopProbes) String() string {
 // up, without touching the gateway. One slow flush happens on EBS and on CI
 // runners with no disk pressure at all, and cannot explain a call unanswered
 // for seconds (RV-T6A), so a stall counts only when it is sustained and
-// overlaps the calls behind the verdict: openLoopFlushStallRun slow flushes in
-// a row, or openLoopFlushStallShare of a one-second window in slow flushes.
-// An unanswered verdict needs more: a run of slow flushes at least
-// openLoopWait long, since only that can keep a call from its answer for its
-// whole window.
+// explains the verdict: openLoopFlushStallRun slow flushes in a row, or
+// openLoopFlushStallShare of a one-second window in slow flushes, and for an
+// unanswered verdict a run of slow flushes at least openLoopWait long, since
+// only that can keep a call from its answer for its whole window. A stall
+// explains a timing verdict only when the stream passes once the calls it
+// overlaps are set aside (RV-T6B): a real regression makes calls slow or
+// unanswered across the whole run, and one burst somewhere in it must not
+// turn that failure into a skip.
 const (
 	openLoopFlushEvery      = 100 * time.Millisecond
 	openLoopFlushStall      = 50 * time.Millisecond
@@ -852,28 +882,30 @@ func (p *openLoopFlushProbe) runsLocked() []openLoopStallRun {
 	return out
 }
 
+// windowShareLocked is the share of the one-second window starting at flush
+// i spent in slow flushes.
+func (p *openLoopFlushProbe) windowShareLocked(i int) float64 {
+	w := openLoopSpan{p.flushes[i].at, p.flushes[i].at.Add(openLoopFlushWindow)}
+	var slow time.Duration
+	for _, g := range p.flushes[i:] {
+		if !g.at.Before(w.to) {
+			break
+		}
+		if g.took >= openLoopFlushStall {
+			slow += min(g.took, w.to.Sub(g.at))
+		}
+	}
+	return float64(slow) / float64(openLoopFlushWindow)
+}
+
 // busiestLocked is the largest share of a one-second window, starting at a
-// slow flush and overlapping one of the spans, spent in slow flushes.
-func (p *openLoopFlushProbe) busiestLocked(overlapping []openLoopSpan) float64 {
+// slow flush, spent in slow flushes.
+func (p *openLoopFlushProbe) busiestLocked() float64 {
 	best := 0.0
 	for i, f := range p.flushes {
-		if f.took < openLoopFlushStall {
-			continue
+		if f.took >= openLoopFlushStall {
+			best = max(best, p.windowShareLocked(i))
 		}
-		w := openLoopSpan{f.at, f.at.Add(openLoopFlushWindow)}
-		if !openLoopAnyOverlap(w, overlapping) {
-			continue
-		}
-		var slow time.Duration
-		for _, g := range p.flushes[i:] {
-			if !g.at.Before(w.to) {
-				break
-			}
-			if g.took >= openLoopFlushStall {
-				slow += min(g.took, w.to.Sub(g.at))
-			}
-		}
-		best = max(best, float64(slow)/float64(openLoopFlushWindow))
 	}
 	return best
 }
@@ -887,41 +919,52 @@ func openLoopAnyOverlap(s openLoopSpan, spans []openLoopSpan) bool {
 	return false
 }
 
-// spansOrWhole is the spans a stall must overlap: the failing calls' or, for
-// a verdict with none, the probe's whole time.
-func (p *openLoopFlushProbe) spansOrWholeLocked(failing []openLoopSpan) []openLoopSpan {
-	if len(failing) > 0 {
-		return failing
+// stallSpansLocked is every stall that counts for a verdict of kind: a run
+// of openLoopFlushStallRun slow flushes or more, or a one-second window
+// openLoopFlushStallShare in slow flushes; for an unanswered verdict only a
+// run at least openLoopWait long.
+func (p *openLoopFlushProbe) stallSpansLocked(kind string) []openLoopSpan {
+	var out []openLoopSpan
+	for _, r := range p.runsLocked() {
+		switch {
+		case kind == "unanswered" && r.span.to.Sub(r.span.from) >= openLoopWait:
+			out = append(out, r.span)
+		case kind != "unanswered" && r.n >= openLoopFlushStallRun:
+			out = append(out, r.span)
+		}
 	}
-	to := p.stopped
-	if to.IsZero() {
-		to = time.Now()
+	if kind == "unanswered" {
+		return out
 	}
-	return []openLoopSpan{{p.started, to}}
+	for i, f := range p.flushes {
+		if f.took >= openLoopFlushStall && p.windowShareLocked(i) >= openLoopFlushStallShare {
+			out = append(out, openLoopSpan{f.at, f.at.Add(openLoopFlushWindow)})
+		}
+	}
+	return out
 }
 
-// stalled reports whether the disk flush stalled in a way that explains a
-// verdict of kind over the failing spans: sustained and overlapping them,
-// and for an unanswered verdict at least openLoopWait long.
-func (p *openLoopFlushProbe) stalled(kind string, failing []openLoopSpan) bool {
+// explains reports whether the disk flush stalled in a way that explains a
+// verdict of kind, and for a timing verdict what the stream showed without
+// the calls the stalls overlap. Any counted stall explains an inconclusive
+// verdict (the baseline or a session start the box could not carry). A
+// timing verdict (unanswered or slow, judged on timing) is explained only
+// when the stream passes once the calls whose windows overlap a counted
+// stall are set aside; with no timing to judge it is not explained.
+func (p *openLoopFlushProbe) explains(kind string, timing *openLoopTiming) (bool, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	spans := p.spansOrWholeLocked(failing)
-	for _, r := range p.runsLocked() {
-		if !openLoopAnyOverlap(r.span, spans) {
-			continue
-		}
-		if kind == "unanswered" {
-			if r.span.to.Sub(r.span.from) >= openLoopWait {
-				return true
-			}
-			continue
-		}
-		if r.n >= openLoopFlushStallRun {
-			return true
-		}
+	stalls := p.stallSpansLocked(kind)
+	if len(stalls) == 0 {
+		return false, ""
 	}
-	return kind != "unanswered" && p.busiestLocked(spans) >= openLoopFlushStallShare
+	if kind != "unanswered" && kind != "slow" {
+		return true, ""
+	}
+	if timing == nil {
+		return false, ""
+	}
+	return timing.passesWithout(stalls)
 }
 
 func (p *openLoopFlushProbe) String() string {
@@ -939,9 +982,9 @@ func (p *openLoopFlushProbe) String() string {
 			longest, longestN = d, r.n
 		}
 	}
-	s := fmt.Sprintf("a 4 KiB write and flush beside the store every %v took up to %v (%d of %d at %v or more; longest run %d in a row over %v; busiest 1 s window %.0f%% slow; a stall counts at %d in a row or %.0f%% of 1 s overlapping the failing calls, and for unanswered calls a run of %v)",
+	s := fmt.Sprintf("a 4 KiB write and flush beside the store every %v took up to %v (%d of %d at %v or more; longest run %d in a row over %v; busiest 1 s window %.0f%% slow; a stall counts at %d in a row or %.0f%% of 1 s, and for unanswered calls a run of %v)",
 		openLoopFlushEvery, p.max.Round(time.Millisecond), slow, len(p.flushes), openLoopFlushStall, longestN, longest.Round(time.Millisecond),
-		100*p.busiestLocked(p.spansOrWholeLocked(nil)), openLoopFlushStallRun, 100*openLoopFlushStallShare, openLoopWait)
+		100*p.busiestLocked(), openLoopFlushStallRun, 100*openLoopFlushStallShare, openLoopWait)
 	if p.err != nil {
 		s += fmt.Sprintf(", probe error %v", p.err)
 	}
@@ -954,15 +997,20 @@ func (p *openLoopFlushProbe) String() string {
 // when neither did (the box had CPU and disk to spare, so the real path that
 // could not carry the stream is the gateway's own). The two timing verdicts,
 // unanswered and slow, are measured on the same wall clock and are a skip on
-// such a box as well; on a quiet box they fail. A disk stall counts only when
-// it explains the verdict over failing, the windows of the calls behind it
-// (openLoopFlushProbe.stalled; none: the whole run). A refusal or an explicit
-// failure is not a timing matter and fails on any box. Every verdict prints
-// both probes.
-func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error, failing ...openLoopSpan) {
+// such a box as well; on a quiet box they fail. A disk stall explains a
+// timing verdict only when the stream, judged again on timing without the
+// calls the stall overlaps, passes (openLoopFlushProbe.explains). A refusal or
+// an explicit failure is not a timing matter and fails on any box. Every
+// verdict prints both probes, and a timing verdict what the stream showed
+// without the stalled calls.
+func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error, timing *openLoopTiming) {
 	t.Helper()
 	flush.stop()
-	short := probes.starved() || flush.stalled(verdict.kind, failing)
+	stalled, rest := flush.explains(verdict.kind, timing)
+	short := probes.starved() || stalled
+	if rest != "" {
+		verdict.detail = fmt.Sprintf("%s; %s", verdict.detail, rest)
+	}
 	if verdict.kind == "inconclusive" && !short {
 		// The baseline's own words blame the box; the probe says otherwise.
 		verdict.detail = strings.TrimSuffix(strings.TrimPrefix(verdict.detail, "INCONCLUSIVE: "), "; the box is overloaded, so this run says nothing about the gateway")
@@ -1061,7 +1109,7 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 				t.Errorf("GAP-1456: the ingress still served requests %v after the session start of sandbox %d went unanswered", openLoopTeardownDeadline, i)
 			}
 			probes.take()
-			settleOpenLoop(t, openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the session start of sandbox %d was not answered inside %v (%v)", i, openLoopWait, err)}, probes, flush, ctx.Err())
+			settleOpenLoop(t, openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the session start of sandbox %d was not answered inside %v (%v)", i, openLoopWait, err)}, probes, flush, ctx.Err(), nil)
 			return
 		}
 	}
@@ -1092,7 +1140,7 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		t.Errorf("GAP-1456: the ingress still served requests %v after the stream ended (%s)", openLoopTeardownDeadline, probes)
 	}
 	verdict := judgeOpenLoop(plan, got, base)
-	settleOpenLoop(t, verdict, probes, flush, ctx.Err(), got.failingSpans(verdict.kind, openLoopBudget(plan, base))...)
+	settleOpenLoop(t, verdict, probes, flush, ctx.Err(), &openLoopTiming{got, openLoopBudget(plan, base)})
 }
 
 // openLoopProcessCPU is the user and system CPU time this process has used.

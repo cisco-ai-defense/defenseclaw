@@ -15,8 +15,9 @@ func gap1041Note(p *openLoopFlushProbe, at time.Time, took time.Duration) {
 	p.note(at, took, nil)
 }
 
-// substrate-1 GAP-1041 (RV-T6A): a sustained stall that does not overlap the
-// windows of the calls behind the verdict does not explain it.
+// substrate-1 GAP-1041: a sustained stall explains a timing verdict only over
+// the calls it overlaps. Slow calls before or after it stay in the judgement
+// and fail it; slow calls during it are set aside and the rest pass.
 func TestGAP1041StallMustOverlapTheFailingCalls(t *testing.T) {
 	p := &openLoopFlushProbe{}
 	t0 := time.Now()
@@ -24,30 +25,56 @@ func TestGAP1041StallMustOverlapTheFailingCalls(t *testing.T) {
 		gap1041Note(p, t0.Add(time.Duration(i)*115*time.Millisecond), 115*time.Millisecond)
 	}
 	stallEnd := t0.Add(40 * 115 * time.Millisecond)
-	before := []openLoopSpan{{t0.Add(-10 * time.Second), t0.Add(-5 * time.Second)}}
-	after := []openLoopSpan{{stallEnd.Add(time.Second), stallEnd.Add(4 * time.Second)}}
-	during := []openLoopSpan{{t0.Add(time.Second), t0.Add(time.Second + openLoopWait)}}
-	for _, kind := range []string{"slow", "unanswered"} {
-		if p.stalled(kind, before) || p.stalled(kind, after) {
-			t.Fatalf("%s: a stall outside the failing calls' windows counted", kind)
+	stream := func(from time.Time, kind string) *openLoopTiming {
+		r := openLoopResult{}
+		for i := range 30 {
+			c := openLoopCall{issued: from.Add(time.Duration(i) * 100 * time.Millisecond), elapsed: 900 * time.Millisecond, answered: kind == "slow"}
+			r.calls = append(r.calls, c)
 		}
-		if !p.stalled(kind, during) {
-			t.Fatalf("%s: a %v stall over the failing calls did not count", kind, stallEnd.Sub(t0))
+		for i := range 200 {
+			c := openLoopCall{issued: t0.Add(time.Duration(i-100) * 100 * time.Millisecond), elapsed: 10 * time.Millisecond, answered: true}
+			if openLoopAnyOverlap(openLoopSpan{c.issued, c.issued.Add(c.elapsed)}, []openLoopSpan{{from, from.Add(3 * time.Second)}}) {
+				continue
+			}
+			r.calls = append(r.calls, c)
+		}
+		r.offered = len(r.calls)
+		for _, c := range r.calls {
+			if c.answered {
+				r.latencies = append(r.latencies, c.elapsed)
+			}
+		}
+		return &openLoopTiming{r, 100 * time.Millisecond}
+	}
+	for _, kind := range []string{"slow", "unanswered"} {
+		for _, from := range []time.Time{t0.Add(-8 * time.Second), stallEnd.Add(2 * time.Second)} {
+			if ok, why := p.explains(kind, stream(from, kind)); ok {
+				t.Fatalf("%s: a stall outside the failing calls' windows explained them: %s", kind, why)
+			}
+		}
+		if ok, why := p.explains(kind, stream(t0.Add(time.Second), kind)); !ok {
+			t.Fatalf("%s: a %v stall over the failing calls did not explain them: %s", kind, stallEnd.Sub(t0), why)
+		}
+		if ok, _ := p.explains(kind, nil); ok {
+			t.Fatalf("%s: a timing verdict with no stream to judge again was explained", kind)
 		}
 	}
-	// The failing windows of a verdict.
-	r := openLoopResult{calls: []openLoopCall{
+	if ok, _ := p.explains("inconclusive", nil); !ok {
+		t.Fatal("a sustained stall did not explain an inconclusive verdict")
+	}
+	// The windows set aside: an answered call's wait, an unanswered call's
+	// answer window.
+	r := openLoopResult{offered: 4, calls: []openLoopCall{
 		{issued: t0, elapsed: 10 * time.Millisecond, answered: true},
 		{issued: t0.Add(time.Second), elapsed: 900 * time.Millisecond, answered: true},
 		{issued: t0.Add(2 * time.Second), answered: false},
 	}}
-	if got := r.failingSpans("unanswered", 0); len(got) != 1 || !got[0].from.Equal(t0.Add(2*time.Second)) || got[0].to.Sub(got[0].from) != openLoopWait {
-		t.Fatalf("unanswered spans %v", got)
+	rest, left := r.without([]openLoopSpan{{t0.Add(1500 * time.Millisecond), t0.Add(1600 * time.Millisecond)}})
+	if left != 1 || rest.offered != 3 || len(rest.calls) != 2 || len(rest.latencies) != 1 {
+		t.Fatalf("without a span inside the slow call: left %d, rest %+v", left, rest)
 	}
-	if got := r.failingSpans("slow", 100*time.Millisecond); len(got) != 1 || !got[0].from.Equal(t0.Add(time.Second)) {
-		t.Fatalf("slow spans %v", got)
-	}
-	if got := r.failingSpans("inconclusive", 0); got != nil {
-		t.Fatalf("inconclusive spans %v", got)
+	rest, left = r.without([]openLoopSpan{{t0.Add(5 * time.Second), t0.Add(5100 * time.Millisecond)}})
+	if left != 1 || rest.offered != 3 || len(rest.latencies) != 2 {
+		t.Fatalf("without a span inside the unanswered call's window: left %d, rest %+v", left, rest)
 	}
 }
