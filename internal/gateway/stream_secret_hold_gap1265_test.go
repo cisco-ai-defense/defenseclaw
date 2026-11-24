@@ -55,6 +55,18 @@ type gap1265Result struct {
 	blocked bool
 }
 
+// gap1265Choice1 starts a piece that the GAP-1265 upstreams send in choice 1,
+// a second lane of the reply (OpenAI chat shapes only; rel-1-0-10:GAP-1767).
+const gap1265Choice1 = "\x00choice1:"
+
+// gap1265Piece is the choice and text of a row piece.
+func gap1265Piece(p string) (int, string) {
+	if text, ok := strings.CutPrefix(p, gap1265Choice1); ok {
+		return 1, text
+	}
+	return 0, p
+}
+
 // gap1265Format is the passthrough stream format of a gap0429Path name.
 func gap1265Format(t *testing.T, name string) streamTailFormat {
 	t.Helper()
@@ -96,10 +108,15 @@ func gap1265Upstream(t *testing.T, f streamTailFormat, raw bool, pieces []string
 			if i == at && pause > 0 && !idle() {
 				return
 			}
-			if raw {
-				write(`data: {"id":"r1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":` + streamTailJSON(p) + `}}]}` + "\n\n")
-			} else {
-				write(f.delta(p))
+			choice, text := gap1265Piece(p)
+			switch {
+			case raw || (choice > 0 && f.name == gap0429OpenAIChat.name):
+				write(fmt.Sprintf(`data: {"id":"r1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":%d,"delta":{"content":%s}}]}`, choice, streamTailJSON(text)) + "\n\n")
+			case choice > 0:
+				t.Errorf("gap1265Upstream: format %s has no choice %d", f.name, choice)
+				return
+			default:
+				write(f.delta(text))
 			}
 		}
 		if at == len(pieces) && pause > 0 && !idle() {
