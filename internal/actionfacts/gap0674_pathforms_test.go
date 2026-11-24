@@ -1,6 +1,7 @@
 package actionfacts
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ func TestGAP0674WalkReadsOneFolderTheSameInEveryFormOfItsPath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	base := credentialPathWalk(root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
+	base := credentialPathWalk(credentialWalkWaitUnbounded(), root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 	if len(base.found) != len(files) || base.cut {
 		t.Fatalf("walk of %s found %v cut %v, want the %d files and no cut", root, base.found, base.cut, len(files))
 	}
@@ -42,7 +43,7 @@ func TestGAP0674WalkReadsOneFolderTheSameInEveryFormOfItsPath(t *testing.T) {
 		t.Fatalf("only %d forms of the folder: %v", len(forms), forms)
 	}
 	for _, form := range forms {
-		walk := credentialPathWalk(form, form, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
+		walk := credentialPathWalk(credentialWalkWaitUnbounded(), form, form, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 		if walk.used != base.used || walk.cut || len(walk.found) != len(base.found) {
 			t.Errorf("form %q: used %+v cut %v found %d, want used %+v, no cut, %d found (the form of %q)", form, walk.used, walk.cut, len(walk.found), base.used, len(base.found), root)
 			continue
@@ -58,7 +59,7 @@ func TestGAP0674WalkReadsOneFolderTheSameInEveryFormOfItsPath(t *testing.T) {
 	// walks: both are read, both within the call's one walk budget.
 	slash := filepath.ToSlash(root)
 	facts := Analyze(Input{Tool: "exec", Command: "grep -r KEY " + slash + " " + slash + "/./", CWD: root, ActiveHome: t.TempDir()})
-	if caps := facts.CredentialPathReadCaps(); caps.Any() {
+	if caps := facts.CredentialPathReadCaps(context.Background()); caps.Any() {
 		t.Fatalf("two forms of one folder in one call are a cap of the resolve: %v", caps)
 	}
 	if got := len(facts.CredentialPathReads()); got == 0 {

@@ -1094,7 +1094,7 @@ func dispatchTrustedActionOnce(
 	// candidates, work or lookups) is TRUNCATED too: at least the unknown
 	// tier of the pack, and what it resolved before the cap still joins the
 	// chain (rel-1-0-10:GAP-1029).
-	if set := facts.CredentialPathReadCaps(); set.Any() {
+	if set := facts.CredentialPathReadCaps(parent); set.Any() {
 		defer func() {
 			findings = withBoundedTruncation(findings, set, request)
 		}()

@@ -1,6 +1,7 @@
 package actionfacts
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -82,7 +83,7 @@ func resolveWithin(t *testing.T, limits credentialPathLimits, command, cwd, home
 	if l == nil {
 		return walkRoomRecord{nil_: true}
 	}
-	rec := resolveCredentialPathReadsWithin(limits, l.words, l.cwd, l.home, l.commands, l.paths)
+	rec := resolveCredentialPathReadsWithin(context.Background(), limits, l.words, l.cwd, l.home, l.commands, l.paths)
 	if rec == nil {
 		return walkRoomRecord{nil_: true}
 	}

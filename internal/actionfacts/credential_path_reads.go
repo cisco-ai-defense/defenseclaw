@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"context"
 	"math"
 	"os"
 	"path"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -91,6 +93,62 @@ const (
 // the walk's result is the one it would have had: nothing is cut or skipped.
 var credentialPathWalkSlots = make(chan struct{}, max(2, runtime.GOMAXPROCS(0)/4))
 
+// credentialPathWalkSlotWait is the longest one resolve waits for walk slots
+// (substrate-1:GAP-1083). The slots are the gateway's, shared by every call:
+// two walks of a slow folder (a home on an SMB share, sshfs or NFS) can hold
+// them for seconds, and a call that waited for them without a limit answered
+// past the hook's 3.5 s budget, where the client applies its fail mode. A walk
+// that gets no slot in time is cut before it reads anything: probeUnder and
+// the file-unknown read (searchFolder), as for a walk past its budget, the
+// chain's unknown tier and no cap of the resolve.
+const credentialPathWalkSlotWait = time.Second
+
+// credentialWalkWait is what one resolve may still wait for walk slots, and
+// the context of the call it resolves for (nil: none).
+type credentialWalkWait struct {
+	ctx  context.Context
+	left time.Duration
+}
+
+func newCredentialWalkWait(ctx context.Context) *credentialWalkWait {
+	return &credentialWalkWait{ctx: ctx, left: credentialPathWalkSlotWait}
+}
+
+// take takes a walk slot: a free one at once, else the first one freed within
+// what the resolve may still wait. A call whose context is done (its client
+// has gone, its deadline has passed) walks nothing and waits for nothing, so
+// it holds no slot and no place among the walks that wait.
+func (w *credentialWalkWait) take() bool {
+	var done <-chan struct{}
+	if w.ctx != nil {
+		if w.ctx.Err() != nil {
+			return false
+		}
+		done = w.ctx.Done()
+	}
+	select {
+	case credentialPathWalkSlots <- struct{}{}:
+		return true
+	default:
+	}
+	if w.left <= 0 {
+		return false
+	}
+	start := time.Now()
+	timer := time.NewTimer(w.left)
+	defer func() {
+		timer.Stop()
+		w.left -= time.Since(start)
+	}()
+	select {
+	case credentialPathWalkSlots <- struct{}{}:
+		return true
+	case <-timer.C:
+	case <-done:
+	}
+	return false
+}
+
 // MaxCredentialPathCandidates is the candidate cap of the resolve
 // (bounded.Items), for the gateway's bound-rule lane test.
 const MaxCredentialPathCandidates = maxCredentialPathCandidates
@@ -129,8 +187,12 @@ func (f Facts) HasCredentialPathReads() bool {
 
 // CredentialPathReadCaps is the caps the resolve hit: TRUNCATED, the one
 // bound rule.
-func (f Facts) CredentialPathReadCaps() bounded.CapSet {
-	record := f.credentialPaths.get()
+//
+// The dispatch reads them first, with the call's context: a resolve that
+// waits for a walk slot stops waiting when the call is done
+// (substrate-1:GAP-1083).
+func (f Facts) CredentialPathReadCaps(ctx context.Context) bounded.CapSet {
+	record := f.credentialPaths.getWithin(ctx)
 	if record == nil {
 		return bounded.CapSet{}
 	}
@@ -521,6 +583,7 @@ type credentialPathResolver struct {
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
 	keepAll    bool                     // see credentialPathLimits.keepAll
+	wait       *credentialWalkWait      // the wait for walk slots left
 	// walkedBy holds the folders each command already searched, as named
 	// and as resolved: a folder named again by the same command adds
 	// nothing, so grep -r K . . . walks it once (rel-1-0-10:GAP-1668).
@@ -568,12 +631,17 @@ func lazyCredentialPathReads(words []credentialPathWord, cwd, home string, comma
 }
 
 func (l *credentialPathResult) get() *credentialPathRecord {
+	return l.getWithin(nil)
+}
+
+// getWithin is get, the resolve (when it runs now) within ctx (nil: none).
+func (l *credentialPathResult) getWithin(ctx context.Context) *credentialPathRecord {
 	if l == nil {
 		return nil
 	}
 	l.once.Do(func() {
 		if l.pending {
-			l.record = resolveCredentialPathReads(l.words, l.cwd, l.home, l.commands, l.paths)
+			l.record = resolveCredentialPathReads(ctx, l.words, l.cwd, l.home, l.commands, l.paths)
 		}
 		l.pending, l.words, l.commands, l.paths = false, nil, nil, nil
 	})
@@ -584,8 +652,8 @@ func (l *credentialPathResult) get() *credentialPathRecord {
 
 // resolveCredentialPathReads makes the private record of one call (nil when
 // the call reads no credentials file the record adds and no cap was hit).
-func resolveCredentialPathReads(words []credentialPathWord, cwd, home string, commands []CommandFact, paths []PathFact) *credentialPathRecord {
-	return resolveCredentialPathReadsWithin(defaultCredentialPathLimits, words, cwd, home, commands, paths)
+func resolveCredentialPathReads(ctx context.Context, words []credentialPathWord, cwd, home string, commands []CommandFact, paths []PathFact) *credentialPathRecord {
+	return resolveCredentialPathReadsWithin(ctx, defaultCredentialPathLimits, words, cwd, home, commands, paths)
 }
 
 // credentialHeldRead is a read the ordinary path projection already holds
@@ -598,6 +666,7 @@ type credentialHeldRead struct {
 }
 
 func resolveCredentialPathReadsWithin(
+	ctx context.Context,
 	limits credentialPathLimits,
 	words []credentialPathWord,
 	cwd, home string,
@@ -607,7 +676,7 @@ func resolveCredentialPathReadsWithin(
 	if !credentialPathResolveNeeded(words, commands) {
 		return nil
 	}
-	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands, keepAll: limits.keepAll}
+	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands, keepAll: limits.keepAll, wait: newCredentialWalkWait(ctx)}
 	counted := make(map[int64]bool)
 	for _, command := range commands {
 		if command.Effect == EffectExecute && slices.ContainsFunc(command.Operations, func(op OperationKind) bool {
@@ -1766,7 +1835,7 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 		r.add(id, "", true)
 		return
 	}
-	walk := credentialPathWalk(dir, shown, filter, left, r.walkRoom())
+	walk := credentialPathWalk(r.wait, dir, shown, filter, left, r.walkRoom())
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	for _, file := range walk.found {
 		if r.stopped() {
@@ -1949,8 +2018,15 @@ type credentialPathWalkResult struct {
 // resolve never read. The folders it reads, its cut and its budget are the
 // same either way: a walk that stopped reading there would leave a later folder
 // of the call a budget it did not have (substrate-1:GAP-0674).
-func credentialPathWalk(dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits, room credentialWalkRoom) (walk credentialPathWalkResult) {
-	credentialPathWalkSlots <- struct{}{}
+//
+// The walk runs in a walk slot (credentialPathWalkSlots), taken through wait.
+// One it does not get in time is a walk cut before it read anything and
+// charged all of limits, so every folder the call names after it is spent
+// too and waits no more (substrate-1:GAP-1083).
+func credentialPathWalk(wait *credentialWalkWait, dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits, room credentialWalkRoom) (walk credentialPathWalkResult) {
+	if !wait.take() {
+		return credentialPathWalkResult{cut: true, used: limits}
+	}
 	defer func() { <-credentialPathWalkSlots }()
 	groups := credentialProbeFirstSegments()
 	budget := credentialPathWalkBudget{limits: limits}

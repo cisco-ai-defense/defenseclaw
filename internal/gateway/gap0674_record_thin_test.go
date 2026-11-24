@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ type gap0674ChainAnswers struct {
 
 func gap0674Answers(facts actionfacts.Facts, place bool) gap0674ChainAnswers {
 	var a gap0674ChainAnswers
-	a.Caps = facts.CredentialPathReadCaps()
+	a.Caps = facts.CredentialPathReadCaps(context.Background())
 	a.Has = facts.HasCredentialPathReads()
 	a.Content = credentialFileContentRead(facts)
 	a.Unplaced = hasUnplacedRelativePath(facts)
