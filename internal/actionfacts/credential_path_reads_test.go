@@ -256,7 +256,7 @@ func TestGAP1029ResolveStopsAtEachCapAndKeepsWhatItRead(t *testing.T) {
 		t.Helper()
 		out := parsePOSIX(command, 1, 0)
 		classifyOutput(&out)
-		return resolveCredentialPathReadsWithin(context.Background(), limits, out.credentialWords, dir, dir, out.commands, out.paths)
+		return resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), limits, out.credentialWords, dir, dir, out.commands, out.paths)
 	}
 	for _, row := range []struct {
 		name    string

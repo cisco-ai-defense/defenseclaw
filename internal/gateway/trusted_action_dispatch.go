@@ -517,6 +517,12 @@ func dispatchTrustedActionOnce(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	// One wait for walk slots per hook call: the twins and simple-command
+	// passes below copy the request, so they share it
+	// (substrate-1:GAP-1083).
+	if request.Input.CredentialWalkBudget == nil {
+		request.Input.CredentialWalkBudget = actionfacts.NewCredentialWalkBudget(parent)
+	}
 	request = windowsStatementsOnePerLine(request)
 	// A call judged as the twin of its data word leaves a detection-only
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
