@@ -14472,11 +14472,16 @@ function Set-DefenseClawManagedAcls {
         Set-DefenseClawPathAcl -Path $Layout.BrokerStateDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     }
     Set-DefenseClawPathAcl -Path $Layout.AuthorizationDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
+    # The enrolled-accounts record has the ledger's writer, owner and access
+    # list (GAP-1733), so it is re-stamped with it (GAP-1800).
     foreach ($authorizationFile in @(
         $Layout.AuthorizationLedgerPath,
         (Microsoft.PowerShell.Management\Join-Path `
             $Layout.AuthorizationDirectory `
-            'activation.json')
+            'activation.json'),
+        (Microsoft.PowerShell.Management\Join-Path `
+            $Layout.AuthorizationDirectory `
+            'enrolled-accounts.json')
     )) {
         if (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $authorizationFile `
@@ -38972,8 +38977,9 @@ function Get-DefenseClawGuardianStateFiles {
     <#
         The guardian state files whose hold breaks a lifecycle run, measured
         natively (GAP-0977): the ledger (protected_targets.json), the activation
-        receipt, the cleanup ledger (a failed save aborts a guardian pass) and
-        the guardian state record. Every other file the guardian or its
+        receipt, the cleanup ledger (a failed save aborts a guardian pass), the
+        enrolled-accounts record (a pass that changes the enrolled set cannot
+        publish while it is held, GAP-1800) and the guardian state record. Every other file the guardian or its
         enumerator publishes did not stop a repair when it was held, and a file
         a standard account can open is never gated: that account could hold it
         and block every ensure and repair (N2). Mirrors
@@ -38984,7 +38990,7 @@ function Get-DefenseClawGuardianStateFiles {
     $candidates = [Collections.Generic.List[string]]::new()
     $authorization = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name AuthorizationDirectory)
     if (-not [string]::IsNullOrWhiteSpace($authorization)) {
-        foreach ($name in @('protected_targets.json', 'activation.json', 'user-cleanup.json')) {
+        foreach ($name in @('protected_targets.json', 'activation.json', 'user-cleanup.json', 'enrolled-accounts.json')) {
             $candidates.Add([IO.Path]::Combine($authorization, $name))
         }
     }
