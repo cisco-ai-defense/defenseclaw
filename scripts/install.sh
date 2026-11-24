@@ -3098,7 +3098,7 @@ keep_rolled_back_data() {
     local kept version label what
     version="$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)"
     if [[ -f "${PREVIOUS}/ROLLED_BACK" ]]; then
-        label=rolled-back what="the data from before the last rollback"
+        label=rolled-back what="the data written while ${version} ran"
     elif is_version "${version}" && version_lt "${version}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         label=audit-history what="the audit history DefenseClaw ${version} recorded"
     else
@@ -3107,7 +3107,7 @@ keep_rolled_back_data() {
     kept="${DEFENSECLAW_HOME}/backups/${label}-${version}-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" || return 1
     info "Kept ${what} in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
-    info "It is not used again; once you no longer need its audit history, remove it with: rm -rf '${kept}'"
+    info "It is not used again; once you no longer need it, remove it with: rm -rf '${kept}'"
 }
 
 # stash_live SLOT: move the live install (binaries copied, everything else
