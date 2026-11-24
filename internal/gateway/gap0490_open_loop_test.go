@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -674,17 +675,117 @@ func (p openLoopProbes) String() string {
 	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f)", strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure)
 }
 
+// The disk-flush probe (substrate-1 GAP-1041). The serialised stage the stream
+// queues on is the store's commits, and each ends in a flush of the
+// write-ahead log to disk (synchronous=FULL), about 1.7 flushes a call. On a
+// gate box the flush of a 4 KiB write takes 3 to 8 ms (p99 8 ms, max 20 ms over
+// 700 to 800 flushes a run), and the stream keeps the stage about a third busy.
+// While other jobs write to the same file system its flushes stall for seconds
+// at 100 to 130 ms each (ext4 commits their data with the journal), with the
+// CPU idle: the stage then needs several seconds a second, the calls queue
+// past their window, and the CPU probe, finding the box quiet, blamed the
+// gateway (TestGAP0490OpenLoop* failed at rel and on every fold in about half
+// the runs on dc-sub-gates and dc-t6-timing). The probe writes and flushes
+// 4 KiB beside the store every openLoopFlushEvery for the whole test, without
+// touching the gateway; a flush of openLoopFlushStall or more says the box's
+// disk, not the gateway, could not carry the stage at that moment.
+const (
+	openLoopFlushEvery = 100 * time.Millisecond
+	openLoopFlushStall = 50 * time.Millisecond
+)
+
+// openLoopFlushProbe is the disk-flush probe of one test.
+type openLoopFlushProbe struct {
+	stopping, done chan struct{}
+	mu             sync.Mutex
+	flushes, slow  int
+	max            time.Duration
+	err            error
+}
+
+// startOpenLoopFlushProbe starts the probe on a file in dir (the file system
+// the store is on).
+func startOpenLoopFlushProbe(dir string) *openLoopFlushProbe {
+	p := &openLoopFlushProbe{stopping: make(chan struct{}), done: make(chan struct{})}
+	f, err := os.OpenFile(filepath.Join(dir, "flush-probe"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		p.err = err
+		close(p.done)
+		return p
+	}
+	go func() {
+		defer close(p.done)
+		defer f.Close()
+		block := make([]byte, 4096)
+		tick := time.NewTicker(openLoopFlushEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-p.stopping:
+				return
+			case <-tick.C:
+			}
+			started := time.Now()
+			_, err := f.WriteAt(block, 0)
+			if err == nil {
+				err = f.Sync()
+			}
+			took := time.Since(started)
+			p.mu.Lock()
+			if err != nil && p.err == nil {
+				p.err = err
+			}
+			p.flushes++
+			p.max = max(p.max, took)
+			if took >= openLoopFlushStall {
+				p.slow++
+			}
+			p.mu.Unlock()
+		}
+	}()
+	return p
+}
+
+// stop ends the probe and waits for it.
+func (p *openLoopFlushProbe) stop() {
+	select {
+	case <-p.stopping:
+	default:
+		close(p.stopping)
+	}
+	<-p.done
+}
+
+// stalled reports whether any flush took openLoopFlushStall or more.
+func (p *openLoopFlushProbe) stalled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.slow > 0
+}
+
+func (p *openLoopFlushProbe) String() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	s := fmt.Sprintf("a 4 KiB write and flush beside the store every %v took up to %v (%d of %d at %v or more)", openLoopFlushEvery, p.max.Round(time.Millisecond), p.slow, p.flushes, openLoopFlushStall)
+	if p.err != nil {
+		s += fmt.Sprintf(", probe error %v", p.err)
+	}
+	return s
+}
+
 // settleOpenLoop ends an open-loop test on its verdict. An INCONCLUSIVE verdict
 // is a skip naming GAP-1456 and the numbers when the box probe found the box
-// short of CPU, and a failure when it did not (the box had CPU to spare, so the
-// real path that could not carry the stream is the gateway's own). The two
-// timing verdicts, unanswered and slow, are measured on the same wall clock
-// and are a skip on a box the probe found short of CPU as well; on a quiet box
-// they fail. A refusal or an explicit failure is not a timing matter and fails
-// on any box.
-func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, deadline error) {
+// short of CPU or the flush probe found its disk flush stalled, and a failure
+// when neither did (the box had CPU and disk to spare, so the real path that
+// could not carry the stream is the gateway's own). The two timing verdicts,
+// unanswered and slow, are measured on the same wall clock and are a skip on
+// such a box as well; on a quiet box they fail. A refusal or an explicit
+// failure is not a timing matter and fails on any box.
+func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error) {
 	t.Helper()
-	if verdict.kind == "inconclusive" && !probes.starved() {
+	flush.stop()
+	short := probes.starved() || flush.stalled()
+	if verdict.kind == "inconclusive" && !short {
 		// The baseline's own words blame the box; the probe says otherwise.
 		verdict.detail = strings.TrimSuffix(strings.TrimPrefix(verdict.detail, "INCONCLUSIVE: "), "; the box is overloaded, so this run says nothing about the gateway")
 	}
@@ -693,13 +794,13 @@ func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes
 	}
 	switch {
 	case verdict.kind == "ok":
-		t.Logf("%s; %s", verdict.detail, probes)
-	case (verdict.kind == "inconclusive" || verdict.kind == "unanswered" || verdict.kind == "slow") && probes.starved():
-		t.Skipf("GAP-1456 INCONCLUSIVE, box short of CPU (%s): %s", probes, verdict.detail)
+		t.Logf("%s; %s; %s", verdict.detail, probes, flush)
+	case (verdict.kind == "inconclusive" || verdict.kind == "unanswered" || verdict.kind == "slow") && short:
+		t.Skipf("GAP-1456 GAP-1041 INCONCLUSIVE, box short of CPU or of disk flush (%s; %s): %s", probes, flush, verdict.detail)
 	case verdict.kind == "inconclusive":
-		t.Fatalf("GAP-1456 FAIL, not a skip: the box was not short of CPU (%s), so this is the gateway: %s", probes, verdict.detail)
+		t.Fatalf("GAP-1456 FAIL, not a skip: the box was not short of CPU or disk flush (%s; %s), so this is the gateway: %s", probes, flush, verdict.detail)
 	default:
-		t.Fatalf("%s (%s)", verdict.detail, probes)
+		t.Fatalf("%s (%s; %s)", verdict.detail, probes, flush)
 	}
 }
 
@@ -726,6 +827,8 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	defer cancel()
 	var probes openLoopProbes
 	probes.take()
+	flush := startOpenLoopFlushProbe(t.TempDir())
+	defer flush.stop()
 	f := newManagedHookAuditFixture(t, nil)
 	bindings, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(t.TempDir()), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
@@ -778,7 +881,7 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 				t.Errorf("GAP-1456: the ingress still served requests %v after the session start of sandbox %d went unanswered", openLoopTeardownDeadline, i)
 			}
 			probes.take()
-			settleOpenLoop(t, openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the session start of sandbox %d was not answered inside %v (%v)", i, openLoopWait, err)}, probes, ctx.Err())
+			settleOpenLoop(t, openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the session start of sandbox %d was not answered inside %v (%v)", i, openLoopWait, err)}, probes, flush, ctx.Err())
 			return
 		}
 	}
@@ -808,7 +911,7 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		// a request that outlived its caller.
 		t.Errorf("GAP-1456: the ingress still served requests %v after the stream ended (%s)", openLoopTeardownDeadline, probes)
 	}
-	settleOpenLoop(t, judgeOpenLoop(plan, got, base), probes, ctx.Err())
+	settleOpenLoop(t, judgeOpenLoop(plan, got, base), probes, flush, ctx.Err())
 }
 
 // openLoopProcessCPU is the user and system CPU time this process has used.
