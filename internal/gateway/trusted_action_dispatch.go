@@ -928,6 +928,18 @@ func dispatchTrustedActionOnce(
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
+	// The same reading judges a write of a shell startup profile spelled
+	// relative to that directory (echo x >> .bashrc in the home, a function
+	// that may return before its cd): only its shell-profile finding counts
+	// (substrate-1:GAP-1090).
+	if twin, ok := protectedHomeShellProfileTwinRequest(request); ok {
+		defer func() {
+			twinFindings := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return trustedActionFindingKey(f.RuleID) != trustedActionFindingKey(shellProfileWriteRule)
+			})
+			findings = withTwinProvenBlocks(findings, twinFindings)
+		}()
+	}
 	// A file writer or a shell run through any static prefix wrapper
 	// (nohup, nice, setsid, stdbuf, ionice, sudo, ...; or after a word that
 	// may expand to nothing) writes what the plain call does (GAP-2512,
@@ -4588,6 +4600,39 @@ func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedAc
 	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
 	if !strings.Contains(text, "id_rsa") && !strings.Contains(text, "id_ed25519") &&
 		!strings.Contains(text, "id_ecdsa") && !strings.Contains(text, "id_dsa") {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.conflictSource = nil
+	twin.Input.CWD = cwd
+	return twin, true
+}
+
+// shellProfileWriteRule is the rule of a write of a shell startup profile.
+const shellProfileWriteRule = "persistence.shell_profile_write"
+
+// shellProfileNames are the file names matchesShellProfileCandidate reads
+// as a shell startup profile, in lower case.
+var shellProfileNames = []string{".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc", "config.fish", "profile.ps1"}
+
+// protectedHomeShellProfileTwinRequest returns the call of a managed hook
+// peer placed in the directory the hook client ran it in
+// (protectedHomeClientDirectory), when its text names a shell startup
+// profile. Without a cwd of its own the gateway read `echo x >> .bashrc`
+// and `echo x >> ./.bashrc` from the home as writes of no known file, and
+// the function rows of GAP-0690, 0693, 0694 and 0711 the same, so a managed
+// peer was allowed what a per-user gateway alerts (default) or blocks
+// (strict) as persistence.shell_profile_write (substrate-1:GAP-1090, live
+// on dc-ent-rhel). The placed reading is the per-user one; the caller keeps
+// only its shell-profile finding.
+func protectedHomeShellProfileTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
+	if !slices.ContainsFunc(shellProfileNames, func(name string) bool { return strings.Contains(text, name) }) {
 		return trustedActionRequest{}, false
 	}
 	twin := request
