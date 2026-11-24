@@ -33,6 +33,13 @@ func ArgsLimitIssue(raw json.RawMessage) IssueCode {
 	return ""
 }
 
+// ReadArgumentField returns the canonical field read for a top-level argument
+// key. It uses the same strings.ToLower mapping as the shared reader; callers
+// must not use Unicode simple folding to group aliases.
+func ReadArgumentField(key string) (string, bool) {
+	return canonicalInputFieldName(key)
+}
+
 // ReadArgumentKeyRank is how directly the structured argument reading reads
 // an argument key: 0 for a key it reads as spelled (canonicalInputFieldName's
 // command, cmd, script, path, file_path, url, ... and the closed file-tool

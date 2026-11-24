@@ -9,6 +9,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"unicode"
@@ -31,10 +32,11 @@ import (
 // allow at the unknown tier of the pack, as the hook routes floor a
 // truncated reading: an alert with the evaluation-limit finding in the
 // default pack, a block where the pack or guardrail.cascade.unknown says so.
-// A large call is never a silent allow, and never weaker than the same call
-// without the padding where the padding sits beside the command. The
-// projections go to the rules alone; the LLM judge and AID read the call's
-// own reading (RV-0841b F6).
+// A large call is never a silent allow. The bridge reads each distinct value
+// of a recognized field within its fixed budget; excess members or values
+// receive the unknown-tier finding. Projections go to the rules alone. The
+// LLM judge and AID read whole params when no earlier argument reading has
+// already denied (RV-0841b F6, RV-0841c F2).
 
 const (
 	// substrateMCPWindowMembers is the most top-level members one projection
@@ -47,10 +49,14 @@ const (
 	substrateMCPMaxWindows = 4
 	// substrateMCPMaxProjections is the most projections one reading adds.
 	substrateMCPMaxProjections = 2 * substrateMCPMaxWindows
-	// substrateMCPReadingsPerArgs is the most judged readings one argument
-	// reading costs: itself and its projections. A bridged call with more
-	// readings shares this budget per argument reading (substrateMCPReading).
-	substrateMCPReadingsPerArgs = 1 + substrateMCPMaxProjections
+	// One field may have many spellings, but only eight other distinct
+	// values are read. Each may need a head and tail projection.
+	substrateMCPMaxAlternateValues = 8
+	substrateMCPMaxFieldMembers    = 8
+	// Full reading, eight base projections, and two per alternate value:
+	// at most 25 rule readings per argument reading. The bridge shares this
+	// budget across its readings (substrateMCPReading).
+	substrateMCPReadingsPerArgs = 1 + substrateMCPMaxProjections + 2*substrateMCPMaxAlternateValues
 	// substrateMCPKeyMax is the longest key a projection keeps whole.
 	substrateMCPKeyMax = 1 << 10
 	// substrateMCPTailRoom is what a tail cut keeps free for the placeholder
@@ -83,37 +89,84 @@ func substrateMCPReadingOf(ctx context.Context) substrateMCPReading {
 	return r
 }
 
-// substrateMCPBoundedVerdict is the verdict of a call whose full reading
-// gave full, with judge the rule verdict of one projection of its arguments.
+// substrateMCPBoundedVerdict judges bounded projections and, on the bridge,
+// each distinct value hidden by a conflicting read-key alias. A deny returns
+// early. Any reading left uncovered is floored at the configured unknown tier.
 func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry.Registration, connectorName string,
 	args json.RawMessage, full SubstrateCalloutVerdict, judge func(json.RawMessage) SubstrateCalloutVerdict) SubstrateCalloutVerdict {
 	issue := actionfacts.ArgsLimitIssue(args)
-	if issue == "" {
-		return full
-	}
-	out := full
 	rd := substrateMCPReadingOf(ctx)
-	var projections []json.RawMessage
-	switch {
-	case out.Verdict == "deny":
-	case rd.left == nil:
-		projections = substrateMCPArgsProjections(args) // the callout route: one reading
-	default:
-		projections = substrateMCPProjectionsUpTo(args, min(substrateMCPMaxProjections, *rd.left))
+	out := full
+	base := args
+	var alternates []json.RawMessage
+	overflow := false
+	changed := false
+	if rd.left != nil && out.Verdict != "deny" {
+		base, alternates, changed, overflow = substrateMCPReadFieldVariants(args)
 	}
-	for _, p := range projections {
+	// Keep small calls with no conflicting values on their original path.
+	if issue == "" && !overflow && len(alternates) == 0 {
+		return out
+	}
+	read := func(raw json.RawMessage) {
+		if out.Verdict == "deny" {
+			return
+		}
 		if rd.left != nil {
+			if *rd.left <= 0 {
+				overflow = true
+				return
+			}
 			*rd.left--
 		}
-		if out = substrateMCPStricter(out, judge(p)); out.Verdict == "deny" {
-			break
+		out = substrateMCPStricter(out, judge(raw))
+	}
+	if issue == "" {
+		if changed && len(alternates) > 0 {
+			read(base) // the shared reader could not read the original conflict
+		}
+	} else if out.Verdict != "deny" {
+		var projections []json.RawMessage
+		if rd.left == nil {
+			projections = substrateMCPArgsProjections(base) // callout route
+		} else {
+			projections = substrateMCPProjectionsUpTo(base, min(substrateMCPMaxProjections, *rd.left))
+		}
+		if len(projections) == 0 {
+			overflow = true
+		}
+		for _, p := range projections {
+			read(p)
 		}
 	}
-	if out.Verdict != "allow" {
+	for _, alt := range alternates {
+		if out.Verdict == "deny" {
+			break
+		}
+		if actionfacts.ArgsLimitIssue(alt) == "" {
+			read(alt)
+			continue
+		}
+		limit := 2 // one value's head and tail, with no unrelated members
+		if rd.left != nil {
+			limit = min(limit, *rd.left)
+		}
+		projections := substrateMCPProjectionsUpTo(alt, limit)
+		if len(projections) == 0 {
+			overflow = true
+		}
+		for _, p := range projections {
+			read(p)
+		}
+	}
+	if out.Verdict != "allow" || (issue == "" && !overflow) {
 		return out
 	}
 	set := bounded.Of(bounded.Bytes)
-	if issue == actionfacts.IssueDepthLimit {
+	switch {
+	case overflow:
+		set = bounded.Of(bounded.Items)
+	case issue == actionfacts.IssueDepthLimit:
 		set = bounded.Of(bounded.Depth)
 	}
 	out.Source, out.Reason = "tool_rules", boundedTruncatedTitle+" ("+set.Reason()+")"
@@ -130,6 +183,97 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 		out.Severity = "MEDIUM"
 	}
 	return out
+}
+
+// substrateMCPReadFieldVariants is bridge-only. It keeps one spelling of
+// each field in the base reading, and one isolated reading per other value.
+// Sorting makes the representative stable; grouping uses exactly the shared
+// reader's canonicalization. Isolated readings cannot inherit ambiguity from
+// other fields. The caller floors over-budget input at the unknown tier.
+func substrateMCPReadFieldVariants(raw json.RawMessage) (json.RawMessage, []json.RawMessage, bool, bool) {
+	if len(raw) == 0 {
+		return raw, nil, false, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return raw, nil, false, true
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return raw, nil, false, false
+	}
+	seen := make(map[string]bool)
+	collision := false
+	for key := range obj {
+		if field, known := actionfacts.ReadArgumentField(key); known {
+			if seen[field] {
+				collision = true
+				break
+			}
+			seen[field] = true
+		}
+	}
+	if !collision {
+		return raw, nil, false, false
+	}
+	type fieldValues struct {
+		members int
+		values  []any
+	}
+	fields := make(map[string]*fieldValues)
+	base := make(map[string]any, len(obj))
+	var alternates []json.RawMessage
+	changed, overflow := false, false
+	for _, key := range substrateMCPKeyOrder(obj) {
+		value := obj[key]
+		field, known := actionfacts.ReadArgumentField(key)
+		if !known {
+			base[key] = value
+			continue
+		}
+		group := fields[field]
+		if group == nil {
+			fields[field] = &fieldValues{members: 1, values: []any{value}}
+			base[key] = value
+			continue
+		}
+		changed = true
+		group.members++
+		if group.members > substrateMCPMaxFieldMembers {
+			overflow = true
+		}
+		distinct := true
+		for _, prior := range group.values {
+			if reflect.DeepEqual(prior, value) {
+				distinct = false
+				break
+			}
+		}
+		if !distinct {
+			continue
+		}
+		if len(alternates) >= substrateMCPMaxAlternateValues {
+			overflow = true
+			continue
+		}
+		group.values = append(group.values, value)
+		alt, err := substrateMCPEncode(map[string]any{key: value})
+		if err != nil {
+			overflow = true
+			continue
+		}
+		alternates = append(alternates, alt)
+	}
+	if !changed {
+		return raw, nil, false, overflow
+	}
+	enc, err := substrateMCPEncode(base)
+	if err != nil {
+		return raw, alternates, false, true
+	}
+	return enc, alternates, true, overflow
 }
 
 // substrateMCPStricter is the stricter of two verdicts (deny, ask, allow;

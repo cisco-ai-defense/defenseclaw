@@ -480,10 +480,12 @@ func substrateMCPArgName(v any) (string, bool) {
 
 // judge is the strictest verdict of the call's readings; a deny ends it.
 // The argument readings come first and, when the whole params are read
-// too, go to the rules alone; the params reading goes to every lane, as
-// the one reading of a call did before. A call judges at most
-// substrateMCPReadingsPerArgs readings per argument reading, projections
-// included (RV-0841b F6).
+// too, go to the rules alone. An argument denial ends evaluation: no whole
+// params reading reaches AID or the LLM judge for that denied attempt.
+// Otherwise params go to every lane, as the single reading did before.
+// AID and the judge may only make a verdict stricter (RV-0841c F2).
+// A call judges at most substrateMCPReadingsPerArgs readings per argument
+// reading, including projections and distinct alias values (RV-0841b F6).
 func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substrateMCPJudgedCall) SubstrateCalloutVerdict {
 	readings := c.args
 	if c.params != nil {

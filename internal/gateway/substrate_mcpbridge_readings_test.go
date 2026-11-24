@@ -257,4 +257,25 @@ func TestSubstrateMCPProjectionsSkipTheJudge(t *testing.T) {
 	if n := boundedJudgeCalls(mock) - 1; n != 1 {
 		t.Fatalf("a large call asked the judge %d times, want 1 (projections are read by the rules alone)", n)
 	}
+	// A deterministic argument denial short-circuits before the primary
+	// params reading. This pins the accepted RV-0841c F2 behavior: neither
+	// AID nor the judge needs to run after a stricter verdict is final.
+	t.Run("denied arguments stop before primary", func(t *testing.T) {
+		real := substrateMCPJudge
+		var seen []bool
+		substrateMCPJudge = func(_ *APIServer, ctx context.Context, _ registry.Registration, _ substrateCalloutRequest) SubstrateCalloutVerdict {
+			seen = append(seen, substrateMCPReadingOf(ctx).rulesOnly)
+			return SubstrateCalloutVerdict{V: "1", Verdict: "deny", Source: "tool_rules"}
+		}
+		t.Cleanup(func() { substrateMCPJudge = real })
+		bridge := &substrateMCPBridge{a: b.fixture.api, reg: b.reg, s: &substrateStream{target: "notes"}}
+		v := bridge.judge(t.Context(), "prompts/get", substrateMCPJudgedCall{
+			tool: "prompts_get", args: []json.RawMessage{json.RawMessage(tixgBlockedArgs)},
+			params: json.RawMessage("{}"),
+		})
+		if v.Verdict != "deny" || len(seen) != 1 || !seen[0] {
+			t.Fatalf("deny short circuit: verdict %s, rulesOnly calls %v; want one rules-only denial", v.Verdict, seen)
+		}
+	})
+
 }

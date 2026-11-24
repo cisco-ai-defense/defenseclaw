@@ -370,3 +370,119 @@ func TestSubstrateMCPVerdictMemberWindows(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPBridgeConflictingReadValues(t *testing.T) {
+	b := newTixgBridge(t, false)
+	laptop, agent, resp := b.open(t)
+	if laptop == nil {
+		t.Fatalf("bridge refused: %+v", resp)
+	}
+	cmd, _ := json.Marshal(tixgCommand)
+	cases := []string{
+		`{"command":"x","scripT":` + string(cmd) + `}`,
+		`{"cmd":"echo hi","script":` + string(cmd) + `}`,
+		`{"Command":"x","command":` + string(cmd) + `}`,
+		`{"cmd":"x","command":"echo hi","script":` + string(cmd) + `,"commandline":"x"}`,
+		`{"scr\u0130pt":` + string(cmd) + `,"command":"x"}`,
+	}
+	for i, args := range cases {
+		tixgSend(t, agent, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"read_file","arguments":%s}}`, i+100, args))
+		tixgExpectErr(t, agent, laptop, float64(i+100), -32001, "CMD-RM-RF")
+	}
+	var spellings []string
+	for i := range 9 {
+		key := []byte("commandline")
+		key[i] -= 'a' - 'A'
+		spellings = append(spellings, fmt.Sprintf("%q:%q", string(key), "echo hi"))
+	}
+	overflow := "{" + strings.Join(spellings, ",") + "}"
+	bridge := &substrateMCPBridge{a: b.fixture.api, reg: b.reg, s: &substrateStream{target: "notes"}}
+	v := bridge.judge(t.Context(), "tools/call", substrateMCPJudgedCall{
+		tool: "read_file", args: []json.RawMessage{json.RawMessage(overflow)},
+	})
+	if v.Verdict != "allow" || !slices.Contains(v.Findings, evaluationLimitRuleID) {
+		t.Fatalf("nine spellings: verdict %s findings %v, want allow with an evaluation-limit finding", v.Verdict, v.Findings)
+	}
+	var distinct []string
+	for i := range 10 {
+		key := []byte("commandline")
+		key[i] -= 'a' - 'A'
+		distinct = append(distinct, fmt.Sprintf("%q:%q", string(key), fmt.Sprintf("echo %d", i)))
+	}
+	v = bridge.judge(t.Context(), "tools/call", substrateMCPJudgedCall{
+		tool: "read_file", args: []json.RawMessage{json.RawMessage("{" + strings.Join(distinct, ",") + "}")},
+	})
+	if v.Verdict != "allow" || !slices.Contains(v.Findings, evaluationLimitRuleID) {
+		t.Fatalf("ten distinct values: verdict %s findings %v, want allow with an evaluation-limit finding", v.Verdict, v.Findings)
+	}
+}
+
+// Case variants of two aliases exceed four projection windows without
+// exceeding the bridge frame limit. The denied value must be read anywhere.
+func TestMCPBridgeCaseVariantFlood(t *testing.T) {
+	b := newTixgBridge(t, false)
+	laptop, agent, resp := b.open(t)
+	if laptop == nil {
+		t.Fatalf("bridge refused: %+v", resp)
+	}
+	cmd, _ := json.Marshal(tixgCommand)
+	id := 200
+	for _, n := range []int{1600, 5000} {
+		for _, at := range []int{0, n / 2, n - 1} {
+			var members []string
+			for i := 0; i < n; i++ {
+				base, mask := "commandline", i
+				if i >= 1600 {
+					base, mask = "shellcommand", i-1600
+				}
+				var key strings.Builder
+				for _, r := range base {
+					if r >= 'a' && r <= 'z' {
+						if mask&1 != 0 {
+							r -= 'a' - 'A'
+						}
+						mask >>= 1
+					}
+					key.WriteRune(r)
+				}
+				k, _ := json.Marshal(key.String())
+				v := `"echo hi"`
+				if i == at {
+					v = string(cmd)
+				}
+				members = append(members, string(k)+":"+v)
+			}
+			args := "{" + strings.Join(members, ",") + "}"
+			tixgSend(t, agent, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"read_file","arguments":%s}}`, id, args))
+			tixgExpectErr(t, agent, laptop, float64(id), -32001, "CMD-RM-RF")
+			id++
+		}
+	}
+	// A different recognized field can also occupy all projection windows
+	// while the command is a separate member of the same object.
+	for _, n := range []int{1600, 5000} {
+		for _, at := range []int{0, n / 2, n} {
+			var members []string
+			for i := 0; i < n; i++ {
+				mask := i
+				var key strings.Builder
+				for _, r := range "workingdirectory" {
+					if mask&1 != 0 {
+						r -= 'a' - 'A'
+					}
+					mask >>= 1
+					key.WriteRune(r)
+				}
+				k, _ := json.Marshal(key.String())
+				members = append(members, string(k)+`:"/notes"`)
+			}
+			members = append(members, "")
+			copy(members[at+1:], members[at:])
+			members[at] = `"scripT":` + string(cmd)
+			args := "{" + strings.Join(members, ",") + "}"
+			tixgSend(t, agent, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"read_file","arguments":%s}}`, id, args))
+			tixgExpectErr(t, agent, laptop, float64(id), -32001, "CMD-RM-RF")
+			id++
+		}
+	}
+}
