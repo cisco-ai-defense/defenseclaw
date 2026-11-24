@@ -36,37 +36,50 @@ func TestEnvChdirProjectCopyWithKeyLinkMatchesLinuxOnWindows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	testenv.Symlink(t, filepath.FromSlash("../.ssh/authorized_keys"), filepath.Join(project, "keylink"))
+	// A Limited token cannot make the keys link: the rows that copy or write
+	// through it skip there (GAP-2158); the other rows run on every token.
+	keylink := testenv.TrySymlink(t, filepath.FromSlash("../.ssh/authorized_keys"), filepath.Join(project, "keylink"))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	for _, row := range []struct {
-		command string
-		block   bool
+		command  string
+		block    bool
+		needLink bool
 	}{
-		{`env -C ~ cp -r project project-bak`, false},
-		{`env -C ~ cp -r project/src src-bak`, false},
-		{`env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, true},
-		{`env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, true},
+		{`env -C ~ cp -r project project-bak`, false, true},
+		{`env -C ~ cp -r project/src src-bak`, false, false},
+		{`env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, true, true},
+		{`env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, true, false},
 	} {
-		payload := mustJSON(t, map[string]any{"session_id": "env-copy", "hook_event_name": "PreToolUse",
-			"tool_name": "Bash", "cwd": project, "tool_input": map[string]string{"command": row.command}})
-		for _, connector := range []string{"claudecode"} {
-			{
-				cfg := &config.Config{}
-				cfg.Guardrail.Mode = "action"
-				cfg.Guardrail.Connector = connector
-				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
-				req.Header.Set("Content-Type", "application/json")
-				if header := hookpaths.ResolveConnector(connector, "", "PreToolUse", payload); header != "" {
-					req.Header.Set(hookpaths.Header, header)
-				}
-				recorder := httptest.NewRecorder()
-				api.handleAgentHook(connector).ServeHTTP(recorder, req)
-				if blocked := strings.HasPrefix(recorder.Body.String(), `{"action":"block"`); blocked != row.block {
-					t.Errorf("%s %q: block=%v, want %v: %.300s", connector, row.command, blocked, row.block, recorder.Body.String())
-				}
+		t.Run(row.command, func(t *testing.T) {
+			if row.needLink {
+				keylink.Require(t)
 			}
-		}
+			checkEnvChdirProjectCopyRow(t, project, row.command, row.block)
+		})
+	}
+}
+
+// checkEnvChdirProjectCopyRow judges one row of
+// TestEnvChdirProjectCopyWithKeyLinkMatchesLinuxOnWindows on the Claude Code
+// route.
+func checkEnvChdirProjectCopyRow(t *testing.T, project, command string, block bool) {
+	t.Helper()
+	payload := mustJSON(t, map[string]any{"session_id": "env-copy", "hook_event_name": "PreToolUse",
+		"tool_name": "Bash", "cwd": project, "tool_input": map[string]string{"command": command}})
+	const connector = "claudecode"
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = connector
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
+	req.Header.Set("Content-Type", "application/json")
+	if header := hookpaths.ResolveConnector(connector, "", "PreToolUse", payload); header != "" {
+		req.Header.Set(hookpaths.Header, header)
+	}
+	recorder := httptest.NewRecorder()
+	api.handleAgentHook(connector).ServeHTTP(recorder, req)
+	if blocked := strings.HasPrefix(recorder.Body.String(), `{"action":"block"`); blocked != block {
+		t.Errorf("%s %q: block=%v, want %v: %.300s", connector, command, blocked, block, recorder.Body.String())
 	}
 }

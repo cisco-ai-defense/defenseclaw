@@ -19,6 +19,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -36,7 +37,10 @@ func TestOpenClawPathUnderAny(t *testing.T) {
 		}
 	}
 	link := filepath.Join(home, "skills", "escape")
-	testenv.Symlink(t, other, link)
+	// A Limited Windows token cannot make the symbolic link: that case skips
+	// there, and on Windows a junction out of the root is judged too
+	// (GAP-2158).
+	escape := testenv.TrySymlink(t, other, link)
 	roots := []string{home}
 	cases := map[string]bool{
 		filepath.Join(home, "skills", "s1"): true,
@@ -46,9 +50,19 @@ func TestOpenClawPathUnderAny(t *testing.T) {
 		"relative/path":                     false,
 		filepath.Join(home, "missing"):      false,
 	}
+	junction := filepath.Join(home, "skills", "escape-junction")
+	if runtime.GOOS == "windows" {
+		testenv.Junction(t, other, junction)
+		cases[junction] = false
+	}
 	for p, want := range cases {
-		if got := openClawPathUnderAny(p, roots); got != want {
-			t.Errorf("openClawPathUnderAny(%q) = %v, want %v", p, got, want)
-		}
+		t.Run(p, func(t *testing.T) {
+			if p == link {
+				escape.Require(t)
+			}
+			if got := openClawPathUnderAny(p, roots); got != want {
+				t.Errorf("openClawPathUnderAny(%q) = %v, want %v", p, got, want)
+			}
+		})
 	}
 }

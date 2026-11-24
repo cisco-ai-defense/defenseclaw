@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -32,6 +33,23 @@ import (
 // build would refuse is refused by the writer, so it never reaches
 // config.yaml and blocks the reloads after it.
 func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
+	// The installed layout links <data_dir>/policies to the built-in packs. A
+	// Limited Windows token cannot make the symbolic link, so on Windows the
+	// layout also runs through a junction, on every token (GAP-2158).
+	t.Run("symbolic link", func(t *testing.T) {
+		checkConfigWriterRefusesAnUnloadableRuleReference(t, testenv.Symlink)
+	})
+	if runtime.GOOS == "windows" {
+		t.Run("junction", func(t *testing.T) {
+			checkConfigWriterRefusesAnUnloadableRuleReference(t, testenv.Junction)
+		})
+	}
+}
+
+// checkConfigWriterRefusesAnUnloadableRuleReference is
+// TestConfigWriterRefusesAnUnloadableRuleReference with the policies folder
+// linked by link.
+func checkConfigWriterRefusesAnUnloadableRuleReference(t *testing.T, link func(testing.TB, string, string)) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -40,7 +58,7 @@ func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The installed layout: <data_dir>/policies holds the built-in packs.
-	testenv.Symlink(t, policies, filepath.Join(dir, "policies"))
+	link(t, policies, filepath.Join(dir, "policies"))
 	if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\nobservability: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

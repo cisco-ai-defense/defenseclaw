@@ -185,7 +185,7 @@ func TestSandboxPrerequisiteRecord(t *testing.T) {
 	}
 	ready := write("ready.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":true}`)
 	link := filepath.Join(dir, "link.json")
-	testenv.Symlink(t, ready, link)
+	linked := testenv.TrySymlink(t, ready, link)
 	docker := &config.Config{}
 	docker.OpenShell.Enabled = true
 	setup := &config.Config{}
@@ -227,10 +227,16 @@ func TestSandboxPrerequisiteRecord(t *testing.T) {
 		"other item": {write("e2fs.json", `{"version":1,"install":"setup","driver":"docker","ready":false,"missing":[{"item":"e2fsprogs"}]}`),
 			setup, sandboxUnavailablePrerequisiteOther},
 	} {
-		record, ok := readSandboxPrerequisites(tc.path)
-		if got := sandboxPrerequisiteWhy(tc.cfg, "linux", sandboxDriverFor(tc.cfg, "linux"), record, ok); got != tc.want {
-			t.Errorf("%s: %q, want %q", name, got, tc.want)
-		}
+		t.Run(name, func(t *testing.T) {
+			if tc.path == link {
+				// A Limited Windows token cannot make the link (GAP-2158).
+				linked.Require(t)
+			}
+			record, ok := readSandboxPrerequisites(tc.path)
+			if got := sandboxPrerequisiteWhy(tc.cfg, "linux", sandboxDriverFor(tc.cfg, "linux"), record, ok); got != tc.want {
+				t.Errorf("%s: %q, want %q", name, got, tc.want)
+			}
+		})
 	}
 	// A MicroVM configuration with the docker fallback: the MicroVM part
 	// and the fallback part are read apart, and a record without a
