@@ -340,7 +340,7 @@ func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, wind
 		Network:         network,
 		DataFlows:       cloneSlice(o.dataFlows),
 		Artifacts:       artifacts,
-		credentialPaths: resolveCredentialPathReads(o.credentialWords, cwd, activeHome, commands, paths),
+		credentialPaths: lazyCredentialPathReads(o.credentialWords, cwd, activeHome, commands, paths),
 	}
 }
 

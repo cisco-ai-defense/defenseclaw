@@ -12,3 +12,6 @@ import (
 // separate: actors are Linux; elsewhere (tests) the relay and the agent are
 // not separated.
 func separate(kit.RelayConfig) (*separation, string, error) { return nil, "", nil }
+
+// withAgentFS runs fn (the relay and the agent are one user here).
+func (sp *separation) withAgentFS(fn func()) bool { fn(); return true }

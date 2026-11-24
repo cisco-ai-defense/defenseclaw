@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
 type substrateLoginFlags struct {
@@ -335,12 +337,19 @@ func substrateWorkloadWarning(m *api.WorkloadMatch, subject string) string {
 }
 
 func newSubstrateLogoutCmd() *cobra.Command {
-	var com substrateCommon
+	var (
+		com substrateCommon
+		all bool
+	)
 	cmd := &cobra.Command{
 		Use:   "logout",
-		Short: "Sign out of a cluster and forget the stored sign-in",
-		Long:  `Removes your stored sign-in for the cluster and, where the sign-in server supports it, ends it there too. Your agents keep running; sign in again to reach them.`,
-		Args:  cobra.NoArgs,
+		Short: "Sign out of a cluster: end the sign-in there and forget it",
+		Long: `Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the sign-in server
+where that server supports it, and removes the stored sign-in. --all ends every token of yours issued before now, on
+every device, and closes their open terminals. An end covers tokens already issued: a refresh token held on another
+device or in a copied store can still get new ones, so also end your sessions at the sign-in server (ask your
+administrator). Your agents keep running; sign in again to reach them.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, c, err := auth.ResolveContext(com.context)
 			if err != nil {
@@ -353,34 +362,137 @@ func newSubstrateLogoutCmd() *cobra.Command {
 			ctx, stop := substrateContext(cmd)
 			defer stop()
 			saved, _ := store.Load(name)
+			var cl substrateSigninEnder
+			if all || saved != nil && (saved.AccessToken != "" || saved.IDToken != "") {
+				sess, err := substrateOpen(cmd, &com)
+				if err != nil {
+					return err
+				}
+				cl = sess.Client
+			}
+			msg, err := substrateEndSignin(ctx, cl, name, saved, all, time.Now())
+			if err != nil {
+				// --all ended nothing: the stored sign-in is kept, so the
+				// person can run it again.
+				return err
+			}
 			if err := auth.Logout(ctx, name, c, store, nil); err != nil {
 				return substrateFail(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Signed out of %s.\n", name)
-			if note := substrateLogoutNote(saved, time.Now()); note != "" {
-				fmt.Fprintln(cmd.OutOrStdout(), note)
-			}
+			fmt.Fprintln(cmd.OutOrStdout(), msg)
 			return nil
 		},
 	}
 	com.add(cmd)
+	cmd.Flags().BoolVar(&all, "all", false, "end every token of yours issued before now, on every device")
 	return cmd
 }
 
-// substrateLogoutNote says how long a copy of the ended sign-in still works
-// (GAP-0409). The gateway verifies sign-in tokens by signature and expiry,
-// with no revocation list, so logout ends the refresh token at the issuer
-// and forgets the stored tokens, but an access or ID token copied before
-// it stays valid until it expires. "" when nothing was stored or it has
-// already expired.
+// substrateSigninEnder is the cluster call logout makes (api.Client).
+type substrateSigninEnder interface {
+	EndSignin(ctx context.Context, scope string, also ...string) (api.Revocation, error)
+}
+
+// substrateEndSignin ends the sign-in on the cluster before logout forgets
+// it, and says what happened (B5.1). One sign-in (scope this) is forgotten
+// whatever the cluster answers, with a note when a copy may still work;
+// --all (scope all) is an error when the cluster ended nothing, and the
+// stored sign-in is kept.
+func substrateEndSignin(ctx context.Context, cl substrateSigninEnder, name string, saved *auth.Token, all bool, now time.Time) (string, error) {
+	scope := "this"
+	if all {
+		scope = "all"
+	}
+	if cl == nil {
+		// Nothing stored: no token of this context to end.
+		return fmt.Sprintf("Signed out of %s.", name), nil
+	}
+	var also []string
+	if !all && saved != nil {
+		// Both stored tokens of this sign-in: the gateway accepts the
+		// access token too when api_audience is set (RV1-03).
+		for _, tok := range []string{saved.IDToken, saved.AccessToken} {
+			if tok != "" {
+				also = append(also, tok)
+			}
+		}
+	}
+	rev, err := cl.EndSignin(ctx, scope, also...)
+	if err == nil {
+		if all {
+			who := orWord(safetext.Line(rev.Principal), safetext.Line(rev.Person))
+			// Like the help: an end covers tokens already issued, not a
+			// refresh token held elsewhere (RV2-02).
+			return fmt.Sprintf("Signed out of %s: every token of %s issued before %s is refused, on every device. "+
+				"A refresh token held elsewhere can still get new tokens: also end your sessions at the sign-in server (ask your administrator).",
+				name, who, rev.NotBefore.UTC().Format("15:04:05 MST")), nil
+		}
+		return fmt.Sprintf("Signed out of %s. This sign-in no longer works on the cluster.", name), nil
+	}
+	e, isAPI := api.AsError(err)
+	switch {
+	case isAPI && e.Status == http.StatusNotFound:
+		// A gateway before 1.0.11, or one with ending sign-ins off (kept
+		// for those gateways until 1.0.14).
+		if all {
+			return "", cliusage.WithExitCode(fmt.Errorf("this cluster's gateway can't end sign-ins (it is older than DefenseClaw 1.0.11, "+
+				"or ending sign-ins is off there): nothing was changed and you are still signed in to %s", name), substrateExitRefused)
+		}
+		return strings.TrimSpace(fmt.Sprintf("Signed out of %s. %s", name, substrateLogoutNote(saved, now))), nil
+	case isAPI && e.Reason == "signin_ended":
+		if all {
+			return "", cliusage.WithExitCode(fmt.Errorf("this sign-in to %s was already ended, so it can't end your other sign-ins: "+
+				"sign in again with defenseclaw substrate login, then run defenseclaw substrate logout --all", name), substrateExitSignedOut)
+		}
+		return fmt.Sprintf("Signed out of %s. This sign-in had already been ended on the cluster.", name), nil
+	case !all && (errors.Is(err, auth.ErrNotSignedIn) || isAPI && e.Unauthorized()):
+		// The cluster does not take this token (expired, refused): there is
+		// nothing of it to end there.
+		return fmt.Sprintf("Signed out of %s.", name), nil
+	case all:
+		return "", substrateFail(err)
+	}
+	why := err.Error()
+	if isAPI {
+		why = substrateAPIMessage(e)
+	}
+	msg := fmt.Sprintf("Signed out of %s, but the cluster could not end this sign-in: %s.", name, safetext.Line(why))
+	if note := substrateLogoutCopyNote(saved, now); note != "" {
+		msg += " " + note
+	}
+	return msg, nil
+}
+
+// substrateLogoutNote is what logout says when the cluster's gateway can't
+// end sign-ins (a 404 from a gateway before 1.0.11 or with ending sign-ins
+// off; GAP-0409): how long a copy of the token still works. "" when nothing
+// was stored or it has already expired. Kept for those gateways until
+// 1.0.14.
 func substrateLogoutNote(saved *auth.Token, now time.Time) string {
-	if saved == nil || saved.AccessToken == "" && saved.IDToken == "" || !saved.Expiry.After(now) {
+	note := substrateLogoutCopyNote(saved, now)
+	if note == "" {
 		return ""
 	}
-	left := max(int(saved.Expiry.Sub(now).Round(time.Minute)/time.Minute), 1)
-	return fmt.Sprintf("A copy of this sign-in's token still works on the cluster until it expires at %s (about %d min): "+
-		"the gateway does not revoke sign-in tokens. If you think a token was copied, ask an administrator to end your session at the sign-in server.",
-		saved.Expiry.UTC().Format("15:04 MST"), left)
+	return "This cluster's gateway can't end sign-ins (it is older than DefenseClaw 1.0.11, or ending sign-ins is off there). " + note
+}
+
+// substrateLogoutCopyNote says until when a copy of saved works: its
+// expiry, or 15 minutes after it was issued (identity.MaxPersonSignInAge)
+// when that comes first, as the admin listener accepts it (GAP-0409).
+func substrateLogoutCopyNote(saved *auth.Token, now time.Time) string {
+	if saved == nil || saved.AccessToken == "" && saved.IDToken == "" {
+		return ""
+	}
+	until := saved.UsableUntil()
+	if until.IsZero() {
+		until = saved.Expiry
+	}
+	if !until.After(now) {
+		return ""
+	}
+	left := max(int(until.Sub(now).Round(time.Minute)/time.Minute), 1)
+	return fmt.Sprintf("A copy of the token works until %s (about %d min; the cluster accepts a sign-in token for at most %d minutes after it was issued).",
+		until.UTC().Format("15:04 MST"), left, int(identity.MaxPersonSignInAge/time.Minute))
 }
 
 func newSubstrateWhoamiCmd() *cobra.Command {

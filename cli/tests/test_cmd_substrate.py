@@ -199,6 +199,7 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["pull", "fix-tests-7f3a", "--branch", "agent/fix", "--yes"],
         ["pull", "fix-tests-7f3a", "--patch-out", "fix.patch", "--timeout", "5m"],
         ["checkpoint", "fix-tests-7f3a", "--every", "1h"],
+        ["port", "web-3f2a", "3000", "5173:8000", "--json"],
         ["undo", "fix-tests-7f3a", "--to", "dc-checkpoint-2", "-y"],
         ["delete", "one", "two", "-y"],
         ["delete", "--batch", "b1", "--yes"],
@@ -211,6 +212,10 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["secrets", "set", "NPM_TOKEN", "--from-env", "NPM_TOKEN"],
         ["secrets", "rm", "NPM_TOKEN", "-y"],
         ["secrets", "test", "NPM_TOKEN"],
+        # --mine is a hidden no-op on set, rm and test; 1.0.10 shipped it, so scripts still pass it (GAP-0904).
+        ["secrets", "set", "NPM_TOKEN", "--from-env", "NPM_TOKEN", "--mine"],
+        ["secrets", "rm", "NPM_TOKEN", "--mine", "-y"],
+        ["secrets", "test", "NPM_TOKEN", "--mine"],
         ["policy", "explain", "fix-tests-7f3a"],
         ["policy", "show", "--json"],
         ["policy", "test", "fix-tests-7f3a", "--host", "registry.example.test"],
@@ -232,6 +237,18 @@ def test_every_stub_forwards_its_arguments_unchanged(exec_capture: list[list[str
     result = CliRunner().invoke(substrate, args, obj=AppContext())
     assert result.exit_code == 0, (args, result.output)
     assert exec_capture == [["/opt/dc/defenseclaw-gateway", "/opt/dc/defenseclaw-gateway", "substrate", *args]]
+
+
+@pytest.mark.parametrize("sub", ["set", "rm", "test"])
+def test_the_no_op_mine_flag_is_accepted_but_hidden(sub: str) -> None:
+    # GAP-0904: the stub must accept --mine (the Go flag shipped in 1.0.10) without showing it in help.
+    command = _python_tree()[f"substrate secrets {sub}"]
+    mine = [p for p in command.params if isinstance(p, click.Option) and "--mine" in p.opts]
+    assert len(mine) == 1 and mine[0].hidden, sub
+    result = CliRunner().invoke(substrate, ["secrets", sub, "--help"], obj=AppContext())
+    assert result.exit_code == 0 and "--mine" not in result.output, result.output
+    listing = [p for p in _python_tree()["substrate secrets list"].params if isinstance(p, click.Option)]
+    assert [p.hidden for p in listing if "--mine" in p.opts] == [False]
 
 
 def test_a_missing_gateway_binary_is_a_plain_error(monkeypatch: pytest.MonkeyPatch) -> None:

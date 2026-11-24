@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
 
 // Asks, decisions and policy explain on the admin listener. The stores
@@ -42,17 +44,25 @@ import (
 //
 //	GET  /api/v1/substrate/asks[?all=1]                 -> {"asks":[...]} pending
 //	POST /api/v1/substrate/asks/{id} {decision, always?, reason?}
+//	GET  /api/v1/substrate/approvals[?all=1]            -> standing approvals (substrate_approvals.go)
 //	GET  /api/v1/substrate/decisions[?actor=a/n][&limit=][&all=1]
 //	GET  /api/v1/substrate/policy/explain[?actor=a/n][&host=][&method=][&tool=]
 //	POST /api/v1/substrate/callout/ask   (callout token) {actor, host|tool, summary, reason, severity, ask_id?}
 //	     ask_id reads that ask again (the callout's hold); a host already
-//	     approved for the actor answers approved.
+//	     approved for the actor answers approved. A once approval answers
+//	     approved for one request only, the first that takes it (GAP-0484).
 
 // SubstrateAskStore is the leader's ask and decision store (asks.Client).
 type SubstrateAskStore interface {
 	OpenAsk(ctx context.Context, a asks.Ask) (asks.Ask, error)
 	Resolve(ctx context.Context, in asks.ResolveRequest) (asks.Ask, error)
+	// Use takes an approval for one request: an always approval answers
+	// every request, a once approval only the first (asks.ErrUsed after).
+	Use(ctx context.Context, in asks.UseRequest) (asks.Ask, error)
 	List(ctx context.Context, in asks.ListRequest) ([]asks.Ask, error)
+	// Revoke takes back the always approvals of a host for an actor
+	// (GAP-0492).
+	Revoke(ctx context.Context, in asks.RevokeRequest) (asks.RevokeResult, error)
 	Record(ctx context.Context, d asks.Decision) (struct{}, error)
 	Decisions(ctx context.Context, in asks.ListRequest) ([]asks.Decision, error)
 }
@@ -70,6 +80,19 @@ func askView(a asks.Ask) map[string]any {
 		"summary": a.Summary, "reason": a.Reason, "severity": a.Severity, "created": a.Created, "expires": a.Expires,
 		"state": a.State, "unattended": a.Unattended, "note": a.Note, "rule": a.Rule,
 	}
+}
+
+// askAnswerView is askView for the body of an answer. When no binding names
+// the ask any more the answer stands but moved nothing; the body says so
+// (binding_gone and message) so an approval does not read as a secret that
+// went live (GAP-0973).
+func askAnswerView(a asks.Ask, bindingGone bool) map[string]any {
+	v := askView(a)
+	if bindingGone {
+		v["binding_gone"] = true
+		v["message"] = "No binding names this ask now. If it was removed, nothing changed; if its add is still finishing, the add applies your answer."
+	}
+	return v
 }
 
 func (a *APIServer) substrateListAsks(st *substrateState) http.HandlerFunc {
@@ -126,19 +149,52 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
 			return
 		case asks.IsDecided(err):
-			writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
+			// An administrator answering a binding ask again the same way
+			// applies that answer to the binding again: the binding write
+			// of the first answer may have failed (RV4 F2).
+			again, ok, berr := a.substrateReapplyBindingDecision(r.Context(), st, c, r.PathValue("id"), in.Decision)
+			switch {
+			case !ok:
+				writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
+			case berr != nil && !errors.Is(berr, errSubstrateBindingGone):
+				fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", again.ID, berr)
+				writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
+			default:
+				writeSubstrateJSON(w, http.StatusOK, askAnswerView(again, errors.Is(berr, errSubstrateBindingGone)))
+			}
+			return
+		case asks.IsAdminOnly(err):
+			writeSubstrateJSONError(w, http.StatusForbidden, "ask_admin_only")
 			return
 		case err != nil:
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
+		berr := a.substrateBindingDecided(r.Context(), st, got)
 		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
+		gone := errors.Is(berr, errSubstrateBindingGone)
+		if gone {
+			// No binding names this ask. Either the add that opened it has
+			// not written the binding yet (the add applies this answer when
+			// it does, RV4 F2), or rm removed it (rm denies a waiting
+			// binding's ask; an answer that wins that race moves nothing).
+			// The answer stands and is recorded above (GAP-0903, GAP-0908).
+			fmt.Fprintf(os.Stderr, "[substrate] ask %s answered (%s); no binding names it now\n", got.ID, got.State)
+			berr = nil
+		}
+		if berr != nil {
+			// The ask is answered but the binding store refused the write:
+			// the binding stays waiting; the administrator is told.
+			fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", got.ID, berr)
+			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
+			return
+		}
 		if got.OwnerID != ownerOf(c.person).ID() {
 			// An administrator answering someone else's ask is recorded as
 			// themselves (decided_by), and logged here.
 			fmt.Fprintf(os.Stderr, "[substrate] administrator answered another person's ask %s (%s)\n", got.ID, got.State)
 		}
-		writeSubstrateJSON(w, http.StatusOK, askView(got))
+		writeSubstrateJSON(w, http.StatusOK, askAnswerView(got, gone))
 	}
 }
 
@@ -201,6 +257,14 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			out := map[string]any{"profile": profile, "launcher_atespace": space}
 			if err != nil {
 				out = map[string]any{"profile": "", "reason": "no profile with launcher atespaces is assigned to you"}
+			}
+			// GAP-0653: say which assignment gave the profile, or that none
+			// did and default_profile applies, and which assignments were
+			// consulted and did not select the caller.
+			if st.cfg.ProfileWhy != nil {
+				for k, v := range st.cfg.ProfileWhy(c.person, c.admin).View() {
+					out[k] = v
+				}
 			}
 			substrateMarkAssurance(out, ownerOf(c.person))
 			writeSubstrateJSON(w, http.StatusOK, out)
@@ -378,29 +442,78 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
+		// approvedFor reports whether an approved ask a answers this ask: a
+		// host-wide approval answers a host-wide ask; a url_rules ask is
+		// answered only by an approval of the same rule that named every
+		// method this ask names (GAP-0177).
+		approvedFor := func(a asks.Ask) bool {
+			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved &&
+				(urlRuleApprovalCovers(a.Rule, ask.Rule) || (hostWide && asks.HostWide(a.Rule)))
+		}
+		// use takes approval id for this one request (GAP-0484): ok is false
+		// when another request took a once approval first (or it is gone),
+		// and this request asks again; err is an outage.
+		use := func(id string) (asks.Ask, bool, error) {
+			got, err := st.cfg.Asks.Use(r.Context(), asks.UseRequest{ID: id, UID: reg.UID})
+			switch {
+			case err == nil:
+				return got, true, nil
+			case asks.IsUsed(err) || asks.IsNotFound(err):
+				return asks.Ask{}, false, nil
+			}
+			return asks.Ask{}, false, err
+		}
 		if in.AskID != "" {
 			// The callout holds the request and reads its ask again; only
 			// this actor incarnation's ask is answered.
+			held := slices.IndexFunc(list, func(a asks.Ask) bool { return a.ID == in.AskID && a.UID == reg.UID })
+			if held < 0 {
+				writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
+				return
+			}
+			if a := list[held]; a.State != asks.StateApproved || a.Always {
+				writeSubstrateJSON(w, http.StatusOK, askView(a))
+				return
+			}
+			// A once approval lets this held request through only if no
+			// other request took it first; otherwise this one asks again.
+			got, ok, err := use(in.AskID)
+			if err != nil {
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+				return
+			}
+			if ok {
+				writeSubstrateJSON(w, http.StatusOK, askView(got))
+				return
+			}
+		}
+		if ask.Host != "" {
+			// Approved always for this actor (the controller adds a host-wide
+			// one to the policy on its next pass): not asked twice.
+			standing := hostWide && slices.Contains(reg.Approved, ask.Host)
+			standing = standing || slices.ContainsFunc(list, func(a asks.Ask) bool { return a.Always && approvedFor(a) })
+			if standing {
+				writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
+				return
+			}
+			// A once approval nobody used yet lets this one request through
+			// (the agent's retry after its held request was refused as
+			// pending); every later request asks again (GAP-0484).
+			now := time.Now()
 			for _, a := range list {
-				if a.ID == in.AskID && a.UID == reg.UID {
-					writeSubstrateJSON(w, http.StatusOK, askView(a))
+				if a.Always || !approvedFor(a) || !a.UsedAt.IsZero() || !now.Before(a.DecidedAt.Add(asks.OnceWindow)) {
+					continue
+				}
+				got, ok, err := use(a.ID)
+				if err != nil {
+					writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+					return
+				}
+				if ok {
+					writeSubstrateJSON(w, http.StatusOK, askView(got))
 					return
 				}
 			}
-			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
-			return
-		}
-		if ask.Host != "" && ((hostWide && slices.Contains(reg.Approved, ask.Host)) || slices.ContainsFunc(list, func(a asks.Ask) bool {
-			// A host-wide approval answers a host-wide ask; a url_rules
-			// ask is answered only by an approval of the same rule that
-			// named every method this ask names (GAP-0177).
-			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved &&
-				(urlRuleApprovalCovers(a.Rule, ask.Rule) || (hostWide && asks.HostWide(a.Rule)))
-		})) {
-			// Approved earlier for this actor (the controller adds a
-			// host-wide one to the policy on its next pass): not asked twice.
-			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
-			return
 		}
 		if ask.Host != "" {
 			// approve --always keeps the approval for later runs of the same
@@ -472,6 +585,43 @@ func (a *APIServer) dispatchQueuedAskWebhook(got asks.Ask) {
 	})
 }
 
+// substrateAskClosedAction is the webhook action of an ask the leader
+// closed because its actor crashed, was reverted or was deleted.
+const substrateAskClosedAction = "approval-closed"
+
+// recordSubstrateAskClosed writes a pending ask the leader closed because
+// its actor crashed, was reverted or was deleted to the audit log, and
+// tells the webhooks of an unattended run's ask (they were told it was
+// queued), with the reason code: such a closure left no audit, OTLP or log
+// record before (GAP-0526).
+func (a *APIServer) recordSubstrateAskClosed(ctx context.Context, r telemetryrelay.Record) {
+	if a == nil || r.AskID == "" {
+		return
+	}
+	reason := orDefaultString(r.Reason, "closed")
+	summary := fmt.Sprintf("ask %s of agent %s/%s for %s closed: %s", r.AskID, r.Atespace, r.Actor, r.Host, reason)
+	if a.logger != nil {
+		_ = a.logger.LogAlertCtx(context.WithoutCancel(ctx), "substrate", "MEDIUM", summary, map[string]any{
+			"event": "ask_closed", "ask": r.AskID, "actor": r.Atespace + "/" + r.Actor, "actor_uid": r.UID,
+			"target": r.Host, "reason": reason, "unattended": r.Unattended,
+		})
+	}
+	// The closure is the end of the ask's lifecycle: log.approval.resolved,
+	// result cancelled, answered by the system (GAP-0677).
+	a.emitSubstrateApprovalV8(ctx, asks.Ask{ID: r.AskID, State: asks.StateExpired, Host: r.Host, Atespace: r.Atespace,
+		Actor: r.Actor, UID: r.UID, Profile: r.Profile, OwnerID: r.UserID}, false, audit.SandboxApprovalByAutomatic)
+	if !r.Unattended || a.webhookSource == nil {
+		return
+	}
+	if webhooks := a.webhookSource(); webhooks != nil {
+		webhooks.Dispatch(audit.Event{
+			Timestamp: time.Now().UTC(), Action: substrateAskClosedAction, Target: r.Host, Actor: "defenseclaw-substrate",
+			Details:  fmt.Sprintf("ask=%s actor=%s/%s unattended=true reason=%s", r.AskID, r.Atespace, r.Actor, reason),
+			Severity: orDefaultString(r.Severity, "MEDIUM"),
+		})
+	}
+}
+
 func orDefaultString(v, def string) string {
 	if strings.TrimSpace(v) == "" {
 		return def
@@ -512,7 +662,7 @@ func (st *substrateState) substrateRecordDecision(ctx context.Context, reg regis
 // and host-wide for a host-wide ask or the same rule covering every method
 // for a url_rules ask (as within one actor, GAP-0177).
 func alwaysApprovalCovers(approved, asked asks.Ask) bool {
-	return approved.Always && approved.State == asks.StateApproved && approved.Kind != "tool" &&
+	return approved.Always && approved.State == asks.StateApproved && approved.Kind != "tool" && approved.Kind != asks.KindGitPush &&
 		approved.OwnerID == asked.OwnerID && approved.Profile == asked.Profile && approved.Host == asked.Host &&
 		(urlRuleApprovalCovers(approved.Rule, asked.Rule) || (asks.HostWide(asked.Rule) && asks.HostWide(approved.Rule)))
 }

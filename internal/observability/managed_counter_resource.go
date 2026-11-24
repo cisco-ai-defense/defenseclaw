@@ -21,7 +21,8 @@ package observability
 // user, account, host, pod or device label. A collector that turns resource
 // attributes into labels (Prometheus remote write, for one) would add the
 // host, tenant, workspace and device key ones, so a metric destination
-// sends these counters with a resource cut to the keys below. The bundled
+// sends these counters with a resource cut to the keys below (a Kubernetes
+// namespace is the one deployment label that stays). The bundled
 // collector cuts the same keys (bundles/local_observability_stack/
 // otel-collector/config.yaml, transform/managed-sandbox-resource).
 // service.instance.id stays: it is a random id per gateway process, and
@@ -46,6 +47,10 @@ var resourceRestrictedMetrics = map[string]bool{
 var restrictedMetricResourceKeys = map[string]bool{
 	"service.name": true, "service.namespace": true, "service.version": true, "service.instance.id": true,
 	"deployment.environment.name": true, "os.type": true,
+	// The namespace of a Substrate release: one value per install, no user,
+	// host or pod. The chart's metrics.prometheusRule.namespaceLabel scopes
+	// the policy alerts with it (GAP-0669).
+	"k8s.namespace.name": true,
 }
 
 // ResourceRestrictedMetric reports whether metric name is exported with a

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,9 +40,14 @@ import (
 // reading of the gap's cells on a host whose / holds that many names; the
 // gap's own cells read the host's / and answer either rel's allow or the
 // unknown tier, never 504. Outside a race build each row of the default
-// pack answers three times on the production budget and its median is held
-// to half of that budget; under -race, and in the other packs, the budget is
-// raised and only the answers are checked.
+// pack answers three times and the median of the CPU time of those answers
+// is held to half of the production scan budget; under -race only the
+// answers are checked. The bar counts work (the process's CPU time) and the
+// deadline of the route is raised far above any load, because a wall-clock
+// bar and the 200 ms deadline both fail on a loaded shared box with the
+// expansion bounded (GAP-0708: 128 ms against 100 ms at load 11-22): a
+// regression to the unbounded expansion reads thousands of entries, which
+// is CPU time whatever else runs.
 func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home", "alice")
@@ -108,13 +114,10 @@ func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.
 			tier = "block"
 		}
 		runs := 1
-		if hookAnswerRaceBuild || p.name != "default" {
-			// Only the default pack is timed on the production budget. The other
-			// packs judge answers, and a full parallel run can take the 200 ms of a
-			// row that reads the host's / past it (GAP-1982), which is a 504 and
-			// no answer at all.
-			a.inspectToolScanTimeout = 30 * time.Second
-		} else {
+		// The answers do not depend on the clock: a scan deadline the box's
+		// load could reach would answer 504 for a bounded expansion too.
+		a.inspectToolScanTimeout = 30 * time.Second
+		if !hookAnswerRaceBuild && p.name == "default" {
 			runs = 3
 		}
 		for _, row := range rows {
@@ -125,9 +128,9 @@ func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", strings.NewReader(string(body)))
 				req.Header.Set("Content-Type", "application/json")
 				rec := httptest.NewRecorder()
-				start := time.Now()
+				start := processCPUTime()
 				a.handleInspectTool(rec, req)
-				times = append(times, time.Since(start))
+				times = append(times, processCPUTime()-start)
 				judged++
 				if rec.Code == http.StatusGatewayTimeout && runs > 1 {
 					// A run of the timed pack that passed the budget is a sample over
@@ -170,9 +173,9 @@ func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.
 			if runs > 1 {
 				slices.Sort(times)
 				median := times[len(times)/2]
-				t.Logf("%s %.60q: median %s of %v", p.name, row.command, median.Round(time.Millisecond), times)
+				t.Logf("%s %.60q: median CPU %s of %v", p.name, row.command, median.Round(time.Millisecond), times)
 				if median > bar {
-					t.Errorf("%s %q: median answer %s, want under %s (half the %s scan budget); runs %v",
+					t.Errorf("%s %q: median answer CPU time %s, want under %s (half the %s scan budget); runs %v",
 						p.name, row.command, median.Round(time.Millisecond), bar, inspectScanTimeout, times)
 				}
 			}
@@ -181,4 +184,14 @@ func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.
 	if judged == 0 {
 		t.Fatal("no cell judged")
 	}
+}
+
+// processCPUTime is the CPU time this process has used (user plus system),
+// the work of the answers measured, not the time a loaded box made them wait.
+func processCPUTime() time.Duration {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return 0
+	}
+	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
 }

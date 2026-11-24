@@ -73,7 +73,25 @@ type NotificationsConfig struct {
 	// minute boundaries. Zero or negative falls back to
 	// NotificationsDefaultMaxPerMinute.
 	MaxPerMinute int `mapstructure:"max_per_minute" yaml:"max_per_minute,omitempty"`
+
+	// Substrate gates the desktop notifications of `defenseclaw substrate
+	// watch` and the attached launcher (B3.6). Both default on; they still
+	// need Enabled, and an administrator can turn them off for the cluster
+	// (substrate.activity.notifications: off).
+	Substrate NotificationsSubstrateConfig `mapstructure:"substrate" yaml:"substrate,omitempty"`
 }
+
+// NotificationsSubstrateConfig is notifications.substrate.
+type NotificationsSubstrateConfig struct {
+	// Asks notifies once for each new ask an agent of yours raises.
+	Asks bool `mapstructure:"asks" yaml:"asks"`
+	// TaskEnd notifies when a --task run of yours ends.
+	TaskEnd bool `mapstructure:"task_end" yaml:"task_end"`
+}
+
+// IsZero is true at the defaults (both on), so a config that never touched
+// the block does not write it (yaml omitempty).
+func (s NotificationsSubstrateConfig) IsZero() bool { return s.Asks && s.TaskEnd }
 
 // NotificationSourceFilter toggles the three block-decision sources.
 // All default to true so a fresh enable reports everything, and

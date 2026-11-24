@@ -177,6 +177,18 @@ identity.keys_url and keys_ca_file unless config sets them. */ -}}
 {{- if and $keys.caConfigMap (not (hasKey $id "keys_ca_file")) }}{{ $_ := set $id "keys_ca_file" "/etc/defenseclaw-substrate/actor-keys-ca/ca.crt" }}{{ end -}}
 {{- $_ := set $sub "identity" $id -}}
 {{- end -}}
+{{- /* Dedicated values for substrate.launcher, files and git. Each fills
+its config key unless config.substrate sets it: config stays the single
+source and wins. An unset value adds nothing; false is a value. */ -}}
+{{- $cv := .Values.substrate -}}
+{{- range $sect, $keys := dict "launcher" (dict "keyReplay" "key_replay") "files" (dict "push" "push" "sync" "sync") "git" (dict "httpsRewrite" "https_rewrite" "submodules" "submodules" "lfs" "lfs" "pushBranch" "push_branch") -}}
+{{- $have := get $cv $sect | default dict -}}
+{{- $target := get $sub $sect | default dict -}}
+{{- range $v, $k := $keys -}}
+{{- if and (hasKey $have $v) (not (hasKey $target $k)) }}{{ $_ := set $target $k (get $have $v) }}{{ end -}}
+{{- end -}}
+{{- if $target }}{{ $_ := set $sub $sect $target }}{{ end -}}
+{{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- /* GAP-0426: redact before the gateway keeps or sends a record. The
 chart's profile is the observability default unless config names one. */ -}}
@@ -578,9 +590,12 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- end -}}
 
 {{/* Leader RPC mTLS: the pod-identity bundle and the SPIFFE IDs that may call the leader (A2 serve flags). */}}
-{{/* Leader peers: gateway replicas may call every method; the callout
- only the egress chain check and the controller only registrations,
- lifecycle and activity (leader.Permissions, GAP-0094). */}}
+{{/* Leader peers: gateway replicas may call every method but the
+ controller's publish of its egress callout read (leader.NamedOnly,
+ GAP-0553); the callout only the egress chain check, the name lookup of a
+ registration and its egress decisions for the telemetry relay; the controller
+ only registrations, lifecycle, activity and that publish
+ (leader.Permissions, GAP-0094, GAP-0505). */}}
 {{- define "dc.peerFlags" -}}
 - --peer-bundle=/var/run/ate/credential-bundle.pem
 - --peer-trust=/var/run/ate/podidentity-ca.crt
@@ -619,6 +634,9 @@ the leader. */}}
 - name: relay-session
   mountPath: /var/run/secrets/defenseclaw-relay-session
   readOnly: true
+- name: relay-ca
+  mountPath: /var/run/secrets/defenseclaw-relay-ca
+  readOnly: true
 - name: llm-credentials
   mountPath: /var/run/secrets/defenseclaw-llm
   readOnly: true
@@ -640,6 +658,11 @@ the leader. */}}
 - name: relay-session
   secret:
     secretName: {{ .Values.gateway.relaySessionSecret }}
+    optional: true
+    defaultMode: 0440
+- name: relay-ca
+  secret:
+    secretName: {{ .Values.gateway.relayCASecret }}
     optional: true
     defaultMode: 0440
 - name: llm-credentials
@@ -753,4 +776,18 @@ certificates.
 {{- end }}
 - --relay-port={{ $r.relayPort }}
 {{- end -}}
+{{- end -}}
+
+{{/* The self-service secrets namespace (config.substrate.self_service_secrets.namespace),
+or "" when self_service_secrets.mode is off. */}}
+{{- define "dc.userSecretsNs" -}}
+{{- $ss := dig "substrate" "self_service_secrets" dict (.Values.config | default dict) -}}
+{{- if ne (toString (dig "mode" "bindings" $ss)) "off" -}}
+{{- dig "namespace" "defenseclaw-user-secrets" $ss -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The self-service secrets namespace whatever the mode (the hooks revoke its grants when off). */}}
+{{- define "dc.userSecretsNsName" -}}
+{{- dig "substrate" "self_service_secrets" "namespace" "defenseclaw-user-secrets" (.Values.config | default dict) -}}
 {{- end -}}

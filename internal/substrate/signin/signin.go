@@ -57,6 +57,11 @@ const RefusedCode = "subscription_signin_refused"
 // hook registration sits in a folder the agent must own (see HookInAgentFolder).
 const TamperRefusedCode = "agent_hook_tamper_refused"
 
+// AckRequiredCode is the reason of an open-source create that carries a
+// warning the person has not acknowledged yet (HTTP 428, GAP-0482): nothing
+// was created, and the launcher asks for a yes before it sends it again.
+const AckRequiredCode = "signin_ack_required"
+
 // IsRefusalCode reports whether code is one of the refusal reasons.
 func IsRefusalCode(code string) bool {
 	return code == RefusedCode || code == TamperRefusedCode

@@ -4419,4 +4419,6 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("notifications.sources.asset_policy", true)
 	viper.SetDefault("notifications.dedup_window", NotificationsDefaultDedupWindow)
 	viper.SetDefault("notifications.max_per_minute", NotificationsDefaultMaxPerMinute)
+	viper.SetDefault("notifications.substrate.asks", true)
+	viper.SetDefault("notifications.substrate.task_end", true)
 }

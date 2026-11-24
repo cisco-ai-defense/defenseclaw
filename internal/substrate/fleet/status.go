@@ -50,7 +50,10 @@ type Replicas struct {
 
 // Leader is the gateway leader and its store.
 type Leader struct {
-	Ready       bool `json:"ready"`
+	Ready bool `json:"ready"`
+	// Desired is the leader's replica count, for doctor's components row
+	// (GAP-0593); not part of the status document.
+	Desired     int  `json:"-"`
 	LeaseHeld   bool `json:"lease_held"`
 	StoreSchema int  `json:"store_schema,omitempty"`
 }

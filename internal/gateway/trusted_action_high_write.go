@@ -232,6 +232,11 @@ func provedHighWriteFindings(
 	// state: the judgement of a string under a key that names no place
 	// (actionfacts.UnknownKeyTwin.SelfProtectionOnly).
 	selfOnly := false
+	// guestHome is the sandbox guest's home while its placement is judged:
+	// the catalog rules spell a home as ~, $HOME, /root, /home/<name> or
+	// /Users/<name>, never as the guest's (/sandbox), so a target below it is
+	// matched in its ~ spelling, as the laptop's /home/<name> target is.
+	guestHome := ""
 	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
 		if seenTargets[resolved] {
 			return
@@ -239,12 +244,16 @@ func provedHighWriteFindings(
 		seenTargets[resolved] = true
 		instructionProof := instructionTarget(resolved, flavor)
 		instruction := instructionProof != instructionNotProved
+		matched := resolved
+		if rel, below := strings.CutPrefix(resolved, guestHome+"/"); guestHome != "" && below && flavor == actionfacts.PathFlavorPOSIX {
+			matched = "~/" + rel
+		}
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
 				if selfOnly && rule.ID != stateWriteRuleID {
 					continue
 				}
-				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
+				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, matched, flavor, instruction) {
 					continue
 				}
 				proof := proofForRule(rule.ID)
@@ -363,6 +372,22 @@ func provedHighWriteFindings(
 		}
 	}
 	judgePaths(facts)
+	// A sandbox call is read in the guest's own working directory as well
+	// (sandboxGuestPlacedInput): a copy-mode call names no directory of its
+	// own, so a relative write the laptop resolves in its folder, or in a
+	// folder its working-folder tracking keeps for the command (cd -,
+	// cd "$D" or a cd before $CMD, rel-1-0-10:GAP-0869), named no target
+	// here, and the actor allowed rm ../.defenseclaw/audit.db after
+	// cd .cache; cd -; $CMD where the laptop blocks (substrate-1 GAP-0377 at
+	// FU8). The reading is lexical, and this lane reads no guest file on the
+	// host (isSandboxHookRequest).
+	if guest, ok := sandboxGuestPlacedInput(request, facts); ok {
+		if home := path.Clean(guest.ActiveHome); path.IsAbs(guest.ActiveHome) && home != "/" {
+			guestHome = home
+		}
+		judgePaths(request.guestMemo.analyze(guest))
+		guestHome = ""
+	}
 	// A native write call with a key outside its reviewed schema stays
 	// partial and names no path; each file it may write is judged as the
 	// reviewed call that writes it (actionfacts.UnknownKeyWriteTargetViews,

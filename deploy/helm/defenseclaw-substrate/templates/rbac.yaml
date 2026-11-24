@@ -27,6 +27,13 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+{{- if include "dc.userSecretsNs" . }}
+# The self-service binding store (B1): only the gateway writes it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get, update]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -84,6 +91,13 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+{{- if include "dc.userSecretsNs" . }}
+# The self-service binding store (B1): the controller renders it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -95,6 +109,41 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: defenseclaw-controller
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
+  namespace: {{ .Release.Namespace }}
+---
+# The controller reads which egress callout Substrate uses from
+# atenet-egress's live Envoy config (GAP-0505): when it is not the
+# DefenseClaw callout, actor policies follow the fail mode. get on that one
+# ConfigMap in the Substrate namespace, nothing else there (it holds no
+# secret: certificates come through SDS files), for the controller alone:
+# the gateway reads the controller's result through the leader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-{{ .Release.Namespace }}-egress-read
+  namespace: {{ .Values.substrate.namespace }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "controller") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [atenet-egress]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-{{ .Release.Namespace }}-egress-read
+  namespace: {{ .Values.substrate.namespace }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "controller") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-{{ .Release.Namespace }}-egress-read
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-controller
@@ -133,6 +182,10 @@ namespace.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- /* Self-service values (B1): dc-b-<person> Secrets, one per person. */ -}}
+{{- with include "dc.userSecretsNs" . -}}
+{{- $_ := set $secretNs . (dict "names" list "any" true) -}}
 {{- end -}}
 {{- range $ns := keys $secretNs | sortAlpha }}
 {{- $e := get $secretNs $ns }}

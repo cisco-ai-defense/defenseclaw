@@ -32,13 +32,23 @@ const RetentionStartupDelay = time.Minute
 // for hours, and only a gateway restart cleared it (rel-1-0-6:GAP-0263).
 const RetentionRetryMax = 30 * time.Minute
 
-// RetentionSizeCapCheckInterval is the wait between runs while an audit
-// store size cap (observability.local.max_store_mb) is set, instead of the
-// six-hour cadence: a busy gateway writes far more than its cap's headroom
-// in six hours, and a store that fills its volume fails every hook closed
-// (GAP-0402). A run under the cap reads the store's page counts and deletes
-// nothing.
-const RetentionSizeCapCheckInterval = 10 * time.Minute
+// RetentionSizeCapCheckInterval is the wait between size checks while an
+// audit store size cap (observability.local.max_store_mb) is set, instead of
+// the six-hour cadence: a store that fills its volume fails every hook closed
+// (GAP-0402). A check reads the store's page counts only; the full pass runs
+// when the used pages are near the cap or the six-hour pass is due
+// (substrate-1:GAP-0538). A gateway answering 50 hook posts a second writes
+// about 75 MiB a minute (substrate-1:GAP-0570), and a capped pass starts at
+// nine tenths of the cap, so the check comes well before the next 100 MiB.
+const RetentionSizeCapCheckInterval = 30 * time.Second
+
+// RetentionSizeCapShortfallInterval is the wait before another full pass
+// after one that left the store over its cap with nothing it may delete
+// (open correlation state, pending work): until then the size checks do not
+// start a pass, which would find the same rows. Two minutes: at 75 MiB a
+// minute the store gains about 150 MiB meanwhile, inside the volume the
+// chart requires (twice the cap plus 256 MiB).
+const RetentionSizeCapShortfallInterval = 2 * time.Minute
 
 // RetentionControllerState is a bounded lifecycle/health label. It never
 // contains a database error, path, SQL text, or retained record content.
@@ -127,6 +137,12 @@ type retentionStoreCapper interface {
 	UpdateMaxStoreMB(int64) error
 }
 
+// retentionStoreCapChecker is a capped reaper that tells from the store's
+// page counts alone whether a pass would delete for the cap.
+type retentionStoreCapChecker interface {
+	StoreOverCapStart(context.Context) (bool, error)
+}
+
 // RetentionController owns exactly one audit reaper for the process lifetime.
 // Runtime graph activation changes policy through ApplyPolicy; it never swaps
 // or closes the reaper or its stores.
@@ -156,6 +172,11 @@ type RetentionController struct {
 	// failedRuns counts the runs that failed in a row; while it is set the
 	// next run follows retryInterval, and a policy reload runs at once.
 	failedRuns atomic.Int64
+	// lastRunAt is when the last full pass started, and capShortfall whether
+	// it ended over the size cap with nothing it could delete. Only the run
+	// goroutine touches them.
+	lastRunAt    time.Time
+	capShortfall bool
 
 	statusMu sync.Mutex
 	status   atomic.Pointer[RetentionControllerStatus]
@@ -437,6 +458,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 			return
 		}
 		interval := audit.RetentionScheduleInterval
+		capCheck := false
 		switch {
 		case !controller.enabled():
 			interval = 0
@@ -449,6 +471,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 			interval = audit.RetentionFollowUpInterval
 		case controller.maxStoreMB() > 0 && !controller.secureClient:
 			interval = RetentionSizeCapCheckInterval
+			capCheck = true
 		}
 		wake, err := controller.scheduler.Wait(ctx, interval, controller.policyWake)
 		if err != nil {
@@ -466,7 +489,10 @@ func (controller *RetentionController) run(ctx context.Context) {
 		}
 		switch wake {
 		case audit.RetentionScheduleTick:
-			if controller.enabled() && !controller.runOnce(ctx) {
+			if !controller.enabled() || (capCheck && !controller.capPassDue(ctx)) {
+				continue
+			}
+			if !controller.runOnce(ctx) {
 				return
 			}
 		case audit.RetentionScheduleReload:
@@ -501,6 +527,45 @@ func (controller *RetentionController) run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// capPassDue is whether a size-check tick runs the full pass: the six-hour
+// pass is due, or the store's page counts are past the size at which a pass
+// deletes for the cap (a failed check runs the pass, which reports the
+// failure). After a pass that could not bring the store under the cap, the
+// checks wait RetentionSizeCapShortfallInterval before the next one.
+func (controller *RetentionController) capPassDue(ctx context.Context) bool {
+	now := controller.clock()
+	if !now.Before(controller.lastRunAt.Add(audit.RetentionScheduleInterval)) {
+		return true
+	}
+	if controller.capShortfall && now.Before(controller.lastRunAt.Add(RetentionSizeCapShortfallInterval)) {
+		return false
+	}
+	checker, ok := controller.reaper.(retentionStoreCapChecker)
+	if !ok {
+		return true
+	}
+	over, err := checker.StoreOverCapStart(ctx)
+	return err != nil || over
+}
+
+// capPassStuck is whether a size-capped pass that completed under the cap
+// still left the store past the size at which a pass starts, having deleted
+// nothing (only open correlation state or protected rows were left): the
+// next checks would start the same empty pass every RetentionSizeCapCheckInterval,
+// so they wait RetentionSizeCapShortfallInterval as after a shortfall over
+// the cap.
+func (controller *RetentionController) capPassStuck(ctx context.Context, result audit.RetentionRunResult) bool {
+	if !result.SizeCapped || result.Backlog || sumRowsDeleted(result.RowsDeleted) > 0 {
+		return false
+	}
+	checker, ok := controller.reaper.(retentionStoreCapChecker)
+	if !ok {
+		return false
+	}
+	over, err := checker.StoreOverCapStart(ctx)
+	return err == nil && over
 }
 
 // maxStoreMB is the reaper's size cap in MiB, zero when it has none.
@@ -561,6 +626,8 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
+	controller.lastRunAt = attemptedAt
+	controller.capShortfall = err == nil && (result.CapNotReached || controller.capPassStuck(ctx, result))
 	controller.backlog.Store(err == nil && result.Backlog)
 	controller.logRunOutcome(err)
 	status := controller.Status()

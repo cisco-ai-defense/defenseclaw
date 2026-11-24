@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -93,8 +94,19 @@ type StageOptions struct {
 	StateDir string
 	// GitDepth is the history depth of the shallow clone (200).
 	GitDepth int
+	// Upstream stages a "this checkout" copy (run --clone .): the history
+	// is only the commits after the merge-base with the remote-tracking
+	// branch, and the sandbox fetches the rest from the remote
+	// (FetchUpstream). The folder must be the top of a checkout.
+	Upstream bool
+	// UpstreamHTTPS, when set, turns an ssh or scp-form remote into the
+	// https address git in the sandbox clones (substrate.git.https_rewrite
+	// and the image's rules); ok false refuses the remote, as with none.
+	UpstreamHTTPS func(string) (string, bool)
 	// MaxBytes caps the staged copy, history included (500 MiB).
 	MaxBytes int64
+	// Summary optionally collects working-tree sizes after exclusions and masking.
+	Summary *CopySummary
 	// MaxWalkEntries caps the files and directories of a non-git folder
 	// (default 250k); a larger folder is refused rather than copied in part.
 	MaxWalkEntries int
@@ -112,12 +124,37 @@ type StageOptions struct {
 	// (committed templates such as .env.example) most projects do not have,
 	// so a warning for each was noise on every copy run (GAP-0308).
 	UnmaskAsked []string
+	// UnmaskExact shares files by exact relative path (slash-separated),
+	// never as a glob or a base name: a push passes the run's shared files
+	// (CopyRecord.Unmasked) here, so sharing the root .env does not share
+	// a deploy/prod/.env added later.
+	UnmaskExact []string
+	// RewriteSecrets, when set to a placeholder form (PlaceholderToken or
+	// PlaceholderEnv), uploads a file whose credentials the content scan
+	// finds with each value replaced by a placeholder instead of holding
+	// the whole file back; files held back by name or pattern, and
+	// findings that are the file as a whole, stay held back. The Agent
+	// Substrate launcher sets it (upload_scan.secret_action replace);
+	// OpenShell does not. The record keeps where each value was
+	// (CopyRecord.SecretLines), never the value.
+	RewriteSecrets string
+	// ScanMaxFileBytes and ScanTimeBudget bound the content scan
+	// (DefaultScanMaxFileBytes, DefaultScanTimeBudget); every file they
+	// leave unscanned is reported (CopyRecord.NotScanned).
+	ScanMaxFileBytes int64
+	ScanTimeBudget   time.Duration
 	// Replace discards an existing copy record of the same name once the
 	// new copy is staged (a failed Stage leaves it as it was). A replaced
 	// uploaded copy is remembered (CopyRecord.Replaced) until the new one is
 	// uploaded, since the sandbox still holds it.
 	Replace bool
 	Now     func() time.Time
+	// prior are the replaced credentials of the copy a push stages into
+	// (PrepareCopy reads them from its record): a credential line it already
+	// replaced (same file, rule, line text and place in the line) keeps its
+	// placeholder and a new one is numbered after the highest, so a push
+	// never renumbers what the sandbox holds (RV6-1).
+	prior []SecretLine
 }
 
 // CopyRecord is the persisted state of one copy-mode sandbox.
@@ -144,19 +181,37 @@ type CopyRecord struct {
 	// it was staged from ("" for plain folders and unborn branches).
 	Baseline string `json:"baseline"`
 	Head     string `json:"head,omitempty"`
-	Branch   string `json:"branch,omitempty"`
+	// SandboxHead is the commit the sandbox copy's HEAD starts at when it
+	// is not Head: one commit on Head whose tree holds the uploaded
+	// version of each tracked file whose credentials were replaced (its
+	// committed versions, with the values, are withheld).
+	SandboxHead string `json:"sandbox_head,omitempty"`
+	Branch      string `json:"branch,omitempty"`
 	// Remotes are the (credential-free) remotes configured in the copy.
 	Remotes map[string]string `json:"remotes,omitempty"`
 	// LineEndings are the operator's core.autocrlf/eol/safecrlf settings,
 	// applied to the copy and to the capture Apply merges into.
 	LineEndings map[string]string `json:"line_endings,omitempty"`
 	HeldBack    []string          `json:"held_back,omitempty"`
+	// Masks are the extra exclude patterns of the copy (run --exclude);
+	// push stages with them too.
+	Masks []string `json:"masks,omitempty"`
 	// Unmasked are the files that look like secrets --unmask shared with
 	// the sandbox, which the run names so the user can confirm them.
 	Unmasked []string `json:"unmasked,omitempty"`
+	// SecretLines are the credentials replaced with placeholders in the
+	// uploaded files (StageOptions.RewriteSecrets). They stay in this local
+	// record; the sandbox only ever sees the placeholders.
+	SecretLines []SecretLine `json:"secret_lines,omitempty"`
+	// NotScanned are the files the content scan did not read (over the
+	// per-file limit or past the time budget); they were uploaded as they
+	// are, and the warnings name them.
+	NotScanned []string `json:"not_scanned,omitempty"`
 	// Withheld counts the committed blobs left out of the shipped history
 	// (see withholdHistory); the copy is then a partial clone.
-	Withheld   int        `json:"withheld,omitempty"`
+	Withheld int `json:"withheld,omitempty"`
+	// Upstream is set for a "this checkout" copy (StageOptions.Upstream).
+	Upstream   *Upstream  `json:"upstream,omitempty"`
 	Files      int        `json:"files"`
 	Bytes      int64      `json:"bytes"`
 	StagedAt   time.Time  `json:"staged_at"`
@@ -178,6 +233,19 @@ type SandboxCopy struct {
 	StateDir     string   `json:"remote_state_dir,omitempty"`
 	Baseline     string   `json:"baseline"`
 	Head         string   `json:"head,omitempty"`
+	SandboxHead  string   `json:"sandbox_head,omitempty"`
+}
+
+// sandboxHead is the commit the sandbox copy's HEAD starts at: the
+// baseline for a plain folder, else SandboxHead or Head.
+func (r *CopyRecord) sandboxHead() string {
+	switch {
+	case r.Kind == CopyPlain:
+		return r.Baseline
+	case r.SandboxHead != "":
+		return r.SandboxHead
+	}
+	return r.Head
 }
 
 // stateDir is the copy's state directory in the sandbox.
@@ -216,7 +284,7 @@ func (r *CopyRecord) inSandbox() []*CopyRecord {
 	if p := r.Replaced; p != nil {
 		return []*CopyRecord{{
 			Version: r.Version, Name: r.Name, Project: r.Project, Kind: p.Kind,
-			RemoteDir: p.RemoteDir, RemoteGitDir: p.RemoteGitDir, StateDir: p.StateDir, Baseline: p.Baseline, Head: p.Head,
+			RemoteDir: p.RemoteDir, RemoteGitDir: p.RemoteGitDir, StateDir: p.StateDir, Baseline: p.Baseline, Head: p.Head, SandboxHead: p.SandboxHead,
 		}}
 	}
 	return nil
@@ -227,7 +295,7 @@ func (r *CopyRecord) replacing(prev *CopyRecord) {
 	switch {
 	case prev == nil:
 	case prev.UploadedAt != nil:
-		r.Replaced = &SandboxCopy{Kind: prev.Kind, RemoteDir: prev.RemoteDir, RemoteGitDir: prev.RemoteGitDir, StateDir: prev.StateDir, Baseline: prev.Baseline, Head: prev.Head}
+		r.Replaced = &SandboxCopy{Kind: prev.Kind, RemoteDir: prev.RemoteDir, RemoteGitDir: prev.RemoteGitDir, StateDir: prev.StateDir, Baseline: prev.Baseline, Head: prev.Head, SandboxHead: prev.SandboxHead}
 	default:
 		r.Replaced = prev.Replaced
 	}
@@ -362,6 +430,83 @@ func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 	return rec, nil
 }
 
+// PreparedCopy holds a local stage before its actor has been created.
+type PreparedCopy struct {
+	layout layout
+	rec    *CopyRecord
+	dir    string
+	parent string
+}
+
+// PrepareCopy stages the project without installing a copy record.
+func PrepareCopy(ctx context.Context, opts StageOptions) (*PreparedCopy, error) {
+	lay, err := newLayout(opts.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	if old, err := LoadCopy(opts.DataDir, opts.Name); err == nil {
+		opts.prior = old.SecretLines
+	}
+	opts.Name = "preflight-" + randomSuffix()
+	rec, dir, err := stageCopy(ctx, lay, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedCopy{layout: lay, rec: rec, dir: dir, parent: lay.sandboxDir(opts.Name)}, nil
+}
+
+// Close discards a stage which was not installed.
+func (p *PreparedCopy) Close() {
+	if p.dir != "" {
+		_ = removeTree(p.dir)
+		p.dir = ""
+	}
+	_ = os.Remove(p.parent)
+}
+
+// Record returns the staged copy metadata.
+func (p *PreparedCopy) Record() CopyRecord { return *p.rec }
+
+// Install binds the stage to a newly created actor and installs its local record.
+func (p *PreparedCopy) Install(name, root, stateDir string, replace bool) error {
+	if p.dir == "" {
+		return errors.New("workspace: preflight has already been consumed")
+	}
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if !path.IsAbs(root) || path.Clean(root) == "/" {
+		return fmt.Errorf("workspace: remote root %q must be an absolute directory below /", root)
+	}
+	rec := *p.rec
+	rec.Name = name
+	rec.RemoteDir = path.Join(root, rec.RepoName)
+	var err error
+	if rec.StateDir, err = checkStateDir(stateDir, rec.RemoteDir); err != nil {
+		return err
+	}
+	rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
+	if rec.Kind == CopyPlain {
+		rec.RemoteGitDir = path.Join(rec.stateDir(), "git")
+	}
+	if pathExists(p.layout.copyRecord(name)) {
+		if !replace {
+			return fmt.Errorf("workspace: copy %s already exists", name)
+		}
+		prev, _ := LoadCopy(p.layout.dataDir, name)
+		rec.replacing(prev)
+	}
+	if err := ensurePrivateDir(p.layout.sandboxDir(name)); err != nil {
+		return err
+	}
+	if err := installCopyDir(p.layout, &rec, p.dir); err != nil {
+		return err
+	}
+	p.dir = ""
+	p.rec = &rec
+	return nil
+}
+
 // stageCopy builds a complete copy directory for opts beside the live one
 // (<copy>.new-<random>) and returns its record, whose paths point into it.
 // Nothing else is touched: the caller installs the directory
@@ -400,7 +545,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	rec := &CopyRecord{
 		Version: 1, Name: opts.Name, Project: real, RepoName: repo,
 		RemoteDir: path.Join(path.Clean(root), repo), StateDir: stateDir, StagedAt: now().UTC(),
-		Warnings: warnings,
+		Warnings: warnings, Masks: append([]string(nil), opts.Masks...),
 	}
 	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
 	// A refused copy (too large, a secret it cannot hold back) of a
@@ -430,12 +575,18 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	scanOpts := secretScanOptions{
 		patterns: opts.Masks, unmask: normalizeUnmask(opts.Unmask, real), maskTracked: true,
 		detector: opts.Detector, contentScan: !opts.DisableContentScan,
-		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real),
+		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real), unmaskExact: exactRels(opts.UnmaskExact),
+		rewrite: opts.RewriteSecrets, maxFileBytes: opts.ScanMaxFileBytes, timeBudget: opts.ScanTimeBudget,
+		prior: opts.prior,
 	}
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
 	}
-	if isGitTopLevel(ctx, real) {
+	gitTop := isGitTopLevel(ctx, real)
+	if opts.Upstream && !gitTop {
+		return nil, "", &UpstreamError{Msg: real + " is not the top folder of a git checkout; --clone . needs one (or use run without --clone .)"}
+	}
+	if gitTop {
 		rec.Kind = CopyGit
 		rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
 		err = stageGit(ctx, rec, opts, scanOpts, maxBytes)
@@ -445,7 +596,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		if parent := enclosingRepo(real); parent != "" {
 			rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s is inside the git repository at %s; it is copied as a plain folder", real, parent))
 		}
-		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries)
+		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries, opts.Summary)
 	}
 	if err != nil {
 		return nil, "", err
@@ -563,6 +714,9 @@ func replaceDir(dir, live string, exchange func(a, b string) error) (string, err
 type stagedFile struct {
 	rel  string
 	info fs.FileInfo
+	// content, when set, is what the copy holds in place of the file's own
+	// bytes (its credentials replaced with placeholders).
+	content []byte
 }
 
 func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts secretScanOptions, maxBytes int64) error {
@@ -572,6 +726,11 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return err
 	}
 	rec.Head, rec.Branch = head, branch
+	if opts.Upstream {
+		if rec.Upstream, err = resolveUpstream(ctx, proj, head, branch, opts.UpstreamHTTPS); err != nil {
+			return err
+		}
+	}
 
 	// The working tree to ship: tracked files still present plus untracked
 	// files git does not ignore.
@@ -621,7 +780,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if w := leftOutWarning(leftOut); w != "" {
 		rec.Warnings = append(rec.Warnings, w)
 	}
-	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec, opts.Summary)
 	if err != nil {
 		return err
 	}
@@ -650,6 +809,12 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	depth := opts.GitDepth
 	if depth <= 0 {
 		depth = DefaultGitDepth
+	}
+	if rec.Upstream != nil {
+		// Every commit of base..HEAD is at most Commits-1 steps from HEAD
+		// and base at most Commits, so this depth ships them and base and
+		// stops there; the sandbox fetches the rest (FetchUpstream).
+		depth = rec.Upstream.Commits + 1
 	}
 	if head != "" {
 		source := "file://" + rec.Project
@@ -731,8 +896,12 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	// not in the copy's index, and marking it failed the whole run with
 	// "Unable to mark file .env" (GAP-0596). Held back, it is simply absent
 	// from the copy.
+	replaced := map[string]struct{}{}
+	for _, l := range rec.SecretLines {
+		replaced[l.Rel] = struct{}{}
+	}
 	inCopy := map[string]bool{}
-	if len(heldBack) > 0 && head != "" {
+	if (len(heldBack) > 0 || len(replaced) > 0) && head != "" {
 		listed, err := sg.output(ctx, "ls-files", "-z", "--cached")
 		if err != nil {
 			return err
@@ -754,22 +923,86 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			return err
 		}
 	}
-	baseline, err := captureBaseline(ctx, sg, filepath.Join(stage, ".git", "index"), head, false)
+	// A tracked file uploaded with its credentials replaced: its committed
+	// versions are withheld below, so the sandbox's HEAD and index must
+	// hold the uploaded version. Left pointing at the withheld blob, the
+	// agent's git status, diff and stash failed, and with text=auto or
+	// core.autocrlf so did the pull's capture (GAP-0752). One commit on
+	// Head holds the uploaded versions.
+	var replacedTracked []string
+	for p := range replaced {
+		if inCopy[p] {
+			replacedTracked = append(replacedTracked, p)
+		}
+	}
+	sandboxHead := head
+	if len(replacedTracked) > 0 {
+		sort.Strings(replacedTracked)
+		g := sg
+		g.stdin = strings.NewReader(strings.Join(replacedTracked, "\x00") + "\x00")
+		if err := g.run(ctx, "update-index", "-z", "--stdin"); err != nil {
+			return err
+		}
+		tree, err := sg.line(ctx, "write-tree")
+		if err != nil {
+			return err
+		}
+		if sandboxHead, err = sg.line(ctx, "commit-tree", tree, "-p", head, "-m", "defenseclaw: credentials replaced with placeholders in the sandbox copy"); err != nil {
+			return err
+		}
+		ref := []string{"update-ref", "--no-deref", "HEAD", sandboxHead}
+		if branch != "" {
+			ref = []string{"update-ref", branch, sandboxHead}
+		}
+		if err := sg.run(ctx, ref...); err != nil {
+			return err
+		}
+		rec.SandboxHead = sandboxHead
+		// Every commit the agent makes sits on that commit, so a branch it
+		// pushes from the sandbox would put the placeholders over the
+		// credential lines upstream (RV6-4). A pre-push hook in the copy
+		// refuses such a push: an accident guard, not a control (the agent
+		// can remove it).
+		if err := writePlaceholderPrePush(stage, sandboxHead); err != nil {
+			return err
+		}
+		what := strings.Join(replacedTracked, ", ")
+		if len(replacedTracked) > 3 {
+			what = strconv.Itoa(len(replacedTracked)) + " tracked files"
+		}
+		rec.Warnings = append(rec.Warnings, "the sandbox's git history has one commit on yours that replaces the credentials in "+what+
+			" with placeholders; a branch the agent pushes from the sandbox would carry it (a pre-push hook in the copy refuses that push, but it is an accident guard: the agent can skip or remove it). "+
+			"Bring the work back with pull --branch and push it from this computer")
+	}
+	baseline, err := captureBaseline(ctx, sg, filepath.Join(stage, ".git", "index"), sandboxHead, false)
 	if err != nil {
 		return err
 	}
 	rec.Baseline = baseline
+	if rec.Upstream != nil {
+		changed, err := sg.output(ctx, "diff-tree", "-r", "-z", "--name-only", "--no-commit-id", head, baseline)
+		if err != nil {
+			return err
+		}
+		rec.Upstream.Changes = len(splitNUL(changed))
+	}
 	if head != "" {
 		// Held-back files stay out of the shipped history as well, and so
 		// does every version of a path the name rules cover.
+		// A file uploaded with its credentials replaced keeps only the
+		// replaced version: its committed versions hold the values.
 		held := toSet(heldBack)
 		withheld := func(rel string) bool {
 			if _, ok := held[rel]; ok {
 				return true
 			}
-			return !unmaskedBy(scanOpts.unmask, rel) && secretByName(scanOpts.patterns, rel)
+			if _, ok := replaced[rel]; ok {
+				return true
+			}
+			return !scanOpts.isUnmasked(rel) && secretByName(scanOpts.patterns, rel)
 		}
-		n, err := withholdHistory(ctx, sg, stage, filepath.Dir(stage), withheld)
+		keep := func(rel string) bool { _, ok := replaced[rel]; return ok }
+		n, err := withholdHistory(ctx, sg, stage, filepath.Dir(stage), withheld, keep)
 		if err != nil {
 			return err
 		}
@@ -843,7 +1076,7 @@ func gitConfigPath(ctx context.Context, g gitCmd) string {
 	return filepath.Join(p, "config")
 }
 
-func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64, maxEntries int) error {
+func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64, maxEntries int, summary *CopySummary) error {
 	var candidates []string
 	var opaque []string
 	truncated, err := walkProject(rec.Project, maxEntries, func(rel string, d fs.DirEntry) error {
@@ -866,7 +1099,7 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 		sort.Strings(opaque)
 		rec.Warnings = append(rec.Warnings, "not copied: "+strings.Join(firstN(opaque, 5), ", "))
 	}
-	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec, summary)
 	if err != nil {
 		return err
 	}
@@ -917,12 +1150,16 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 // candidate paths. It returns the files to copy and the ones held back,
 // which the record lists once (CopyRecord.HeldBack), not among its
 // warnings.
-func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord) ([]stagedFile, []string, error) {
+func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord, summary *CopySummary) ([]stagedFile, []string, error) {
 	sort.Strings(candidates)
-	held, err := detectSecretsIn(root, candidates, scanOpts)
+	scan, err := detectSecretsIn(root, candidates, scanOpts)
 	if err != nil {
 		return nil, nil, err
 	}
+	held := scan.held
+	rec.SecretLines = scan.lines
+	rec.NotScanned = scan.notScanned()
+	rec.Warnings = append(rec.Warnings, notScannedWarnings(scan, scanOpts.maxFileBytes, scanOpts.timeBudget)...)
 	// What --unmask shared, and what it named that the copy does not take
 	// (git-ignored files never go): both were silent (GAP-0248).
 	// A file only the pack's or the configuration's own entries share (a
@@ -930,19 +1167,19 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	// covers) counts only when its content looks like a secret: a template of
 	// names was named on every run as if the user had unmasked it (GAP-0351).
 	unmaskOnly := scanOpts
-	unmaskOnly.unmask = nil
+	unmaskOnly.unmask, unmaskOnly.unmaskExact = nil, nil
 	contentOnly := unmaskOnly
 	contentOnly.patterns = nil
 	rec.Unmasked = nil
 	for _, rel := range candidates {
-		if !unmaskedBy(scanOpts.unmask, rel) {
+		if !scanOpts.isUnmasked(rel) {
 			continue
 		}
 		check := contentOnly
-		if unmaskedBy(scanOpts.unmaskAsked, rel) {
+		if unmaskedBy(scanOpts.unmaskAsked, rel) || slices.Contains(scanOpts.unmaskExact, rel) {
 			check = unmaskOnly
 		}
-		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
+		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && would.found() {
 			rec.Unmasked = append(rec.Unmasked, rel)
 		}
 	}
@@ -968,46 +1205,17 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 			continue
 		}
 		total += info.Size()
-		if total > maxBytes {
+		if summary != nil {
+			summary.Add(rel, info.Size())
+		} else if total > maxBytes {
 			return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 		}
-		files = append(files, stagedFile{rel: rel, info: info})
+		files = append(files, stagedFile{rel: rel, info: info, content: scan.rewritten[rel]})
+	}
+	if total > maxBytes {
+		return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 	}
 	return files, held, nil
-}
-
-// detectSecretsIn applies the mask rules to a fixed list of files (copy
-// mode ships exactly git's view of the working tree, not a directory walk)
-// and returns the ones it holds back.
-func detectSecretsIn(root string, rels []string, opts secretScanOptions) ([]string, error) {
-	var held []string
-	budget := defaultMaxContentScanFiles
-	for _, rel := range rels {
-		if unmaskedBy(opts.unmask, rel) {
-			continue
-		}
-		if secretByName(opts.patterns, rel) {
-			held = append(held, rel)
-			continue
-		}
-		if !opts.contentScan || opts.detector == nil || budget <= 0 {
-			continue
-		}
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		info, err := os.Lstat(p)
-		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxContentScanBytes {
-			continue
-		}
-		budget--
-		content, err := readSmallRegular(p, maxContentScanBytes)
-		if err != nil || looksBinary(content) {
-			continue
-		}
-		if _, ok := opts.detector.DetectSecret(rel, content); ok {
-			held = append(held, rel)
-		}
-	}
-	return held, nil
 }
 
 func copyFiles(src, dst string, files []stagedFile) error {
@@ -1024,6 +1232,12 @@ func copyFiles(src, dst string, files []stagedFile) error {
 			}
 			if err := os.Symlink(target, to); err != nil {
 				return err
+			}
+			continue
+		}
+		if f.content != nil {
+			if err := writeReplaced(to, f.content, f.info.Mode(), f.info.ModTime()); err != nil {
+				return fmt.Errorf("workspace: copy %s: %w", f.rel, err)
 			}
 			continue
 		}
@@ -1454,11 +1668,7 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 	if kv["baseline"] != rec.Baseline {
 		return fmt.Errorf("workspace: sandbox baseline is %q, expected %s", kv["baseline"], rec.Baseline)
 	}
-	wantHead := rec.Head
-	if rec.Kind == CopyPlain {
-		wantHead = rec.Baseline
-	}
-	if kv["head"] != wantHead {
+	if wantHead := rec.sandboxHead(); kv["head"] != wantHead {
 		return fmt.Errorf("workspace: sandbox HEAD is %q, expected %q", kv["head"], wantHead)
 	}
 	t := time.Now().UTC()
@@ -1479,6 +1689,20 @@ func parseKV(b []byte) map[string]string {
 		} else {
 			out[k] = v
 		}
+	}
+	return out
+}
+
+// exactRels cleans exact shared paths to the slash-separated relative form
+// the copy compares against; empty, absolute and escaping entries are dropped.
+func exactRels(in []string) []string {
+	var out []string
+	for _, p := range in {
+		p = path.Clean(filepath.ToSlash(p))
+		if p == "." || p == "" || strings.HasPrefix(p, "/") || p == ".." || strings.HasPrefix(p, "../") {
+			continue
+		}
+		out = append(out, p)
 	}
 	return out
 }

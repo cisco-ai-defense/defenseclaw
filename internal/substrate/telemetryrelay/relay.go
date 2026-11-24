@@ -50,6 +50,17 @@ const (
 	KindEgress    = "egress"
 	KindCount     = "count"
 	KindGauge     = "gauge"
+	// KindAskClosed is a pending ask the leader closed because its actor
+	// crashed, was reverted or was deleted (GAP-0526): Reason is one of the
+	// AskClosed codes.
+	KindAskClosed = "ask_closed"
+)
+
+// Reason codes of a KindAskClosed record.
+const (
+	AskClosedActorCrashed  = "actor_crashed"
+	AskClosedActorReverted = "actor_reverted"
+	AskClosedActorDeleted  = "actor_deleted"
 )
 
 // Metrics a record of kind count or gauge may name.
@@ -101,6 +112,12 @@ type Record struct {
 	// the callout's, from the egress gateway's verified SPIFFE ID, and it has
 	// no UID and no profile (GAP-0581). What a poster sends here is ignored.
 	Unregistered bool `json:"unregistered,omitempty"`
+
+	// AskID, Unattended and Severity: the ask a KindAskClosed record names
+	// (Host is its host or tool, Reason its code).
+	AskID      string `json:"ask_id,omitempty"`
+	Unattended bool   `json:"unattended,omitempty"`
+	Severity   string `json:"severity,omitempty"`
 
 	// Metric and Value: a count (Value is the increment) or a gauge (the
 	// current value).
@@ -172,8 +189,17 @@ type Store struct {
 	// marked Unregistered, without a UID or profile (GAP-0581). Nil keeps
 	// the posted fields (tests).
 	Registrations registry.Store
+	// MaxHostUses bounds the host-use map (DefaultMaxHostUses when 0).
+	MaxHostUses int
 
 	mu sync.Mutex
+	// uses is the newest allowed request of each actor to each host
+	// (MethodHostUses), useCount its entries.
+	uses     map[ActorRef]map[string]time.Time
+	useCount int
+	// useOwner is the person (Person.ID) of each actor in uses that has
+	// one: the trim takes from the people with the most entries first.
+	useOwner map[ActorRef]string
 	// life is lifecycle records and counts, egress the egress decisions.
 	life, egress queue
 	gauges       map[string]int64
@@ -287,7 +313,7 @@ func jsonTextLen(s string) int {
 func textFields(r *Record) []*string {
 	return []*string{&r.Kind, &r.Atespace, &r.Actor, &r.UID, &r.ParentUID, &r.Profile, &r.Template, &r.Connector,
 		&r.Driver, &r.BatchID, &r.RunMode, &r.UserID, &r.UserName, &r.Lifecycle, &r.Host, &r.Path, &r.Decision,
-		&r.Category, &r.Reason, &r.Metric}
+		&r.Category, &r.Reason, &r.Metric, &r.AskID, &r.Severity}
 }
 
 // cutRecord cuts each text field of r to MaxFieldBytes.
@@ -354,7 +380,7 @@ func (s *Store) Add(recs ...Record) {
 			if !validMetric(r.Kind, r.Metric) || r.Value <= 0 {
 				continue
 			}
-		case KindLifecycle:
+		case KindLifecycle, KindAskClosed:
 		case KindEgress:
 			q = &s.egress
 		default:
@@ -385,14 +411,29 @@ func (s *Store) PostCounts(_ context.Context, in PostRequest) (struct{}, error) 
 	return struct{}{}, nil
 }
 
-// PostEgress implements MethodPostEgress.
+// PostEgress implements MethodPostEgress. Only decisions are kept: a
+// secret-injection record (Decision inject, which a callout before S6b
+// sent for each bound secret) is nothing a gateway exports, so it only
+// took room in the queue. The allowed decisions also feed the host-use map.
 func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error) {
+	var allowed []Record
+	var owners []string
 	s.post(in, func(r Record) (Record, bool) {
-		if r.Kind != KindEgress {
+		if r.Kind != KindEgress || (r.Decision != "allow" && r.Decision != "block") {
 			return r, false
 		}
-		return s.egressActor(ctx, r)
+		r, owner, ok := s.egressActor(ctx, r)
+		if ok && r.Decision == "allow" {
+			allowed = append(allowed, r)
+			owners = append(owners, owner)
+		}
+		return r, ok
 	})
+	if len(allowed) > 0 {
+		s.mu.Lock()
+		s.noteUsesLocked(allowed, owners, time.Now())
+		s.mu.Unlock()
+	}
 	return struct{}{}, nil
 }
 
@@ -413,14 +454,14 @@ func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error
 // and profile it can't name another actor's registration, and a poster can
 // already omit the UID, so a drop would protect nothing and would lose real
 // refusals made on a stale cached UID. A record with no atespace or actor
-// is dropped.
-func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
+// is dropped. owner is the person of the registration ("" when none).
+func (s *Store) egressActor(ctx context.Context, r Record) (_ Record, owner string, _ bool) {
 	r.Unregistered = false
 	if s.Registrations == nil {
-		return r, true
+		return r, "", true
 	}
 	if r.Atespace == "" || r.Actor == "" {
-		return r, false
+		return r, "", false
 	}
 	if r.UID != "" {
 		reg, ok, err := s.Registrations.Get(ctx, r.Atespace, r.UID)
@@ -429,14 +470,14 @@ func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
 			if r.Profile == "" {
 				r.Profile = reg.Profile
 			}
-			return r, true
+			return r, reg.Person.ID(), true
 		}
 	}
 	if !registry.ValidName(r.Atespace) || !registry.ValidName(r.Actor) {
-		return r, false
+		return r, "", false
 	}
 	r.UID, r.Profile, r.Unregistered = "", "", true
-	return r, true
+	return r, "", true
 }
 
 // Take implements MethodTake: lifecycle records and counts first, then
@@ -525,6 +566,7 @@ func Serve(srv *leader.Server, s *Store) {
 	srv.Handle(MethodPostCounts, postHandler(s.PostCounts))
 	srv.Handle(MethodPostEgress, postHandler(s.PostEgress))
 	srv.HandleRead(MethodTake, leader.Typed(s.Take))
+	srv.HandleRead(MethodHostUses, leader.Typed(s.HostUses))
 }
 
 // ErrRefused reports a batch the leader refused as a bad request (too

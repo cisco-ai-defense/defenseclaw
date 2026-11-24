@@ -17,7 +17,6 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -61,6 +60,12 @@ type PullOptions struct {
 	// Unflushed marks a sandbox that went down without a flush since it was
 	// made: the review also flags the files it brings back empty.
 	Unflushed bool
+	// RestoreSecretLines (--restore-secret-lines) lands the agent's lines
+	// in a file uploaded with replaced credentials, with the value put back
+	// in place of the placeholder; without it a changed line that holds one
+	// keeps the local line, and a change that removed one is not brought
+	// back.
+	RestoreSecretLines bool
 }
 
 // PullResult is the agent's work, verified and reviewed, ready for Apply.
@@ -76,6 +81,14 @@ type PullResult struct {
 	// Effective is Result with held-back paths reset, which Apply uses.
 	Result    string `json:"result"`
 	Effective string `json:"effective"`
+	// Translated is the baseline with the replaced credentials back, as
+	// the folder had it at the upload (B1 S9a): Changes, the review and the
+	// 3-way apply start from it. "" when no file was uploaded so.
+	Translated string `json:"translated,omitempty"`
+	// Restored are the files uploaded with replaced credentials whose
+	// change the 3-way apply brings into the folder, values put back; a
+	// patch file or a branch leaves them out.
+	Restored []string `json:"restored,omitempty"`
 	// Since is where Changes (and the review, the apply's merge base and a
 	// patch) start: the effective result an earlier 3-way apply put in the
 	// folder, so what was brought back already is not brought back again;
@@ -141,10 +154,7 @@ func LoadPull(dataDir, name string) (*PullResult, error) {
 // hold) and bundles every object the host does not already have. It
 // prints key=value lines.
 func captureScript(rec *CopyRecord, bundle bool) string {
-	head := rec.Head
-	if rec.Kind == CopyPlain {
-		head = rec.Baseline
-	}
+	head := rec.sandboxHead()
 	addArgs := "--all"
 	if rec.Kind == CopyPlain {
 		addArgs += " --force"
@@ -279,12 +289,21 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 		}
 	}
 
-	effective, dropped, err := dropHeldBack(ctx, base, rec, result)
+	held, err := dropHeldBack(ctx, base, rec, result, opts.RestoreSecretLines)
 	if err != nil {
 		return nil, err
 	}
-	pr.Effective, pr.Dropped = effective, dropped
+	effective := held.effective
+	pr.Effective, pr.Dropped, pr.Translated, pr.Restored = effective, held.dropped, held.translated, held.restored
 	if err := base.run(ctx, "update-ref", effectRef, effective); err != nil {
+		return nil, err
+	}
+	if pr.Translated == "" {
+		err = deleteRef(ctx, base, translatedRef)
+	} else {
+		err = base.run(ctx, "update-ref", translatedRef, pr.Translated)
+	}
+	if err != nil {
 		return nil, err
 	}
 	// After an apply, the work it brought is in the folder: the pull says
@@ -304,7 +323,10 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 		return nil, err
 	}
 	rep.Name, rep.Project = rec.Name, rec.Project
+	rep.Findings = dropPutFindings(rep.Findings, held.put)
+	rep.Flags = sortFlags(append(rep.Flags, held.flags...))
 	pr.Review = *rep
+	pr.Review.Warnings = append(pr.Review.Warnings, held.notes...)
 	if dirs := strings.Trim(kv["gitdirs"], ","); dirs != "" {
 		// GAP-0530: left out of the capture, never brought back.
 		pr.Review.Warnings = append(pr.Review.Warnings, "left out, never brought back: git metadata folders the agent made ("+
@@ -331,7 +353,24 @@ func (p *PullResult) from() string {
 	if p.Since != "" {
 		return p.Since
 	}
+	return p.baseCommit()
+}
+
+// baseCommit is the copy's baseline as the folder had it: Translated, or
+// the baseline.
+func (p *PullResult) baseCommit() string {
+	if p.Translated != "" {
+		return p.Translated
+	}
 	return p.Baseline
+}
+
+// baseRef names baseCommit in base.git.
+func (p *PullResult) baseRef() string {
+	if p.Translated != "" {
+		return translatedRef
+	}
+	return baselineRef
 }
 
 // markSince points sinceRef at the result the last 3-way apply put in the
@@ -528,62 +567,6 @@ func (s *base64Sink) Close() error {
 	return s.err
 }
 
-// dropHeldBack resets every held-back path in result to its baseline
-// state: the sandbox never saw those files, so any change to them is a
-// blind overwrite or deletion of an operator secret.
-func dropHeldBack(ctx context.Context, base gitCmd, rec *CopyRecord, result string) (string, []string, error) {
-	if len(rec.HeldBack) == 0 {
-		return result, nil, nil
-	}
-	changes, err := diffTrees(ctx, base, rec.Baseline, result)
-	if err != nil {
-		return "", nil, err
-	}
-	held := toSet(rec.HeldBack)
-	var dropped []string
-	for _, c := range changes {
-		if skipped(held, c.Path) {
-			dropped = append(dropped, c.Path)
-		}
-	}
-	if len(dropped) == 0 {
-		return result, nil, nil
-	}
-	tmp := filepath.Join(filepath.Dir(rec.BaseGit), "effective-"+randomSuffix()+".index")
-	defer os.Remove(tmp)
-	g := base
-	g.index = tmp
-	if err := g.run(ctx, "read-tree", result); err != nil {
-		return "", nil, err
-	}
-	var info bytes.Buffer
-	for _, c := range changes {
-		if !skipped(held, c.Path) {
-			continue
-		}
-		if c.OldMode == "" {
-			fmt.Fprintf(&info, "0 %s\t%s\n", strings.Repeat("0", len(c.NewOID)), c.Path)
-		} else {
-			fmt.Fprintf(&info, "%s %s\t%s\n", c.OldMode, c.OldOID, c.Path)
-		}
-	}
-	g.stdin = &info
-	if err := g.run(ctx, "update-index", "--index-info"); err != nil {
-		return "", nil, err
-	}
-	g.stdin = nil
-	tree, err := g.line(ctx, "write-tree")
-	if err != nil {
-		return "", nil, err
-	}
-	commit, err := g.line(ctx, "commit-tree", tree, "-p", result, "-m", "defenseclaw: sandbox result without changes to held-back files")
-	if err != nil {
-		return "", nil, err
-	}
-	sort.Strings(dropped)
-	return commit, dropped, nil
-}
-
 // reviewTreeChanges classifies and scans a tree diff held in g's object
 // store; unflushed is PullOptions.Unflushed.
 func reviewTreeChanges(ctx context.Context, g gitCmd, changes []TreeChange, scanners []ContentScanner, sensitive []string, unflushed bool) (*ReviewReport, error) {
@@ -757,7 +740,7 @@ func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyO
 	if mode == ApplyBranch && rec.Kind == CopyGit {
 		// A branch that holds the result already (an earlier pull put it
 		// there) lands nothing new: no gate applies, and it stays.
-		if branch := branchName(rec, opts.Branch); branchHolds(ctx, rec, branch, pr.Effective) {
+		if branch := branchName(rec, opts.Branch); branchHolds(ctx, rec, branch, pr) {
 			return &ApplyResult{Mode: mode, UpToDate: true, Branch: branch}, nil
 		}
 	}
@@ -779,10 +762,14 @@ func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyO
 		if opts.PatchPath == "" {
 			return nil, errors.New("workspace: a patch path is required")
 		}
-		if err := writePatch(ctx, base, pr.from(), pr.Effective, opts.PatchPath, opts.Force); err != nil {
+		to, err := pr.landing(ctx, base, rec, pr.from())
+		if err != nil {
 			return nil, err
 		}
-		return &ApplyResult{Mode: mode, Applied: true, Changes: pr.Changes, PatchPath: opts.PatchPath}, nil
+		if err := writePatch(ctx, base, pr.from(), to, opts.PatchPath, opts.Force); err != nil {
+			return nil, err
+		}
+		return &ApplyResult{Mode: mode, Applied: true, Changes: pr.Changes, PatchPath: opts.PatchPath, Warnings: pr.leftOut("patch")}, nil
 	case ApplyBranch:
 		if rec.Kind != CopyGit {
 			return nil, ErrNotGitProject
@@ -791,7 +778,7 @@ func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyO
 		if err != nil {
 			return nil, err
 		}
-		out := &ApplyResult{Mode: mode, Applied: true, Changes: pr.Changes, Branch: branch}
+		out := &ApplyResult{Mode: mode, Applied: true, Changes: pr.Changes, Branch: branch, Warnings: pr.leftOut("branch")}
 		if note != "" {
 			out.Warnings = append(out.Warnings, note)
 		}
@@ -858,15 +845,16 @@ func writePatch(ctx context.Context, base gitCmd, from, to, dest string, force b
 	return f.Close()
 }
 
-// importResult fetches the effective result and the commit its changes
-// start from (baseRef: the baseline, or sinceRef) from base.git into the
-// project under refs/defenseclaw/copy/<name>/.
-func importResult(ctx context.Context, rec *CopyRecord, proj gitCmd, baseRef string) (result, baseline string, err error) {
+// importResult fetches a result (resultRef: effectRef, or landingRef) and
+// the commit its changes start from (baseRef: the baseline, translatedRef
+// or sinceRef) from base.git into the project under
+// refs/defenseclaw/copy/<name>/.
+func importResult(ctx context.Context, rec *CopyRecord, proj gitCmd, resultRef, baseRef string) (result, baseline string, err error) {
 	prefix := "refs/defenseclaw/copy/" + rec.Name
 	g := proj
 	g.config = append(g.config, "transfer.fsckObjects=true", "fetch.writeCommitGraph=false")
 	if err := g.run(ctx, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", "--no-auto-maintenance",
-		"--no-recurse-submodules", rec.BaseGit, "+"+effectRef+":"+prefix+"/result", "+"+baseRef+":"+prefix+"/base"); err != nil {
+		"--no-recurse-submodules", rec.BaseGit, "+"+resultRef+":"+prefix+"/result", "+"+baseRef+":"+prefix+"/base"); err != nil {
 		return "", "", fmt.Errorf("workspace: import the sandbox result: %w", err)
 	}
 	return prefix + "/result", prefix + "/base", nil
@@ -901,8 +889,8 @@ func branchName(rec *CopyRecord, name string) string {
 // branchHolds reports whether branch in rec's project holds the tree of
 // effective, a result in the copy's base.git: an earlier pull put the same
 // work there (a result made again has another commit, the same tree).
-func branchHolds(ctx context.Context, rec *CopyRecord, branch, effective string) bool {
-	if effective == "" {
+func branchHolds(ctx context.Context, rec *CopyRecord, branch string, pr *PullResult) bool {
+	if pr == nil || pr.Effective == "" {
 		return false
 	}
 	tip, err := gitCmd{dir: rec.Project}.line(ctx, "rev-parse", "-q", "--verify", "refs/heads/"+branch+"^{tree}")
@@ -910,12 +898,20 @@ func branchHolds(ctx context.Context, rec *CopyRecord, branch, effective string)
 		return false
 	}
 	base := gitCmd{gitDir: rec.BaseGit}
-	if whole, err := base.line(ctx, "rev-parse", "-q", "--verify", effective+"^{tree}"); err == nil && whole == tip {
+	effective, err := pr.landing(ctx, base, rec, pr.baseCommit())
+	if err != nil {
+		return false
+	}
+	secrets := len(rec.SecretLines) > 0
+	if whole, err := base.line(ctx, "rev-parse", "-q", "--verify", effective+"^{tree}"); err == nil && whole == tip && !secrets {
 		// The whole result: a branch an earlier build made, or one that
 		// keeps the folder's edits.
 		return true
 	}
-	want, _, _, err := branchTree(ctx, base, rec, effective, rec.Baseline)
+	want, _, _, err := branchTree(ctx, base, rec, effective, pr.baseCommit())
+	if err == nil && secrets {
+		want, err = secretFreeTree(ctx, base, rec, want)
+	}
 	return err == nil && want == tip
 }
 
@@ -971,25 +967,50 @@ func branchTree(ctx context.Context, g gitCmd, rec *CopyRecord, result, base str
 // branchCommit is the commit a branch of rec's work points at, in the
 // project where result and base are imported (branchTree): the result
 // itself, or one commit on the copy's HEAD with what the sandbox changed,
-// which names the sandbox's own commits it takes in. note says what the
-// branch holds of the folder's uncommitted edits, when it had any.
-func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, base, branch string) (commit, note string, err error) {
+// which names the sandbox's own commits it takes in. A copy with replaced
+// credentials always gets that one commit, without the files that held
+// them (secretFreeTree): the sandbox's commits hold placeholders and the
+// result the values (GAP-0753). note says what the branch holds of the
+// folder's uncommitted edits, when it had any. sandboxHead is the
+// sandbox's HEAD as pulled: the commits named end there.
+func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, base, sandboxHead, branch string) (commit, note string, err error) {
 	tree, edits, kept, err := branchTree(ctx, proj, rec, result, base)
 	if err != nil {
 		return "", "", err
 	}
-	if commit, err = proj.line(ctx, "rev-parse", "--verify", result+"^{commit}"); err != nil || len(edits) == 0 {
+	secrets := len(rec.SecretLines) > 0
+	if secrets {
+		if tree, err = secretFreeTree(ctx, proj, rec, tree); err != nil {
+			return "", "", err
+		}
+		replaced := toSet(replacedFiles(rec))
+		var rest []string
+		for _, e := range edits {
+			if _, ok := replaced[e]; !ok {
+				rest = append(rest, e)
+			}
+		}
+		edits = rest
+	} else if commit, err = proj.line(ctx, "rev-parse", "--verify", result+"^{commit}"); err != nil || len(edits) == 0 {
 		return commit, "", err
 	}
 	what := "your folder's uncommitted edits from when the copy was made (" + strings.Join(firstN(edits, 5), ", ") + ")"
-	if kept != "" {
+	if kept != "" && len(edits) > 0 && !secrets {
 		return commit, "branch " + branch + " also holds " + what + ": " + kept, nil
 	}
-	msg := "defenseclaw: changes made in sandbox " + rec.Name + "\n\nThe folder's uncommitted edits from when the copy was made are left out."
-	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.Head+".."+result); err == nil {
+	msg := "defenseclaw: changes made in sandbox " + rec.Name
+	if len(edits) > 0 && kept == "" {
+		msg += "\n\nThe folder's uncommitted edits from when the copy was made are left out."
+	}
+	// The sandbox's own commits start after the commit its HEAD began at
+	// (the placeholder commit, for a copy that replaced credentials) and
+	// end at its HEAD as pulled (sandboxHead), so none of ours is listed,
+	// neither the uncommitted-changes commit nor the landing commit
+	// (RV8-5), and none of theirs is hidden (RV6-6).
+	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.sandboxHead()+".."+sandboxHead); err == nil && rec.Head != "" && sandboxHead != "" {
 		var own []string
 		for _, s := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-			if s != "" && !strings.HasPrefix(s, "defenseclaw: ") {
+			if s != "" {
 				own = append(own, "- "+s)
 			}
 		}
@@ -997,8 +1018,18 @@ func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, bas
 			msg += "\n\nThe sandbox's commits it takes in:\n" + strings.Join(firstN(own, 20), "\n")
 		}
 	}
-	if commit, err = proj.line(ctx, "commit-tree", tree, "-p", rec.Head, "-m", msg); err != nil {
+	args := []string{"commit-tree", tree, "-m", msg}
+	if rec.Head != "" {
+		args = append(args, "-p", rec.Head)
+	}
+	if commit, err = proj.line(ctx, args...); err != nil {
 		return "", "", err
+	}
+	switch {
+	case len(edits) == 0:
+		return commit, "", nil
+	case kept != "":
+		return commit, "branch " + branch + " also holds " + what + ": " + kept, nil
 	}
 	return commit, "branch " + branch + " starts at " + shortOID(rec.Head) + " with only the sandbox's changes: " + what +
 		" are not on it, and stay in your working tree", nil
@@ -1046,7 +1077,7 @@ func CheckApply(ctx context.Context, opts ApplyOptions) (bool, error) {
 		if _, code, err := proj.outputCode(ctx, "rev-parse", "-q", "--verify", "refs/heads/"+branch); err != nil || code != 0 {
 			return false, err
 		}
-		if last := lastPullOf(opts.DataDir, rec); last != nil && branchHolds(ctx, rec, branch, last.Effective) {
+		if last := lastPullOf(opts.DataDir, rec); last != nil && branchHolds(ctx, rec, branch, last) {
 			if opts.Starts && !opts.Force && !reusable(last, opts.Reuse) {
 				return false, &EarlierPullError{Branch: branch, PulledAt: last.PulledAt}
 			}
@@ -1096,7 +1127,18 @@ func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts App
 			return "", "", fmt.Errorf("workspace: branch %s already exists", branch)
 		}
 	}
-	imported, importedBase, err := importResult(ctx, rec, proj, baselineRef)
+	// Changes to files with replaced credentials stay out of a branch: a
+	// commit would put the value somewhere new (pr.landing).
+	base := gitCmd{gitDir: rec.BaseGit}
+	land, err := pr.landing(ctx, base, rec, pr.baseCommit())
+	if err != nil {
+		return "", "", err
+	}
+	if err := base.run(ctx, "update-ref", landingRef, land); err != nil {
+		return "", "", err
+	}
+	defer func() { _ = deleteRef(ctx, base, landingRef) }()
+	imported, importedBase, err := importResult(ctx, rec, proj, landingRef, pr.baseRef())
 	if err != nil {
 		return "", "", err
 	}
@@ -1104,7 +1146,7 @@ func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts App
 		_ = proj.run(ctx, "update-ref", "-d", imported)
 		_ = proj.run(ctx, "update-ref", "-d", importedBase)
 	}()
-	tip, note, err := branchCommit(ctx, rec, proj, imported, importedBase, branch)
+	tip, note, err := branchCommit(ctx, rec, proj, imported, importedBase, pr.SandboxHead, branch)
 	if err != nil {
 		return "", "", err
 	}
@@ -1222,11 +1264,11 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 	// that since stays theirs).
 	var result, baseline, parent string
 	if rec.Kind == CopyGit {
-		baseRef := baselineRef
+		baseRef := pr.baseRef()
 		if pr.Since != "" {
 			baseRef = sinceRef
 		}
-		if result, baseline, err = importResult(ctx, rec, g, baseRef); err != nil {
+		if result, baseline, err = importResult(ctx, rec, g, effectRef, baseRef); err != nil {
 			return nil, err
 		}
 		defer func() {
@@ -1334,7 +1376,12 @@ func fallback(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, 
 		}
 	}
 	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
-	patch, err := writeFreePatch(ctx, base, pr.from(), pr.Effective, rec.Project, rec.Name)
+	to, err := pr.landing(ctx, base, rec, pr.from())
+	if err != nil {
+		return nil, err
+	}
+	out.Warnings = append(out.Warnings, pr.leftOut("patch")...)
+	patch, err := writeFreePatch(ctx, base, pr.from(), to, rec.Project, rec.Name)
 	if err != nil {
 		return nil, err
 	}

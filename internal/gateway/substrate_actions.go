@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
@@ -140,6 +141,8 @@ type SubstrateTemplateKit struct {
 	HookContract string
 	KitVersion   string
 	Digest       string
+	// RelayStreams are the signed kit's relay features (registry.JoinStreams).
+	RelayStreams string
 }
 
 func (s *SubstrateATEActions) templateKit(ctx context.Context, tmpl *ateapi.ActorTemplate) (SubstrateTemplateKit, error) {
@@ -257,9 +260,9 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	}
 	return SubstrateCreated{
 		Atespace: req.Atespace, Name: name, UID: a.GetMetadata().GetUid(),
-		Template: ateapi.Key(tref), Connector: req.Connector, SandboxClass: substrateEffectiveClass(tmpl, req.SandboxClass),
+		Template: ateapi.Key(tref), Connector: req.Connector, SandboxClass: s.createdClass(ctx, tmpl, sel, req.SandboxClass),
 		HarnessVersion: kit.AgentVersion, HookContract: kit.HookContract,
-		KitVersion: kit.KitVersion, TemplateDigest: kit.Digest,
+		KitVersion: kit.KitVersion, TemplateDigest: kit.Digest, RelayStreams: kit.RelayStreams,
 	}, nil
 }
 
@@ -299,6 +302,37 @@ func substrateEffectiveClass(tmpl *ateapi.ActorTemplate, class string) string {
 		return have
 	}
 	return class
+}
+
+// createdClass is the class an actor created from tmpl with the extra
+// selector sel runs in. A template with a class label names it
+// (substrateEffectiveClass). One without is placed by its pool, so the
+// workers its selector and sel match say the class: the weakest of them,
+// as the scheduler may pick any (GAP-0630: a template pinned to a microVM
+// pool with --worker-label recorded gvisor). When no worker answers, the
+// label rule stands.
+func (s *SubstrateATEActions) createdClass(ctx context.Context, tmpl *ateapi.ActorTemplate, sel *ateapi.Selector, class string) string {
+	labels := tmpl.GetWorkerSelector().GetMatchLabels()
+	if labels[controller.SandboxClassLabel] != "" {
+		return substrateEffectiveClass(tmpl, class)
+	}
+	workers, err := ateapi.AllWorkers(ctx, s.Client, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] template %s: read the workers for the sandbox class on records: %v\n", ateapi.Key(ateapi.RefOf(tmpl.GetMetadata())), err)
+		return substrateEffectiveClass(tmpl, class)
+	}
+	merged := maps.Clone(labels)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	maps.Copy(merged, sel.GetMatchLabels())
+	have := controller.WorkerClasses(workers, merged)
+	for _, c := range have {
+		if controller.ClassesMeet(have, c) {
+			return c
+		}
+	}
+	return substrateEffectiveClass(tmpl, class)
 }
 
 // classSelector is the worker selector an actor needs to run in class, on
@@ -393,16 +427,51 @@ func (s *SubstrateATEActions) Resume(ctx context.Context, atespace, name string)
 	if err := s.Ensure(ctx, atespace, name); err != nil {
 		return err
 	}
-	_, _, err := s.Client.ResumeActor(ctx, ateapi.Ref(atespace, name))
-	if ateapi.IsResourceExhausted(err) {
+	// A resume restores the actor's snapshot on a worker: seconds on an
+	// idle node, a minute or more while one node restores many microVMs at
+	// once. The control API client's default call deadline (10 s) cut those
+	// resumes off and the actor was deleted (GAP-0468), so a resume gets
+	// its own deadline.
+	rctx, cancel := context.WithTimeout(ctx, substrateResumeTimeout)
+	defer cancel()
+	_, _, err := s.Client.ResumeActor(rctx, ateapi.Ref(atespace, name))
+	switch {
+	case ateapi.IsResourceExhausted(err):
 		return fmt.Errorf("%w: %v", ErrSubstrateNoWorker, err)
+	case err != nil && ctx.Err() == nil && substrateResumeBusy(err):
+		return fmt.Errorf("%w: %v", ErrSubstrateResumeBusy, err)
 	}
 	return err
+}
+
+// substrateResumeTimeout bounds one resume (GAP-0468).
+const substrateResumeTimeout = 3 * time.Minute
+
+// substrateResumeBusy is a resume the control plane could not finish now
+// (deadline, unavailable, aborted): the node or the control plane is busy,
+// not broken.
+func substrateResumeBusy(err error) bool {
+	return ateapi.IsBusy(err) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // ErrSubstrateNoWorker is a resume that no worker of the pool has room for
 // (RESOURCE_EXHAUSTED, GAP-0167).
 var ErrSubstrateNoWorker = errors.New("no worker has room for the actor")
+
+// ErrSubstrateResumeBusy is a resume that did not finish in time because
+// the node or the control plane is busy (GAP-0468): a retry can work.
+var ErrSubstrateResumeBusy = errors.New("the cluster is busy starting other agents")
+
+// Snapshots implements SubstrateSnapshotCounter: how many snapshots the
+// cluster holds for the actor (ActorStatus.snapshots), which a delete
+// removes with it (GAP-0474).
+func (s *SubstrateATEActions) Snapshots(ctx context.Context, atespace, name string) (int, error) {
+	a, err := s.Client.GetActor(ctx, ateapi.Ref(atespace, name))
+	if err != nil {
+		return 0, err
+	}
+	return len(a.GetStatus().GetSnapshots()), nil
+}
 
 // Delete implements SubstrateActorActions.
 func (s *SubstrateATEActions) Delete(ctx context.Context, atespace, name string) error {

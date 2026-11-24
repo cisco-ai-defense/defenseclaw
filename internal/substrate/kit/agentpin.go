@@ -74,7 +74,7 @@ var HarnessReleases = map[string]string{
 	"opencode":    "2.2.7",
 	"amp":         "0.0.1794542441-g4e0611",
 	"cursor":      "2026.11.11-b912975",
-	"devin":       "3000.12.57",
+	"devin":       "3000.14.30821",
 	"antigravity": "1.5.8",
 	"kiro":        "2.35.1",
 }

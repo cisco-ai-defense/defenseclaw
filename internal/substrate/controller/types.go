@@ -39,6 +39,9 @@ type Attestation struct {
 	// sends.
 	AgentVersion string
 	HookContract string
+	// RelayStreams are the signed kit's relay features, comma-joined
+	// (registry.JoinStreams).
+	RelayStreams string
 	// Reason says why a template is not attested (no attestation, bad
 	// signature, digest mismatch...).
 	Reason string
@@ -153,6 +156,7 @@ type Registration struct {
 	HookContract   string `json:"hook_contract,omitempty"`
 	KitVersion     string `json:"kit_version,omitempty"`
 	TemplateDigest string `json:"template_digest,omitempty"`
+	RelayStreams   string `json:"relay_streams,omitempty"`
 	// Person is the verified OIDC subject; Workload a verified workload
 	// principal. Both empty for atespace attribution.
 	Person   string `json:"person,omitempty"`
@@ -258,6 +262,14 @@ const (
 	// EventConfigRefused: a change that does not load was not applied.
 	EventConfigReloaded = "sandbox.config.reloaded"
 	EventConfigRefused  = "sandbox.config.refused"
+	// EventCalloutReplaced: Substrate's egress callout slot is not held by
+	// the DefenseClaw callout (another callout, or none); EventCalloutRestored:
+	// it is again (GAP-0505).
+	EventCalloutReplaced = "sandbox.callout_replaced"
+	EventCalloutRestored = "sandbox.callout_restored"
+	// EventCrashed: Substrate reports the actor CRASHED; the leader closes
+	// its open asks with reason actor_crashed (GAP-0526).
+	EventCrashed = "sandbox.crashed"
 )
 
 // Severities.

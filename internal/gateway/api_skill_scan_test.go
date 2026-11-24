@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 // A configured judge that reports LLM_ANALYSIS_FAILED makes this API scan
@@ -67,8 +68,22 @@ func main() { fmt.Print("{\"findings\":[{\"rule_id\":\"LLM_ANALYSIS_FAILED\",\"s
 	}
 	w := httptest.NewRecorder()
 	(&APIServer{scannerCfg: cfg}).handleSkillScan(w, httptest.NewRequest(http.MethodPost, "/v1/skill/scan", bytes.NewReader(body)))
+	skipWhereScanContainmentIsRefused(t, w.Body.String())
 	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "judge did not run") {
 		t.Fatalf("response = %d %q, want incomplete-scan error", w.Code, w.Body.String())
+	}
+}
+
+// skipWhereScanContainmentIsRefused skips a scan test on a host that refuses
+// the namespaces the scanner's containment needs (user.max_user_namespaces=0,
+// a seccomp profile or sandbox that refuses user namespaces): no scan runs
+// there by design (processutil.RunTracked, GAP-0521), so the scanner
+// fixture never answers (GAP-0174). Any other answer is judged by the test.
+// GitHub Actions runners allow user namespaces, so there it never skips.
+func skipWhereScanContainmentIsRefused(t *testing.T, body string) {
+	t.Helper()
+	if strings.Contains(body, processutil.ErrContainmentUnavailable.Error()) && os.Getenv("GITHUB_ACTIONS") != "true" {
+		t.Skipf("this host cannot run a contained scan: %s", strings.TrimSpace(body))
 	}
 }
 

@@ -777,6 +777,7 @@ func sandboxFloorDigest(f SandboxAdminConfig, packDir string) (string, error) {
 	// that adds them keeps its host floor digest (runtimes stays: it gates
 	// host runs).
 	view.Floor.SandboxClass, view.Floor.IdleSuspendAfter, view.Floor.UnattendedAsks, view.Floor.AskTimeout = "", "", "", ""
+	view.Floor.GitPush = ""
 	view.Floor.ActorSecrets, view.Floor.AskHosts, view.Floor.URLRules, view.Floor.IdleSuspendTasks = nil, nil, nil, nil
 	for _, s := range []*[]string{&view.Floor.AllowedHarnesses, &view.Floor.EgressBlock, &view.Floor.EgressAllowOnly,
 		&view.Floor.RequireCopyFor, &view.Floor.Locked, &view.Floor.RequiredFor, &view.Floor.AllowedCredentials,

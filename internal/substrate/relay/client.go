@@ -45,10 +45,11 @@ type AttachOptions struct {
 	// and says so) when no frame or pong arrives for KeepaliveDead.
 	// Defaults 10 s and 30 s.
 	KeepaliveEvery, KeepaliveDead time.Duration
-	// OnUnsent sees the size of every chunk of input that was read but
-	// could not be sent because the connection ended (GAP-0003), so the
-	// caller can say so instead of losing keys silently.
-	OnUnsent func(n int)
+	// OnUnsent sees a copy of every chunk of input that was read but could
+	// not be sent because the connection ended (GAP-0003), so the caller
+	// can say so or offer it again after a reconnect (B3.1) instead of
+	// losing keys silently. The copy is the caller's to keep and clear.
+	OnUnsent func(b []byte)
 	// Dir is the folder in the actor the agent starts in when it is not
 	// running yet (the copy of the project); "" keeps the relay default.
 	Dir string
@@ -79,6 +80,11 @@ type AttachResult struct {
 	Sent  int64
 	// Warning is the relay's hello warning (GAP-0151), "" for none.
 	Warning string
+	// Renew is set when the relay ended the attachment because its session
+	// token expired (SessionExpiredMessage), or the client ended it RenewLead
+	// before the end the gateway gave (SessionSecondsHeader): the launcher
+	// reconnects at once with a fresh token (GAP-0588).
+	Renew bool
 }
 
 // Attach connects in to the agent's terminal and copies in to the agent and
@@ -132,6 +138,11 @@ func pumpInput(in io.Reader, send func([]byte) error) (detached bool) {
 // answer its close frame before it drops the socket.
 const detachCloseWait = 2 * time.Second
 
+// RenewLead is how long before its session token ends an attachment is
+// renewed (SessionSecondsHeader). A token with less than RenewLead plus a
+// second left is renewed on SessionExpiredMessage.
+const RenewLead = 2 * time.Second
+
 func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions) (AttachResult, error) {
 	d := o.Dialer
 	if d == nil {
@@ -150,6 +161,18 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		return AttachResult{}, err
 	}
 	defer conn.Close()
+	// The gateway says how long the session token lives: end the
+	// attachment cleanly just before, for a planned renew (GAP-0588).
+	var renew <-chan time.Time
+	if resp != nil {
+		if left, err := strconv.Atoi(resp.Header.Get(SessionSecondsHeader)); err == nil && left > 0 && left <= 24*3600 {
+			if d := time.Duration(left)*time.Second - RenewLead; d >= time.Second {
+				t := time.NewTimer(d)
+				defer t.Stop()
+				renew = t.C
+			}
+		}
+	}
 	var wmu sync.Mutex
 	send := func(frame []byte) error {
 		wmu.Lock()
@@ -214,6 +237,8 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 					res.Session, res.Input, res.Warning = c.Session, c.Input, c.Warning
 				case CtlExit:
 					res.ExitCode = c.Code
+				case CtlError:
+					res.Renew = res.Renew || c.Message == SessionExpiredMessage
 				}
 				resMu.Unlock()
 			}
@@ -259,6 +284,15 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 			case <-ctx.Done():
 			}
 		}
+	case <-renew:
+		// No detach: the agent keeps its terminal, and the launcher
+		// reconnects at once.
+		resMu.Lock()
+		res.Renew = true
+		resMu.Unlock()
+		wmu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "renew"), time.Now().Add(time.Second))
+		wmu.Unlock()
 	case <-ctx.Done():
 	}
 	// A write still in flight ends now, so settle does not wait on it.
@@ -352,6 +386,8 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 						res.Session, res.Input, res.Warning = cc.Session, cc.Input, cc.Warning
 					case CtlExit:
 						res.ExitCode = cc.Code
+					case CtlError:
+						res.Renew = res.Renew || cc.Message == SessionExpiredMessage
 					}
 					resMu.Unlock()
 				}
@@ -485,7 +521,7 @@ func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]
 		case err == nil, errors.Is(err, errWriteUnanswered):
 			sent.n += int64(len(b))
 		case o.OnUnsent != nil && len(b) > 0:
-			o.OnUnsent(len(b))
+			o.OnUnsent(append([]byte(nil), b...))
 		}
 		return err
 	}

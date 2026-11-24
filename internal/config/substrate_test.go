@@ -76,6 +76,7 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateLLMCredentialConfig{}, []string{"substrate", "llm", "credential"}},
 		{SubstrateEgressConfig{}, []string{"substrate", "egress"}},
 		{SubstrateTemplatesConfig{}, []string{"substrate", "templates"}},
+		{SubstrateActivityConfig{}, []string{"substrate", "activity"}},
 	} {
 		got := yamlFieldNames(reflect.TypeOf(tc.typ))
 		if want := schemaObjectProperties(t, tc.path...); !reflect.DeepEqual(got, want) {
@@ -129,6 +130,7 @@ substrate:
     keys_ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
     oidc: {issuer: https://login.example.com, client_id: defenseclaw-launcher, groups_claim: groups}
     workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod, claims: {repository: acme/web}}]
+    revocation: {enabled: true, sync_interval: 5s, max_stale: 60s, max_tokens_per_person: 64}
   services: {actor: defenseclaw-actor.defenseclaw-system.svc, admin: defenseclaw-admin.defenseclaw-system.svc}
   launcher_atespaces: {engineering: [eng-payments, eng-web]}
   require_attested_templates: true
@@ -144,8 +146,14 @@ substrate:
     revoked_digests: ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
   default_sandbox_class: gvisor
   idle_suspend_after: 30m
+  relay_tls: required
   unattended: {asks: deny, ask_timeout: 30m, telemetry_sampling: 1.0}
+  interactive:
+    port_forward: {enabled: auto, ports: "3000,8000-8999", max_streams: 32}
+    mcp_bridge: {enabled: off, max_servers: 4, message_max_bytes: 1048576}
+    idle_close: 30m
   rate_limits: {per_actor_rps: 20, per_atespace_rps: 500}
+  activity: {status_window: 30s, notifications: "off"}
   usage: {enabled: true, sync_interval: 10s}
   extproc:
     enabled: true

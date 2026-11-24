@@ -20,6 +20,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -194,3 +195,17 @@ func (o *operator) initRepo() {
 }
 
 var _ osw.Transport = sandboxFS{}
+
+// Start stages and sends a copy over an existing actor transport, as run
+// does with Preflight and Send (only tests use the one-call form).
+func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
+	if opts.Transport == nil {
+		return nil, errors.New("workspace: start needs a transport to the actor")
+	}
+	p, err := Preflight(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer p.Close()
+	return p.Send(ctx, opts.Name, opts.Transport)
+}

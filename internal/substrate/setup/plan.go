@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -49,6 +50,9 @@ type ChartPlan struct {
 	// RelaySessionSecret is the relay session key Secret the relay-session
 	// hook creates when absent (gateway.relaySessionSecret).
 	RelaySessionSecret string `json:"relay_session_secret,omitempty"`
+	// RelayCASecret is the relay CA Secret the relay-session hook creates
+	// when absent (gateway.relayCASecret).
+	RelayCASecret string `json:"relay_ca_secret,omitempty"`
 }
 
 // ChartEditors are the principals the chart's plan makes editors
@@ -85,6 +89,27 @@ type CredentialProvider struct {
 	ConfigMap        string `json:"config_map"`
 	Deployment       string `json:"deployment"`
 	SecretsNamespace string `json:"secrets_namespace"`
+	// UserSecretsNamespace is substrate.self_service_secrets.namespace (the
+	// self-service values, dc-b-<person>); UserSecrets says whether
+	// self-service secrets are on. On, the launcher atespaces are granted
+	// it too; off, its grants are revoked. The chart always names it, so
+	// turning self-service off revokes what turning it on granted.
+	UserSecretsNamespace string `json:"user_secrets_namespace,omitempty"`
+	UserSecrets          bool   `json:"user_secrets,omitempty"`
+}
+
+// grantedNamespaces are the namespaces the launcher atespaces are granted;
+// revokedNamespaces the ones every grant of is removed (self-service off).
+func (cp CredentialProvider) grantedNamespaces() (grant, revoke []string) {
+	grant = []string{cp.SecretsNamespace}
+	if u := cp.UserSecretsNamespace; u != "" && u != cp.SecretsNamespace {
+		if cp.UserSecrets {
+			grant = append(grant, u)
+		} else {
+			revoke = append(revoke, u)
+		}
+	}
+	return grant, revoke
 }
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
@@ -152,6 +177,12 @@ func (p ChartPlan) Validate() error {
 	}
 	if p.CredentialProvider.SecretsNamespace == p.Namespace {
 		errs = append(errs, errors.New("credential_provider.secrets_namespace must not be the DefenseClaw namespace (D14)"))
+	}
+	if u := p.CredentialProvider.UserSecretsNamespace; u != "" &&
+		(!dnsLabel.MatchString(u) || u == p.Namespace || u == p.SubstrateNamespace || u == p.CredentialProvider.SecretsNamespace ||
+			slices.Contains([]string{"default", "kube-system", "kube-public", "kube-node-lease"}, u) ||
+			slices.Contains(p.LauncherAtespaces, u) || slices.Contains(p.WritableAtespaces, u)) {
+		errs = append(errs, errors.New("credential_provider.user_secrets_namespace must be a namespace of its own: not the DefenseClaw, Substrate or admin secrets namespace, not a launcher or writable atespace, and not a Kubernetes system namespace"))
 	}
 	if p.StoreStateConfigMap == "" {
 		errs = append(errs, errors.New("store_state_config_map is required"))

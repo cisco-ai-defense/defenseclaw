@@ -91,12 +91,12 @@ type substrateFixture struct {
 }
 
 var (
-	alice = identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "alice", Principal: "alice@example.com"}
-	bob   = identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "bob", Principal: "bob@example.com"}
-	admin = identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "root", Groups: []string{"dc-admins"}}
+	alice = identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "alice", Principal: "alice@example.com", TokenKey: "jti:alice"}
+	bob   = identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "bob", Principal: "bob@example.com", TokenKey: "jti:bob"}
+	admin = identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "root", Groups: []string{"dc-admins"}, TokenKey: "jti:root"}
 )
 
-func newSubstrateFixture(t *testing.T, mutate ...func(*SubstrateConfig)) *substrateFixture {
+func newSubstrateFixture(t testing.TB, mutate ...func(*SubstrateConfig)) *substrateFixture {
 	t.Helper()
 	cfg := &config.Config{DataDir: t.TempDir(), Gateway: config.GatewayConfig{Token: sandboxTestMasterToken}}
 	// The proxy resolves the guardrail profiles the process's API server
@@ -183,7 +183,7 @@ func (f substrateActivityFunc) ObserveActivity(kind, atespace, uid string, _ tim
 	f(kind, atespace, uid)
 }
 
-func (f *substrateFixture) do(t *testing.T, h http.Handler, method, path, token, body string, headers ...string) *httptest.ResponseRecorder {
+func (f *substrateFixture) do(t testing.TB, h http.Handler, method, path, token, body string, headers ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.RemoteAddr = "10.0.0.7:43210"
@@ -224,7 +224,7 @@ func reasonOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 
 func TestSubstrateActorListenerServesOnlyItsRoutes(t *testing.T) {
 	f := newSubstrateFixture(t)
-	admin := []string{"/api/v1/substrate/actors", "/api/v1/substrate/asks", "/api/v1/substrate/decisions",
+	admin := []string{"/api/v1/substrate/actors", "/api/v1/substrate/asks", "/api/v1/substrate/approvals", "/api/v1/substrate/decisions",
 		"/api/v1/substrate/policy/explain", "/api/v1/substrate/usage", "/api/v1/substrate/secrets",
 		"/api/v1/substrate/batches", "/api/v1/substrate/session-cert", substrateCalloutPath,
 		"/api/v1/substrate/hook/", "/api/v1/substrate/hook/notaconnector", "/api/v1/substrate/notify/claudecode",
@@ -401,7 +401,7 @@ func TestSubstrateActorRateLimit(t *testing.T) {
 
 func TestSubstrateRelayVerify(t *testing.T) {
 	f := newSubstrateFixture(t)
-	tok, _, err := f.sessions.Issue(alice.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
+	tok, _, err := f.sessions.Issue(identity.SignInOf(alice), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +757,7 @@ func TestSubstrateRelayVerifyCarriesTheTaskDigest(t *testing.T) {
 		if name == "alice-1" {
 			owner = alice.ID()
 		}
-		tok, _, err := f.sessions.Issue(owner, identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
+		tok, _, err := f.sessions.Issue(identity.SessionSignIn{Person: owner, TokenKey: "jti:" + name}, identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

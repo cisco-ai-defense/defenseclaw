@@ -91,6 +91,9 @@ type windowsBalloonBroker struct {
 	requests chan windowsBalloonRequest
 }
 
+// toolCheck: Windows delivery uses the shell API, no external tool.
+func toolCheck() error { return nil }
+
 // sendPlatform uses an in-process Win32 broker. The executable that owns the
 // gateway also owns the notification surface, so packaged builds retain their
 // Authenticode identity and no shell child or command interpolation is used.

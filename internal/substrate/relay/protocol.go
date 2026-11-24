@@ -69,6 +69,21 @@ const (
 	CtlReset = "reset"
 )
 
+// SessionExpiredMessage is the CtlError message of an attachment that
+// ended with its session token (GAP-0070). It is a planned end: the
+// gateway caps the token at the end of the person's sign-in, and the
+// launcher reconnects at once with a fresh one, without reporting a lost
+// connection (GAP-0588).
+const SessionExpiredMessage = "session token expired"
+
+// SessionSecondsHeader is the gateway's answer header on a terminal
+// WebSocket upgrade: the whole seconds its session token has left. The
+// launcher ends the attachment RenewLead before that and reconnects with a
+// fresh token, so the renew is planned, not a cut by the relay (GAP-0588).
+// A gateway without it leaves the launcher to renew on
+// SessionExpiredMessage.
+const SessionSecondsHeader = "X-Defenseclaw-Session-Seconds"
+
 // Control is a CONTROL frame.
 type Control struct {
 	Type    string `json:"type"`

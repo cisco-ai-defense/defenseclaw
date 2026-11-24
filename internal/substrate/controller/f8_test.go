@@ -149,7 +149,8 @@ func TestRevertOfARunningActorPausesTheClock(t *testing.T) {
 }
 
 // Suspends and resumes alone never send reverted: not one per pass, not after
-// an upload, not for a suspend plus resume inside one poll.
+// an upload, not for a suspend plus resume inside one poll. A suspend and a
+// resume inside one poll are sent as such, in order (GAP-0486).
 func TestPlainSuspendAndResumeSendNoRevert(t *testing.T) {
 	r, life := lifeRig(t)
 	a := r.actor("eng-web", "alice-f8d", ateapi.ActorStateRunning, "sub-alice")
@@ -183,5 +184,5 @@ func TestPlainSuspendAndResumeSendNoRevert(t *testing.T) {
 		}
 		return suspend()
 	})
-	wantLife(t, life, "suspended", "resumed", "suspended")
+	wantLife(t, life, "suspended", "resumed", "suspended", "resumed", "suspended", "resumed", "suspended")
 }

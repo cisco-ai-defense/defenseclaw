@@ -1217,10 +1217,23 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// (rel-1-0-10:GAP-0999), and it only adds findings.
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
+	if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok {
+		// A Substrate actor's shell call as it reads once the actor's file
+		// system has followed its links (cd -P a/b/ssh, eval "cat key-link",
+		// echo x > claude-dir/settings.json): every reading of the call,
+		// the hook config guard included, judges it too, and it only adds
+		// findings (substrate-1 GAP-0546, GAP-0547).
+		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
+	}
 	return findings
 }
 
 func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
+	if action.guestMemo == nil {
+		// The rule dispatch and the lanes below (the sandbox hook-config
+		// guard) share the guest placement of one input (guestReadingMemo).
+		action.guestMemo = &guestReadingMemo{}
+	}
 	return trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient)
 }
 
@@ -1300,6 +1313,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		// A shell call that writes one through a link is not allowed by the
 		// tool name either (rel-1-0-10:GAP-1243).
 		if twin, ok := localCommandLinkTwinRequest(action); ok && allowed &&
+			(cfg == nil || !cfg.SecureClientIntegration()) &&
+			(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
+			allowed = false
+		}
+		// Nor is a Substrate actor's shell call that writes one through a
+		// link (substrate-1 GAP-0547).
+		if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok && allowed &&
 			(cfg == nil || !cfg.SecureClientIntegration()) &&
 			(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
 			allowed = false

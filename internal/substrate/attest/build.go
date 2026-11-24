@@ -21,6 +21,9 @@ import (
 type KitSpec struct {
 	Version      string
 	HookContract string
+	// RelayStreams are the kit relay's features (kit.RelayConfig.Streams);
+	// the attestation signs them.
+	RelayStreams []string
 	Files        []LayerFile
 	// Remove are paths of the base image the layer drops (whiteouts); only
 	// those that exist in the base are written.
@@ -251,7 +254,7 @@ func Build(ctx context.Context, o BuildOptions) (*BuildResult, error) {
 		return nil, fmt.Errorf("build: scan: %w", err)
 	}
 	res := &BuildResult{Report: rep, Base: baseInfo, Target: target.String(),
-		Kit: KitInfo{Version: o.Kit.Version, HookContract: o.Kit.HookContract, LayerDigest: layer.Digest,
+		Kit: KitInfo{Version: o.Kit.Version, HookContract: o.Kit.HookContract, RelayStreams: o.Kit.RelayStreams, LayerDigest: layer.Digest,
 			LayerDiffID: layer.DiffID, LayerIndex: len(base.Manifest.Layers)}}
 	if rep.Summary.Verdict == VerdictBlock {
 		return res, &BuildBlocked{Cause: ErrScanBlocked, Report: rep}

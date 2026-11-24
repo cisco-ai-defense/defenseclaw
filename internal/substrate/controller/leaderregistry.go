@@ -77,7 +77,7 @@ func fromLeader(r registry.Registration) Registration {
 		Task: r.Unattended, BatchID: r.BatchID, ParentUID: r.ParentUID, ForkedBy: r.ForkedBy,
 		Approved: slices.Clone(r.Approved), Source: SourceLauncher,
 		Connector: r.Connector, AgentVersion: r.HarnessVersion, HookContract: r.HookContract,
-		KitVersion: r.KitVersion, TemplateDigest: r.TemplateDigest, PolicyConflict: r.PolicyConflict != nil}
+		KitVersion: r.KitVersion, TemplateDigest: r.TemplateDigest, RelayStreams: r.RelayStreams, PolicyConflict: r.PolicyConflict != nil}
 	switch {
 	case r.ParentUID != "":
 		out.Source = SourceFork
@@ -110,7 +110,7 @@ func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 		}
 		if registry.KitFillable(cur) && in.Source == SourceAtespace && in.Connector != "" {
 			cur.Connector, cur.HarnessVersion, cur.HookContract = in.Connector, in.AgentVersion, in.HookContract
-			cur.KitVersion, cur.TemplateDigest = in.KitVersion, in.TemplateDigest
+			cur.KitVersion, cur.TemplateDigest, cur.RelayStreams = in.KitVersion, in.TemplateDigest, in.RelayStreams
 		}
 		return l.Store.Put(ctx, cur)
 	}
@@ -121,7 +121,7 @@ func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 	reg := registry.Registration{Atespace: in.Atespace, Name: in.Name, UID: in.UID, Template: in.Template, Profile: in.Profile,
 		Unattended: in.Task, BatchID: in.BatchID, ParentUID: in.ParentUID, ForkedBy: in.ForkedBy,
 		Connector: in.Connector, HarnessVersion: in.AgentVersion, HookContract: in.HookContract,
-		KitVersion: in.KitVersion, TemplateDigest: in.TemplateDigest,
+		KitVersion: in.KitVersion, TemplateDigest: in.TemplateDigest, RelayStreams: in.RelayStreams,
 		Approved: slices.Clone(in.Approved), Attributed: true, CreatedAt: now().UTC()}
 	// A fork is attributed: DefenseClaw makes none, so it never keeps the
 	// parent's person or per-person secrets (GAP-0082, GAP-0425).

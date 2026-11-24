@@ -241,6 +241,12 @@ func substrateRestartOnly(boot, cur *config.Config) []string {
 		{"substrate.extproc (it renders the callout's ConfigMap)", b.Extproc, c.Extproc},
 		{"substrate.unattended.ask_timeout (the leader)", b.Unattended.AskTimeout, c.Unattended.AskTimeout},
 		{"substrate.bundles", b.Bundles, c.Bundles},
+		{"substrate.self_service_secrets.namespace", b.SelfServiceSecrets.EffectiveNamespace(), c.SelfServiceSecrets.EffectiveNamespace()},
+		{"substrate.self_service_secrets.provider", b.SelfServiceSecrets.EffectiveProvider(), c.SelfServiceSecrets.EffectiveProvider()},
+		// The binding store starts at boot: off to on needs a restart; the
+		// other mode changes apply live.
+		{"substrate.self_service_secrets.mode (from off)", b.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff,
+			b.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff && c.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff},
 	} {
 		if !reflect.DeepEqual(k.a, k.b) {
 			out = append(out, k.key)

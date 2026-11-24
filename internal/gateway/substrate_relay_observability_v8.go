@@ -38,6 +38,8 @@ func (a *APIServer) recordSubstrateRelay(ctx context.Context, b telemetryrelay.T
 			a.emitSubstrateLifecycleV8(ctx, r)
 		case telemetryrelay.KindEgress:
 			a.emitSubstrateEgressV8(ctx, r)
+		case telemetryrelay.KindAskClosed:
+			a.recordSubstrateAskClosed(ctx, r)
 		case telemetryrelay.KindCount:
 			a.recordSubstrateCount(r.Metric, r.Value)
 		}
@@ -233,8 +235,10 @@ func (a *APIServer) emitSubstrateEgressV8(ctx context.Context, r telemetryrelay.
 
 // emitSubstrateApprovalV8 is log.approval.requested for a new ask an actor's
 // egress raised, or log.approval.resolved when a person answers it
-// (GAP-0453). An ask that expires is closed by the leader and has no record
-// here.
+// (GAP-0453). An ask that times out is closed by the leader and has no record
+// here; one the leader closed because its actor crashed, was reverted or was
+// deleted (by is automatic, state expired) is log.approval.resolved with the
+// result cancelled (GAP-0677).
 func (a *APIServer) emitSubstrateApprovalV8(ctx context.Context, ask asks.Ask, requested bool, by string) {
 	runtime := a.observabilityV8RuntimeEmitter()
 	if runtime == nil || ask.ID == "" {
@@ -251,6 +255,8 @@ func (a *APIServer) emitSubstrateApprovalV8(ctx context.Context, ask asks.Ask, r
 		result, outcome, producerKey = audit.SandboxApprovalApproved, observability.OutcomeApproved, observability.ProducerKey(audit.ActionGatewayApprovalGranted)
 	case ask.State == asks.StateDenied:
 		result, outcome, severity = audit.SandboxApprovalDenied, observability.OutcomeDenied, "HIGH"
+	case ask.State == asks.StateExpired && by == audit.SandboxApprovalByAutomatic:
+		result, outcome, severity = audit.SandboxApprovalCancelled, observability.OutcomeCancelled, "MEDIUM"
 	default:
 		return
 	}

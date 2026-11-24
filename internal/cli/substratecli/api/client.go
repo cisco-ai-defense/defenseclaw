@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 const (
@@ -149,6 +150,9 @@ type Error struct {
 	// Retryable marks a refusal whose cause may pass (a template
 	// attestation that could not be checked now, GAP-0181).
 	Retryable bool
+	// RelayCertCleared comes with recover's not_crashed answer: the
+	// gateway cleared the agent's relay certificate record (GAP-0930).
+	RelayCertCleared bool
 }
 
 func (e *Error) Error() string {
@@ -171,6 +175,15 @@ func AsError(err error) (*Error, bool) {
 		return e, true
 	}
 	return nil, false
+}
+
+// longCallKey carries a longer request bound for one call (withLongCall).
+type longCallKey struct{}
+
+// withLongCall gives the request made with ctx up to d instead of the
+// client's timeout.
+func withLongCall(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, longCallKey{}, d)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, out any) error {
@@ -207,7 +220,15 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.hc.Do(req)
+	hc := c.hc
+	if d, ok := ctx.Value(longCallKey{}).(time.Duration); ok && hc.Timeout > 0 && d > hc.Timeout {
+		// A call that waits on the cluster (a durable snapshot) gets
+		// its own bound instead of the client's (GAP-0410).
+		long := *hc
+		long.Timeout = d
+		hc = &long
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return friendlyTransport(c.base.Host, redactErr(err, tok))
 	}
@@ -229,11 +250,13 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 			ActorUID string `json:"actor_uid"`
 			Message  string `json:"message"`
 			Retry    bool   `json:"retryable"`
+			Cleared  bool   `json:"relay_cert_record_cleared"`
 		}
 		if json.Unmarshal(raw, &d) == nil {
 			e.Reason = d.Reason
 			e.Refusal, e.Detail, e.Actor, e.ActorUID, e.Retryable = d.Refusal, d.Detail, d.Actor, d.ActorUID, d.Retry
 			e.Message = safetext.Line(d.Message)
+			e.RelayCertCleared = d.Cleared
 		}
 		return e
 	}
@@ -262,6 +285,25 @@ type Info struct {
 	// (the key set cannot be read, a wrong issuer): no hook or model call
 	// of any agent runs (GAP-0194).
 	ActorTokens *ActorTokens `json:"actor_tokens,omitempty"`
+	// EgressCallout is who holds Substrate's egress callout slot (nil from
+	// a gateway that does not report it, GAP-0497).
+	EgressCallout *EgressCallout `json:"egress_callout,omitempty"`
+}
+
+// EgressCallout is the /info egress_callout member.
+type EgressCallout struct {
+	// State is defenseclaw, other, none or unknown.
+	State string `json:"state"`
+	// FailMode is closed, open or off.
+	FailMode  string   `json:"fail_mode"`
+	ChecksOff []string `json:"checks_off,omitempty"`
+	Since     string   `json:"since,omitempty"`
+}
+
+// Replaced reports that the DefenseClaw callout does not hold the slot:
+// another callout does, or none is registered.
+func (e *EgressCallout) Replaced() bool {
+	return e != nil && (e.State == "other" || e.State == "none")
 }
 
 // ActorTokens is the /info actor_tokens member.
@@ -299,3 +341,53 @@ func redactErr(err error, tok string) error {
 
 // StatusCode lets the attach package tell a refusal from a failure.
 func (e *Error) StatusCode() int { return e.Status }
+
+// LauncherSettings holds the cluster's limits and defaults for the launcher.
+type LauncherSettings struct {
+	WorkspaceMaxBytes int64 `json:"workspace_max_bytes"`
+	// KeyReplay is substrate.launcher.key_replay (ask, on or off); ""
+	// from a gateway that predates it.
+	KeyReplay string `json:"key_replay,omitempty"`
+	// Files are the admin switches of push and sync; nil from a gateway
+	// that predates them.
+	Files *LauncherFiles `json:"files,omitempty"`
+	// Git is substrate.git (B2 2.5); nil from a gateway that predates it.
+	Git *LauncherGit `json:"git,omitempty"`
+	// UploadScan is substrate.launcher.upload_scan; nil from a gateway that
+	// predates it, which keeps holding files with secrets back.
+	UploadScan *LauncherUploadScan `json:"upload_scan,omitempty"`
+}
+
+// LauncherGit is substrate.git as the gateway reports it: the effective
+// https rewrite map and the submodule and LFS switches of run --clone.
+type LauncherGit struct {
+	HTTPSRewrite []config.SubstrateGitRewrite `json:"https_rewrite"`
+	Submodules   bool                         `json:"submodules"`
+	LFS          bool                         `json:"lfs"`
+	// PushBranch is the cluster's substrate.git.push_branch (allow, ask or
+	// deny; "" from a gateway before 1.0.11).
+	PushBranch string `json:"push_branch_effective,omitempty"`
+}
+
+// LauncherUploadScan is substrate.launcher.upload_scan as the gateway
+// reports it, defaults filled in.
+type LauncherUploadScan struct {
+	MaxFileBytes    int64  `json:"max_file_bytes"`
+	TimeBudget      string `json:"time_budget"`
+	SecretAction    string `json:"secret_action"`
+	PlaceholderForm string `json:"placeholder_form"`
+}
+
+// LauncherFiles is substrate.files as the gateway reports it.
+type LauncherFiles struct {
+	Push bool `json:"push"`
+	Sync bool `json:"sync"`
+}
+
+// Launcher reads settings from the signed-in admin listener. A gateway
+// predating this route returns 404.
+func (c *Client) Launcher(ctx context.Context) (LauncherSettings, error) {
+	var settings LauncherSettings
+	err := c.do(ctx, http.MethodGet, "launcher", nil, nil, &settings)
+	return settings, err
+}

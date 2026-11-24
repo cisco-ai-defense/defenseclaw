@@ -41,7 +41,7 @@ const (
 
 // CheckIDs lists every check in the order doctor prints them.
 var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckBundles,
-	CheckCallout, CheckIngressClients, CheckActorRoutes, CheckAPIAccess, CheckPolicyConflicts, CheckWorkerDrain}
+	CheckCallout, CheckIngressClients, CheckActorRoutes, CheckAPIAccess, CheckPolicyConflicts, CheckWorkerDrain, CheckRelayTLS}
 
 // Check is one result. Message is for the admin (kept on the cluster);
 // EdgeCase names the plan edge case it guards, when there is one.
@@ -177,6 +177,11 @@ type Observed struct {
 	// Bundles is the signed policy bundle state; nil when substrate.bundles
 	// is off (GAP-0429, GAP-0432).
 	Bundles *Bundles
+
+	// RelayTLS is the effective substrate.relay_tls ("" reads as auto);
+	// RelayCA is the relay CA Secret, nil when it was not read (B3.5).
+	RelayTLS string
+	RelayCA  *RelayCA
 }
 
 // DefaultIssuer is Substrate's actor JWT issuer when actorJWT.issuer is unset.
@@ -208,6 +213,7 @@ func RunChecks(o Observed) []Check {
 		CheckBundleState(o), CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
 		CheckPolicyConflict(o),
 		CheckWorkerDrainRunning(o),
+		CheckRelayTLSReady(o),
 	}
 }
 
@@ -528,7 +534,7 @@ var actorRoutePrefixes = []string{
 	"/api/v1/substrate/hook/", "/api/v1/substrate/notify/", "/api/v1/substrate/inspect/", "/llm/",
 }
 
-var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task", "/api/v1/substrate/relay/tamper"}
+var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task", "/api/v1/substrate/relay/tamper", "/api/v1/substrate/relay/cert"}
 
 // ActorListenerProbes are the paths verify asks the actor listener for,
 // without an actor token: one per actor route (they answer 401), and one
@@ -538,10 +544,10 @@ var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1
 // proxy, which has no admin route, so it answers 401 there by design.
 var ActorListenerProbes = []string{
 	"/api/v1/substrate/hook/claudecode", "/api/v1/substrate/notify/codex", "/api/v1/substrate/inspect/tool",
-	"/llm/bedrock", "/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task",
+	"/llm/bedrock", "/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task", "/api/v1/substrate/relay/cert",
 	"/", "/health", "/status", "/api/v1/substrate/info", "/api/v1/substrate/actors", "/api/v1/substrate/actors/a/b",
 	"/api/v1/substrate/actors/a/b/attach", "/api/v1/substrate/session-cert", "/api/v1/substrate/batches",
-	"/api/v1/substrate/usage", "/api/v1/substrate/doctor", "/api/v1/substrate/asks", "/api/v1/substrate/decisions",
+	"/api/v1/substrate/usage", "/api/v1/substrate/doctor", "/api/v1/substrate/asks", "/api/v1/substrate/approvals", "/api/v1/substrate/decisions",
 	"/api/v1/substrate/policy/explain", "/api/v1/substrate/secrets", "/api/v1/substrate/bundle/status",
 	"/api/v1/substrate/signin", "/api/v1/fleet/", "/api/v1/claude-code/hook",
 	"/api/v1/codex/notify", "/api/v1/admin/shutdown",

@@ -276,6 +276,9 @@ type fakeRelay struct {
 	legacyHello bool
 	// warning goes in every hello (GAP-0151).
 	warning string
+	// sessionSeconds, when set, is the gateway's session-seconds answer
+	// header on the WebSocket upgrade (GAP-0588).
+	sessionSeconds int
 }
 
 func newFakeRelay(tokens ...string) *fakeRelay {
@@ -336,6 +339,11 @@ func (f *fakeRelay) react(frame []byte, send func([]byte)) (end, drop bool) {
 		switch {
 		case strings.Contains(s, "DROP"):
 			return false, true
+		case strings.Contains(s, "EXPIRE"):
+			// The long-poll relay's end of an attachment whose session
+			// token expired (GAP-0070); the WebSocket one is in serveWS.
+			send(relay.EncodeControl(relay.Control{Type: relay.CtlError, Message: "session token expired"}))
+			return true, false
 		case strings.Contains(s, "EXIT"):
 			code := 7
 			send(relay.EncodeControl(relay.Control{Type: relay.CtlExit, Code: &code}))
@@ -362,7 +370,13 @@ func (f *fakeRelay) react(frame []byte, send func([]byte)) (end, drop bool) {
 
 func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 	up := websocket.Upgrader{Subprotocols: []string{relay.Subprotocol}, CheckOrigin: func(*http.Request) bool { return true }}
-	conn, err := up.Upgrade(w, r, nil)
+	f.mu.Lock()
+	var hdr http.Header
+	if f.sessionSeconds > 0 {
+		hdr = http.Header{"X-Defenseclaw-Session-Seconds": {strconv.Itoa(f.sessionSeconds)}}
+	}
+	f.mu.Unlock()
+	conn, err := up.Upgrade(w, r, hdr)
 	if err != nil {
 		return
 	}
@@ -402,10 +416,22 @@ func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 			// suspend in that moment): never counted, never typed.
 			conn.UnderlyingConn().Close()
 			return
-		} else if err == nil && t == relay.FrameData {
+		} else if err == nil && t == relay.FrameData && !strings.Contains(string(p), "UNCOUNTED") {
+			// UNCOUNTED: sent, but not yet counted by the relay when the
+			// attachment ends.
 			f.mu.Lock()
 			f.received[inID] += int64(len(p))
 			f.mu.Unlock()
+		}
+		if t, p, err := relay.Decode(msg); err == nil && t == relay.FrameData && strings.Contains(string(p), "EXPIRE") {
+			// The relay ends an attachment whose session token expired
+			// (GAP-0070): an error control, then a normal close. The
+			// input was received (GAP-0588).
+			send(relay.EncodeControl(relay.Control{Type: relay.CtlError, Message: "session token expired"}))
+			wmu.Lock()
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent detached"), time.Now().Add(time.Second))
+			wmu.Unlock()
+			return
 		}
 		end, drop := f.react(msg, send)
 		if drop {

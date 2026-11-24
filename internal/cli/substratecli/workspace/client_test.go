@@ -298,7 +298,12 @@ func TestClientTransferErrors(t *testing.T) {
 		}
 	})
 	t.Run("upload over the actor's cap is refused", func(t *testing.T) {
-		t.Setenv(relay.FilesMaxBytesEnv, "1000")
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Header.Set(relay.UploadMaxHeader, "1000")
+			a.srv.Config.Handler.ServeHTTP(w, r)
+		}))
+		defer proxy.Close()
+		c := NewClient(proxy.Client(), relay.RouteBase(proxy.URL), c.Token)
 		src := filepath.Join(t.TempDir(), "p")
 		write(t, src, "big", strings.Repeat("x", 5000), 0o644)
 		err := c.Upload(context.Background(), "", src, filepath.Join(a.workdir, "capped"))

@@ -2245,6 +2245,26 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_HOOK_BYTES_PAIRS",
+      "category": "test_fixture",
+      "purpose": "Sets the number of tool-call pairs the audit-bytes-per-hook-post measurement posts (default 150).",
+      "default": "unset",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_audit_bytes_per_post_test.go",
+          "description": "Hook audit bytes-per-post measurement fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_BURST_CALLS",
       "category": "test_fixture",
       "purpose": "Sets the number of hook calls in the probe burst.",
@@ -4313,6 +4333,26 @@
       "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
     },
     {
+      "name": "DEFENSECLAW_PIN_REACHABILITY",
+      "category": "test_fixture",
+      "purpose": "Opt-in for the release and nightly check that every pinned vendor harness archive (Cursor, Devin, Kiro) is still served; unset skips it, because it needs the network and fails on a day a vendor withdraws an old build.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/openshell/harness/pin_reachability_test.go",
+          "description": "TestPinnedArchivesAreReachable runs only when the variable is 1"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_PLUGIN_AGENT_ID",
       "category": "hook_internal",
       "purpose": "Plugin-side agent ID. Falls back to DEFENSECLAW_AGENT_ID when unset.",
@@ -4598,6 +4638,66 @@
         }
       ],
       "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_RG",
+      "category": "test_fixture",
+      "purpose": "Path of the ripgrep 14.1.0 binary the live ripgrep tests of the action-fact resolver run against, instead of rg on PATH.",
+      "default": "unset (rg on PATH)",
+      "accepted_values": [
+        "absolute path to ripgrep 14.1.0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0679_gap0682_test.go",
+          "description": "g0679LiveRG picks the rg binary the live ripgrep checks run"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_RG_FUZZ_SEED",
+      "category": "test_fixture",
+      "purpose": "Seed of the random ripgrep glob and type-add shapes in the live glob fuzz tests; unset uses a fixed seed.",
+      "default": "unset (fixed seed)",
+      "accepted_values": [
+        "unsigned integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0683_test.go",
+          "description": "The glob fuzz tests read the seed to replay or widen a run"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_RG_REQUIRED",
+      "category": "test_fixture",
+      "purpose": "Makes the live ripgrep tests fail instead of skip when no ripgrep 14.1.0 is available (the local gates set it).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0679_gap0682_test.go",
+          "description": "g0679LiveRG fails the test instead of skipping when there is no matching rg"
+        }
+      ],
+      "since": "1.0.11"
     },
     {
       "name": "DEFENSECLAW_RUN_ID",
@@ -5771,6 +5871,26 @@
       ],
       "since": "1.0.10",
       "security_note": "The kubeconfig user's token is sent to the cluster's admin listener, which checks it with a TokenReview. Nothing is stored by the launcher."
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_MCP",
+      "category": "test_fixture",
+      "purpose": "Set by the substrate --mcp unit test to prove that --mcp is a per-run flag only: the variable is never read, so setting it changes nothing.",
+      "default": "unset",
+      "accepted_values": [
+        "name=command",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/substrate_mcp_test.go",
+          "description": "TestSubstrateMCPIsNotASetting sets it and checks that substrate run still bridges no MCP server"
+        }
+      ],
+      "since": "1.0.11"
     },
     {
       "name": "DEFENSECLAW_SUBSTRATE_PROFILE",
@@ -9010,26 +9130,6 @@
         {
           "location": "internal/substrate/setup/chart_test.go",
           "description": "Go test"
-        }
-      ],
-      "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_RELAY_FILES_MAX_BYTES",
-      "category": "runtime_path",
-      "purpose": "Cap in bytes on the file content one upload or download through the Agent Substrate actor relay's file routes may carry. Read by the relay process in the actor; the launcher has its own download cap.",
-      "default": "(relay.DefaultFilesMaxBytes)",
-      "accepted_values": [
-        "positive integer (bytes)",
-        "unset"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "internal/substrate/relay/files.go",
-          "description": "FilesMaxBytesEnv overrides DefaultFilesMaxBytes"
         }
       ],
       "since": "1.0.10"

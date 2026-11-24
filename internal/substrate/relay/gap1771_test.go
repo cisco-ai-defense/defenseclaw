@@ -60,7 +60,7 @@ func TestGAP1771PollWriteWithNoAnswerCountsSent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := Attach(ctx, pr, io.Discard, AttachOptions{BaseURL: srv.URL, Token: "t", LongPoll: true, FlatRoutes: true,
-		OnUnsent: func(n int) { unsent.Add(int64(n)) }})
+		OnUnsent: func(b []byte) { unsent.Add(int64(len(b))) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestGAP1771PollWriteAfterTheEndIsUnsent(t *testing.T) {
 	post := func(context.Context) (*http.Response, error) { posts++; return nil, context.Canceled }
 	var sent sendCount
 	var unsent int
-	o := AttachOptions{OnUnsent: func(n int) { unsent += n }}
+	o := AttachOptions{OnUnsent: func(b []byte) { unsent += len(b) }}
 	err := o.tracked(&sent, func([]byte) error { return pollWrite(context.Background(), sendCtx, post) })([]byte("keys\r"))
 	if err == nil || posts != 0 || sent.settle() != 0 || unsent != len("keys\r") {
 		t.Fatalf("after the end: err=%v posts=%d Sent=%d unsent=%d, want an error, no post, Sent 0, unsent %d", err, posts, sent.n, unsent, len("keys\r"))

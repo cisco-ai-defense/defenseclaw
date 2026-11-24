@@ -161,6 +161,9 @@
             },
             "secretsNamespace": {
               "$ref": "#/definitions/dnsLabel"
+            },
+            "createUserSecretsNamespace": {
+              "type": "boolean"
             }
           }
         },
@@ -199,6 +202,69 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 65535
+            }
+          }
+        },
+        "launcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keyReplay": {
+              "type": "string",
+              "pattern": "^\\s*([Aa][Ss][Kk]|[Oo][Nn]|[Oo][Ff][Ff])?\\s*$"
+            }
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "push": {
+              "type": "boolean"
+            },
+            "sync": {
+              "type": "boolean"
+            }
+          }
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "httpsRewrite": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\s\"\\\\]+[:/]$"
+                  },
+                  "to": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "pattern": "^https://[^\\s\"\\\\@]+/$"
+                  }
+                }
+              }
+            },
+            "submodules": {
+              "type": "boolean"
+            },
+            "lfs": {
+              "type": "boolean"
+            },
+            "pushBranch": {
+              "type": "string",
+              "pattern": "^\\s*([Aa][Ll][Ll][Oo][Ww]|[Aa][Ss][Kk]|[Dd][Ee][Nn][Yy])?\\s*$"
             }
           }
         }
@@ -250,6 +316,105 @@
                 "issuer": {
                   "type": "string",
                   "pattern": "^https://"
+                },
+                "revocation": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {"type": "boolean"},
+                    "sync_interval": {"type": "string", "pattern": "^[0-9]+(ms|s|m)$"},
+                    "max_stale": {"type": "string", "pattern": "^[0-9]+(ms|s|m|h)$", "description": "at least 2 x sync_interval, at most 1h"},
+                    "max_tokens_per_person": {"type": "integer", "minimum": 1, "maximum": 4096}
+                  }
+                }
+              }
+            },
+            "launcher": {
+              "type": "object",
+              "properties": {
+                "upload_scan": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "The secret scan of a project copy before upload (Linux and macOS launchers). secret_action hold_back is the admin-off switch for in-source replacement.",
+                  "properties": {
+                    "max_file_bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 67108864
+                    },
+                    "time_budget": {
+                      "type": "string"
+                    },
+                    "secret_action": {
+                      "type": "string",
+                      "enum": [
+                        "replace",
+                        "hold_back"
+                      ]
+                    },
+                    "placeholder_form": {
+                      "type": "string",
+                      "enum": [
+                        "token",
+                        "env"
+                      ]
+                    }
+                  }
+                },
+                "key_replay": {
+                  "type": "string",
+                  "pattern": "^\\s*([Aa][Ss][Kk]|[Oo][Nn]|[Oo][Ff][Ff])?\\s*$"
+                }
+              }
+            },
+            "files": {
+              "type": "object",
+              "properties": {
+                "push": {
+                  "type": "boolean"
+                },
+                "sync": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "git": {
+              "type": "object",
+              "properties": {
+                "https_rewrite": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "from",
+                      "to"
+                    ],
+                    "properties": {
+                      "from": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[^\\s\"\\\\]+[:/]$"
+                      },
+                      "to": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^https://[^\\s\"\\\\@]+/$"
+                      }
+                    }
+                  }
+                },
+                "submodules": {
+                  "type": "boolean"
+                },
+                "lfs": {
+                  "type": "boolean"
+                },
+                "push_branch": {
+                  "type": "string",
+                  "pattern": "^\\s*([Aa][Ll][Ll][Oo][Ww]|[Aa][Ss][Kk]|[Dd][Ee][Nn][Yy])?\\s*$"
                 }
               }
             }
@@ -318,6 +483,10 @@
           "type": "object"
         },
         "relaySessionSecret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "relayCASecret": {
           "type": "string",
           "minLength": 1
         },
