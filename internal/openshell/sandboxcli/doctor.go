@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -109,9 +110,14 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 	}
 	// Off Linux the Docker VM's kernel is checked in a local image: the
 	// base image, else an overlay image built on it. The doctor's Landlock
-	// row and sandbox run read the same probe (rel-1-0-10:GAP-1746).
+	// row and sandbox run read the same probe (rel-1-0-10:GAP-1746). It
+	// starts a container: one report asks it once, and the doctor's last
+	// line reads that answer (doctorRunRefusal), not a second probe that
+	// also counts against the Python and TUI doctor's 90 s
+	// (rel-1-0-10:GAP-1758).
 	d.ProbeImages = a.harnessImageTags()
-	d.DockerVMLandlockABI = a.DockerVMLandlock
+	a.doctorLandlock = landlockOnce(a.DockerVMLandlock)
+	d.DockerVMLandlockABI = a.doctorLandlock
 	return d
 }
 
@@ -1393,7 +1399,26 @@ func (a *App) doctorRunRefusal(ctx context.Context, rep *openshell.DoctorReport)
 	if rep.Driver != openshell.DriverDocker {
 		return nil
 	}
-	return a.dockerDesktopRefusal(ctx, openshell.Driver{Name: rep.Driver}, nil)
+	probe := a.doctorLandlock
+	if probe == nil {
+		probe = a.DockerVMLandlock
+	}
+	return a.dockerDesktopRefusal(ctx, openshell.Driver{Name: rep.Driver}, nil, probe)
+}
+
+// landlockOnce is probe asked at most once: later calls get the first
+// answer.
+func landlockOnce(probe func(context.Context) (int, string, error)) func(context.Context) (int, string, error) {
+	var (
+		once   sync.Once
+		abi    int
+		kernel string
+		err    error
+	)
+	return func(ctx context.Context) (int, string, error) {
+		once.Do(func() { abi, kernel, err = probe(ctx) })
+		return abi, kernel, err
+	}
 }
 
 // printDoctor prints the checks and the verdict; refusal is what sandbox

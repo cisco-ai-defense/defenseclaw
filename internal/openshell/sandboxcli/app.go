@@ -179,6 +179,10 @@ type App struct {
 	// decides dockerDesktopRefusal. It is also the doctor's probe
 	// (defaultDoctor): one probe for both (rel-1-0-10:GAP-1746).
 	DockerVMLandlock func(ctx context.Context) (abi int, kernel string, err error)
+	// doctorLandlock is the probe the last report's Landlock row asked
+	// (defaultDoctor: DockerVMLandlock, asked at most once per report),
+	// which the doctor's last line reads again (doctorRunRefusal).
+	doctorLandlock func(ctx context.Context) (abi int, kernel string, err error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// LifecycleDir is the OpenShell configuration directory whose gateway
