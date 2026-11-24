@@ -1308,8 +1308,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		waitCodeGuard = a.startCodeGuardOnArgs(ctx, cgReq)
 	}
 	cfg := a.decisionConfig(ctx)
-	var aliasPending effectAliasPending
-	action.aliasPending = &aliasPending
+	aliasPending := action.aliasPending
+	ownAliasPending := aliasPending == nil
+	if ownAliasPending {
+		aliasPending = &effectAliasPending{}
+	}
+	action.aliasPending = aliasPending
 	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
@@ -1426,7 +1430,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	verdict = a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
-	if verdict != nil && verdict.Action != guardrailActionBlock {
+	if ownAliasPending && verdict != nil && verdict.Action != guardrailActionBlock {
 		aliasPending.commit()
 	}
 	return verdict

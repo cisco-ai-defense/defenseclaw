@@ -125,7 +125,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	action trustedActionRequest,
 	command json.RawMessage,
 	commandTool string,
-) *ToolInspectVerdict {
+) (result *ToolInspectVerdict) {
 	ctx = withCallTargetMemo(ctx)
 	connectorName := action.Connector
 	if req != nil {
@@ -145,6 +145,15 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 			record(facts, findings)
 		}
 	}
+	// The second command reading can still block a call the first reading
+	// allowed. Hold cross-call aliases until that final merged verdict.
+	var aliasPending effectAliasPending
+	action.aliasPending = &aliasPending
+	defer func() {
+		if result != nil && result.Action != guardrailActionBlock {
+			aliasPending.commit()
+		}
+	}()
 	verdict := a.inspectTrustedToolPolicyCtx(ctx, req, action)
 	if verdict == nil || !dispatched || primary.Authoritative() {
 		return verdict

@@ -66,3 +66,41 @@ func TestAliasMemoClearedByOverwrite(t *testing.T) {
 		t.Fatalf("replaced alias retained credential proof: %+v", got)
 	}
 }
+
+func TestAliasMemoNotWrittenWhenSecondShellReadingBlocks(t *testing.T) {
+	useEffectsRulesMode(t, "on")
+	installToolCallCorpusProfileConnector(t, "hermes", "strict")
+	cfg := &config.Config{}
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "hermes"
+	cfg.Guardrail.BlockAt = "CRITICAL"
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+	const link = "ln -sf ~/.ssh/id_rsa /home/u/work/second-reading-alias"
+	args, err := json.Marshal(map[string]any{"command": link, "background": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := shadowLiveRequest(link)
+	action.Connector = "hermes"
+	action.Input.Tool = "terminal"
+	action.Input.Command = ""
+	action.Input.Args = args
+	action.LegacyText = string(args)
+	action.sessionID = "gap2075-second-reading"
+	secondary, err := json.Marshal(map[string]string{"command": "cat ~/.ssh/id_rsa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &ToolInspectRequest{Tool: "terminal", Args: args, Direction: "tool_call", Connector: "hermes"}
+	verdict := (&APIServer{scannerCfg: cfg}).inspectSandboxShellToolPolicyCtx(t.Context(), req, action, secondary, "Bash")
+	if verdict == nil || verdict.Action != guardrailActionBlock {
+		t.Fatalf("merged call action %v, want block", verdict)
+	}
+	use := shadowLiveRequest("cat /home/u/work/second-reading-alias")
+	use.Connector = "hermes"
+	use.sessionID = action.sessionID
+	if got := effectShadowRun(use, effectRulesOn, tierRestricted)[0]; len(got.ReadProofs) != 0 {
+		t.Fatalf("blocked call's link was remembered: %+v", got.ReadProofs)
+	}
+}
