@@ -28,15 +28,28 @@ package telemetryrelay
 //     reported. A claim before that, or one after a reported call, drops
 //     the entry unmarked.
 //
-// Known limits (all give a missed mark, except the last): a quick resume
-// before every replica acknowledged; a leader change (the set is in the
-// leader's memory); a suspend and resume the controller saw inside one pass
-// (same time); concurrent first calls on two replicas, where the first claim
-// to reach the leader wins; a replica that served hooks while it could not
-// reach the leader for over ResumeReplicaTTL.
+//   - The leader must know every replica that serves hooks. A replica syncs
+//     once before it serves (Taker.Join), and a leader that just started
+//     marks nothing for ResumeReplicaTTL (Store.ResumeWarmup): its replica
+//     set fills only as each replica syncs with it.
+//
+// Known limits that give a missed mark: a quick resume before every replica
+// acknowledged; a leader change (the set is in the leader's memory, and the
+// new leader warms up); a suspend and resume the controller saw inside one
+// pass (same time).
+//
+// Known limits that can mark a later call instead of the first:
+//   - Concurrent first calls, on two replicas or two on one replica that
+//     reach Hook out of start order: the claim that reaches the leader first
+//     wins, and it may be the later-starting call's.
+//   - A replica the leader does not know: one that could not reach the leader
+//     when it started (until its first sync), a 1.0.10 replica in a mixed
+//     rollout (it never syncs), or one that served hooks while it could not
+//     reach the leader for over ResumeReplicaTTL.
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -63,6 +76,10 @@ const (
 	ResumeReplicaTTL = 2 * time.Minute
 	// maxResumeReplicas bounds the replicas the leader tracks.
 	maxResumeReplicas = 64
+	// resumeEvictBatch is how many of the oldest newest-call starts go at
+	// once when the leader's map is full: one sort per batch instead of a
+	// scan of the whole map under the leader lock for every new actor.
+	resumeEvictBatch = MaxResumeActors / 8
 )
 
 // ResumeSyncRequest is a replica's sync: who it is, the sequence number of
@@ -110,8 +127,17 @@ type resumeLeader struct {
 	entries  map[string]*resumeEntry
 	hookSeen map[string]int64
 	replicas map[string]time.Time
+	// started is the leader's first resume call: the warm-up starts there.
+	started time.Time
 	// now replaces the clock (tests).
 	now func() time.Time
+}
+
+// startLocked notes the leader's first resume call.
+func (l *resumeLeader) startLocked(now time.Time) {
+	if l.started.IsZero() {
+		l.started = now
+	}
 }
 
 func (l *resumeLeader) clock() time.Time {
@@ -127,8 +153,10 @@ func (l *resumeLeader) lifecycle(r Record) {
 		return
 	}
 	at := r.At.UnixNano()
+	now := l.clock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.startLocked(now)
 	switch r.Lifecycle {
 	case chainstate.LifecycleSuspended:
 		if seen, ok := l.hookSeen[r.UID]; ok && seen > at {
@@ -169,16 +197,31 @@ func (l *resumeLeader) noteHookLocked(uid string, start int64) {
 		l.hookSeen = map[string]int64{}
 	}
 	if _, ok := l.hookSeen[uid]; !ok && len(l.hookSeen) >= MaxResumeActors {
-		var oldest string
-		var oldestAt int64
-		for k, v := range l.hookSeen {
-			if oldest == "" || v < oldestAt {
-				oldest, oldestAt = k, v
-			}
-		}
-		delete(l.hookSeen, oldest)
+		evictOldest(l.hookSeen, resumeEvictBatch)
 	}
 	l.hookSeen[uid] = start
+}
+
+// evictOldest deletes the n entries of m with the oldest values.
+func evictOldest(m map[string]int64, n int) {
+	if n <= 0 || len(m) == 0 {
+		return
+	}
+	at := make([]int64, 0, len(m))
+	for _, v := range m {
+		at = append(at, v)
+	}
+	slices.Sort(at)
+	cut := at[min(n, len(at))-1]
+	for k, v := range m {
+		if n == 0 {
+			return
+		}
+		if v <= cut {
+			delete(m, k)
+			n--
+		}
+	}
 }
 
 func (l *resumeLeader) boundEntriesLocked(uid string) {
@@ -215,6 +258,7 @@ func (s *Store) ResumeSync(_ context.Context, in ResumeSyncRequest) (ResumeSyncR
 	now := l.clock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.startLocked(now)
 	l.liveReplicasLocked(now)
 	if l.replicas == nil {
 		l.replicas = map[string]time.Time{}
@@ -265,14 +309,15 @@ func (s *Store) ResumeSync(_ context.Context, in ResumeSyncRequest) (ResumeSyncR
 }
 
 // ResumeClaim implements MethodResumeClaim: the call is the first after the
-// resume only when it started after S, no call after S was reported, and
-// every live replica acknowledged the entry. Any claim for a call after S
-// ends the entry.
+// resume only when it started after S, no call after S was reported, every
+// live replica acknowledged the entry, and the leader is past its warm-up.
+// Any claim for a call after S ends the entry.
 func (s *Store) ResumeClaim(_ context.Context, in ResumeClaimRequest) (ResumeClaimResponse, error) {
 	l := &s.resumes
 	now := l.clock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.startLocked(now)
 	e, ok := l.entries[in.UID]
 	if !ok || in.Start <= e.at {
 		return ResumeClaimResponse{}, nil
@@ -285,6 +330,11 @@ func (s *Store) ResumeClaim(_ context.Context, in ResumeClaimRequest) (ResumeCla
 		}
 	}
 	if seen, ok := l.hookSeen[in.UID]; ok && seen > e.at {
+		first = false
+	}
+	if now.Sub(l.started) < s.resumeWarmup() {
+		// A replica that has not synced with this leader yet may have
+		// served the first call.
 		first = false
 	}
 	delete(l.entries, in.UID)
@@ -406,4 +456,15 @@ func (r *Resumes) Claim(ctx context.Context, c *leader.Client, uid string, start
 		return false
 	}
 	return out.First
+}
+
+// resumeWarmup is Store.ResumeWarmup with its default.
+func (s *Store) resumeWarmup() time.Duration {
+	switch {
+	case s.ResumeWarmup < 0:
+		return 0
+	case s.ResumeWarmup == 0:
+		return ResumeReplicaTTL
+	}
+	return s.ResumeWarmup
 }

@@ -501,6 +501,11 @@ func (a *APIServer) RunSubstrate(ctx context.Context) error {
 	a.startPendingHookRecovery(ctx)
 	if st.cfg.Relay != nil {
 		st.cfg.Relay.Record = a.recordSubstrateRelay
+		// GAP-0486: the leader knows this replica before it serves a hook
+		// call. Bounded: a leader out of reach only delays the marks.
+		jctx, cancel := context.WithTimeout(ctx, substrateRelayJoinWait)
+		_ = st.cfg.Relay.Join(jctx)
+		cancel()
 		go st.cfg.Relay.Run(ctx)
 	}
 	if st.cfg.SignInServer != nil {

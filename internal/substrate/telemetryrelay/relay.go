@@ -191,6 +191,11 @@ type Store struct {
 	Registrations registry.Store
 	// MaxHostUses bounds the host-use map (DefaultMaxHostUses when 0).
 	MaxHostUses int
+	// ResumeWarmup is how long a leader that just started marks no first
+	// hook call after a resume (GAP-0486): it knows a replica only once
+	// that replica synced with it. ResumeReplicaTTL when 0; below 0, no
+	// wait (tests).
+	ResumeWarmup time.Duration
 
 	mu sync.Mutex
 	// uses is the newest allowed request of each actor to each host
@@ -678,6 +683,12 @@ type Taker struct {
 
 // Resumes is the replica's first-hook-after-resume state (GAP-0486).
 func (t *Taker) Resumes() *Resumes { return &t.resumes }
+
+// Join syncs the first-hook-after-resume state once, before the replica
+// serves a hook call, so the leader knows it and a claim on another replica
+// waits for its acknowledgement (GAP-0486). An error only means no marks
+// until a sync works.
+func (t *Taker) Join(ctx context.Context) error { return t.resumes.Sync(ctx, t.Leader) }
 
 // TakeOnce takes and records one batch, then syncs the first-hook-after-
 // resume state. A failed sync (a leader without the method in a rolling

@@ -16,7 +16,7 @@ import (
 
 func gap0486Leader(t *testing.T) (*Store, *leader.Client) {
 	t.Helper()
-	s := &Store{}
+	s := &Store{ResumeWarmup: -1} // a leader past its warm-up
 	srv := &leader.Server{IsLeader: func() bool { return true }}
 	Serve(srv, s)
 	hs := httptest.NewServer(srv)

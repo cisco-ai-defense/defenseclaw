@@ -20,6 +20,9 @@ import (
 const (
 	resumeClaimWait    = 500 * time.Millisecond
 	resumeClaimTimeout = 2 * time.Second
+	// substrateRelayJoinWait bounds the replica's first resume sync, before
+	// its listeners serve.
+	substrateRelayJoinWait = 2 * time.Second
 )
 
 type substrateResumeClaim struct {
