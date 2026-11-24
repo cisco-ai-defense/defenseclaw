@@ -260,6 +260,11 @@ type ManagedStatus struct {
 	// sandbox harness for this account. An unavailable policy answer leaves
 	// it false, so doctor cannot claim broad readiness without one.
 	Allowed bool `json:"allowed"`
+	// AccountDenied is true when the managed gateway answered for every
+	// configured sandbox agent and refused each: the caller's profile sets
+	// sandbox.allowed false. It is the account-wide verdict `sandbox run`
+	// refuses with; DeniedHarnesses also lists agents refused one by one.
+	AccountDenied bool `json:"account_denied,omitempty"`
 	// LegacyAllowedMissing is true only after decoding a status from an older
 	// daemon that did not send allowed. It is not an authorization verdict.
 	LegacyAllowedMissing bool `json:"-"`
@@ -290,9 +295,13 @@ type ManagedStatus struct {
 	RequestAccess   string    `json:"request_access,omitempty"`
 	// InstallMode (prerequisite or setup), Driver and OpenShellVersion
 	// describe the daemon's OpenShell.
-	InstallMode      string `json:"install_mode,omitempty"`
-	Driver           string `json:"driver,omitempty"`
-	OpenShellVersion string `json:"openshell_version,omitempty"`
+	InstallMode string `json:"install_mode,omitempty"`
+	Driver      string `json:"driver,omitempty"`
+	// OpenShellVersion is the release the organization requires (the pin
+	// or the floor); InstalledOpenShellVersion the one found installed when
+	// the daemon knows it ("" when it does not, or from an older daemon).
+	OpenShellVersion          string `json:"openshell_version,omitempty"`
+	InstalledOpenShellVersion string `json:"installed_openshell_version,omitempty"`
 	// GatewayPort is the port the organization gives the caller's OpenShell
 	// gateway (enterprise.openshell.gateway_port; 0 from an older daemon).
 	GatewayPort int `json:"gateway_port,omitempty"`

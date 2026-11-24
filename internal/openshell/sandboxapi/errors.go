@@ -100,12 +100,96 @@ const AccountBusyMessage = "Sandboxes aren't available for your account on this 
 const UnavailableSetupChanging = "your organization changed how sandboxes run on this computer, and DefenseClaw is still setting that up; " +
 	"try again in a few minutes"
 
+// OrganizationOffReason is ManagedStatus.Unavailable and the refusal text
+// while the organization has turned sandboxes off (openshell.enabled false).
+const OrganizationOffReason = "sandboxes are turned off by your organization"
+
+// accountNotAllowedTail is shared by the two forms of the refusal an account
+// gets when its profile sets sandbox.allowed false: a sentence (what `sandbox
+// run` says) and a clause (the Sandboxes row of `sandbox status`).
+const accountNotAllowedTail = "our organization doesn't allow sandboxes for your account"
+
+const (
+	AccountNotAllowedReason  = "y" + accountNotAllowedTail
+	AccountNotAllowedMessage = "Y" + accountNotAllowedTail + "."
+)
+
+// ManagedOffKind is why sandboxes are off or refused for the caller on a
+// managed computer. `sandbox status`, `sandbox run` and `sandbox doctor` all
+// read it from ManagedOff, so they say the same thing.
+type ManagedOffKind int
+
+const (
+	// ManagedOffNone: sandboxes are on for the caller.
+	ManagedOffNone ManagedOffKind = iota
+	// ManagedOffOrganization: the organization turned sandboxes off.
+	ManagedOffOrganization
+	// ManagedOffProfile: the caller's profile sets sandbox.allowed false.
+	ManagedOffProfile
+	// ManagedOffElsewhere: another account holds the computer's gateway.
+	ManagedOffElsewhere
+	// ManagedOffUnavailable: sandboxes can't run here for another reason
+	// the daemon gave (ManagedStatus.Unavailable).
+	ManagedOffUnavailable
+	// ManagedOffSetting: off, and the organization manages that setting.
+	ManagedOffSetting
+)
+
+// Closed reports a reason that closes sandboxes for the account by decision:
+// the organization's switch, the account's profile, or a setting the
+// organization manages. Nothing the account or its install does changes it,
+// so no row may tell the account what its sandboxes need or will do; install
+// problems and another account's gateway are not Closed (they can clear).
+func (k ManagedOffKind) Closed() bool {
+	return k == ManagedOffOrganization || k == ManagedOffProfile || k == ManagedOffSetting
+}
+
+// ManagedOff is the one decision of why sandboxes are off for the caller on a
+// managed computer, and the only place that orders the reasons: the
+// organization's switch (it holds for every account, and nothing below
+// changes it), then the caller's profile, then the install itself (OpenShell
+// missing, or a release that runs no sandbox: no account can use the
+// computer's gateway then), and last another account's gateway. Every caller
+// reads it (the Sandboxes and OpenShell rows of `sandbox status`, the doctor's
+// rows and the refusal `sandbox run` ends with), so no path can name a later
+// reason while an earlier one holds.
+func (st *Status) ManagedOff() ManagedOffKind {
+	if st == nil || st.Managed == nil {
+		return ManagedOffNone
+	}
+	m := st.Managed
+	switch {
+	case m.Unavailable == OrganizationOffReason:
+		return ManagedOffOrganization
+	case m.AccountDenied:
+		return ManagedOffProfile
+	case m.Unavailable != "":
+		return ManagedOffUnavailable
+	case st.GatewayElsewhere != "" && (!st.Enabled || !st.Available):
+		return ManagedOffElsewhere
+	case st.Enabled:
+		return ManagedOffNone
+	}
+	return ManagedOffSetting
+}
+
+// OrganizationOffMessage is what the caller is told while the organization
+// has turned sandboxes off, whatever else would refuse them (a profile that
+// denies them, another account's gateway): the reason, then who to ask.
+func OrganizationOffMessage(requestAccess string) string {
+	return UnavailableSentence(OrganizationOffReason) + " " + AccessContact(requestAccess)
+}
+
 // managedOffMessage is OffMessage for a managed computer.
 func (st *Status) managedOffMessage() string {
 	m := st.Managed
 	var msg string
-	switch {
-	case st.GatewayElsewhere != "":
+	switch kind := st.ManagedOff(); {
+	case kind == ManagedOffOrganization:
+		return OrganizationOffMessage(m.RequestAccess)
+	case kind == ManagedOffProfile:
+		msg = AccountNotAllowedMessage
+	case kind == ManagedOffElsewhere:
 		msg = AccountBusyMessage + "; try again when it has no sandbox running."
 	case m.Unavailable == UnavailableSetupChanging:
 		// A notice that clears by itself: it says to retry, with no

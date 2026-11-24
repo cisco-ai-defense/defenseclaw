@@ -387,6 +387,25 @@ func readSandboxPrerequisites(path string) (record sandboxPrerequisitesRecord, o
 	return record, true
 }
 
+// sandboxInstalledOpenShellVersion is the release of OpenShell the lifecycle
+// found installed, as the record names it for a part it refused ("" when the
+// record is missing or names none): what status shows next to the release the
+// organization requires.
+var sandboxInstalledOpenShellVersion = func() string {
+	record, ok := readSandboxPrerequisites(sandboxPrerequisitesPath(runtime.GOOS))
+	if !ok {
+		return ""
+	}
+	for _, missing := range record.Missing {
+		if strings.EqualFold(strings.TrimSpace(missing.Item), "openshell cli") {
+			if v, err := openshell.ParseVersion(missing.Version); err == nil {
+				return v.String()
+			}
+		}
+	}
+	return ""
+}
+
 // sandboxPrerequisiteWhy says why the lifecycle's record keeps a sandbox on
 // driver from running, "" when it doesn't. No record, or one written for
 // another install mode or driver than the configuration's, reads as not set
