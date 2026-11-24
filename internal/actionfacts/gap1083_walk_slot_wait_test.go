@@ -134,7 +134,7 @@ func TestGAP1083WalkSlotWaitIsBounded(t *testing.T) {
 	for got := range each * len(commands) {
 		select {
 		case a := <-answers:
-			if limit := credentialPathWalkSlotWait + 750*time.Millisecond; a.took > limit {
+			if limit := 1750 * time.Millisecond; a.took > limit {
 				t.Errorf("%q answered in %v while slow walks held the slots, want at most %v", a.command, a.took, limit)
 			}
 			w := want[a.command]
@@ -174,7 +174,7 @@ func TestGAP1083WalkSlotWaitEndsWithTheCall(t *testing.T) {
 	leaving, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	a = gap1083Resolve(leaving, command, root, home)
-	if a.took > credentialPathWalkSlotWait/2 || !reflect.DeepEqual(a.reads, want.reads) {
+	if a.took > 500*time.Millisecond || !reflect.DeepEqual(a.reads, want.reads) {
 		t.Errorf("a call whose context ended at 100 ms waited %v with record %+v, want about 100 ms and %+v", a.took, a.reads, want.reads)
 	}
 
@@ -224,7 +224,7 @@ func TestGAP1083RecordsOfOneCallShareTheWait(t *testing.T) {
 		}
 		tooks = append(tooks, time.Since(at))
 	}
-	if total := time.Since(start); total > credentialPathWalkSlotWait+750*time.Millisecond {
-		t.Errorf("four records of one call took %v (%v) while slow walks held every slot, want at most one wait", total, tooks)
+	if total := time.Since(start); total > 1750*time.Millisecond {
+		t.Errorf("four records of one call took %v (%v) while slow walks held every slot, want at most 1.75 s, one wait of 1 s and 750 ms", total, tooks)
 	}
 }
