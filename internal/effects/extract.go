@@ -2553,7 +2553,7 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	// upstream of the pipe, a printing process substitution, a file the call
 	// wrote) is the script it runs (DET111 R1, GAP-1151, GAP-1593).
 	if text, tcond, ok := w.stdinText(c); ok && entry.ShellCode && (entry.StdinCode || !hasCodeOperand(args, true)) {
-		w.unwrapCode(text, true, dialect, depth, cond || tcond, origin)
+		w.unwrapCodeScopedInput(text, true, dialect, depth, cond || tcond, origin, true, true)
 		return
 	}
 	e := Effect{Kind: KindExec, Cond: cond, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
@@ -4138,6 +4138,10 @@ func (w *walker) unwrapCode(code string, static bool, dialect Dialect, depth int
 // childScope=false runs it in the current shell (eval, source, .), so its
 // cd/env changes persist (review R3-6 C08).
 func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, depth int, cond bool, origin Origin, childScope bool) {
+	w.unwrapCodeScopedInput(code, static, dialect, depth, cond, origin, childScope, false)
+}
+
+func (w *walker) unwrapCodeScopedInput(code string, static bool, dialect Dialect, depth int, cond bool, origin Origin, childScope, scriptOnStdin bool) {
 	if !static {
 		w.positional, w.positionalSet = nil, false
 		return
@@ -4159,6 +4163,9 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 		sub = parsePowerShell(code, w.o)
 	default:
 		sub = parsePOSIX(code, w.o)
+	}
+	if scriptOnStdin && dialect == DialectPOSIX {
+		bindStdinScriptTail(sub, code)
 	}
 	if hasUnknown(sub, ReasonInvalidSyntax) {
 		// A body the shell cannot parse runs nothing from the error on (watch's

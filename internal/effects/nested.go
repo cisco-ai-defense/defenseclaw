@@ -516,6 +516,60 @@ func rawWordsFor(resolved []Word, raw []Word) []Word {
 	return out
 }
 
+// bindStdinScriptTail accounts for a shell reading its script from stdin: a
+// read or xargs on the first script line can consume the next literal line as
+// data. That line then supplies an operand or a variable, rather than running
+// as a command. The proof is bounded to a two-line script with one plain
+// absolute path and no competing stdin redirection.
+func bindStdinScriptTail(sub *Script, code string) {
+	if sub == nil || len(sub.Unknowns) != 0 || len(sub.Stmts) < 2 {
+		return
+	}
+	lines := strings.Split(strings.TrimSuffix(code, "\n"), "\n")
+	if len(lines) != 2 {
+		return
+	}
+	data := lines[1]
+	if !strings.HasPrefix(data, "/") || strings.ContainsAny(data, " \t\r\\'\"$`*?[]{}();&|<>") {
+		return
+	}
+	first := sub.Stmts[0]
+	last := sub.Stmts[len(sub.Stmts)-1]
+	if len(first.Cmds) != 1 || len(last.Cmds) != 1 || len(last.Cmds[0].Words) != 1 {
+		return
+	}
+	for _, stmt := range sub.Stmts[:len(sub.Stmts)-1] {
+		if stmt.Span[1] > len(lines[0]) || stmt.Background {
+			return
+		}
+	}
+	reader, tail := first.Cmds[0], last.Cmds[0]
+	if len(reader.Words) == 0 || len(reader.Redirs) != 0 || reader.PipeIn || reader.Pipeline || reader.Async ||
+		!reader.Words[0].Static || len(tail.Redirs) != 0 || !tail.Words[0].Static ||
+		tail.Words[0].Value != data || last.Span[0] < len(lines[0])+1 {
+		return
+	}
+	switch reader.Words[0].Value {
+	case "read":
+		args := reader.Words[1:]
+		if len(args) == 2 && args[0].Static && args[0].Value == "-r" {
+			args = args[1:]
+		}
+		if len(args) != 1 || !args[0].Static || !plainIdent(args[0].Value) {
+			return
+		}
+		reader.Redirs = append(reader.Redirs, Redir{Op: RedirHeredoc, Body: data + "\n"})
+	case "xargs":
+		if len(reader.Words) < 2 || !reader.Words[1].Static || strings.HasPrefix(reader.Words[1].Value, "-") {
+			return
+		}
+		reader.Words = append(reader.Words[1:], Word{Value: data, Static: true})
+	default:
+		return
+	}
+	sub.Stmts = sub.Stmts[:len(sub.Stmts)-1]
+}
+
 // bindRead applies `read [-r] NAME <<< WORD` (or a static here-document): NAME
 // gets the first line, IFS blanks trimmed. Anything else leaves the names
 // unknown (unbindReader already dropped them).
