@@ -63,6 +63,9 @@ func (p *plainStepUpProof) place(raw string) (string, bool) {
 		strings.Contains(raw, "/./") || strings.HasSuffix(raw, "/.") {
 		return "", false
 	}
+	if p.checked == nil {
+		p.checked = make(map[string]bool)
+	}
 	segments := strings.Split(strings.TrimPrefix(raw, "/"), "/")
 	stack := make([]string, 0, len(segments))
 	sawStepUp := false
