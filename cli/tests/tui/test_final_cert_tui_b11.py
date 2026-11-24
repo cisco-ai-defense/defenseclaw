@@ -164,3 +164,30 @@ def test_tab_bar_names_tabs_before_minor_badges_and_brand(tmp_path, monkeypatch)
     for width, brand in ((150, False), (157, False), (175, False), (260, True)):
         monkeypatch.setattr(type(app), "size", property(lambda _self, width=width: Size(width, 45)))
         assert bool(app._header_title()) is brand, width  # noqa: SLF001 - brand rule under test.
+
+
+def test_add_connector_form_with_several_active_agents_waits_for_a_pick() -> None:
+    # GAP-2052: with several agents active the add form opened on Connector = amp
+    # (first in the alphabet) and Will run: defenseclaw setup amp, one Ctrl+R from
+    # setting up an agent nobody chose.
+    # The loaded Config answers active_connector() with the first roster name.
+    cfg = SimpleNamespace(
+        active_connector=lambda: "amp",
+        active_connectors=lambda: ["amp", "claudecode", "codex"],
+    )
+    goal = next(goal for goal in wizard_goals(SetupWizard.CONNECTOR_SETUP, cfg) if goal.id == "add")
+    model = SetupPanelModel(cfg)
+    model.open_wizard_form(SetupWizard.CONNECTOR_SETUP, goal=goal)
+    connector = next(field for field in model.form_fields if field.label == "Connector")
+    assert connector.value == "" and connector.default == ""
+    assert "amp" in connector.options  # still a choice, only not pre-picked
+    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, list(model.form_fields), cfg) == ()
+
+
+def test_add_connector_form_with_one_active_agent_keeps_it() -> None:
+    cfg = SimpleNamespace(active_connector=lambda: "codex", active_connectors=lambda: ["codex"])
+    goal = next(goal for goal in wizard_goals(SetupWizard.CONNECTOR_SETUP, cfg) if goal.id == "add")
+    model = SetupPanelModel(cfg)
+    model.open_wizard_form(SetupWizard.CONNECTOR_SETUP, goal=goal)
+    connector = next(field for field in model.form_fields if field.label == "Connector")
+    assert connector.value == "codex"
