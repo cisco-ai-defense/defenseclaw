@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -42,15 +44,24 @@ func assessHooksDirectory(t *testing.T, path string) managed.CanonicalResult {
 	return result
 }
 
-// requireCanonicalHooksDirectory skips when the test token cannot own the
-// directory as Administrators (the creator then removes it and says so).
+// requireCanonicalHooksDirectory checks the creator's contract on either
+// token: the hooks folder is canonical from creation, or, when the token
+// cannot give it the Administrators owner, the creation fails with
+// ErrCanonicalOwnerUnavailable and no folder is left. A standard user's
+// (Limited) token cannot assign that owner, so it must get the refusal and
+// nothing on disk; it used to skip here, and a folder the refusal left
+// behind went unseen (GAP-2150). An elevated token can always assign it, so
+// a refusal there fails.
 func requireCanonicalHooksDirectory(t *testing.T, path string, err error) {
 	t.Helper()
 	if errors.Is(err, managed.ErrCanonicalOwnerUnavailable) {
+		if windows.GetCurrentProcessToken().IsElevated() {
+			t.Fatalf("an elevated token must own the hooks folder as Administrators: %v", err)
+		}
 		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
 			t.Fatalf("a refused owner must not leave the folder behind: %v", statErr)
 		}
-		t.Skipf("the test token cannot own the folder as Administrators: %v", err)
+		return
 	}
 	if err != nil {
 		t.Fatalf("create hooks folder: %v", err)
@@ -73,9 +84,9 @@ func TestEnsureHookAPITokenDirIsCanonicalWhenOTLPRunsFirst(t *testing.T) {
 	home := pinMkdirTest(t, managed.ProfileStandalone)
 	path := filepath.Join(home, "hooks")
 	requireCanonicalHooksDirectory(t, path, ensureHookAPITokenDir(path))
-	if err := ensureHookAPITokenDir(path); err != nil {
-		t.Fatalf("an existing folder is left for the trust check: %v", err)
-	}
+	// A second start leaves an existing folder for the trust check, or, on a
+	// token that cannot own it, is refused again and still leaves nothing.
+	requireCanonicalHooksDirectory(t, path, ensureHookAPITokenDir(path))
 }
 
 // Secure Client behaviour stays unchanged: its folder is the ordinary

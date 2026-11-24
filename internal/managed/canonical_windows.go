@@ -384,7 +384,8 @@ func createCanonicalObject(
 	// the default owner and the same protected DACL, then take the owner
 	// through the shared repair. Anything short of a canonical result is
 	// removed again and reported, never left as owner drift.
-	attributes, err = setupSecurityAttributes(strings.TrimPrefix(sddl, "O:"+spec.Forms[0].Owner))
+	fallback := strings.TrimPrefix(sddl, "O:"+spec.Forms[0].Owner) + creatorRemovalACE(spec)
+	attributes, err = setupSecurityAttributes(fallback)
 	if err != nil {
 		return err
 	}
@@ -397,9 +398,43 @@ func createCanonicalObject(
 	if result.Outcome == CanonicalOK || result.Outcome == CanonicalRepaired {
 		return nil
 	}
-	_ = os.Remove(path)
-	return fmt.Errorf("%w (%s): %s", ErrCanonicalOwnerUnavailable, result.Outcome,
-		strings.Join(append(append([]string(nil), result.Drift...), result.RepairError), "; "))
+	detail := strings.Join(append(append([]string(nil), result.Drift...), result.RepairError), "; ")
+	if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		// Not ErrCanonicalOwnerUnavailable: that error promises the object
+		// is gone. The caller fails, and the left object is named.
+		return fmt.Errorf("the canonical owner could not be assigned at creation (%s): %s; and the new object %s could not be removed: %w",
+			result.Outcome, detail, path, removeErr)
+	}
+	return fmt.Errorf("%w (%s): %s", ErrCanonicalOwnerUnavailable, result.Outcome, detail)
+}
+
+// creatorRemovalAccess is what the creator of a fallback object keeps on it:
+// DELETE plus the SYNCHRONIZE and FILE_READ_ATTRIBUTES rights every CreateFile
+// and RemoveDirectory open adds, and READ_CONTROL.
+const creatorRemovalAccess = windows.DELETE | windows.SYNCHRONIZE | windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES
+
+// creatorRemovalACE is the explicit, non-inheritable ACE that lets the token
+// that creates a fallback object open, judge and remove it, or "" when the
+// canonical DACL already grants that token user (SYSTEM, Administrators, the
+// gateway service). A standard user's token cannot assign the Administrators
+// owner, and the protected canonical DACL names none of its SIDs: it kept only
+// the owner's implicit READ_CONTROL and WRITE_DAC, so the canonical check could
+// not open the new object (structural) and the remove was denied, leaving an
+// object that account owns (a hooks folder, a lock file) in the managed tree
+// (GAP-2150). The ACE never outlives the creation: a refusal removes the
+// object, and a repair stamps the canonical DACL over it.
+func creatorRemovalACE(spec canonicalSpec) string {
+	user, err := windows.GetCurrentThreadEffectiveToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return ""
+	}
+	sid := user.User.Sid.String()
+	for _, ace := range spec.Forms[0].ACEs {
+		if ace.SID == sid {
+			return ""
+		}
+	}
+	return fmt.Sprintf("(A;;0x%x;;;%s)", uint32(creatorRemovalAccess), sid)
 }
 
 // reportUntrustedOwnerTransfer logs, as a MarkerBoundary finding, that a
