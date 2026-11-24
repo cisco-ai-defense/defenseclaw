@@ -10,12 +10,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,7 +62,6 @@ func TestMCPBridgeEndToEnd(t *testing.T) {
 	rs := relay.NewServer(relay.Options{Config: cfg, Verifier: scopedSessions{b.fixture},
 		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Warm: func(context.Context, string) error { return nil }})
-	rsrv := httptest.NewUnstartedServer(rs.Handler())
 	key, csr, err := relaytls.NewKeyAndCSR()
 	if err != nil {
 		t.Fatal(err)
@@ -77,10 +74,9 @@ func TestMCPBridgeEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rsrv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}
-	rsrv.StartTLS()
-	t.Cleanup(rsrv.Close)
-	st.cfg.Relays = &dialRelay{addr: strings.TrimPrefix(rsrv.URL, "https://")}
+	// The relay's own listener behind the HTTP-parsing worker ingress
+	// (GAP-1067).
+	st.cfg.Relays = &dialRelay{addr: tixRelayBehindIngress(t, rs.Handler(), kp)}
 
 	// The laptop: the launcher's WebSocket and a stdio MCP server behind it
 	// (one message per line, as the launcher runs it).

@@ -64,12 +64,18 @@ func TestGAP0929RelayRenewsWhenTheGatewayRefusesItsCert(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	failed := make(chan error, 4)
-	tl, _ := relaytls.Split(ln, cs.ServerConfig(), func(err error) { cs.Rejected(err); failed <- err })
-	go func() { _ = http.Serve(tl, http.NotFoundHandler()) }()
+	sp := relaytls.Split(ln.Addr(), cs.ServerConfig(), func(err error) { cs.Rejected(err); failed <- err })
+	go func() { _ = http.Serve(sp.TLS(), http.NotFoundHandler()) }()
+	go func() { _ = http.Serve(ln, sp.Handler(http.NotFoundHandler())) }()
 	refuse := func() {
 		t.Helper()
 		// A gateway that no longer trusts the CA (empty pool).
-		conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: x509.NewCertPool(), ServerName: "uid.aaaa-0001" + relaytls.SANSuffix, MinVersion: tls.VersionTLS13})
+		raw, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		conn, err := relaytls.Upgrade(t.Context(), raw, &tls.Config{RootCAs: x509.NewCertPool(), ServerName: "uid.aaaa-0001" + relaytls.SANSuffix, MinVersion: tls.VersionTLS13})
 		if err == nil {
 			_ = conn.Close()
 			t.Fatal("the handshake passed")
