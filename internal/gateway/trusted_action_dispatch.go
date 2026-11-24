@@ -4395,6 +4395,7 @@ func provenStateCandidateMatches(
 			// The gateway cannot follow the directory through a link
 			// the user can make; the hook placed the entry as the user
 			// and lists it only when it is in the state tree (GAP-2549).
+			spellings = append(spellings, hookpaths.OperandPath(written, request.Input.CWD))
 			for _, placed := range clientWriteTargets(request.ResolvedWriteTargets, written, spellings...) {
 				if filepath.IsAbs(placed) {
 					candidate.Resolved = placed
@@ -4407,8 +4408,16 @@ func provenStateCandidateMatches(
 		return false
 	}
 	physical := ""
+	// The client keys an operand by hookpaths.OperandPath of the operand as
+	// written (a leading .. step applied only when the folder has no link);
+	// the gateway asks by the same function too. Resolved alone is the
+	// cleaned path in forward slashes on Windows, which a .. operand is
+	// never respelled from (GAP-1006), so a managed gateway found no target
+	// for ..\.defenseclaw\config.yaml written by a .NET file method, a
+	// Get-Item open or New-Item -Value, and allowed it (rel-1-0-10:GAP-1191).
 	if found := clientWriteTargets(request.ResolvedWriteTargets, candidate.Value,
-		candidate.Resolved, candidate.Value, candidate.Normalized); len(found) > 0 {
+		candidate.Resolved, candidate.Value, candidate.Normalized,
+		hookpaths.OperandPath(candidate.Value, request.Input.CWD)); len(found) > 0 {
 		physical = found[0]
 	}
 	if physical == "" && !request.SkipLocalFilesystemResolution {
