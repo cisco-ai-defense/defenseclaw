@@ -1,6 +1,7 @@
 package actionfacts
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -165,6 +166,68 @@ func TestGAP0674ReadStoresItsPathOnce(t *testing.T) {
 		at := uintptr(unsafe.Pointer(unsafe.StringData(s))) - uintptr(unsafe.Pointer(host))
 		if at > uintptr(len(fact.Resolved)-len(s)) {
 			t.Errorf("%s does not share the memory of Resolved", name)
+		}
+	}
+}
+
+// TestGAP0674WalkRoomDifferentialCorpora: every call of the actionfacts and
+// hookpaths corpora, alone and next to recursive searches of a tree of
+// credentials files, resolves to the same reads and caps with the walk that
+// keeps only the files the resolve can take as with the one that keeps all.
+func TestGAP0674WalkRoomDifferentialCorpora(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	for i := range 3 {
+		for j := range 12 {
+			dir := filepath.Join(root, fmt.Sprintf("t%d", i), fmt.Sprintf("s%d", j))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("K=1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var corpus []string
+	for _, file := range []string{
+		"testdata/defenseclaw_control.jsonl",
+		"testdata/shell-recall-effects-v1.jsonl",
+		"testdata/ssh_authorized_keys_protection.jsonl",
+		"../hookpaths/testdata/action-windows-protected.jsonl",
+	} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var row struct {
+				Command string `json:"command"`
+			}
+			if json.Unmarshal([]byte(line), &row) == nil && row.Command != "" {
+				corpus = append(corpus, row.Command)
+			}
+		}
+	}
+	if len(corpus) < 100 {
+		t.Fatalf("corpus has %d calls, want the corpora read", len(corpus))
+	}
+	for _, c := range corpus {
+		for _, command := range []string{c, c + "\ngrep -r KEY t0 t1", "grep -r KEY t0\n" + c} {
+			for _, tight := range []credentialPathLimits{
+				{candidates: 2, work: 40, lookups: maxCredentialPathLookups},
+				{candidates: 9, work: 400, lookups: maxCredentialPathLookups},
+				defaultCredentialPathLimits,
+			} {
+				got := resolveWithin(t, tight, command, root, home)
+				tight.keepAll = true
+				want := resolveWithin(t, tight, command, root, home)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("%q limits %+v: record differs: got %d reads caps %v, want %d reads caps %v", command, tight, len(got.reads), got.caps, len(want.reads), want.caps)
+				}
+			}
 		}
 	}
 }
