@@ -76,12 +76,17 @@ func skillFolderAdminOwned(dir *os.File, path string) bool {
 	return err == nil && skillDescriptorAdminOnly(descriptor)
 }
 
+// skillEntryManaged is skillEntryAdminOwned; tests replace it.
+var skillEntryManaged = skillEntryAdminOwned
+
 // skillEntryAdminOwned reports whether the opened folder or file below a
 // managed skill folder is also one only administrators can change: an
 // administrator copy that kept a user's access entry on a subfolder or file
-// is not (GAP-2147).
+// is not (GAP-2147). The walk opened it from its held parent with no link
+// followed, so only its own handle is read.
 func skillEntryAdminOwned(opened *os.File, path string) bool {
-	return skillFolderAdminOwned(opened, path)
+	descriptor, _, err := skillSecurity(opened, path)
+	return err == nil && skillDescriptorAdminOnly(descriptor)
 }
 
 // skillDescriptorAdminOnly reports whether descriptor is an administrator's

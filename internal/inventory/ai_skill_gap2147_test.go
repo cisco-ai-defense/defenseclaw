@@ -56,6 +56,11 @@ func TestGAP2147ManagedIsDecidedFromTheHashedHandle(t *testing.T) {
 // GAP-2147: the walk reports no decision when none was asked for, and the one
 // the probe gives for the folder it hashed when one was.
 func TestGAP2147ManagedFollowsTheProbe(t *testing.T) {
+	// Every entry is one only administrators can change here (the next test
+	// checks the entries themselves).
+	entry := skillEntryManaged
+	skillEntryManaged = func(*os.File, string) bool { return true }
+	t.Cleanup(func() { skillEntryManaged = entry })
 	root := t.TempDir()
 	writeSkillFiles(t, root, map[string]string{"SKILL.md": "---\nname: s\n---\n"})
 	for _, tc := range []struct {
@@ -76,5 +81,51 @@ func TestGAP2147ManagedFollowsTheProbe(t *testing.T) {
 	_, status, _, _, _, managed := hashSkillFolderCaptureNamed(root, 0, maxSkillBytes, skillHomeOwnerTrust(""), func(*os.File, string) bool { return true })
 	if status != SkillContentTooLarge || !managed {
 		t.Errorf("over budget: status %s, managed %t, want a decision", status, managed)
+	}
+}
+
+// GAP-2147: a managed skill folder stays managed only while every folder and
+// file the walk opens in it is one only root can change: root owns it and
+// neither the group nor others may write it. A file others may write, or one
+// a user owns (every file of this test when it does not run as root), makes
+// the skill the user's, as on Windows.
+func TestGAP2147UnixEntryOthersMayChangeClearsManaged(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFiles(t, root, map[string]string{"SKILL.md": "---\nname: s\n---\n", "scripts/run.sh": "x"})
+	approve := func(*os.File, string) bool { return true }
+	managed := func() bool {
+		_, status, _, _, _, managed := hashSkillFolderCaptureNamed(root, maxSkillBytes, maxSkillBytes, skillHomeOwnerTrust(""), approve)
+		if status != SkillContentOK {
+			t.Fatalf("status %s", status)
+		}
+		return managed
+	}
+	// Not group or other writable; owned by root only when this test is root.
+	for _, path := range []string{"SKILL.md", "scripts/run.sh"} {
+		if err := os.Chmod(filepath.Join(root, path), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(root, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if want := os.Geteuid() == 0; managed() != want {
+		t.Fatalf("root-owned = %t: managed = %t, want %t", want, !want, want)
+	}
+	for _, path := range []string{"scripts/run.sh", "scripts", "SKILL.md"} {
+		full := filepath.Join(root, path)
+		info, err := os.Stat(full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(full, info.Mode().Perm()|0o020); err != nil {
+			t.Fatal(err)
+		}
+		if managed() {
+			t.Fatalf("%s is group-writable and the skill still reads as managed", path)
+		}
+		if err := os.Chmod(full, info.Mode().Perm()); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

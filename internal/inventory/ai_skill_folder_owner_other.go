@@ -40,6 +40,18 @@ func skillFolderAdminOwned(dir *os.File, _ string) bool {
 	return ok && st.Uid == 0
 }
 
-// skillEntryAdminOwned is true: below a root-owned folder that neither the
-// group nor others may write, only root can add or remove entries.
-func skillEntryAdminOwned(*os.File, string) bool { return true }
+// skillEntryManaged is skillEntryAdminOwned; tests replace it.
+var skillEntryManaged = skillEntryAdminOwned
+
+// skillEntryAdminOwned reports whether the opened folder or file below a
+// managed skill folder is also one only root can change: root owns it and
+// neither its group nor others may write it. A file or subfolder a user owns
+// or others may write makes the skill the user's, as on Windows (GAP-2147).
+func skillEntryAdminOwned(opened *os.File, _ string) bool {
+	info, err := opened.Stat()
+	if err != nil || info.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == 0
+}

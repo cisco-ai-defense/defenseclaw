@@ -297,7 +297,7 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, tru
 		walk.trusted = trusted
 	}
 	if folderManaged {
-		walk.entryManaged = skillEntryAdminOwned
+		walk.entryManaged = skillEntryManaged
 	}
 	walk.rootInfo, _ = dir.Stat()
 	err = walk.readDir(dir, "", 0)
