@@ -430,11 +430,14 @@ func (s *passthroughStream) run() {
 			// Only a token or a digit run is open (GAP-1265): the events
 			// before the one with the run's first byte go out once the
 			// check has read them, with no verdict, and the run stays held
-			// (GAP-1306). When the rest is over the bound itself, all go.
+			// (GAP-1306). When the events from the run's first byte are
+			// over the bound themselves, the bound decides the run
+			// (TRUNCATED, GAP-1767), then all go.
 			if k := heldBeforeRun(queueText, accumulated.OpenRunFrom()); k > 0 && queueBytes-bufferedBytes(queue[:k]) <= streamSecretMaxHeld {
 				heldCut = k
+				return false, true
 			}
-			return false, true
+			return false, secretBound(bounded.Bytes, streamRunHeldWhy)
 		}
 		return true, true
 	}
