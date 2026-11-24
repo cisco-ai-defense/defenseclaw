@@ -27,9 +27,12 @@ package workspace
 // not committed here are never part of the baseline, so --apply cannot undo
 // them silently: a patch that does not fit the folder is kept as a file.
 //
-// The baseline is HEAD's exact bytes (git ls-tree and cat-file, no filters):
-// git archive applies export-ignore, export-subst and eol conversion, so files
-// it leaves out or rewrites showed as changed (RV-T6A). What run left out
+// The baseline is HEAD as a checkout here writes it (writeHeadTree: git
+// checkout-index, so eol, core.autocrlf and filter drivers such as git-lfs
+// apply, as they did to the folder the person sent). git archive also applies
+// export-ignore and export-subst, so files it left out or rewrote showed as
+// changed (RV-T6A); the raw blobs left the checkout conversion out, so every
+// converted file did (RV-T6B). What run left out
 // with --exclude is known only on the first computer, and the actor's copy of
 // it is the agent's to rewrite, so here the person repeats it (pull
 // --exclude, or --no-exclude when run had none) and it is held back on both
@@ -42,6 +45,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -92,9 +96,10 @@ func (e *ExcludesUnknownError) Error() string {
 // computer that has none: the last commit of project, without what the
 // upload holds back (the default rules and masks, the --exclude the person
 // repeated here; stated says they did), and the agent's folder of the same
-// name. A record adopted before for the same folder and the same masks is
-// kept, so a later pull goes on from what an apply brought back.
+// name. A record adopted before for the same folder and the same masks (in
+// any order) is kept, so a later pull goes on from what an apply brought back.
 func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string, masks []string, stated bool) error {
+	masks = sortedMasks(masks)
 	if project == "" {
 		return &NoRecordError{Reason: "pull was not given a folder to compare with"}
 	}
@@ -144,14 +149,28 @@ func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string
 	if limit <= 0 {
 		limit = DefaultMaxDownloadBytes
 	}
-	tarball, err := headTreeTar(ctx, abs, folder, limit)
+	scratch, err := os.MkdirTemp(hostDir(dataDir), ".elsewhere-co-")
 	if err != nil {
-		return cleanErr("read this folder's last commit", err)
+		return err
 	}
-	files, _, held, err := stageHostTree(bytes.NewReader(tarball), folder, stage, limit, func(rel string) bool {
+	defer os.RemoveAll(scratch)
+	// The tar streams from the checkout into the stage: one file in memory
+	// at a time.
+	pr, pw := io.Pipe()
+	wrote := make(chan error, 1)
+	go func() {
+		err := writeHeadTree(ctx, abs, scratch, folder, limit, pw)
+		pw.CloseWithError(err)
+		wrote <- err
+	}()
+	files, _, held, err := stageHostTree(pr, folder, stage, limit, func(rel string) bool {
 		_, h := osw.HeldBack(rel, masks, nil, nil, nil)
 		return h
 	})
+	pr.Close()
+	if werr := <-wrote; err == nil && werr != nil {
+		err = werr
+	}
 	if err != nil {
 		return cleanErr("read this folder's last commit", err)
 	}
@@ -190,25 +209,27 @@ func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string
 	return rec.save(dataDir)
 }
 
-// headTreeTar is a tar of HEAD's tree of the folder dir (HEAD:./, also below
-// the top of the repository) under folder/, with the bytes as committed: the
-// blobs read with cat-file, which applies no attribute (git archive applies
-// export-ignore, export-subst and eol and smudge conversion). Links and
+// writeHeadTree writes a tar of HEAD's tree of the folder dir (HEAD:./, also
+// below the top of the repository) to w under folder/, as a checkout of HEAD
+// on this computer writes it: git checkout-index from a private index of HEAD
+// into scratch, with this repository's own configuration, so the checkout
+// conversion applies (eol, core.autocrlf, ident, working-tree-encoding and
+// filter drivers such as git-lfs smudge) and export-ignore and export-subst do
+// not. The person's upload, and so the agent's copy, holds work-tree bytes;
+// the raw blobs showed every converted file as changed (RV-T6B). Links and
 // submodules are left out, as stageHostTree leaves them out of the agent's
-// copy.
-func headTreeTar(ctx context.Context, dir, folder string, limit int64) ([]byte, error) {
+// copy. limit bounds the commit before the checkout and the bytes written.
+func writeHeadTree(ctx context.Context, dir, scratch, folder string, limit int64, w io.Writer) error {
 	out, err := hostGit(ctx, dir, nil, nil, "ls-tree", "-r", "-z", "-l", "HEAD:./")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	type entry struct {
-		exec      bool
-		oid, path string
-		size      int64
+		exec bool
+		path string
 	}
 	var entries []entry
 	var total int64
-	var batch bytes.Buffer
 	for _, line := range splitNUL(out) {
 		meta, p, ok := strings.Cut(line, "\t")
 		f := strings.Fields(meta)
@@ -217,48 +238,69 @@ func headTreeTar(ctx context.Context, dir, folder string, limit int64) ([]byte, 
 		}
 		size, err := strconv.ParseInt(f[3], 10, 64)
 		if err != nil || size < 0 {
-			return nil, fmt.Errorf("git ls-tree gave %q", line)
+			return fmt.Errorf("git ls-tree gave %q", line)
 		}
 		if total += size; total > limit {
-			return nil, fmt.Errorf("this folder's last commit is larger than %d MB", limit>>20)
+			return fmt.Errorf("this folder's last commit is larger than %d MB", limit>>20)
 		}
-		entries = append(entries, entry{exec: f[0] == "100755", oid: f[2], path: p, size: size})
-		batch.WriteString(f[2] + "\n")
+		entries = append(entries, entry{exec: f[0] == "100755", path: p})
 	}
-	var blobs []byte
+	tw := tar.NewWriter(w)
 	if len(entries) > 0 {
-		if blobs, err = hostGit(ctx, dir, nil, batch.Bytes(), "cat-file", "--batch"); err != nil {
-			return nil, err
+		pre, err := hostGit(ctx, dir, nil, nil, "rev-parse", "--show-prefix")
+		if err != nil {
+			return err
+		}
+		prefix := strings.TrimRight(string(pre), "\r\n")
+		index, co := filepath.Join(scratch, "index"), filepath.Join(scratch, "co")
+		env := []string{"GIT_INDEX_FILE=" + index}
+		if _, err := hostGit(ctx, dir, env, nil, "read-tree", "HEAD"); err != nil {
+			return err
+		}
+		var list bytes.Buffer
+		for _, e := range entries {
+			list.WriteString(e.path + "\x00")
+		}
+		if _, err := hostCheckoutGit(ctx, dir, env, list.Bytes(), "checkout-index", "--stdin", "-z", "--prefix="+filepath.ToSlash(co)+"/"); err != nil {
+			return err
+		}
+		total = 0
+		for _, e := range entries {
+			if err := tarCheckedOut(tw, filepath.Join(co, filepath.FromSlash(prefix+e.path)), folder+"/"+e.path, e.exec, &total, limit); err != nil {
+				return err
+			}
 		}
 	}
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	for _, e := range entries {
-		nl := bytes.IndexByte(blobs, '\n')
-		if nl < 0 {
-			return nil, errors.New("git cat-file gave a short answer")
-		}
-		head := strings.Fields(string(blobs[:nl]))
-		end := int64(nl) + 1 + e.size
-		if len(head) != 3 || head[0] != e.oid || head[1] != "blob" || head[2] != strconv.FormatInt(e.size, 10) || int64(len(blobs)) < end+1 {
-			return nil, fmt.Errorf("git cat-file gave %q for %s", blobs[:nl], e.path)
-		}
-		mode := int64(0o644)
-		if e.exec {
-			mode = 0o755
-		}
-		if err := tw.WriteHeader(&tar.Header{Name: folder + "/" + e.path, Mode: mode, Size: e.size, Typeflag: tar.TypeReg}); err != nil {
-			return nil, err
-		}
-		if _, err := tw.Write(blobs[nl+1 : end]); err != nil {
-			return nil, err
-		}
-		blobs = blobs[end+1:]
+	return tw.Close()
+}
+
+// tarCheckedOut adds the checked-out regular file src to tw as name, keeping
+// the running total of the bytes inside limit.
+func tarCheckedOut(tw *tar.Writer, src, name string, executable bool, total *int64, limit int64) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
 	}
-	if err := tw.Close(); err != nil {
-		return nil, err
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
 	}
-	return buf.Bytes(), nil
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("git checkout-index wrote %s as something other than a file", name)
+	}
+	if *total += fi.Size(); *total > limit {
+		return fmt.Errorf("this folder's last commit, checked out, is larger than %d MB", limit>>20)
+	}
+	mode := int64(0o644)
+	if executable {
+		mode = 0o755
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: fi.Size(), Typeflag: tar.TypeReg}); err != nil {
+		return err
+	}
+	_, err = io.CopyN(tw, f, fi.Size())
+	return err
 }
 
 // elsewhereNote is the review line of a pull measured against this
@@ -281,4 +323,15 @@ func elsewhereExcludesNote(rec *hostRecord) string {
 		return "held back on both sides, as run's --exclude: " + strings.Join(rec.Masks, ", ")
 	}
 	return ""
+}
+
+// sortedMasks is the --exclude list sorted and without repeats: the same set
+// in another order is the same record.
+func sortedMasks(masks []string) []string {
+	if len(masks) == 0 {
+		return nil
+	}
+	out := slices.Clone(masks)
+	slices.Sort(out)
+	return slices.Compact(out)
 }

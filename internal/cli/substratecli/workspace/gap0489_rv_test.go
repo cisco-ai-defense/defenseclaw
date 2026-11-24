@@ -28,20 +28,20 @@ func gap0489Commit(o *hcEnv) {
 }
 
 // substrate-1 GAP-0489 (RV-T6A): the second computer's baseline is HEAD's
-// exact bytes. Before, it was git archive's output, which leaves out
-// export-ignore paths and rewrites export-subst and eol files, so an
-// unchanged tests/ folder showed as added (and --apply always fell back to a
-// patch file), and unchanged files showed as modified.
+// files, export-ignore paths and export-subst files as committed. Before, it
+// was git archive's output, which leaves out export-ignore paths and rewrites
+// export-subst files, so an unchanged tests/ folder showed as added (and
+// --apply always fell back to a patch file), and unchanged files showed as
+// modified. Line endings and filters: TestGAP0489BaselineIsTheCheckoutHere.
 func TestGAP0489BaselineIsTheCommittedBytes(t *testing.T) {
 	old := hostCopy
 	hostCopy = true
 	t.Cleanup(func() { hostCopy = old })
 	o := newHCEnv(t)
 	o.git(o.project, "init", "-q", "-b", "main")
-	hcWrite(t, o.project, ".gitattributes", "/tests export-ignore\nversion.txt export-subst\ncrlf.txt text eol=crlf\n")
+	hcWrite(t, o.project, ".gitattributes", "/tests export-ignore\nversion.txt export-subst\n")
 	hcWrite(t, o.project, "tests/a_test.txt", "a test\n")
 	hcWrite(t, o.project, "version.txt", "$Format:%H$\n")
-	hcWrite(t, o.project, "crlf.txt", "one\ntwo\n")
 	hcWrite(t, o.project, "README.md", "line one\n")
 	gap0489Commit(o)
 
@@ -53,8 +53,6 @@ func TestGAP0489BaselineIsTheCommittedBytes(t *testing.T) {
 	hcWrite(t, filepath.Join(workdir, "myapp"), "README.md", "line one\nline two by the agent\n")
 	hostCopy = old
 	clone, data2 := gap0489Second(t, o)
-	// The second computer's own checkout: its crlf.txt is CRLF on disk, but
-	// the baseline is the commit, not the work tree.
 	rv, err := Pull(ctx, PullOptions{Exec: c, DataDir: data2, Name: "w1", Project: clone})
 	if err != nil {
 		t.Fatalf("pull on the second computer: %v", err)

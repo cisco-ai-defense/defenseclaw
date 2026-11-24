@@ -185,16 +185,34 @@ func HasCopy(dataDir, name string) bool {
 
 // --- git on this computer ---------------------------------------------------
 
-// hostGit runs git with a private configuration: no system or user config,
-// no hooks, no filters, no line-ending conversion, no prompts.
+// hostGit runs git with a private configuration: no system config, no hooks,
+// no line-ending conversion, no prompts.
 func hostGit(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
-	base := []string{"-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.hooksPath=" + os.DevNull,
+	return runHostGit(ctx, dir, true, env, stdin, args...)
+}
+
+// hostCheckoutGit runs git with this computer's own configuration (system,
+// user and repository: core.autocrlf, core.eol, filter drivers), still with
+// no hooks and no prompts, to write files as a checkout here writes them
+// (GAP-0489).
+func hostCheckoutGit(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
+	return runHostGit(ctx, dir, false, env, stdin, args...)
+}
+
+func runHostGit(ctx context.Context, dir string, private bool, env []string, stdin []byte, args ...string) ([]byte, error) {
+	base := []string{"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "core.fsmonitor=false", "-c", "core.quotePath=false", "-c", "commit.gpgSign=false", "-c", "core.longpaths=true"}
+	if private {
+		base = append([]string{"-c", "core.autocrlf=false", "-c", "core.safecrlf=false"}, base...)
+	}
 	cmd := exec.CommandContext(ctx, "git", append(base, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
 		"GIT_AUTHOR_NAME=defenseclaw", "GIT_AUTHOR_EMAIL=defenseclaw@localhost",
 		"GIT_COMMITTER_NAME=defenseclaw", "GIT_COMMITTER_EMAIL=defenseclaw@localhost")
+	if private {
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1")
+	}
 	cmd.Env = append(cmd.Env, env...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
