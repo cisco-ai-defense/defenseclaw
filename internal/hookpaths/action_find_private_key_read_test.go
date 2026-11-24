@@ -40,6 +40,10 @@ func TestGAP1025FindExecReadsPrivateKey(t *testing.T) {
 		{"find ~ -path '*.txt' -exec cat {} +", false},
 		{"find ~ -name '*' -exec cat {} +", true},
 		{"find ~ -exec cat {} +", true},
+		{`find ~ -path '*ssh*' -ok cat {} \;`, false},
+		{`find ~ -path '*ssh*' -okdir cat {} \;`, false},
+		{`find ~ -path '*ssh*' -execdir cat {} \;`, true},
+		{`find ~ -path '*ssh*' -ok cat {} \; -exec cat {} \;`, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.command, func(t *testing.T) {

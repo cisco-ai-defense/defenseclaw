@@ -73,7 +73,10 @@ func actionFindPrivateKeyRead(words []string, cwd, home string) bool {
 			if end == len(words) {
 				return false
 			}
-			contentChild = contentChild || actionFindContentChild(words[i+1:end])
+			// Interactive actions require confirmation and are not read proof (GAP-0522).
+			if words[i] == "-exec" || words[i] == "-execdir" {
+				contentChild = contentChild || actionFindContentChild(words[i+1:end])
+			}
 			i = end
 		}
 	}
