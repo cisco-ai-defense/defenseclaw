@@ -72,6 +72,14 @@ func (p *effectAliasPending) commit() {
 	}
 }
 
+// Only calls with bounded alias-key fields need a pending recorder. The
+// storage path validates their contents after the verdict.
+func deferEffectAlias(request trustedActionRequest) bool {
+	return request.Connector != "" && len(request.Connector) <= 64 &&
+		request.sessionID != "" && len(request.sessionID) <= effectAliasMaxSessionBytes &&
+		request.Input.ActiveHome != "" && len(request.Input.ActiveHome) <= effectAliasMaxPathBytes
+}
+
 func aliasKey(request trustedActionRequest) (effectAliasKey, bool) {
 	key := effectAliasKey{
 		connector: strings.TrimSpace(request.Connector),

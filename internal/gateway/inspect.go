@@ -1309,7 +1309,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	}
 	cfg := a.decisionConfig(ctx)
 	aliasPending := action.aliasPending
-	ownAliasPending := aliasPending == nil
+	ownAliasPending := aliasPending == nil && deferEffectAlias(action)
 	if ownAliasPending {
 		aliasPending = &effectAliasPending{}
 	}
