@@ -24,6 +24,10 @@ func TestAgentIdentitiesListTheUPNOfADirectoryAccount(t *testing.T) {
 	agentIdentityTestSetup(t)
 	const uid, local = 1_870_400_596, 1_870_400_597
 	previous, previousFacts := managedHookPeerHomes, identityFactsEnabled.Load()
+	previousStamp, previousConfirmed := managedHookPeerAccountsStamp, managedHookPeerAccountsConfirmed
+	// Use a confirmed account listing for the fake resolver below.
+	managedHookPeerAccountsStamp = func() string { return "upn-fixture" }
+	managedHookPeerAccountsConfirmed = func() bool { return true }
 	managedHookPeerHomes = &managedHookPeerHomeCache{
 		newResolver: func() unixidentity.Resolver {
 			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
@@ -37,6 +41,7 @@ func TestAgentIdentitiesListTheUPNOfADirectoryAccount(t *testing.T) {
 	t.Cleanup(func() {
 		managedHookPeerHomes = previous
 		setIdentityFactsEnabled(previousFacts)
+		managedHookPeerAccountsStamp, managedHookPeerAccountsConfirmed = previousStamp, previousConfirmed
 	})
 	managedHookPeerHomes.directoriesOnce.Do(func() {
 		managedHookPeerHomes.directories = newIdentityDirectoryCache(func(key string) (useridentity.DirectoryFacts, error) {

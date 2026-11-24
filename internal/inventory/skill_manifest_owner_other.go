@@ -19,40 +19,29 @@
 package inventory
 
 import (
-	"bytes"
-	"io"
 	"io/fs"
 	"os"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
-// skillManifestOwned reports whether the SKILL.md at path, whose bytes the
-// hash walk read as data, may be kept as the skill's manifest: a regular
-// file with one link, owned by the owner of the skill folder (rootInfo), as
-// the Linux sensor helper requires of a home's files. A scan running as root
-// otherwise keeps the text of a hard link to a file the user cannot read.
-// The checks run on the opened file and its bytes must equal data, so a
-// swap between the two reads keeps nothing (GAP-1811).
-func skillManifestOwned(path string, rootInfo fs.FileInfo, data []byte) bool {
+// skillManifestOwned reports whether the opened SKILL.md may be kept as the
+// skill's manifest: a regular file with one link, owned by the owner of the
+// skill folder (rootInfo), as the Linux sensor helper requires of a home's
+// files. A scan running as root otherwise keeps the text of a hard link to a
+// file the user cannot read. The walk read the bytes from this same handle,
+// so a swap between the check and the read keeps nothing (GAP-1811).
+func skillManifestOwned(file *os.File, rootInfo fs.FileInfo) bool {
+	if file == nil || rootInfo == nil {
+		return false
+	}
 	root, ok := rootInfo.Sys().(*syscall.Stat_t)
 	if !ok {
 		return false
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	info, err := file.Stat()
 	if err != nil {
 		return false
 	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return false
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || st.Uid != root.Uid {
-		return false
-	}
-	got, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
-	return err == nil && bytes.Equal(got, data)
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && info.Mode().IsRegular() && st.Nlink == 1 && st.Uid == root.Uid
 }

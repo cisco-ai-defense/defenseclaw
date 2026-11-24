@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/textlower"
 	"mvdan.cc/sh/v3/syntax"
@@ -1443,7 +1444,7 @@ func actionBoundedGlob(pattern string, dotglob bool) ([]string, bounded.CapSet) 
 // actionMSYSDrivePath maps /c/... and /cygdrive/c/... to c:/... (Git Bash and
 // Cygwin spellings of a Windows drive).
 func actionMSYSDrivePath(value string) string {
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	if strings.HasPrefix(lower, "/cygdrive/") && len(value) >= 11 && asciiLetter(value[10]) &&
 		(len(value) == 11 || value[11] == '/') {
 		return value[10:11] + ":" + value[11:]

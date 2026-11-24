@@ -1141,8 +1141,20 @@ func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRe
 // gets one set of findings whichever route carries it (rel-1-0-10:GAP-0782:
 // the proxy ran the rule packs alone). secureClient is a Secure Client
 // install, which keeps its own tool policy (GAP-0048 adds no finding there).
-func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
-	findings := trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
+//
+// Its readings past the dispatch (the lanes, the nested Windows readings, the
+// link and cmd twins) run outside dispatchTrustedAction's recovery, so a panic
+// in one is contained here with the same answer: the evaluation-fault finding,
+// a block in every pack (evaluation_fault.go). It never reaches the hook's
+// fail-mode answer, an allow in a fail-open profile (GAP-1914).
+func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) (findings []RuleFinding) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logEvaluatorFault("tool call readings connector="+action.Connector, recovered)
+			findings = evaluationFaultFindings(evaluatorFaultTitle, action.EnforcementCapable)
+		}
+	}()
+	findings = trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
 	for _, nested := range windowsNestedReadings(action) {
 		// A statement the call runs inside a subexpression, an operand, a
 		// loop body or a powershell -c or cmd /c script is judged by the
@@ -1186,6 +1198,9 @@ func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest,
 // hook configuration targets, the MCP/app and shell tool effects and the
 // DefenseClaw control guard.
 func trustedToolCallLaneFindings(ctx context.Context, action trustedActionRequest, findings []RuleFinding, mcpServer string, secureClient bool) []RuleFinding {
+	if trustedToolLaneFaultHook != nil {
+		trustedToolLaneFaultHook(action)
+	}
 	findings = provedHighWriteFindings(ctx, action, findings)
 	findings = outboundPIIFindings(action, findings)
 	if !secureClient {
@@ -1329,13 +1344,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			verdict = mergeWithAIDVerdict(nil, aid)
 		}
 	} else {
-		severity := HighestSeverity(ruleFindings)
-		enforceableSeverity := HighestSeverity(enforceableRuleFindings(ruleFindings))
-		severity, enforceableSeverity = aggregateCodeGuardSeverity(
-			cgFindings,
-			severity,
-			enforceableSeverity,
-		)
+		// The verdict's severity counts every finding. The action below takes
+		// only the enforceable ones: profileMeetActionForFindings filters them
+		// (guardrailActionForFindings), and CodeGuard's part is the enforceable
+		// severity aggregateCodeGuardSeverity returns.
+		severity, _ := aggregateCodeGuardSeverity(cgFindings, HighestSeverity(ruleFindings), "NONE")
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
 		runtimeAction, floorConfirm := profileMeetDecisionForFindings(

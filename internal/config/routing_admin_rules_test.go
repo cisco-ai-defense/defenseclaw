@@ -63,7 +63,7 @@ func TestValidateRoutingAdminRulesRefusals(t *testing.T) {
 		{"default outside allow", rule(func(r *RoutingAdminRule) { r.Default = "coder" }), nil, nil, "not in its allow list"},
 		{"unknown default", rule(func(r *RoutingAdminRule) { r.Allow, r.Default = nil, "gpt" }), nil, nil, "default \"gpt\" is not an alias"},
 		{"budget duplicate", nil, []RoutingBudget{okBudget, okBudget}, nil, "used by an earlier budget"},
-		{"budget scope", nil, budget(func(b *RoutingBudget) { b.Scope = "team" }), nil, "must be user, group or connector"},
+		{"budget scope", nil, budget(func(b *RoutingBudget) { b.Scope = "team" }), nil, "must be user, group, connector, actor or batch"},
 		{"group star", nil, budget(func(b *RoutingBudget) { b.Scope = "group" }), nil, "names one group"},
 		{"connector name", nil, budget(func(b *RoutingBudget) { b.Scope, b.Subject = "connector", "Claude Code" }), nil, "must be a connector name"},
 		{"spaced action", rule(func(r *RoutingAdminRule) { r.Action = " deny" }), nil, nil, "must be constrain or deny"},

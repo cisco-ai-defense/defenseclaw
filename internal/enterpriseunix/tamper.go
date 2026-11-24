@@ -334,9 +334,9 @@ func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
 	restored := false
 	for _, state := range published.States {
 		if state.Changed && contains(want, state.Connector) {
-			l.result.Changes = append(l.result.Changes, fmt.Sprintf(
+			l.result.Changes = append(l.result.Changes, publishedPolicyChange(state, fmt.Sprintf(
 				"put back DefenseClaw's %s machine policy (%s), which was changed or removed after the last lifecycle run",
-				state.Connector, strings.Join(state.Paths, ", ")))
+				state.Connector, strings.Join(state.Paths, ", "))))
 			restored = true
 		}
 	}
@@ -388,8 +388,13 @@ func (e *Env) codexRequirementsTampered(validated *validatedConfig) string {
 		return ""
 	}
 	if validated == nil {
+		// The ownership record, not the deployment's machine-policy set,
+		// says DefenseClaw published the file (TamperedFiles reads it first):
+		// a run that failed on the file drops Codex from that set, and the
+		// guardian kept no watch on it after (a symbolic link put in its
+		// place, GAP-1968).
 		record, err := e.loadDeployment()
-		if err != nil || record == nil || !contains(record.MachinePolicyConnectors, enterprisepolicy.ConnectorCodex) {
+		if err != nil || record == nil {
 			return ""
 		}
 		raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)

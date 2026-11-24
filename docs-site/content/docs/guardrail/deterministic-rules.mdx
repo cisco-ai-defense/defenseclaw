@@ -35,7 +35,7 @@ defenseclaw guardrail block-at HIGH --connector codex
 
 `use-pack` also takes `--connector` to switch one connector. A `block-at` or `alert-at` change moves the levels without changing the pack. [Thresholds](/docs/policies/thresholds) shows which scope wins.
 
-Strict trades noise for blocks. In the public benchmarks it raised eight alerts on 7,908 benign commands that default did not, and blocked none of them. See [Guardrail benchmarks](/docs/guardrail/benchmarks).
+Strict is the tightest pack. In the public benchmarks it raised eight alerts on 7,908 benign commands that default did not, and blocked none of them. See [Guardrail benchmarks](/docs/guardrail/benchmarks).
 
 Six opt-in protection packs (privacy, cloud production, database destruction, infrastructure destruction, Kubernetes production and Active Directory) and one staged SSH contract sit beside them in `policies/guardrail-use-cases`. [Deterministic detection](/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context) lists them.
 
@@ -88,7 +88,7 @@ In action mode, the pack turns a finding's severity into an action:
 
 Alert-only detectors never block, whatever the pack: the eleven YARA signatures that scan MCP tool descriptions, and the correlator that looks at a session after the fact. They produce findings for the audit log and for you.
 
-Read the pack's own numbers in the [benchmarks](/docs/guardrail/benchmarks). On the 1.0.10 run, the `default` rules alone had precision 0.884 and recall 0.212, alerted on 0.6% of benign calls and blocked 0.1%. They are precise and blunt: most of what they miss is prompt injection that needs the context of the request.
+Read the pack's own numbers in the [benchmarks](/docs/guardrail/benchmarks). On the 1.0.10 run, the `default` rules alone had precision 0.884 and recall 0.212, alerted on 0.6% of benign calls and blocked 0.1%. They are precise. Prompt injection that needs the context of the request is read by the decision model and the judge.
 
 ## Protected state and persistence
 

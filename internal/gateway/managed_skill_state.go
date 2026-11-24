@@ -11,10 +11,13 @@
 package gateway
 
 import (
+	"context"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 const endpointSkillInventorySource = "endpoint_skill_inventory"
@@ -89,6 +92,10 @@ func (cycle *managedInventoryPublishCycle) trackSkills(
 			continue
 		}
 		installed := true
+		if cycle.skillRemovalCandidates == nil {
+			cycle.skillRemovalCandidates = map[string]managedSkillState{}
+		}
+		cycle.skillRemovalCandidates[id] = old
 		components = append(components, endpointInventoryComponent{
 			id: id, componentType: "skill", signal: old.Signal, product: old.Product, itemName: old.Name,
 			agentConnector: old.Connector, agentInstalled: &installed,
@@ -99,6 +106,48 @@ func (cycle *managedInventoryPublishCycle) trackSkills(
 	}
 	cycle.skills = next
 	return components
+}
+
+// A turnover can have a supported current collection but too many rows once
+// removals are included. Deliver a bounded removal batch first. Until every
+// removal is accepted, leave the current rows unpublished and retain all other
+// prior state so a failed batch cannot turn new rows into unchanged ones.
+// action is the collection's action in this product (managed on a Secure
+// Client endpoint, the operator action elsewhere); limits are the same.
+func prepareManagedSkillSnapshot(ctx context.Context, emitter sidecarRuntimeEmitter, components []endpointInventoryComponent, complete bool, publish endpointInventoryCycle, action observability.ProducerKey) ([]endpointInventoryComponent, error) {
+	if !complete || managedInventorySnapshotEligible(endpointSkillInventorySource, action, components) {
+		return components, nil
+	}
+	current := make([]endpointInventoryComponent, 0, len(components))
+	var removed []endpointInventoryComponent
+	for _, row := range components {
+		if row.skillState == skillStateRemoved {
+			removed = append(removed, row)
+		} else {
+			current = append(current, row)
+		}
+	}
+	if len(removed) == 0 || !managedInventorySnapshotEligible(endpointSkillInventorySource, action, current) {
+		return components, nil
+	}
+	sort.Slice(removed, func(i, j int) bool { return removed[i].id < removed[j].id })
+	batch := removed[:min(len(removed), managedInventoryLimit(action))]
+	accepted, err := emitEndpointInventoryComponents(ctx, emitter, endpointSkillInventorySource, batch, action, publish)
+	if publish.cycle != nil {
+		if publish.cycle.skillRemovals == nil {
+			publish.cycle.skillRemovals = map[string]managedSkillState{}
+		}
+		for id := range accepted {
+			if prior, ok := publish.cycle.skillRemovalCandidates[id]; ok {
+				publish.cycle.skillRemovals[id] = prior
+			}
+		}
+	}
+	if err != nil || len(accepted) != len(removed) {
+		publish.cycle.markDegraded()
+		return components, err
+	}
+	return current, nil
 }
 
 // skillScanComplete reports whether a skill missing from report can be

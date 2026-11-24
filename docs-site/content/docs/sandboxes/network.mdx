@@ -213,7 +213,7 @@ The sandbox sends all traffic through DefenseClaw. These are the network failure
 
 **Cause:** no SSH leaves a sandbox, and no unblock opens it. npm resolves `github:OWNER/REPO` and `git+ssh://` dependencies to SSH.
 
-**Fix:** `git remote set-url origin https://github.com/OWNER/REPO.git`. Write dependencies as `git+https://github.com/OWNER/REPO.git`. Claude Code, Codex, Copilot CLI, Cursor and Devin agents are told this after the refused call.
+**Fix:** `git remote set-url origin https://github.com/OWNER/REPO.git`. Write dependencies as `git+https://github.com/OWNER/REPO.git`. Claude Code, Codex and Copilot CLI agents are told this after the refused call.
 
 **Check:** the git command succeeds.
 

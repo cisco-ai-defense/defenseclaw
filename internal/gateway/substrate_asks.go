@@ -202,6 +202,7 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			if err != nil {
 				out = map[string]any{"profile": "", "reason": "no profile with launcher atespaces is assigned to you"}
 			}
+			substrateMarkAssurance(out, ownerOf(c.person))
 			writeSubstrateJSON(w, http.StatusOK, out)
 			return
 		}
@@ -221,6 +222,7 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			"template": reg.Template, "mode": substrateMode(reg), "fail_mode": substrateFailMode(st.cfg, reg),
 			"approved_hosts": reg.Approved, "secrets": reg.Secrets,
 		}
+		substrateMarkAssurance(out, reg.Person)
 		var hosts []string
 		if st.cfg.Policies != nil {
 			pol, err := st.cfg.Policies.GetActorEgressPolicy(r.Context(), ateapi.Ref(reg.Atespace, reg.Name))
@@ -257,6 +259,17 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			out["tool"] = res
 		}
 		writeSubstrateJSON(w, http.StatusOK, out)
+	}
+}
+
+// substrateMarkAssurance adds the lower-assurance mark to a policy explain
+// answer when the person signed in with an email the issuer did not verify
+// (GAP-0640). A verified sign-in adds nothing.
+func substrateMarkAssurance(out map[string]any, p registry.Person) {
+	if a := p.Assurance(); a != "" {
+		out["assurance"] = "lower"
+		out["assurance_reason"] = a
+		out["assurance_note"] = "the sign-in's email is not verified by the issuer, so it is not the principal; the user name or UPN stands in"
 	}
 }
 

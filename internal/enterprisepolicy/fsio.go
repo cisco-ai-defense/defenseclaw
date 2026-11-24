@@ -324,6 +324,21 @@ func writePolicyFileWith(opts Options, path string, write func(path string) erro
 	return created, write(path)
 }
 
+// policyFileLink is the target of the symbolic link at path, read without
+// following it, or "" when path is not one.
+func policyFileLink(opts Options, path string) string {
+	path = platformPath(opts, path)
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return ""
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return ""
+	}
+	return target
+}
+
 // removePolicyFile deletes path if it is a regular file.
 func removePolicyFile(opts Options, path string) error {
 	path = platformPath(opts, path)

@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -341,7 +342,7 @@ func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
 	}
 	folder := `that user's %USERPROFILE%\.defenseclaw`
 	if path := windowsEnterpriseFirstWindowsPath(text); path != "" {
-		if index := strings.Index(strings.ToLower(path), `\.defenseclaw`); index >= 0 {
+		if index := strings.Index(asciifold.Lower(path), `\.defenseclaw`); index >= 0 {
 			folder = path[:index+len(`\.defenseclaw`)]
 		}
 	}
@@ -362,7 +363,7 @@ func windowsEnterpriseCommittedJournalNextStep(original string, installed bool) 
 	}
 	step := ". The change is committed and DefenseClaw is installed and running; only the clean-up of its lifecycle journal failed."
 	if path := windowsEnterpriseFirstWindowsPath(original); path != "" {
-		if index := strings.Index(strings.ToLower(path), `\.defenseclaw`); index >= 0 {
+		if index := strings.Index(asciifold.Lower(path), `\.defenseclaw`); index >= 0 {
 			folder := path[:index+len(`\.defenseclaw`)]
 			step += " " + folder + " was left by a per-user DefenseClaw install, whose permissions the managed install does not change:" +
 				" have that user run `defenseclaw uninstall --all --binaries --yes`, or move the folder out of the profile."

@@ -49,8 +49,11 @@ type Actor struct {
 	// DefenseClaw, which Foreign marks too; GAP-0419).
 	Attribution string `json:"attribution,omitempty"`
 	Foreign     bool   `json:"foreign,omitempty"`
-	Deleted     bool   `json:"deleted,omitempty"`
-	State       string `json:"state,omitempty"`
+	// Budget is the highest used share of the budgets that count this agent
+	// ("80 %", or "over"); empty when none does.
+	Budget  string `json:"budget,omitempty"`
+	Deleted bool   `json:"deleted,omitempty"`
+	State   string `json:"state,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
@@ -281,16 +284,65 @@ func (c *Client) Batch(ctx context.Context, id string) (map[string]any, error) {
 }
 
 // Usage returns the person's usage (model calls, tokens, cost).
-func (c *Client) Usage(ctx context.Context, batch string, all bool) (map[string]any, error) {
-	q := url.Values{}
-	if batch != "" {
-		q.Set("batch", batch)
+func (c *Client) Usage(ctx context.Context, q UsageQuery) (UsageAnswer, error) {
+	v := url.Values{}
+	if q.By != "" {
+		v.Set("by", q.By)
 	}
-	if all {
-		q.Set("all", "1")
+	if q.Since != "" {
+		v.Set("since", q.Since)
 	}
-	var out map[string]any
-	return out, c.do(ctx, http.MethodGet, "usage", q, nil, &out)
+	if q.Batch != "" {
+		v.Set("batch", q.Batch)
+	}
+	if q.All {
+		v.Set("all", "1")
+	}
+	var out UsageAnswer
+	return out, c.do(ctx, http.MethodGet, "usage", v, nil, &out)
+}
+
+// UsageQuery is what substrate usage asks for: By is the rollup, Since a
+// window as <n>h or <n>d, All an administrator's read of every person.
+type UsageQuery struct {
+	By, Since, Batch string
+	All              bool
+}
+
+// UsageRow is one rolled-up line of the usage answer; Name is a person's
+// display name in an administrator's per-person view.
+type UsageRow struct {
+	Key        string   `json:"key"`
+	Name       string   `json:"name,omitempty"`
+	Calls      int64    `json:"calls"`
+	UsageCalls int64    `json:"usage_calls"`
+	Input      int64    `json:"input_tokens"`
+	Output     int64    `json:"output_tokens"`
+	CostUSD    *float64 `json:"cost_usd,omitempty"`
+	CostCalls  int64    `json:"cost_calls"`
+}
+
+// UsageBudget is a budget line the caller may see, with its spend.
+type UsageBudget struct {
+	ID          string   `json:"id"`
+	Scope       string   `json:"scope"`
+	Subject     string   `json:"subject,omitempty"`
+	Period      string   `json:"period"`
+	LimitUSD    float64  `json:"limit_usd"`
+	OnExceed    string   `json:"on_exceed"`
+	SpentUSD    *float64 `json:"spent_usd,omitempty"`
+	PercentUsed *float64 `json:"percent_used,omitempty"`
+	Exceeded    bool     `json:"exceeded"`
+	ResetsAt    string   `json:"resets_at"`
+}
+
+// UsageAnswer is the gateway's usage reply.
+type UsageAnswer struct {
+	By      string        `json:"by"`
+	From    string        `json:"from"`
+	To      string        `json:"to"`
+	Rows    []UsageRow    `json:"rows"`
+	Budgets []UsageBudget `json:"budgets,omitempty"`
 }
 
 // Asks lists the person's pending approvals.

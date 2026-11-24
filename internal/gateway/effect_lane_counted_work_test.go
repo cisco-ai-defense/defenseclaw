@@ -37,7 +37,7 @@ func TestEffectsLaneVerdictIgnoresTheClock(t *testing.T) {
 	if idleRes.Tier != string(effectTierRestricted) || len(idle) == 0 {
 		t.Fatalf("idle run = tier %s findings %v, want a restricted raise for the Known keys write", idleRes.Tier, ruleIDsOf(idle))
 	}
-	effectShadowFaultHook = func() { time.Sleep(effectsLaneSlowStep) }
+	t.Cleanup(setEffectShadowFaultHookIdle(t, func() { time.Sleep(effectsLaneSlowStep) }))
 	slowRes := computeEffectShadow(request, effectRulesOn, tierRestricted)
 	slow := effectShadowFindings(slowRes, effectRulesOn)
 	if slowRes.Tier != idleRes.Tier || slowRes.Action != idleRes.Action || slowRes.Reason != "" {

@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1945,6 +1946,142 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
             self.assertTrue(named)
             for path in named:
                 self.assertTrue(os.path.lexists(path), f"the uninstall names {path}, which it removed:\n{text}")
+
+    def test_uninstall_names_a_folder_an_earlier_uninstall_kept_and_never_deletes_it(self):
+        """GAP-1912: the kept copy is the user's; nothing offered to delete it once a later uninstall had nothing to move."""
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, _kept = self._stage(home)
+            shutil.rmtree(os.path.join(data_dir, "connector_backups", "omnigent"))
+            shutil.rmtree(os.path.join(data_dir, "connector_backups", "openhands"))
+            root = data_dir + "-removed-connector-backups"
+            earlier = os.path.join(root, "openhands", "openhands-hook.sh.edited-0123")
+            os.makedirs(os.path.dirname(earlier))
+            with open(earlier, "w", encoding="utf-8") as fh:
+                fh.write("# my edit\n")
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("codex",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, "")
+            self.assertEqual(error, "")
+            text = "\n".join(echoed)
+            folder = os.path.join(root, "openhands")
+            self.assertIn(f"  - {folder}: files an earlier uninstall kept from DefenseClaw's OpenHands setup", text)
+            # The plan names no platform, so the command is the POSIX one; shlex.quote is what it prints, and a
+            # Windows temp path (a drive letter and backslashes) gets quoted, so build the expectation the same way.
+            self.assertIn(f"rm -rf {shlex.quote(folder)}", text)
+            self.assertTrue(os.path.isfile(earlier), "the user's kept copy is never deleted by an uninstall")
+
+    def test_uninstall_says_nothing_of_kept_backups_when_there_are_none(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, _kept = self._stage(home)
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("codex",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, "")
+            self.assertEqual(error, "")
+            self.assertNotIn("an earlier uninstall kept", "\n".join(echoed))
+
+    def test_a_folder_moved_by_this_uninstall_is_not_listed_as_an_earlier_one(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, _kept = self._stage(home)
+            root = data_dir + "-removed-connector-backups"
+            os.makedirs(os.path.join(root, "openhands"))
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, "")
+            self.assertEqual(error, "")
+            text = "\n".join(echoed)
+            # openhands was kept earlier; the openhands copy of this run lands beside it as openhands-2.
+            self.assertIn(f"  - {os.path.join(root, 'openhands')}: files an earlier uninstall kept", text)
+            self.assertNotIn(f"  - {os.path.join(root, 'openhands-2')}: files an earlier uninstall kept", text)
+            self.assertNotIn(f"  - {os.path.join(root, 'omnigent')}: files an earlier uninstall kept", text)
+
+    def test_the_delete_command_for_a_kept_folder_is_the_platforms_own(self):
+        with tempfile.TemporaryDirectory() as home:
+            data_dir = os.path.join(home, ".defenseclaw")
+            root = data_dir + "-removed-connector-backups"
+            os.makedirs(os.path.join(root, "omnigent-2"))
+            posix = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")
+            self.assertEqual(len(posix), 2, posix)
+            # The POSIX command quotes a path that needs it (a Windows temp path does: drive letter, backslashes).
+            self.assertIn(f"rm -rf {shlex.quote(os.path.join(root, 'omnigent-2'))}", posix[1])
+            windows = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "win32")
+            self.assertIn("Remove-Item -Recurse -Force -LiteralPath", windows[1])
+            os.makedirs(os.path.join(root, "codex"))
+            self.assertEqual(len(cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")), 2)
+
+    def test_the_kept_folders_are_listed_under_one_heading(self):
+        """GAP-1994: the list of earlier-kept folders opens with a heading line, once."""
+        with tempfile.TemporaryDirectory() as home:
+            data_dir = os.path.join(home, ".defenseclaw")
+            root = data_dir + "-removed-connector-backups"
+            os.makedirs(os.path.join(root, "openhands"))
+            os.makedirs(os.path.join(root, "omnigent-2"))
+            lines = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")
+            heading = "Backups an earlier uninstall kept (your copy of files from before DefenseClaw's setup):"
+            self.assertEqual(lines[0], heading)
+            self.assertEqual(len(lines), 3, lines)
+            self.assertTrue(all(line.startswith("  - ") for line in lines[1:]), lines)
+            self.assertEqual(cmd_uninstall._earlier_kept_backup_lines(os.path.join(home, "none"), {}, "linux"), [])
+
+    def test_a_linked_kept_root_is_refused_and_never_followed(self):
+        """GAP-1994: a link in place of the kept folder is named and refused: nothing behind it is listed or offered for deletion."""
+        with tempfile.TemporaryDirectory() as home:
+            data_dir = os.path.join(home, ".defenseclaw")
+            root = data_dir + "-removed-connector-backups"
+            target = os.path.join(home, "elsewhere")
+            os.makedirs(os.path.join(target, "openhands"))
+            try:
+                os.symlink(target, root, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"cannot create a symlink here: {exc}")
+            for platform_name in ("linux", "win32"):
+                text = "\n".join(cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, platform_name))
+                self.assertIn(f"  - {root}: not listed, it is a link and DefenseClaw does not follow links", text)
+                self.assertNotIn(os.path.join(root, "openhands"), text)
+                self.assertNotIn(os.path.join(target, "openhands"), text)
+                self.assertNotIn("rm -rf", text)
+                self.assertNotIn("Remove-Item", text)
+            self.assertTrue(os.path.isdir(os.path.join(target, "openhands")))
+
+    def test_an_uninstall_with_a_linked_kept_root_says_so_and_deletes_nothing(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, _kept = self._stage(home)
+            shutil.rmtree(os.path.join(data_dir, "connector_backups", "omnigent"))
+            shutil.rmtree(os.path.join(data_dir, "connector_backups", "openhands"))
+            root = data_dir + "-removed-connector-backups"
+            target = os.path.join(home, "elsewhere")
+            theirs = os.path.join(target, "openhands", "mine.txt")
+            os.makedirs(os.path.dirname(theirs))
+            with open(theirs, "w", encoding="utf-8") as fh:
+                fh.write("not DefenseClaw's\n")
+            try:
+                os.symlink(target, root, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"cannot create a symlink here: {exc}")
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("codex",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, "")
+            self.assertEqual(error, "")
+            text = "\n".join(echoed)
+            self.assertIn(f"  - {root}: not listed, it is a link", text)
+            self.assertNotIn("rm -rf", text)
+            self.assertTrue(os.path.isfile(theirs))
+            self.assertTrue(os.path.islink(root))
 
     def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
         with (

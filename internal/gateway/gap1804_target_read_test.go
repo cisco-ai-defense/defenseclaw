@@ -41,7 +41,7 @@ func TestGAP1804GatewayTargetReadUnansweredIsRefused(t *testing.T) {
 	var share atomic.Bool
 	end := make(chan struct{})
 	t.Cleanup(func() { close(end) })
-	restore := hookpaths.OverrideNetworkSharesForTest(func(path string) string {
+	restore := overrideNetworkSharesIdle(t, func(path string) string {
 		if share.Load() && (path == cwd || strings.HasPrefix(path, cwd+string(filepath.Separator))) {
 			return cwd
 		}
@@ -84,7 +84,7 @@ func TestGAP1804GatewayTargetReadUnansweredIsRefused(t *testing.T) {
 				candidate := actionfacts.PathFact{Access: actionfacts.PathAccessWrite, Value: row.target, Normalized: row.target, Resolved: row.target}
 				var holding atomic.Bool
 				var held atomic.Int32
-				release := hookpaths.HoldKnownFolderReadsForTest(func(folder string) bool {
+				release := holdKnownFolderReadsIdle(t, func(folder string) bool {
 					if holding.Load() && folder == cwd {
 						held.Add(1)
 						return true

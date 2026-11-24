@@ -250,6 +250,87 @@ func (a *App) noteManaged(st *sandboxapi.Status) {
 	}
 }
 
+// accountStatus is st as every command that says why sandboxes are off reads
+// it (`sandbox status`, `sandbox run`'s refusal, `sandbox activity -f`), so
+// that all of them name the reason sandboxapi.Status.ManagedOff gives and no
+// command has an order of its own. The daemon's status can name the install
+// while the account's profile has refused sandboxes (a daemon that just
+// restarted has not settled its view of the account), so the managed
+// gateway's own settled view is added: a view that refuses the account sets
+// ManagedStatus.AccountDenied, as the daemon does when it has the view, and
+// when the organization has turned sandboxes off too, the organization's
+// reason comes first, as `sandbox run` gives it. A status that is not
+// managed, or whose reason is the organization's switch, or a view that is
+// provisional, allows the account or is not given, is returned as it was
+// (GAP-2059).
+//
+// The gateway answers a policy view only for a named connector (it refuses
+// a view that names none), and profiles match per connector. harness is the
+// agent a run is for; for a command that is for none (`sandbox status`,
+// `sandbox activity -f`) it is "" and the view is the one of the configured
+// primary connector, so those commands name the reason for the primary
+// connector. With no connector configured there is no view to ask and the
+// daemon's status stands. The view is asked on ctx, so Ctrl-C ends the wait.
+func (a *App) accountStatus(ctx context.Context, st *sandboxapi.Status, harness string) *sandboxapi.Status {
+	if st == nil || st.Managed == nil || st.Managed.AccountDenied || a.ManagedAccountPolicy == nil ||
+		st.ManagedOff() == sandboxapi.ManagedOffOrganization || (st.Enabled && st.Available) {
+		return st
+	}
+	if harness == "" {
+		harness = a.Cfg.PrimaryConnector()
+	}
+	if harness == "" {
+		return st
+	}
+	ctx, cancel := context.WithTimeout(ctx, managedFactsTimeout)
+	defer cancel()
+	view, err := a.ManagedAccountPolicy(ctx, harness)
+	if err != nil || view == nil || view.Provisional || view.Allowed {
+		return st
+	}
+	out := *st
+	m := *st.Managed
+	if m.RequestAccess == "" {
+		m.RequestAccess = view.RequestAccess
+	}
+	if a.ManagedOrganizationOff != nil && a.ManagedOrganizationOff(ctx) {
+		// The organization's switch outranks the account's profile, as
+		// `sandbox run` reads them (refuseForbiddenAccount).
+		m.Unavailable = sandboxapi.OrganizationOffReason
+	} else {
+		m.AccountDenied = true
+	}
+	out.Managed = &m
+	a.managedSeen = &m
+	return &out
+}
+
+// managedOffError is the DisabledError (exit status 1, as `sandbox run`'s)
+// with the one reason sandboxes are off for the account, or nil while they
+// are not, or when the daemon does not answer. before is a command that
+// has not started its work (`sandbox activity -f` before it follows): it
+// is refused only for a reason that means no sandbox can run for the
+// account (the organization's switch, the profile, another account's
+// gateway, a setting the organization manages). The install's reason is
+// not one: sandboxes that still run have a feed to follow.
+func (a *App) managedOffError(ctx context.Context, api API, before bool) error {
+	st, err := api.Status(ctx)
+	if err != nil {
+		return nil
+	}
+	st = a.accountStatus(ctx, st, "")
+	switch st.ManagedOff() {
+	case sandboxapi.ManagedOffNone:
+		return nil
+	case sandboxapi.ManagedOffUnavailable:
+		if before {
+			return nil
+		}
+	}
+	a.noteManaged(st)
+	return &DisabledError{Message: st.OffMessage(), Enabled: st.Enabled}
+}
+
 // managedAccessRules are the openshell.admin rules an egress refusal names
 // in the access-refused form (sandboxapi.AccessRefused).
 var managedAccessRules = map[string]bool{

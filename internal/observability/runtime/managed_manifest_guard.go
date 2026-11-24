@@ -29,6 +29,11 @@ func WithManagedManifestDigest(ctx context.Context, hash, digest string, part, t
 	return context.WithValue(ctx, managedManifestDigestKey{}, expected)
 }
 
+func managedManifestDigestBound(ctx context.Context) bool {
+	expected, ok := ctx.Value(managedManifestDigestKey{}).(managedManifestDigest)
+	return ok && expected.digest != ""
+}
+
 func managedManifestProjectionMatches(ctx context.Context, outcome pipeline.LocalLogOutcome) bool {
 	expected, guarded := ctx.Value(managedManifestDigestKey{}).(managedManifestDigest)
 	if !guarded || expected.digest == "" {

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestOpenClawOutageKnownValueNearVariants(t *testing.T) {
@@ -32,9 +33,7 @@ func TestOpenClawOutageKnownValueNearVariants(t *testing.T) {
 		t.Fatal(err)
 	}
 	linked := filepath.Join(ordinary, "config-link")
-	if err := os.Symlink(protected, linked); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, linked)
 	branchy := ""
 	for i := 1; i <= 6; i++ {
 		branchy += fmt.Sprintf("if test -f marker%d; then V%d=a; else V%d=b; fi; ", i, i, i)

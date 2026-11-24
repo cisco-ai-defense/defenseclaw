@@ -103,6 +103,8 @@ type SandboxScanOptions struct {
 	MaxFilesPerScan         int
 	MaxFileBytes            int64
 	StoreRawLocalPaths      bool
+
+	DisableSkillContentHashes bool
 }
 
 // SandboxScanOptionsFromConfig keeps the privacy settings and bounds of
@@ -121,6 +123,8 @@ func SandboxScanOptionsFromConfig(cfg *config.Config) SandboxScanOptions {
 		MaxFilesPerScan:         ad.MaxFilesPerScan,
 		MaxFileBytes:            int64(ad.MaxFileBytes),
 		StoreRawLocalPaths:      ad.StoreRawLocalPaths,
+
+		DisableSkillContentHashes: !ad.EffectiveIncludeSkillContentHashes(),
 	}
 	if opts.MaxFilesPerScan <= 0 {
 		opts.MaxFilesPerScan = 1000
@@ -480,6 +484,8 @@ func newSandboxScanService(scan SandboxScan, opts SandboxScanOptions, catalog []
 			HomeDir:      home,
 			HomeDirs:     []string{home},
 			IDEInventory: config.IDEInventoryOff,
+
+			DisableSkillContentHashes: opts.DisableSkillContentHashes,
 		}),
 		catalog: catalog,
 		sandbox: facts,
@@ -759,6 +765,9 @@ func (s *ContinuousDiscoveryService) attributeSandboxSignal(sig AISignal, id, na
 	for i, ev := range sig.Evidence {
 		ev.PathHash = namespace(ev.PathHash)
 		ev.WorkspaceHash = namespace(ev.WorkspaceHash)
+		if s.opts.DisableSkillContentHashes {
+			ev.Skill = nil // The spool may contain an observation made before the setting changed.
+		}
 		if !s.opts.StoreRawLocalPaths {
 			ev.RawPath = ""
 		}

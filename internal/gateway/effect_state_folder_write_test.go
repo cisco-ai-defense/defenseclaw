@@ -135,10 +135,6 @@ func useDefaultLaneGeneration(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.EffectsRulesTier = string(tierRestricted)
 	liveGeneration.Store(&Generation{Config: cfg})
-	prevResolver := effectResolverOverride
-	effectResolverOverride = func(path string) (string, bool) { return path, true }
-	t.Cleanup(func() {
-		liveGeneration.Store(previous)
-		effectResolverOverride = prevResolver
-	})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	t.Cleanup(setEffectResolverIdle(t, func(path string) (string, bool) { return path, true }))
 }

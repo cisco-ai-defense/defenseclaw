@@ -136,6 +136,9 @@ type App struct {
 	// returns sandboxapi.ErrNotManagedHost on any other computer.
 	HostClient func(goos string) (API, error)
 	IO         IO
+	// ReadSecret reads a secret without echoing it (vault add and
+	// replace); nil reads the terminal with echo off.
+	ReadSecret func(prompt string) (string, error)
 
 	Terminal Terminal
 	Streamer Streamer
@@ -221,6 +224,13 @@ type App struct {
 	// daemon, whose socket would start it: an account the organization does
 	// not allow sandboxes is refused with nothing started (GAP-0534).
 	ManagedAccountPolicy func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error)
+	// ManagedOrganizationOff asks the managed gateway whether the
+	// organization turned sandboxes off (openshell.enabled false), without
+	// the account's sandbox daemon (nil, or false, when this is no managed
+	// computer or the gateway does not answer). A run reads it before it
+	// refuses an account its profile denies, so the organization's switch
+	// is the reason given first, as it is in status and doctor.
+	ManagedOrganizationOff func(ctx context.Context) bool
 	// ManagedAccountHome is the home path the managed gateway exec shim
 	// resolves for this account, including directory accounts.
 	ManagedAccountHome func() (string, error)
@@ -253,6 +263,9 @@ type App struct {
 	// managed computer: the caller's profile and request-access contact a
 	// refusal names (ManagedError).
 	managedSeen *sandboxapi.ManagedStatus
+	// vaultSealTried: this command tried to seal the vault on its way to a
+	// sandbox (a run that resumes its sandbox connects to it).
+	vaultSealTried bool
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run

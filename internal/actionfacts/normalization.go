@@ -21,6 +21,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 type pathSyntax uint8
@@ -628,7 +630,7 @@ func canonicalWindowsFilesystemPath(value string) (string, bool) {
 	if value == "" {
 		return "", false
 	}
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	providerQualified := false
 	switch {
 	case strings.HasPrefix(lower, powerShellFileSystemProviderPrefix):
@@ -1069,7 +1071,7 @@ func canonicalRegistryPath(value string) (string, bool) {
 	if value == "" || strings.TrimSpace(value) != value {
 		return "", false
 	}
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	for _, prefix := range []string{
 		`microsoft.powershell.core\registry::`,
 		`registry::`,

@@ -5,6 +5,8 @@ package actionfacts
 
 import (
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // trustedWindowsHomeLiteral is a Windows drive ActiveHome, as
@@ -90,7 +92,9 @@ func rewriteTrustedShellHome(source, activeHome string, dialect Dialect, posixSc
 	if len(anchors) == 0 || strings.ContainsAny(source, "`^\x00") {
 		return "", false
 	}
-	lower := strings.ToLower(source)
+	// Offsets of source are offsets of lower: asciifold.Lower keeps every
+	// byte but the ASCII capitals (GAP-1934).
+	lower := asciifold.Lower(source)
 	var out, rest strings.Builder
 	last := 0
 	single, double := false, false

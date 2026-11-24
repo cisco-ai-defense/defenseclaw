@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -138,13 +139,8 @@ func TestSlimHookLinksNoGatewayPackages(t *testing.T) {
 			linked := map[string]bool{}
 			for _, dep := range deps {
 				linked[dep] = true
-				if slimHookAllowedPackage(dep) {
-					continue
-				}
-				for _, bad := range slimHookForbidden {
-					if dep == bad || (strings.HasSuffix(bad, "/") && strings.HasPrefix(dep, bad)) {
-						t.Errorf("defenseclaw-hook links %s", dep)
-					}
+				if bad := slimHookForbiddenEntry(dep); bad != "" {
+					t.Errorf("defenseclaw-hook links %s (forbidden: %s)", dep, bad)
 				}
 			}
 			for _, heavy := range slimHookKnownHeavy {
@@ -161,30 +157,54 @@ func TestSlimHookLinksNoGatewayPackages(t *testing.T) {
 }
 
 // TestOpenClawPluginConfigCheckLinkedWhereSetupRuns pins the other half of
-// the split above: every connector Setup runs from internal/gateway or
-// internal/cli (enterprisehooks.Install is called from the CLI), and both
-// link the package that registers the OpenClaw plugin config check
+// the split above: every program that links a package running connector
+// Setup (one that calls a connector's Setup, found in the source) links
+// the package that registers the OpenClaw plugin config check
 // (internal/gateway/openclaw_schema_link.go). Without it, Setup refuses an
-// openclaw.json that carries a plugin config.
+// openclaw.json that carries a plugin config. The hook links
+// internal/enterprisehooks but never runs Setup (enterprisehooks.Install is
+// not in the hook binary). The callers and the programs, tagged mains among
+// them, are discovered (GAP-1862: a fixed list of three packages before).
 func TestOpenClawPluginConfigCheckLinkedWhereSetupRuns(t *testing.T) {
 	gotool := goToolOrSkip(t)
-	const check = "github.com/defenseclaw/defenseclaw/internal/gateway/connector/openclawschema"
+	const (
+		check = linkTestModule + "/internal/gateway/connector/openclawschema"
+		hook  = linkTestModule + "/cmd/defenseclaw-hook"
+	)
+	files := moduleGoFiles(t)
+	callers := connectorSetupCallers(t, files)
+	// The two callers at the split: the gateway (and the CLI through it) and
+	// enterprisehooks.Install, which the CLI calls.
+	for _, want := range []string{"/internal/gateway", "/internal/enterprisehooks"} {
+		if !callers[linkTestModule+want] {
+			t.Errorf("connector Setup callers %v miss %s: the discovery is broken", callers, want)
+		}
+	}
 	for _, goos := range []string{"linux", "darwin", "windows"} {
-		for _, pkg := range []string{"../../internal/gateway", "../../internal/cli", "../defenseclaw"} {
-			cmd := exec.Command(gotool, "list", "-deps", pkg)
-			cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("%s go list -deps %s: %v", goos, pkg, err)
+		programs := 0
+		for _, main := range mainPackages(t, gotool, goos, files) {
+			if main.importPath == hook {
+				continue
 			}
-			found := false
-			for _, dep := range strings.Fields(string(out)) {
-				found = found || dep == check
+			var runs []string
+			for caller := range callers {
+				if main.deps[caller] || main.importPath == caller {
+					runs = append(runs, caller)
+				}
 			}
-			if !found {
-				t.Errorf("%s: %s does not link %s", goos, pkg, check)
+			if len(runs) == 0 {
+				continue
+			}
+			programs++
+			if !main.deps[check] {
+				sort.Strings(runs)
+				t.Errorf("%s: %s runs connector Setup (%s) but does not link %s", goos, main.importPath, strings.Join(runs, ", "), check)
 			}
 		}
+		if programs == 0 {
+			t.Errorf("%s: no program runs connector Setup: the discovery is broken", goos)
+		}
+		t.Logf("%s: %d programs run connector Setup", goos, programs)
 	}
 }
 
@@ -203,36 +223,25 @@ func TestEveryConfigProgramLinksTheFullConfig(t *testing.T) {
 		check  = module + "/internal/config/fullconfig"
 		hook   = module + "/cmd/defenseclaw-hook"
 	)
+	files := moduleGoFiles(t)
 	for _, goos := range []string{"linux", "darwin", "windows"} {
-		cmd := exec.Command(gotool, "list", "-f", `{{if eq .Name "main"}}{{.ImportPath}} {{join .Deps " "}}{{end}}`, "./...")
-		cmd.Dir = "../.."
-		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("%s go list ./...: %v", goos, err)
-		}
 		programs := 0
-		for _, line := range strings.Split(string(out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
-				continue
-			}
-			deps := map[string]bool{}
-			for _, dep := range fields[1:] {
-				deps[dep] = true
-			}
+		// Tagged mains too (GAP-1862: benchmarks/cmd/s7bench builds only
+		// with -tags s7bench and was covered only through internal/gateway).
+		for _, main := range mainPackages(t, gotool, goos, files) {
+			deps := main.deps
 			if !deps[cfg] {
 				continue
 			}
 			programs++
-			if fields[0] == hook {
+			if main.importPath == hook {
 				if deps[check] {
 					t.Errorf("%s: %s links %s", goos, hook, check)
 				}
 				continue
 			}
 			if !deps[check] {
-				t.Errorf("%s: %s links internal/config but not %s", goos, fields[0], check)
+				t.Errorf("%s: %s links internal/config but not %s", goos, main.importPath, check)
 			}
 		}
 		// 13 programs linked internal/config on each OS at the split.
@@ -255,30 +264,16 @@ func TestEveryIDEInventoryProgramLinksTheSQLiteDriver(t *testing.T) {
 		driver    = "modernc.org/sqlite"
 		hook      = module + "/cmd/defenseclaw-hook"
 	)
+	files := moduleGoFiles(t)
 	for _, goos := range []string{"linux", "darwin", "windows"} {
-		cmd := exec.Command(gotool, "list", "-f", `{{if eq .Name "main"}}{{.ImportPath}} {{join .Deps " "}}{{end}}`, "./...")
-		cmd.Dir = "../.."
-		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("%s go list ./...: %v", goos, err)
-		}
 		programs := 0
-		for _, line := range strings.Split(string(out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) == 0 || fields[0] == hook {
-				continue
-			}
-			deps := map[string]bool{}
-			for _, dep := range fields[1:] {
-				deps[dep] = true
-			}
-			if !deps[inventory] {
+		for _, main := range mainPackages(t, gotool, goos, files) {
+			if main.importPath == hook || !main.deps[inventory] {
 				continue
 			}
 			programs++
-			if !deps[driver] {
-				t.Errorf("%s: %s links %s but not %s", goos, fields[0], inventory, driver)
+			if !main.deps[driver] {
+				t.Errorf("%s: %s links %s but not %s", goos, main.importPath, inventory, driver)
 			}
 		}
 		if programs == 0 {
@@ -333,11 +328,49 @@ func TestSlimHookSizeBudget(t *testing.T) {
 	}
 }
 
-func slimHookAllowedPackage(dep string) bool {
-	for _, allowed := range slimHookAllowed {
-		if dep == allowed || (!strings.Contains(allowed, "/guardrail/") && strings.HasPrefix(dep, allowed+"/")) {
-			return true
+// slimHookForbiddenEntry returns the slimHookForbidden entry dep matches,
+// or "" when none does or an allowed entry covers dep more specifically. The
+// connector hook runtime is allowed below internal/gateway/, but a forbidden
+// entry that names a package below it (the OpenClaw plugin config check,
+// internal/gateway/connector/openclawschema) still wins (GAP-1862: the
+// allowed prefix used to exempt it).
+func slimHookForbiddenEntry(dep string) string {
+	allowed := slimHookAllowedEntry(dep)
+	for _, bad := range slimHookForbidden {
+		matches := dep == bad || (strings.HasSuffix(bad, "/") && strings.HasPrefix(dep, bad))
+		if matches && len(strings.TrimSuffix(bad, "/")) > len(allowed) {
+			return bad
 		}
 	}
-	return false
+	return ""
+}
+
+// slimHookAllowedEntry returns the longest slimHookAllowed entry that
+// covers dep: the package itself, or a package below it (only the exact
+// package for the guardrail entries), or "" for none.
+func slimHookAllowedEntry(dep string) string {
+	best := ""
+	for _, allowed := range slimHookAllowed {
+		if (dep == allowed || (!strings.Contains(allowed, "/guardrail/") && strings.HasPrefix(dep, allowed+"/"))) && len(allowed) > len(best) {
+			best = allowed
+		}
+	}
+	return best
+}
+
+func TestSlimHookForbiddenEntryWinsOverABroaderAllow(t *testing.T) {
+	for dep, want := range map[string]bool{
+		linkTestModule + "/internal/gateway/connector/openclawschema": true,
+		linkTestModule + "/internal/gateway/connector":                false,
+		linkTestModule + "/internal/gateway/connector/hookproto":      false,
+		linkTestModule + "/internal/gateway":                          true,
+		linkTestModule + "/internal/gateway/router":                   true,
+		linkTestModule + "/internal/guardrail/bounded":                false,
+		linkTestModule + "/internal/guardrail/bounded/x":              true,
+		"github.com/santhosh-tekuri/jsonschema/v6":                    true,
+	} {
+		if got := slimHookForbiddenEntry(dep) != ""; got != want {
+			t.Errorf("slimHookForbiddenEntry(%s) forbidden = %v, want %v", dep, got, want)
+		}
+	}
 }

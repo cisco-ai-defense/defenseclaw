@@ -88,6 +88,8 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # migrate puts it back only on that item (rel-1-0-10:GAP-0644).
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
+    # The sandbox vault block (openshell.vault, with auto_capture) is new in 1.0.11.
+    ("openshell.vault", (1, 0, 11)),
     ("guardrail.internal_domains", (1, 0, 6)),
     ("guardrail.chains", (1, 0, 6)),
     ("connectors", (1, 0, 6)),
@@ -134,7 +136,15 @@ NEWER_CONFIG_KEYS = (
     ("openshell.admin.url_rules", (1, 0, 10)),
     ("substrate", (1, 0, 10)),
     ("enterprise.openshell.allow_downgrade", (1, 0, 11)),
+    ("ai_discovery.include_skill_content_hashes", (1, 0, 11)),
     ("ai_discovery.include_skill_manifests", (1, 0, 11)),
+    # Under substrate (1.0.10), so a downgrade to 1.0.10 kept it (GAP-2035).
+    ("substrate.bundles.oci", (1, 0, 11)),
+    # The same: 1.0.10 has substrate and refuses these (fold of the skill scan,
+    # sign-in and spend/usage units; test_every_key_new_since_1_0_10 lists them).
+    ("substrate.identity.kube_sign_in", (1, 0, 11)),
+    ("substrate.skills", (1, 0, 11)),
+    ("substrate.usage", (1, 0, 11)),
 )
 # More keys added after 1.0.9, in the same path language: a "*" segment is
 # one entry of a map of named entries (a connector, a profile). 1.0.9

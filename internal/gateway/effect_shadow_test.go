@@ -220,8 +220,7 @@ func TestEffectShadowFindingsEnforcement(t *testing.T) {
 // End to end: a redirection append to authorized_keys is the restricted ruling
 // tier and blocks in every mode.
 func TestComputeEffectShadowRestrictedAuthorizedKeys(t *testing.T) {
-	effectResolverOverride = func(p string) (string, bool) { return p, true }
-	defer func() { effectResolverOverride = nil }()
+	defer setEffectResolverIdle(t, func(p string) (string, bool) { return p, true })()
 	req := trustedActionRequest{
 		Connector: "claudecode",
 		Input: actionfacts.Input{

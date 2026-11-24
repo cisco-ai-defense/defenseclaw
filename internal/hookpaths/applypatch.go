@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/syntax"
@@ -918,7 +919,7 @@ func patchTargetPaths(path, cwd, home string, resolve patchResolution) ([]string
 // trimHomePrefix strips a leading home form: ~, $HOME, ${HOME}, $env:HOME,
 // $env:USERPROFILE or %USERPROFILE%, alone or followed by a separator.
 func trimHomePrefix(path string) (string, bool) {
-	lower := strings.ToLower(path)
+	lower := asciifold.Lower(path)
 	for _, prefix := range []string{"~", "${home}", "$home", "$env:userprofile", "$env:home", "%userprofile%"} {
 		if !strings.HasPrefix(lower, prefix) {
 			continue

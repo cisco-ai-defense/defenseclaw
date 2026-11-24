@@ -310,7 +310,31 @@ func ReadRegularFileBounded(path string, maxBytes int64) ([]byte, error) {
 // by a repair or a scanner), on platforms where that is retried.
 const readStabilityMetadataRetries = 3
 
+// ErrFileChanged matches the error ReadRegularFileBounded returns when the
+// file at path was replaced or rewritten while it was opened or read. None
+// of the bytes are returned. A reader that does not hold the lock of the
+// file's writers can read again: a writer that replaces a file by an
+// atomic rename leaves a whole new file at path. It is not
+// ErrReadIdentityChanged: RetryTransientRead does not repeat these reads.
+var ErrFileChanged = errors.New("safefile: file changed while reading")
+
+type fileChangedError struct{ msg string }
+
+func (e *fileChangedError) Error() string { return e.msg }
+
+func (e *fileChangedError) Is(target error) bool { return target == ErrFileChanged }
+
+// fileChanged keeps the message the read errors always had and makes it
+// match ErrFileChanged.
+func fileChanged(format, path string) error {
+	return &fileChangedError{msg: fmt.Sprintf(format, path)}
+}
+
 var errReadMetadataChanged = errors.New("safefile: file metadata changed while reading")
+
+// retryMetadataChange is readStabilityRetriesMetadataChange; a test sets it
+// to check the retry on a platform that does not retry.
+var retryMetadataChange = readStabilityRetriesMetadataChange
 
 func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
@@ -318,8 +342,8 @@ func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]by
 		if !errors.Is(err, errReadMetadataChanged) {
 			return data, err
 		}
-		if !readStabilityRetriesMetadataChange || attempt >= readStabilityMetadataRetries {
-			return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+		if !retryMetadataChange || attempt >= readStabilityMetadataRetries {
+			return nil, fileChanged("safefile: file changed while reading: %s", path)
 		}
 	}
 }
@@ -345,7 +369,7 @@ func readRegularFileBoundedOnce(path string, maxBytes int64, afterRead func()) (
 		return nil, err
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
-		return nil, fmt.Errorf("safefile: file changed while opening: %s", path)
+		return nil, fileChanged("safefile: file changed while opening: %s", path)
 	}
 	before, err := readStabilitySnapshot(file)
 	if err != nil {
@@ -374,14 +398,14 @@ func readRegularFileBoundedOnce(path string, maxBytes int64, afterRead func()) (
 		if metadataOnly {
 			return nil, errReadMetadataChanged
 		}
-		return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+		return nil, fileChanged("safefile: file changed while reading: %s", path)
 	}
 	current, err := validateRegularFilePath(path)
 	if err != nil {
 		return nil, err
 	}
 	if !os.SameFile(opened, current) {
-		return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+		return nil, fileChanged("safefile: file changed while reading: %s", path)
 	}
 	return data, nil
 }

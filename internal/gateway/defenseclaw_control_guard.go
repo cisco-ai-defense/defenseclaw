@@ -37,6 +37,10 @@ const (
 	defenseClawControlUnprovenRuleID = "tamper.defenseclaw_control_unproven"
 )
 
+// defenseClawControlReader is actionfacts.DefenseClawControl; tests replace
+// it to inject a reader fault.
+var defenseClawControlReader = actionfacts.DefenseClawControl
+
 // defenseClawControlFindings adds the DefenseClaw self-protection findings of
 // one call. A rule the active pack does not hold adds nothing. Read-only
 // DefenseClaw commands and restarts add nothing.
@@ -51,15 +55,25 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 	if text == "" {
 		return findings
 	}
-	controls := actionfacts.DefenseClawControl(actionfacts.Analyze(request.Input), text)
+	controls := defenseClawControlReader(actionfacts.Analyze(request.Input), text)
 	if len(controls) == 0 {
 		return findings
 	}
+	out := append([]RuleFinding(nil), findings...)
+	if fault := slices.IndexFunc(controls, func(control actionfacts.DefenseClawControlFact) bool {
+		return control.Kind == actionfacts.DefenseClawControlFault
+	}); fault >= 0 {
+		// A reader fault is the evaluation fault of the call, the answer of
+		// trustedToolCallFindings' recovery (a block in every pack and mode),
+		// with the facts read before it kept (GAP-1936).
+		logEvaluatorFault("defenseclaw control connector="+request.Connector, controls[fault].Fault)
+		out = withEvaluationFaultFinding(out, evaluatorFaultTitle, request.EnforcementCapable)
+		controls = slices.Delete(slices.Clone(controls), fault, fault+1)
+	}
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
 	if generation == nil {
-		return findings
+		return out
 	}
-	out := append([]RuleFinding(nil), findings...)
 	// A proven self-disable is an alert where the user runs DefenseClaw
 	// themselves with the default or permissive pack, a block under the strict
 	// pack and in every managed install.

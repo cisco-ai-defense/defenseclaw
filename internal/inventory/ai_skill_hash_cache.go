@@ -59,6 +59,9 @@ type skillHashCacheEntry struct {
 	front        skillFrontMatter
 	manifestHash string
 	manifestSize int64
+	// manifestPath is the exact root SKILL.md the walk read, in the spelling
+	// it opened the folder by (openSkillFolder).
+	manifestPath string
 }
 
 // skillSignatureRacy reports whether a write after a hash read at readAt could have left

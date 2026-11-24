@@ -604,7 +604,7 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 	env.reportMachinePolicy(r, p.intended, result, err)
 	for _, state := range result.States {
 		if state.Changed {
-			l.noteChange("rewrote DefenseClaw's %s machine policy entries", state.Connector)
+			l.noteChange("%s", publishedPolicyChange(state, fmt.Sprintf("rewrote DefenseClaw's %s machine policy entries", state.Connector)))
 		}
 	}
 	// A connector the config no longer publishes loses its hooks, and with
@@ -629,11 +629,20 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		// The trusted pin is the view of the bytes this publish wrote, never
 		// of whatever is on disk: a Codex requirements file that is not what
 		// the publish just recorded (another writer between the write and
-		// this read) is refused, not pinned (GAP-1928).
-		if name == enterprisepolicy.ConnectorCodex && codexMergedBy(result) && env.codexRequirementsDrifted(policyOpts) {
-			return &codedError{code: codeMachinePolicy, err: errors.New("pin codex policy view: requirements.toml changed after DefenseClaw published it; run ensure again once no other tool writes it")}
+		// this read) is refused, not pinned, and the digest is of the bytes
+		// that check read (GAP-1928).
+		var digest string
+		var digestErr error
+		if name == enterprisepolicy.ConnectorCodex && codexMergedBy(result) {
+			recorded := policyOpts
+			recorded.StateDir = env.P(recorded.StateDir)
+			digest, digestErr = enterprisepolicy.PublishedCodexPolicyViewDigest(recorded)
+			if errors.Is(digestErr, enterprisepolicy.ErrCodexRequirementsChanged) {
+				return &codedError{code: codeMachinePolicy, err: errors.New("pin codex policy view: requirements.toml changed after DefenseClaw published it; run ensure again once no other tool writes it")}
+			}
+		} else {
+			digest, digestErr = enterprisepolicy.PolicyViewDigest(policyOpts, name)
 		}
-		digest, digestErr := enterprisepolicy.PolicyViewDigest(policyOpts, name)
 		if digestErr != nil {
 			return &codedError{code: codeMachinePolicy, err: fmt.Errorf("pin %s policy view: %w", name, digestErr)}
 		}
@@ -672,12 +681,21 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 	return &codedError{code: codeApply, err: errors.New("the plan has no runtime descriptor")}
 }
 
-// codexRequirementsDrifted reports whether the Codex requirements file is
-// not the bytes DefenseClaw's ownership record (under the state directory of
-// this host) says it last wrote.
-func (e *Env) codexRequirementsDrifted(opts enterprisepolicy.Options) bool {
-	opts.StateDir = e.P(opts.StateDir)
-	return enterprisepolicy.CodexRequirementsDrifted(opts)
+// publishedPolicyChange is the change line for a connector's machine policy
+// a publish wrote: plain unless the publish replaced an edit, which it then
+// names with where the edit is kept, or a symbolic link (GAP-1967,
+// GAP-1968).
+func publishedPolicyChange(state enterprisepolicy.State, plain string) string {
+	paths := strings.Join(state.Paths, ", ")
+	switch {
+	case state.SavedEdit != "":
+		return fmt.Sprintf("restored the published %s machine policy %s over an edit made to it; the edited file is saved at %s (reconcile keeps an edit instead)",
+			state.Connector, paths, state.SavedEdit)
+	case state.ReplacedLink != "":
+		return fmt.Sprintf("restored the published %s machine policy %s, which was a symbolic link to %s; the link was replaced, not followed",
+			state.Connector, paths, state.ReplacedLink)
+	}
+	return plain
 }
 
 // codexMergedBy reports whether result published the Codex requirements
@@ -1214,9 +1232,11 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 	// Reconcile is how an administrator accepts an edit of a shared vendor
 	// file: this publish keeps it, and the verified view is re-pinned below.
 	// Ensure and repair put back the published file instead (GAP-1928).
-	env.adoptMachinePolicyEdits = true
-	result, publishErr := env.MachinePolicy.Publish(validated.Loaded)
-	env.adoptMachinePolicyEdits = false
+	result, publishErr := func() (enterprisepolicy.Result, error) {
+		env.adoptMachinePolicyEdits = true
+		defer func() { env.adoptMachinePolicyEdits = false }()
+		return env.MachinePolicy.Publish(validated.Loaded)
+	}()
 	if isCoded(publishErr, codeMachinePolicy) {
 		r.AddWarning(codeMachinePolicy, publishErr.Error())
 		return

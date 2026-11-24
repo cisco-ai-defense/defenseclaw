@@ -35,6 +35,13 @@ const managedDockerGroupDetail = "you are in the docker group, which sandboxes o
 	"Docker access is administrator-equivalent on this computer: it can read and change every file here, " +
 	"including your organization's policy and other people's files, so it is not limited to your own policy"
 
+// managedDockerGroupClosedDetail is the row's detail for an account whose
+// sandboxes are closed (ManagedOffKind.Closed): the group is the same risk,
+// and nothing here says sandboxes need it or that they will run (GAP-2029).
+const managedDockerGroupClosedDetail = "you are in the docker group; " +
+	"Docker access is administrator-equivalent on this computer: it can read and change every file here, " +
+	"including your organization's policy and other people's files, so it is not limited to your own policy"
+
 // managedDockerGroupRequiredDetail is what the row adds for an account
 // whose organization requires agents to run only in a sandbox here: Docker
 // access is also a way to run them outside the sandbox policy, a documented
@@ -50,8 +57,10 @@ const managedDockerGroupRequiredDetail = "; your organization requires %s to run
 // can't be read. member is openshell.Doctor.DockerGroup, which the host
 // checks set; nil (a test's host report) gives no row. m.RequiredOnHost
 // (the agents the managed gateway refuses on the host) adds what the group
-// means for them.
-func managedDockerGroupCheck(goos string, m *sandboxapi.ManagedStatus, member func() (bool, bool, error)) *openshell.Check {
+// means for them. off is why sandboxes are off for the account
+// (Status.ManagedOff): a closed account is told nothing about what its
+// sandboxes need.
+func managedDockerGroupCheck(goos string, m *sandboxapi.ManagedStatus, off sandboxapi.ManagedOffKind, member func() (bool, bool, error)) *openshell.Check {
 	if goos != "linux" || m == nil || member == nil {
 		return nil
 	}
@@ -64,6 +73,13 @@ func managedDockerGroupCheck(goos string, m *sandboxapi.ManagedStatus, member fu
 		contact = "ask " + contact
 	}
 	detail := managedDockerGroupDetail
+	fix := "nothing to change for your sandboxes; run only images and containers you trust, " +
+		"and if you no longer run sandboxes on this computer, " + contact + " to take you out of the docker group"
+	if off.Closed() {
+		detail = managedDockerGroupClosedDetail
+		fix = "run only images and containers you trust, and " + contact + " to take you out of the docker group, " +
+			"which your account does not need (see Sandbox runtime)"
+	}
 	if len(m.RequiredOnHost) > 0 {
 		names := commandNames(sandboxapi.DisplayTexts(m.RequiredOnHost))
 		them := "it"
@@ -74,6 +90,5 @@ func managedDockerGroupCheck(goos string, m *sandboxapi.ManagedStatus, member fu
 	}
 	return &openshell.Check{ID: CheckIDManagedDockerGroup, Title: "Docker access", Status: openshell.StatusWarn,
 		Detail: detail,
-		Fix: &openshell.Fix{Summary: "nothing to change for your sandboxes; run only images and containers you trust, " +
-			"and if you no longer run sandboxes on this computer, " + contact + " to take you out of the docker group"}}
+		Fix:    &openshell.Fix{Summary: fix}}
 }

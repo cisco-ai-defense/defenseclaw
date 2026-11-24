@@ -24,13 +24,15 @@
 </div>
 
 DefenseClaw combines a Python operator CLI, a Go gateway, connector hooks, policy,
-scanners, and observability exporters. It is an enforcement and evidence layer;
-it does not prove that an agent, model interaction, or third-party capability is
-risk-free.
+scanners, and observability exporters. It is an enforcement and evidence layer
+for AI agents.
 
-Hooks fail closed by default. Only Cisco Secure Client deployments default
-hook delivery to fail-open when no policy is specified; there an explicit
-fail-closed setting and valid policy denials remain effective. See
+A running gateway that gives no decision in time blocks the call. When the account's gateway is
+stopped, the default and permissive policies let a call run with a warning and
+the strict policy blocks; an explicit `guardrail.hook_fail_mode` overrides this.
+Cisco Secure Client deployments default hook delivery to open when no policy is
+specified; there an explicit fail-closed setting and valid policy denials remain
+effective. See
 [Fail modes](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/fail-modes/)
 for the Secure Client scope.
 

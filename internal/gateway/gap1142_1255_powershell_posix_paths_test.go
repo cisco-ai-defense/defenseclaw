@@ -99,7 +99,7 @@ func TestPowerShellPathsOnPOSIXHostArePlacedByPowerShell(t *testing.T) {
 					if lane {
 						useDefaultEffectsLane(t)
 						// the shipped link resolver: link-state is read through its link
-						effectResolverOverride = nil
+						t.Cleanup(setEffectResolverIdle(t, nil))
 					}
 					return boundedParse(route.decide(t, api, ctx, cwd, command))
 				}

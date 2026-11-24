@@ -76,7 +76,8 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	off.daemon.status.Available, off.daemon.status.Managed = false, managedStatusFixture()
 	off.daemon.status.Managed.Unavailable = "OpenShell is not installed on this computer"
 	err := off.Run(bg, RunOptions{Harness: "claude"})
-	if err == nil || !strings.Contains(err.Error(), "sandboxes are unavailable") {
+	// The install reason, in the words of sandbox status (GAP-2024).
+	if err == nil || !strings.Contains(err.Error(), "OpenShell is not installed on this computer") || strings.Contains(err.Error(), "another account") {
 		t.Fatalf("unavailable run: %v", err)
 	}
 	if r := off.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 0 {
@@ -211,7 +212,7 @@ func TestManagedMacDockerHostOfTheShellIsNamed(t *testing.T) {
 	ta := newTestApp(t, "")
 	m := managedStatusFixture()
 	ta.DockerEngine = func(context.Context) (string, error) { return "Ubuntu 24.04.4 LTS", nil }
-	c := ta.managedDockerCheck(bg, m, false)
+	c := ta.managedDockerCheck(bg, m, sandboxapi.ManagedOffNone)
 	if c.Status != openshell.StatusWarn || c.Fix == nil {
 		t.Fatalf("doctor row with the shell's DOCKER_HOST: %+v", c)
 	}
@@ -236,13 +237,13 @@ func TestManagedMacDoctorChecksDocker(t *testing.T) {
 	ta := newTestApp(t, "")
 	m := managedStatusFixture()
 	ta.DockerEngine = func(context.Context) (string, error) { return "", errors.New("Cannot connect to the Docker daemon") }
-	c := ta.managedDockerCheck(bg, m, false)
+	c := ta.managedDockerCheck(bg, m, sandboxapi.ManagedOffNone)
 	if c.Status != openshell.StatusFail || c.Fix == nil {
 		t.Fatalf("no Docker: %+v", c)
 	}
 	has(t, c.Fix.Summary, "start Docker Desktop", "contact it-security@example.com")
 	ta.DockerEngine = func(context.Context) (string, error) { return "Docker Desktop", nil }
-	if c := ta.managedDockerCheck(bg, m, false); c.Status != openshell.StatusPass {
+	if c := ta.managedDockerCheck(bg, m, sandboxapi.ManagedOffNone); c.Status != openshell.StatusPass {
 		t.Fatalf("Docker answers: %+v", c)
 	}
 }
@@ -255,7 +256,7 @@ func TestManagedMacDoctorDockerWhileAnotherAccountHoldsSandboxes(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "")
 	ta := newTestApp(t, "")
 	ta.DockerEngine = func(context.Context) (string, error) { return "", errors.New("Cannot connect to the Docker daemon") }
-	c := ta.managedDockerCheck(bg, managedStatusFixture(), true)
+	c := ta.managedDockerCheck(bg, managedStatusFixture(), sandboxapi.ManagedOffElsewhere)
 	if c.Status != openshell.StatusSkip || c.Fix != nil {
 		t.Fatalf("Docker row while another account holds the sandboxes: %+v", c)
 	}

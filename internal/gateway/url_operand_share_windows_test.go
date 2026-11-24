@@ -12,8 +12,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // The gateway routes ask no network share for a URL in a command, in the
@@ -23,7 +21,7 @@ import (
 func TestGatewayURLOperandAsksNoNetworkShare(t *testing.T) {
 	var mu sync.Mutex
 	var asked []string
-	restore := hookpaths.OverrideNetworkSharesForTest(func(path string) string {
+	restore := overrideNetworkSharesIdle(t, func(path string) string {
 		// The share of a UNC path as this host spells it (\\server\share).
 		if volume := filepath.VolumeName(path); len(volume) > 2 && strings.ContainsAny(volume[:2], `\/`) && strings.ContainsAny(volume[1:2], `\/`) {
 			return volume

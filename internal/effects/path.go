@@ -7,6 +7,8 @@ package effects
 import (
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // This file resolves and cleans paths under an explicit Flavor, with no use of
@@ -443,7 +445,7 @@ func normalizeWindows(p string, o Options) string {
 	for i := range out {
 		// the default-stream alias ::$DATA names the file itself (review WP2),
 		// and the index alias of a folder the folder (rel-1-0-10:GAP-1075).
-		if idx := strings.Index(strings.ToUpper(out[i]), "::$DATA"); idx >= 0 {
+		if idx := strings.Index(asciifold.Lower(out[i]), "::$data"); idx >= 0 {
 			out[i] = out[i][:idx]
 		} else {
 			out[i] = withoutFolderIndexAlias(out[i])

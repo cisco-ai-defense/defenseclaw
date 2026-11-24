@@ -554,7 +554,7 @@ func TestV8EventHistoryMigrationIsAdditiveAndIdempotent(t *testing.T) {
 }
 
 func TestV8EventHistoryMigrationPreservesHistoricalRowsAndLegacyMeanings(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "audit.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +614,7 @@ func TestV8EventHistoryMigrationPreservesHistoricalRowsAndLegacyMeanings(t *test
 }
 
 func TestStoreInitFailsWhenMandatoryV8EventHistoryAnchorIsMissing(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "partial.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "partial.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +636,7 @@ func TestStoreInitFailsWhenMandatoryV8EventHistoryAnchorIsMissing(t *testing.T) 
 }
 
 func TestStoreInitFailsWhenMandatoryV8EventHistoryColumnIsMissing(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "partial-column.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "partial-column.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

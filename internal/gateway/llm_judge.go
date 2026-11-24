@@ -34,6 +34,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -2329,7 +2330,7 @@ func toolJudgeSecurityMiddleExcerpt(args string, lowerBound, upperBound, maxByte
 	if maxBytes <= 0 || lowerBound >= upperBound {
 		return ""
 	}
-	lower := asciiLowerPreservingBytes(args)
+	lower := asciifold.Lower(args)
 	positions := make(map[int]struct{})
 	for _, term := range toolJudgeSecurityExcerptTerms {
 		for searchFrom := lowerBound; searchFrom < upperBound; {
@@ -2379,19 +2380,6 @@ func toolJudgeSecurityMiddleExcerpt(args string, lowerBound, upperBound, maxByte
 		lastEnd = end
 	}
 	return excerpt.String()
-}
-
-// asciiLowerPreservingBytes lowercases the ASCII search vocabulary without
-// changing offsets in arbitrary UTF-8 input. strings.ToLower cannot be used
-// here because Unicode case folding may change byte length.
-func asciiLowerPreservingBytes(value string) string {
-	lowered := []byte(value)
-	for index, current := range lowered {
-		if current >= 'A' && current <= 'Z' {
-			lowered[index] = current + ('a' - 'A')
-		}
-	}
-	return string(lowered)
 }
 
 func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args string) string {

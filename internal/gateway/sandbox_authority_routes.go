@@ -214,6 +214,7 @@ func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) s
 		TokenDelivery:    o.TokenDelivery,
 		LLM:              o.LLM,
 		KeepHeadless:     o.KeepHeadless,
+		VaultAutoCapture: o.Vault.AutoCapture,
 		// OpenShell's own telemetry stays off on a managed host unless the
 		// caller's floor allows it.
 		UpstreamTelemetry: o.UpstreamTelemetry && floor.AllowUpstreamTelemetry != nil && *floor.AllowUpstreamTelemetry,
@@ -595,7 +596,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if floor.Allowed != nil && !*floor.Allowed {
-		refuse(sandboxrelay.ReasonNotAllowed, "Your organization doesn't allow sandboxes for your account.", access)
+		refuse(sandboxrelay.ReasonNotAllowed, sandboxapi.AccountNotAllowedMessage, access)
 		return
 	}
 	if !sandboxHarnessAllowed(floor, req.Harness) {

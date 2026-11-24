@@ -18,6 +18,8 @@ package registry
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -163,7 +165,15 @@ func (s *Remote) Put(ctx context.Context, r Registration) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
-	if err := s.Client.Call(ctx, leader.MethodRegistrationWrite, leader.NewRequestID(), r, nil); err != nil {
+	err := s.Client.Call(ctx, leader.MethodRegistrationWrite, leader.NewRequestID(), r, nil)
+	if old, ok := r.olderLeaderForm(); ok && leader.IsUndecodable(err) {
+		// GAP-0943: a leader older than this follower (a rolling upgrade)
+		// refuses a field it does not know. Write the record in the form it
+		// knows, under a new request ID (the refused call changed nothing).
+		fmt.Fprintf(os.Stderr, "[substrate] the leader predates the sign-in assurance mark; %s/%s is registered without it\n", r.Atespace, r.Name)
+		err = s.Client.Call(ctx, leader.MethodRegistrationWrite, leader.NewRequestID(), old, nil)
+	}
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
