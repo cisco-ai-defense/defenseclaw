@@ -4,7 +4,11 @@
 
 package effects
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+)
 
 // parseCMD lowers a cmd.exe command line into the neutral IR: the operators
 // & && || |, double quotes, ^ escaping, redirections (spaced or attached), and
@@ -357,7 +361,7 @@ loop:
 			rest = r
 			pending = true
 		case hasCmdKeyword(rest, "for"):
-			low := strings.ToLower(rest)
+			low := asciifold.Lower(rest)
 			i := strings.Index(low, " do ")
 			if i < 0 {
 				return "", true, true

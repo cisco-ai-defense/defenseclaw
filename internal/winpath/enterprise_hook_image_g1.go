@@ -10,7 +10,11 @@
 
 package winpath
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+)
 
 // EnterpriseInstallBinOf returns the <InstallRoot>\bin folder that holds
 // executable: its own folder when that folder is named bin (the gateway,
@@ -67,16 +71,17 @@ func SameEnterpriseHookImageDirFamily(a, b string) bool {
 // paths of the family they own and still compare the whole command with the
 // one rendered for that path, so this only proposes candidates.
 //
-// The search folds ASCII letters only, so every offset in the folded copy is
-// the same byte offset in text: strings.ToLower changes the byte length of
-// some letters (U+023A grows from 2 to 3 bytes, U+0130 shrinks to ASCII i),
-// and slicing text with offsets from that copy panicked or lost the path on a
-// non-ASCII folder name (GAP-1859). The image name is ASCII, and Windows does
-// not fold a non-ASCII letter to an ASCII one.
+// The search folds ASCII letters only (asciifold.Lower), so every offset in
+// the folded copy is the same byte offset in text: strings.ToLower changes the
+// byte length of some letters (U+023A grows from 2 to 3 bytes, U+0130 shrinks
+// to ASCII i), and slicing text with offsets from that copy panicked or lost
+// the path on a non-ASCII folder name or on such letters before the command
+// (GAP-1859, GAP-1935). The image name is ASCII, and Windows does not fold a
+// non-ASCII letter to an ASCII one.
 func EnterpriseHookImagePathsIn(text string) []string {
 	var paths []string
-	lower := asciiLowerSameLength(text)
-	name := asciiLowerSameLength(EnterpriseHookImageName)
+	lower := asciifold.Lower(text)
+	name := asciifold.Lower(EnterpriseHookImageName)
 	for offset := 0; ; {
 		index := strings.Index(lower[offset:], name)
 		if index < 0 {
@@ -97,16 +102,4 @@ func EnterpriseHookImagePathsIn(text string) []string {
 			paths = append(paths, candidate)
 		}
 	}
-}
-
-// asciiLowerSameLength lowers A-Z and leaves every other byte as is, so the
-// result has the byte offsets of value.
-func asciiLowerSameLength(value string) string {
-	out := []byte(value)
-	for i, b := range out {
-		if b >= 'A' && b <= 'Z' {
-			out[i] = b + ('a' - 'A')
-		}
-	}
-	return string(out)
 }

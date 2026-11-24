@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
@@ -43,7 +44,7 @@ func trustedWindowsLocationAuthorizedKeysWriteWith(input actionfacts.Input, memo
 // not execute cd; cmd does, so prove the location change in the inner command.
 func trustedWindowsCMDWrapperLocationWrite(input actionfacts.Input) bool {
 	command := strings.TrimSpace(input.Command)
-	lower := strings.ToLower(command)
+	lower := asciifold.Lower(command)
 	for _, prefix := range []string{"cmd /d /c ", "cmd.exe /d /c "} {
 		if !strings.HasPrefix(lower, prefix) {
 			continue

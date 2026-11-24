@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // NormalizedFinding is a stable, scanner-agnostic representation of a
@@ -321,7 +323,7 @@ func canonicalStructuredRuleID(ruleID string) (string, bool) {
 
 func normalizeSensitiveLocalPatternFinding(raw, source, severity string) (NormalizedFinding, bool) {
 	trimmed := strings.TrimSpace(raw)
-	lower := strings.ToLower(trimmed)
+	lower := asciifold.Lower(trimmed)
 
 	if strings.HasPrefix(lower, "pii-data:") {
 		value := strings.TrimSpace(trimmed[len("pii-data:"):])

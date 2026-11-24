@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -152,7 +153,7 @@ func trustedLauncherRedirectAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 
 func trustedCMDPrivateKeyRead(input actionfacts.Input) bool {
 	body, ok := trustedCMDBody(input)
-	if !ok || !strings.HasPrefix(strings.ToLower(body), "type ") {
+	if !ok || !strings.HasPrefix(asciifold.Lower(body), "type ") {
 		return false
 	}
 	operand := strings.TrimSpace(body[len("type "):])
