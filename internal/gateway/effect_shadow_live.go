@@ -164,7 +164,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		AccountHomes: accountHomes,
 		Resolve:      effectResolverOverride,
 	})
-	var aliasUses []decide.Proof
+	var aliasUses []effectAliasUse
 	if len(result.Unknowns) == 0 {
 		aliasUses = sessionEffectAliases.uses(request, result)
 	}
@@ -175,20 +175,8 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	reachEnv := newEffectReachEnv(request.Input.ActiveHome, text)
 	for i, tier := range tiers {
 		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
-		for _, proof := range aliasUses {
-			c.touches, c.known, c.restricted, c.linkTo = true, true, true, true
-			c.sets = dedupeStrings(append(c.sets, effectrules.SetCredentials))
-			c.restrictedSets = dedupeStrings(append(c.restrictedSets, effectrules.SetCredentials))
-			if proof.Kind == decide.KindRead {
-				c.readProofs = appendCredentialReadProof(c.readProofs, proof)
-			} else {
-				c.knownMutation = true
-				c.writtenCredentialSets = dedupeStrings(append(c.writtenCredentialSets, proof.Set))
-				c.credentialAppend = c.credentialAppend || proof.Kind == decide.KindAppend
-			}
-			if c.kind == "" {
-				c.kind = proof.Kind.String()
-			}
+		for _, use := range aliasUses {
+			addEffectAliasUse(&c, result, use)
 		}
 		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
 		res := &results[i]
@@ -220,6 +208,35 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		sessionEffectAliases.remember(request, result, facts, opts.Flavor)
 	}
 	return finish("", len(result.Effects))
+}
+
+// addEffectAliasUse grades a Known read or write through a session link alias
+// exactly as classifyEffects grades the plain spelling of the member it names
+// (GAP-2025): a read carries the member's class read proof with its own
+// content flow (effectReadFlow) and no restricted tier, so a count or a show
+// of ~/.npmrc through a project link gets the cell cat or grep -c of ~/.npmrc
+// gets; a
+// write is a Known mutation proof of the member's class, which names the
+// class's 1.0.10 rule (decide.RuleFor) as the plain write of the member does
+// through that rule's own reader, never the restricted tier: a plain write
+// is restricted too, but that finding folds into the class rule
+// (decide.FoldsIntoLegacy), and an alias has no reader finding to fold into.
+// The memo holds only exact credential members (knownAliasCredential), and
+// every token is accounted (uses runs only then).
+func addEffectAliasUse(c *effectClass, result effects.Result, use effectAliasUse) {
+	proof := use.proof
+	c.touches, c.known = true, true
+	c.sets = dedupeStrings(append(c.sets, effectrules.SetCredentials))
+	if c.program == "" && c.kind == "" {
+		c.program, c.kind = result.Effects[use.effect].Origin.Program, string(result.Effects[use.effect].Kind)
+	}
+	if proof.Kind == decide.KindRead {
+		proof.Flow = effectReadFlow(result, use.effect)
+		c.readProofs = appendCredentialReadProof(c.readProofs, proof)
+		return
+	}
+	c.knownMutation = true
+	c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
 }
 
 // effectExtractCut reports whether the extractor stopped at one of its

@@ -320,7 +320,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectStructuredTextReplacements(input)
 	facts.SQLServerCommandExecutions =
 		projectSQLServerCommandExecutions(input)
-	sqlReads, sqlReadCaps := sqlCLIReadInputs(input, facts)
+	sqlReads, sqlReadCaps, sqlUnreadDanger := sqlCLIReadInputs(input, facts)
+	facts.sqlUnreadDanger = sqlUnreadDanger
 	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input, sqlReads)
 	facts.SQLSensitiveServerFileReads =
 		projectSQLSensitiveServerFileReads(input, sqlReads)

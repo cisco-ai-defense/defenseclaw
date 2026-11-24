@@ -505,16 +505,25 @@ func dispatchTrustedActionOnce(
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
 	// the record never stands in for it.
-	var unreadDataWord, cutSQLQuery bool
+	// A SQL cut whose unread rest holds a modeled danger keyword takes the
+	// truncated row (the GAP-0851 bound-only MEDIUM) instead of the record
+	// (DET111 ruling on T23 review P3-1); a benign rest keeps the record.
+	var unreadDataWord, cutSQLQuery, cutSQLDanger, sqlASTDanger bool
 	var sqlASTCaps bounded.CapSet
 	defer func() {
 		if unreadDataWord {
 			findings = withPosixDataWordRecord(findings)
 		}
-		if cutSQLQuery {
+		switch {
+		case cutSQLDanger:
+			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
+		case cutSQLQuery:
 			findings = withSQLQueryCutRecord(findings)
 		}
-		if sqlASTCaps.Any() {
+		switch {
+		case sqlASTCaps.Any() && sqlASTDanger:
+			findings = withBoundedTruncation(findings, sqlASTCaps, request)
+		case sqlASTCaps.Any():
 			findings = withSQLASTCapRecord(findings, sqlASTCaps)
 		}
 	}()
@@ -584,9 +593,15 @@ func dispatchTrustedActionOnce(
 				break
 			}
 			effectRequest := request
+			generation := func() *compiledRulePackCategories {
+				if request.generation != nil {
+					return request.generation
+				}
+				return snapshotRulePackGenerationFor(parent, request.Connector)
+			}
 			defer func() {
 				findings = joinEffectFindings(withFloorRaiseOnlyMark(effectRequest, findings, 0),
-					effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
+					effectLiveFindings(effectRequest, mode, effectsRulesTierFor(), generation))
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
@@ -1112,7 +1127,7 @@ func dispatchTrustedActionOnce(
 	// something from is TRUNCATED as well (DET111 T20 review P2-3).
 	set := semantic.FactOnlyCuts(facts)
 	// A SQL facts cap hit is recorded only (DET111 ruling on T20 review P3-1).
-	sqlASTCaps = facts.SQLASTCaps()
+	sqlASTCaps, sqlASTDanger = facts.SQLASTCaps(), facts.SQLUnreadDanger()
 	if kubeCut, lost := facts.KubeRequestCaps(); lost {
 		set = set.Union(kubeCut)
 	}
@@ -1195,6 +1210,7 @@ func dispatchTrustedActionOnce(
 			}
 			unreadDataWord = split.Data > 0
 			cutSQLQuery = split.Query > 0
+			cutSQLDanger = split.QueryUnreadDanger > 0
 		}()
 	}
 	// The call is read once more where the agent's working directory is

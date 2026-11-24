@@ -368,6 +368,8 @@ func RuleFor(p Proof) string {
 		return RuleStateWrite
 	case TargetAuthorizedKeys:
 		return RuleAuthorizedKeysWrite
+	case TargetCredential, TargetOtherHomeCredential:
+		return setRules[p.Set]
 	}
 	// A write, append or delete of a hook config or a credential file names
 	// the rule the plain spelling fires on it (rm FILE fires it too:

@@ -311,7 +311,7 @@ var builtin = Table{Rows: []Row{
 		},
 	},
 	{
-		ID: RowEffectRead, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential}, Sources: []string{SourceEffects}, LinkAt: true,
+		ID: RowEffectRead, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential}, Sources: []string{SourceEffects},
 		Flows: []ReadFlow{FlowNone}, Content: true, SecureClient: true, Source: "DET111 effects credential read (GAP-1825, GAP-1826, GAP-1846)",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
