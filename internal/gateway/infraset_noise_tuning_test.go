@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestInfraSetAtomicNoisePosture(t *testing.T) {
@@ -538,6 +539,12 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		if enforced != 1 {
 			t.Errorf("%s: findings %v, want one enforced %s", test.name, findingIDs(findings), rule)
 		}
+	}
+	// The subtest links a file, which an account without
+	// SeCreateSymbolicLinkPrivilege (the Windows standard-user leg) cannot do:
+	// it is not generated there and runs in the elevated leg (GAP-2168).
+	if !testenv.CanLinkFiles(t) {
+		return
 	}
 	t.Run("existing symlink", func(t *testing.T) {
 		home := t.TempDir()
