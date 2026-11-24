@@ -653,7 +653,7 @@ func (f *file) indexValue(value string) int {
 }
 
 func (s *Store) read() (*file, error) {
-	b, err := safefile.ReadRegularFileBounded(s.Path(), maxFileBytes)
+	b, err := readStable(s.Path(), maxFileBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Pending exposures can name a value no vault holds yet.
 		f := &file{Version: fileVersion}

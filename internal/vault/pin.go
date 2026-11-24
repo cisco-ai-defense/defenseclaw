@@ -124,7 +124,7 @@ var errPinDamaged = errors.New("the vault pin is not valid")
 
 // readPin returns the pin, nil when there is none.
 func (s *Store) readPin() (*pinRecord, error) {
-	b, err := safefile.ReadRegularFileBounded(s.PinPath(), maxPinBytes)
+	b, err := readStable(s.PinPath(), maxPinBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
