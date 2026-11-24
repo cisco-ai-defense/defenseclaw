@@ -167,8 +167,11 @@ type openLoopResult struct {
 	window    time.Duration // first to last recorded issue, plus one tick
 	latencies []time.Duration
 	problems  map[string]int
-	refused   int // calls whose proposal or receipt got HTTP 429
-	failed    int // calls the gateway answered with an explicit failure: a status other than 200 or 429, or a proposal that did not allow
+	// calls is each stream call's issue time, time to its answer and
+	// whether it was answered (GAP-1041: the window a stall must overlap).
+	calls   []openLoopCall
+	refused int // calls whose proposal or receipt got HTTP 429
+	failed  int // calls the gateway answered with an explicit failure: a status other than 200 or 429, or a proposal that did not allow
 	// cpuPerCall is the process CPU time (user and system) one call of the
 	// single-stream baseline took, launcher included; 0 when not measured.
 	cpuPerCall time.Duration
@@ -344,7 +347,9 @@ func driveOpenLoop(parent context.Context, post openLoopPost, plan openLoopPlan)
 		if issued.After(last) {
 			last = issued
 		}
+		answered := len(result.latencies)
 		result.record(elapsed, status, out, err)
+		result.calls = append(result.calls, openLoopCall{issued: issued, elapsed: elapsed, answered: len(result.latencies) > answered})
 	}
 	var launch sync.WaitGroup
 	for i, token := range plan.tokens {
@@ -524,7 +529,7 @@ func judgeOpenLoop(plan openLoopPlan, got, base openLoopResult) openLoopVerdict 
 	sandboxes := len(plan.tokens)
 	rho := openLoopUtilisation(plan, base)
 	rhoCPU := openLoopCPUUtilisation(plan, base)
-	budget := time.Duration(openLoopP95Slack * openLoopQueueingFactor(rho) / (1 - rhoCPU) * float64(base.percentile(95)))
+	budget := openLoopBudget(plan, base)
 	numbers := fmt.Sprintf("%d sandboxes at %d calls/s, issued %.1f calls/s on schedule: answered share %.3f, p50 %v, p95 %v, max %v; single-stream real path mean %v, p95 %v, CPU per call %v, utilisation %.2f, queueing factor %.2f, CPU utilisation %.2f of %d cores, p95 budget %v",
 		sandboxes, plan.perSecond, got.achievedRate(), got.answeredShare(), got.percentile(50).Round(time.Microsecond), got.percentile(95).Round(time.Microsecond), got.percentile(100).Round(time.Microsecond),
 		base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), base.cpuPerCall.Round(time.Microsecond), rho, openLoopQueueingFactor(rho), rhoCPU, plan.cores, budget.Round(time.Microsecond))
@@ -535,6 +540,43 @@ func judgeOpenLoop(plan openLoopPlan, got, base openLoopResult) openLoopVerdict 
 		return openLoopVerdict{"slow", fmt.Sprintf("p95 over the budget of %.1f x the single-stream p95 x the queueing factor (%s)", openLoopP95Slack, numbers)}
 	}
 	return openLoopVerdict{"ok", numbers}
+}
+
+// openLoopBudget is the p95 a stream may have: the slack times the queueing
+// factor of the serialised stage times the single-stream p95, stretched by
+// the CPU the stream leaves free.
+func openLoopBudget(plan openLoopPlan, base openLoopResult) time.Duration {
+	return time.Duration(openLoopP95Slack * openLoopQueueingFactor(openLoopUtilisation(plan, base)) / (1 - openLoopCPUUtilisation(plan, base)) * float64(base.percentile(95)))
+}
+
+// openLoopCall is one stream call.
+type openLoopCall struct {
+	issued   time.Time
+	elapsed  time.Duration
+	answered bool
+}
+
+// openLoopSpan is a stretch of wall time.
+type openLoopSpan struct{ from, to time.Time }
+
+func (a openLoopSpan) overlaps(b openLoopSpan) bool {
+	return !a.to.Before(b.from) && !b.to.Before(a.from)
+}
+
+// failingSpans is the window of each call behind a timing verdict: an
+// unanswered call's answer window, a slow call's wait. Other verdicts have
+// none.
+func (r openLoopResult) failingSpans(kind string, budget time.Duration) []openLoopSpan {
+	var out []openLoopSpan
+	for _, c := range r.calls {
+		switch {
+		case kind == "unanswered" && !c.answered:
+			out = append(out, openLoopSpan{c.issued, c.issued.Add(openLoopWait)})
+		case kind == "slow" && c.answered && c.elapsed > budget:
+			out = append(out, openLoopSpan{c.issued, c.issued.Add(c.elapsed)})
+		}
+	}
+	return out
 }
 
 // openLoopAnswerer is the stand-in relay: it only answers.
@@ -686,27 +728,48 @@ func (p openLoopProbes) String() string {
 // past their window, and the CPU probe, finding the box quiet, blamed the
 // gateway (TestGAP0490OpenLoop* failed at rel and on every fold in about half
 // the runs on dc-sub-gates and dc-t6-timing). The probe writes and flushes
-// 4 KiB beside the store every openLoopFlushEvery for the whole test, without
-// touching the gateway; a flush of openLoopFlushStall or more says the box's
-// disk, not the gateway, could not carry the stage at that moment.
+// 4 KiB beside the store every openLoopFlushEvery from the time the fixture is
+// up, without touching the gateway. One slow flush happens on EBS and on CI
+// runners with no disk pressure at all, and cannot explain a call unanswered
+// for seconds (RV-T6A), so a stall counts only when it is sustained and
+// overlaps the calls behind the verdict: openLoopFlushStallRun slow flushes in
+// a row, or openLoopFlushStallShare of a one-second window in slow flushes.
+// An unanswered verdict needs more: a run of slow flushes at least
+// openLoopWait long, since only that can keep a call from its answer for its
+// whole window.
 const (
-	openLoopFlushEvery = 100 * time.Millisecond
-	openLoopFlushStall = 50 * time.Millisecond
+	openLoopFlushEvery      = 100 * time.Millisecond
+	openLoopFlushStall      = 50 * time.Millisecond
+	openLoopFlushStallRun   = 3
+	openLoopFlushStallShare = 0.25
+	openLoopFlushWindow     = time.Second
+	// openLoopFlushKeep bounds the flushes kept (the test deadline at
+	// openLoopFlushEvery is 900).
+	openLoopFlushKeep = 4096
 )
+
+// openLoopFlush is one probe flush: when it started and what it took.
+type openLoopFlush struct {
+	at   time.Time
+	took time.Duration
+}
 
 // openLoopFlushProbe is the disk-flush probe of one test.
 type openLoopFlushProbe struct {
 	stopping, done chan struct{}
 	mu             sync.Mutex
-	flushes, slow  int
+	flushes        []openLoopFlush
 	max            time.Duration
 	err            error
+	// started and stopped bound the probe's time (the whole-run span of a
+	// verdict with no calls of its own).
+	started, stopped time.Time
 }
 
 // startOpenLoopFlushProbe starts the probe on a file in dir (the file system
 // the store is on).
 func startOpenLoopFlushProbe(dir string) *openLoopFlushProbe {
-	p := &openLoopFlushProbe{stopping: make(chan struct{}), done: make(chan struct{})}
+	p := &openLoopFlushProbe{stopping: make(chan struct{}), done: make(chan struct{}), started: time.Now()}
 	f, err := os.OpenFile(filepath.Join(dir, "flush-probe"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		p.err = err
@@ -730,20 +793,23 @@ func startOpenLoopFlushProbe(dir string) *openLoopFlushProbe {
 			if err == nil {
 				err = f.Sync()
 			}
-			took := time.Since(started)
-			p.mu.Lock()
-			if err != nil && p.err == nil {
-				p.err = err
-			}
-			p.flushes++
-			p.max = max(p.max, took)
-			if took >= openLoopFlushStall {
-				p.slow++
-			}
-			p.mu.Unlock()
+			p.note(started, time.Since(started), err)
 		}
 	}()
 	return p
+}
+
+// note records one flush.
+func (p *openLoopFlushProbe) note(at time.Time, took time.Duration, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil && p.err == nil {
+		p.err = err
+	}
+	if len(p.flushes) < openLoopFlushKeep {
+		p.flushes = append(p.flushes, openLoopFlush{at, took})
+	}
+	p.max = max(p.max, took)
 }
 
 // stop ends the probe and waits for it.
@@ -754,19 +820,128 @@ func (p *openLoopFlushProbe) stop() {
 		close(p.stopping)
 	}
 	<-p.done
+	p.mu.Lock()
+	if p.stopped.IsZero() {
+		p.stopped = time.Now()
+	}
+	p.mu.Unlock()
 }
 
-// stalled reports whether any flush took openLoopFlushStall or more.
-func (p *openLoopFlushProbe) stalled() bool {
+// openLoopStallRun is a run of slow flushes in a row.
+type openLoopStallRun struct {
+	span openLoopSpan
+	n    int
+}
+
+// runsLocked is every run of slow flushes in a row.
+func (p *openLoopFlushProbe) runsLocked() []openLoopStallRun {
+	var out []openLoopStallRun
+	var cur *openLoopStallRun
+	for _, f := range p.flushes {
+		if f.took < openLoopFlushStall {
+			cur = nil
+			continue
+		}
+		end := f.at.Add(f.took)
+		if cur == nil {
+			out = append(out, openLoopStallRun{span: openLoopSpan{f.at, end}})
+			cur = &out[len(out)-1]
+		}
+		cur.span.to, cur.n = end, cur.n+1
+	}
+	return out
+}
+
+// busiestLocked is the largest share of a one-second window, starting at a
+// slow flush and overlapping one of the spans, spent in slow flushes.
+func (p *openLoopFlushProbe) busiestLocked(overlapping []openLoopSpan) float64 {
+	best := 0.0
+	for i, f := range p.flushes {
+		if f.took < openLoopFlushStall {
+			continue
+		}
+		w := openLoopSpan{f.at, f.at.Add(openLoopFlushWindow)}
+		if !openLoopAnyOverlap(w, overlapping) {
+			continue
+		}
+		var slow time.Duration
+		for _, g := range p.flushes[i:] {
+			if !g.at.Before(w.to) {
+				break
+			}
+			if g.took >= openLoopFlushStall {
+				slow += min(g.took, w.to.Sub(g.at))
+			}
+		}
+		best = max(best, float64(slow)/float64(openLoopFlushWindow))
+	}
+	return best
+}
+
+func openLoopAnyOverlap(s openLoopSpan, spans []openLoopSpan) bool {
+	for _, x := range spans {
+		if s.overlaps(x) {
+			return true
+		}
+	}
+	return false
+}
+
+// spansOrWhole is the spans a stall must overlap: the failing calls' or, for
+// a verdict with none, the probe's whole time.
+func (p *openLoopFlushProbe) spansOrWholeLocked(failing []openLoopSpan) []openLoopSpan {
+	if len(failing) > 0 {
+		return failing
+	}
+	to := p.stopped
+	if to.IsZero() {
+		to = time.Now()
+	}
+	return []openLoopSpan{{p.started, to}}
+}
+
+// stalled reports whether the disk flush stalled in a way that explains a
+// verdict of kind over the failing spans: sustained and overlapping them,
+// and for an unanswered verdict at least openLoopWait long.
+func (p *openLoopFlushProbe) stalled(kind string, failing []openLoopSpan) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.slow > 0
+	spans := p.spansOrWholeLocked(failing)
+	for _, r := range p.runsLocked() {
+		if !openLoopAnyOverlap(r.span, spans) {
+			continue
+		}
+		if kind == "unanswered" {
+			if r.span.to.Sub(r.span.from) >= openLoopWait {
+				return true
+			}
+			continue
+		}
+		if r.n >= openLoopFlushStallRun {
+			return true
+		}
+	}
+	return kind != "unanswered" && p.busiestLocked(spans) >= openLoopFlushStallShare
 }
 
 func (p *openLoopFlushProbe) String() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s := fmt.Sprintf("a 4 KiB write and flush beside the store every %v took up to %v (%d of %d at %v or more)", openLoopFlushEvery, p.max.Round(time.Millisecond), p.slow, p.flushes, openLoopFlushStall)
+	slow, longestN := 0, 0
+	var longest time.Duration
+	for _, f := range p.flushes {
+		if f.took >= openLoopFlushStall {
+			slow++
+		}
+	}
+	for _, r := range p.runsLocked() {
+		if d := r.span.to.Sub(r.span.from); d > longest {
+			longest, longestN = d, r.n
+		}
+	}
+	s := fmt.Sprintf("a 4 KiB write and flush beside the store every %v took up to %v (%d of %d at %v or more; longest run %d in a row over %v; busiest 1 s window %.0f%% slow; a stall counts at %d in a row or %.0f%% of 1 s overlapping the failing calls, and for unanswered calls a run of %v)",
+		openLoopFlushEvery, p.max.Round(time.Millisecond), slow, len(p.flushes), openLoopFlushStall, longestN, longest.Round(time.Millisecond),
+		100*p.busiestLocked(p.spansOrWholeLocked(nil)), openLoopFlushStallRun, 100*openLoopFlushStallShare, openLoopWait)
 	if p.err != nil {
 		s += fmt.Sprintf(", probe error %v", p.err)
 	}
@@ -779,12 +954,15 @@ func (p *openLoopFlushProbe) String() string {
 // when neither did (the box had CPU and disk to spare, so the real path that
 // could not carry the stream is the gateway's own). The two timing verdicts,
 // unanswered and slow, are measured on the same wall clock and are a skip on
-// such a box as well; on a quiet box they fail. A refusal or an explicit
-// failure is not a timing matter and fails on any box.
-func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error) {
+// such a box as well; on a quiet box they fail. A disk stall counts only when
+// it explains the verdict over failing, the windows of the calls behind it
+// (openLoopFlushProbe.stalled; none: the whole run). A refusal or an explicit
+// failure is not a timing matter and fails on any box. Every verdict prints
+// both probes.
+func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error, failing ...openLoopSpan) {
 	t.Helper()
 	flush.stop()
-	short := probes.starved() || flush.stalled()
+	short := probes.starved() || flush.stalled(verdict.kind, failing)
 	if verdict.kind == "inconclusive" && !short {
 		// The baseline's own words blame the box; the probe says otherwise.
 		verdict.detail = strings.TrimSuffix(strings.TrimPrefix(verdict.detail, "INCONCLUSIVE: "), "; the box is overloaded, so this run says nothing about the gateway")
@@ -827,8 +1005,6 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	defer cancel()
 	var probes openLoopProbes
 	probes.take()
-	flush := startOpenLoopFlushProbe(t.TempDir())
-	defer flush.stop()
 	f := newManagedHookAuditFixture(t, nil)
 	bindings, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(t.TempDir()), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
@@ -855,6 +1031,10 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(handler)
+	// The flush probe starts once the fixture is up: a stall while the store
+	// opened says nothing about the calls (GAP-1041).
+	flush := startOpenLoopFlushProbe(t.TempDir())
+	defer flush.stop()
 	closed := false
 	defer func() {
 		// A test that ends early (a Fatal) still closes inside its bound.
@@ -911,7 +1091,8 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		// a request that outlived its caller.
 		t.Errorf("GAP-1456: the ingress still served requests %v after the stream ended (%s)", openLoopTeardownDeadline, probes)
 	}
-	settleOpenLoop(t, judgeOpenLoop(plan, got, base), probes, flush, ctx.Err())
+	verdict := judgeOpenLoop(plan, got, base)
+	settleOpenLoop(t, verdict, probes, flush, ctx.Err(), got.failingSpans(verdict.kind, openLoopBudget(plan, base))...)
 }
 
 // openLoopProcessCPU is the user and system CPU time this process has used.
