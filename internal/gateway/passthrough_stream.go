@@ -481,12 +481,16 @@ func (s *passthroughStream) run() {
 		if !scanText(true) {
 			return false
 		}
-		// Bedrock reasoning can be signed. Keep its queued bytes intact
-		// while an open run waits for more text, as in rel/1.0.10.
-		if s.provider == "bedrock" {
-			return true
-		}
 		runs := accumulated.OpenRuns()
+		// Bedrock reasoning can be signed and must reach the client unchanged.
+		// Other Bedrock lanes still use the masked quiet release of GAP-1307.
+		if s.provider == "bedrock" {
+			for _, run := range runs {
+				if run.key.field == responseFieldReasoning {
+					return true
+				}
+			}
+		}
 		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
 		if !ok {
 			return true // it cannot be masked: everything stays held
