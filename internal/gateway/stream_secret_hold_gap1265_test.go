@@ -51,6 +51,8 @@ type gap1265Row struct {
 type gap1265Result struct {
 	got     string // reply text the client got
 	before  int    // secret bytes the client had at the first check that read it whole or found anything
+	snapRaw string // the raw body the client had then (GAP-2154)
+	bodyRaw string // the raw body the client got
 	final   int    // secret bytes the client had at the end
 	blocked bool
 }
@@ -58,6 +60,14 @@ type gap1265Result struct {
 // gap1265Choice1 starts a piece that the GAP-1265 upstreams send in choice 1,
 // a second lane of the reply (OpenAI chat shapes only; rel-1-0-10:GAP-1767).
 const gap1265Choice1 = "\x00choice1:"
+
+// gap1265Finish0 is a piece that finishes choice 0 (finish_reason; OpenAI
+// chat shapes); gap1265Raw starts a piece a passthrough upstream writes as
+// is (rel-1-0-10:GAP-2154).
+const (
+	gap1265Finish0 = "\x00finish0"
+	gap1265Raw     = "\x00raw:"
+)
 
 // gap1265Piece is the choice and text of a row piece.
 func gap1265Piece(p string) (int, string) {
@@ -107,6 +117,18 @@ func gap1265Upstream(t *testing.T, f streamTailFormat, raw bool, pieces []string
 		for i, p := range pieces {
 			if i == at && pause > 0 && !idle() {
 				return
+			}
+			if ev, ok := strings.CutPrefix(p, gap1265Raw); ok && !raw {
+				write(ev)
+				continue
+			}
+			if p == gap1265Finish0 {
+				if !raw && f.name != gap0429OpenAIChat.name {
+					t.Errorf("gap1265Upstream: format %s has no finish_reason piece", f.name)
+					return
+				}
+				write(`data: {"id":"r1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n")
+				continue
 			}
 			choice, text := gap1265Piece(p)
 			switch {
@@ -220,12 +242,13 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 	})
 	out := make([]gap1265Result, len(rows))
 	for i, r := range runs {
-		res := gap1265Result{got: text(r.rec.Body.String()), blocked: r.watch.blocked}
+		res := gap1265Result{got: text(r.rec.Body.String()), blocked: r.watch.blocked, bodyRaw: r.rec.Body.String()}
 		if s := rows[i].secret; s.text != "" {
 			snap := r.watch.snap
 			if !r.watch.seen {
 				snap = r.rec.Body.String()
 			}
+			res.snapRaw = snap
 			res.before, res.final = gap0429Released(text(snap), s), gap0429Released(res.got, s)
 		}
 		out[i] = res
