@@ -66,6 +66,8 @@ cisco_ai_defense:
 
 Set the key back to `false` to make new managed inspection requests omit the class. AI Defense then selects the existing global connection. This does not delete class connections or policy associations. OSS and API-key inspection do not send this field.
 
+For CLI downgrades to releases before 1.0.10, the upgrade shim sets this key aside so the older gateway can load the config. After upgrading again, `defenseclaw migrate` restores the saved value, including an explicit `false`.
+
 ## Choose the agents to protect
 
 List each agent under `guardrail.connectors`. The key is the connector name; an empty value (`{}`) enables it with the defaults, and only `enabled: false` turns a listed agent off. A config without this map protects nothing, and `verify` fails on it (`no_connectors_enabled`).
