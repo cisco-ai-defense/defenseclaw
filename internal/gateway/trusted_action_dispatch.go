@@ -997,6 +997,18 @@ func dispatchTrustedActionOnce(
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
 		}()
 	}
+	// A Bash or zsh all-output redirect (cmd &> f, cmd &>> f, cmd >& f)
+	// writes f, while the POSIX facts read "cmd &" and "> f" (or no
+	// command at all) and tie no write of f to the call: the call is also
+	// judged as the spelling the shell runs (> f 2> f), and the stricter of
+	// the two readings counts. echo k &>> ~/.bashrc gets the cell of
+	// echo k >> ~/.bashrc (GAP-2151), for every rule a write decides, as
+	// the state write already did (GAP-2143).
+	if twin, ok := bashAggregateRedirectTwinRequest(request); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	if shellUnread {
 		// A shell runs here-document or here-string text the reading cannot
 		// know (a body with a command substitution, a document handed on
@@ -2312,6 +2324,25 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 	twin := request
 	twin.Input = input
 	return provenStateMutationPath(actionfacts.Analyze(input), twin)
+}
+
+// bashAggregateRedirectTwinRequest returns the request for the Bash reading
+// of a POSIX call with an all-output redirect (actionfacts
+// BashAggregateRedirectsAsPOSIX): its redirects spelled > f 2> f. The
+// spelling has no such redirect left, so its own dispatch makes no twin.
+func bashAggregateRedirectTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	spelled, ok := actionfacts.BashAggregateRedirectsAsPOSIX(command)
+	if !ok || spelled == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, spelled), true
 }
 
 // cmdProgramWord finds a word that starts cmd.exe in an agent's shell
