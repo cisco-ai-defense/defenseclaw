@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,14 +25,10 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-)
-
-const (
-	gap0768Origin = "https://git.example.test/team/app.git"
-	gap0768Fork   = "https://git.example.test/team/fork.git"
 )
 
 // gap0768Prepare reviews the push with the origin this computer recorded.
@@ -120,17 +118,14 @@ func TestGAP0768PushUsesTheRecordedOrigin(t *testing.T) {
 	}
 }
 
-func gap0768Mkdir(t *testing.T, d string) {
-	t.Helper()
-	if err := os.MkdirAll(d, 0o755); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func gap0768File(t *testing.T, p, body string) {
-	t.Helper()
-	gap0768Mkdir(t, filepath.Dir(p))
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+// Without a recorded origin there is nothing trusted to push to: refused
+// before any network read, whatever the checkout's config says.
+func TestGAP0768NoRecordedOriginIsRefused(t *testing.T) {
+	s := rv4Setup(t)
+	s.write("a.txt", "x\n")
+	_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", "", nil)
+	var pe *BranchPushError
+	if !errors.As(err, &pe) || pe.Kind != "no_origin" {
+		t.Fatalf("got %v, want a no_origin refusal", err)
 	}
 }

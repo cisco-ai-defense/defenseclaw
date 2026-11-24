@@ -17,23 +17,15 @@
 package workspace
 
 import (
-	"context"
-	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
 
-// Without a recorded origin there is nothing trusted to push to: refused
-// before any network read, whatever the checkout's config says.
-func TestGAP0768NoRecordedOriginIsRefused(t *testing.T) {
-	s := rv4Setup(t)
-	s.write("a.txt", "x\n")
-	_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", "", nil)
-	var pe *BranchPushError
-	if !errors.As(err, &pe) || pe.Kind != "no_origin" {
-		t.Fatalf("got %v, want a no_origin refusal", err)
-	}
-}
+const (
+	gap0768Origin = "https://git.example.test/team/app.git"
+	gap0768Fork   = "https://git.example.test/team/fork.git"
+)
 
 // RecordedOrigin reads the clone address or the uploaded folder's origin
 // from this computer's records, the newer one when both exist.
@@ -53,5 +45,20 @@ func TestGAP0768RecordedOriginComesFromThisComputer(t *testing.T) {
 	}
 	if got := RecordedOrigin(data, "c2"); got != "https://git.example.test/team/cl.git" {
 		t.Fatalf("clone record: %q", got)
+	}
+}
+
+func gap0768Mkdir(t *testing.T, d string) {
+	t.Helper()
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func gap0768File(t *testing.T, p, body string) {
+	t.Helper()
+	gap0768Mkdir(t, filepath.Dir(p))
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
