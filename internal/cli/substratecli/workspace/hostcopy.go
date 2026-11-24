@@ -108,6 +108,12 @@ type hostRecord struct {
 	// baseline is this commit of Project, and the record serves pull and
 	// apply only (push, sync, checkpoint and undo still refuse here).
 	LocalHead string `json:"local_head,omitempty"`
+	// Masks are the --exclude globs the person repeated for such a record,
+	// held back on both sides as run held them; ExcludesStated says they
+	// said what run left out (--exclude or --no-exclude). Without it, apply
+	// and branch refuse (ExcludesUnknownError).
+	Masks          []string `json:"masks,omitempty"`
+	ExcludesStated bool     `json:"excludes_stated,omitempty"`
 }
 
 func hostDir(dataDir string) string { return filepath.Join(dataDir, "substrate", "hostcopies") }
@@ -711,7 +717,7 @@ func (c *Client) downloadHostTree(ctx context.Context, rec *hostRecord, dir stri
 		if slices.Contains(rec.Unmasked, rel) {
 			return false
 		}
-		_, h := osw.HeldBack(rel, nil, nil, nil, nil)
+		_, h := osw.HeldBack(rel, rec.Masks, nil, nil, nil)
 		return h
 	})
 }
@@ -803,7 +809,11 @@ func hostPull(ctx context.Context, opts PullOptions, label string) (*Review, err
 		return b, err == nil
 	}
 	if rec.LocalHead != "" {
-		notes = append([]string{elsewhereNote(rec.LocalHead)}, notes...)
+		head := []string{elsewhereNote(rec.LocalHead)}
+		if n := elsewhereExcludesNote(rec); n != "" {
+			head = append(head, n)
+		}
+		notes = append(head, notes...)
 	}
 	rep := osw.ReviewReport{Name: opts.Name, Project: rec.Project, Changes: changes, Warnings: notes}
 	rep.Flags = osw.ReviewFlags(changes, content, nil)
@@ -885,6 +895,9 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 		return nil, errors.New("pull first: there is nothing reviewed to bring back")
 	}
 	pr := rec.Pulled
+	if rec.LocalHead != "" && !rec.ExcludesStated && opts.Mode != ModePatch {
+		return nil, &ExcludesUnknownError{Name: opts.Name}
+	}
 	if needsDecision(pr) && !opts.AcceptSensitive && opts.Mode != ModePatch {
 		if opts.Mode != ModeBranch || len(pr.Review.SecretPaths()) != 0 {
 			return nil, &SensitiveError{Files: flaggedPaths(pr)}

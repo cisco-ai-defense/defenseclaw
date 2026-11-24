@@ -26,8 +26,18 @@ package workspace
 // upload uses, so a secret file is neither measured nor brought back. Changes
 // not committed here are never part of the baseline, so --apply cannot undo
 // them silently: a patch that does not fit the folder is kept as a file.
+//
+// The baseline is HEAD's exact bytes (git ls-tree and cat-file, no filters):
+// git archive applies export-ignore, export-subst and eol conversion, so files
+// it leaves out or rewrites showed as changed (RV-T6A). What run left out
+// with --exclude is known only on the first computer, and the actor's copy of
+// it is the agent's to rewrite, so here the person repeats it (pull
+// --exclude, or --no-exclude when run had none) and it is held back on both
+// sides; until then --apply and --branch refuse (ExcludesUnknownError), since
+// any path the agent wrote or left out may be one run held back.
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -37,6 +47,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,12 +77,24 @@ func elsewhereFolders(project string) []string {
 	return []string{a, b}
 }
 
+// ExcludesUnknownError is Apply's refusal, on a computer that did not run
+// run, to write or branch the agent's work before the person said what run
+// left out with --exclude there (GAP-0489, RV-T6A).
+type ExcludesUnknownError struct{ Name string }
+
+func (e *ExcludesUnknownError) Error() string {
+	return "nothing was written: this computer cannot know which paths run left out with --exclude on the computer you started the agent from, " +
+		"and any file the agent wrote or left out may be one of them. Pull again with the same --exclude run had (repeat it for each), or --no-exclude if it had none; " +
+		"or write a patch with --patch-out FILE and look at it first"
+}
+
 // adoptBaseline makes the host-copy record pull measures against on a
 // computer that has none: the last commit of project, without what the
-// upload holds back, and the agent's folder of the same name. A record
-// adopted before for the same folder is kept, so a later pull goes on from
-// what an apply brought back.
-func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string) error {
+// upload holds back (the default rules and masks, the --exclude the person
+// repeated here; stated says they did), and the agent's folder of the same
+// name. A record adopted before for the same folder and the same masks is
+// kept, so a later pull goes on from what an apply brought back.
+func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string, masks []string, stated bool) error {
 	if project == "" {
 		return &NoRecordError{Reason: "pull was not given a folder to compare with"}
 	}
@@ -78,7 +102,8 @@ func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string
 	if err != nil {
 		return err
 	}
-	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.LocalHead != "" && rec.Project == abs {
+	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.LocalHead != "" && rec.Project == abs &&
+		slices.Equal(rec.Masks, masks) && rec.ExcludesStated == stated {
 		return nil
 	}
 	out, err := hostGit(ctx, abs, nil, nil, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
@@ -115,18 +140,16 @@ func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string
 		return err
 	}
 	defer os.RemoveAll(stage)
-	// The committed bytes as git checks them out here (HEAD:./ is the tree
-	// of this folder, also below the top of the repository).
-	tarball, err := hostGit(ctx, abs, nil, nil, "archive", "--format=tar", "--prefix="+folder+"/", "HEAD:./")
-	if err != nil {
-		return cleanErr("read this folder's last commit", err)
-	}
 	limit := c.MaxDownloadBytes
 	if limit <= 0 {
 		limit = DefaultMaxDownloadBytes
 	}
+	tarball, err := headTreeTar(ctx, abs, folder, limit)
+	if err != nil {
+		return cleanErr("read this folder's last commit", err)
+	}
 	files, _, held, err := stageHostTree(bytes.NewReader(tarball), folder, stage, limit, func(rel string) bool {
-		_, h := osw.HeldBack(rel, nil, nil, nil, nil)
+		_, h := osw.HeldBack(rel, masks, nil, nil, nil)
 		return h
 	})
 	if err != nil {
@@ -143,7 +166,7 @@ func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string
 			b, err := os.ReadFile(filepath.Join(stage, filepath.FromSlash(f.rel)))
 			return b, err == nil
 		}
-		if _, h := osw.HeldBack(f.rel, nil, nil, content, det); h {
+		if _, h := osw.HeldBack(f.rel, masks, nil, content, det); h {
 			held = append(held, f.rel)
 			continue
 		}
@@ -162,8 +185,80 @@ func adoptBaseline(ctx context.Context, c *Client, dataDir, name, project string
 		return cleanErr("read this folder's last commit", err)
 	}
 	rec := &hostRecord{Version: hostRecordVersion, Name: name, Project: abs, Folder: folder, RemoteDir: remote,
-		Baseline: baseline, HeldBack: held, Files: len(kept), Bytes: bytesTotal, UploadedAt: time.Now().UTC(), LocalHead: head}
+		Baseline: baseline, HeldBack: held, Files: len(kept), Bytes: bytesTotal, UploadedAt: time.Now().UTC(), LocalHead: head,
+		Masks: masks, ExcludesStated: stated}
 	return rec.save(dataDir)
+}
+
+// headTreeTar is a tar of HEAD's tree of the folder dir (HEAD:./, also below
+// the top of the repository) under folder/, with the bytes as committed: the
+// blobs read with cat-file, which applies no attribute (git archive applies
+// export-ignore, export-subst and eol and smudge conversion). Links and
+// submodules are left out, as stageHostTree leaves them out of the agent's
+// copy.
+func headTreeTar(ctx context.Context, dir, folder string, limit int64) ([]byte, error) {
+	out, err := hostGit(ctx, dir, nil, nil, "ls-tree", "-r", "-z", "-l", "HEAD:./")
+	if err != nil {
+		return nil, err
+	}
+	type entry struct {
+		exec      bool
+		oid, path string
+		size      int64
+	}
+	var entries []entry
+	var total int64
+	var batch bytes.Buffer
+	for _, line := range splitNUL(out) {
+		meta, p, ok := strings.Cut(line, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 4 || f[1] != "blob" || f[0] != "100644" && f[0] != "100755" {
+			continue
+		}
+		size, err := strconv.ParseInt(f[3], 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("git ls-tree gave %q", line)
+		}
+		if total += size; total > limit {
+			return nil, fmt.Errorf("this folder's last commit is larger than %d MB", limit>>20)
+		}
+		entries = append(entries, entry{exec: f[0] == "100755", oid: f[2], path: p, size: size})
+		batch.WriteString(f[2] + "\n")
+	}
+	var blobs []byte
+	if len(entries) > 0 {
+		if blobs, err = hostGit(ctx, dir, nil, batch.Bytes(), "cat-file", "--batch"); err != nil {
+			return nil, err
+		}
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		nl := bytes.IndexByte(blobs, '\n')
+		if nl < 0 {
+			return nil, errors.New("git cat-file gave a short answer")
+		}
+		head := strings.Fields(string(blobs[:nl]))
+		end := int64(nl) + 1 + e.size
+		if len(head) != 3 || head[0] != e.oid || head[1] != "blob" || head[2] != strconv.FormatInt(e.size, 10) || int64(len(blobs)) < end+1 {
+			return nil, fmt.Errorf("git cat-file gave %q for %s", blobs[:nl], e.path)
+		}
+		mode := int64(0o644)
+		if e.exec {
+			mode = 0o755
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: folder + "/" + e.path, Mode: mode, Size: e.size, Typeflag: tar.TypeReg}); err != nil {
+			return nil, err
+		}
+		if _, err := tw.Write(blobs[nl+1 : end]); err != nil {
+			return nil, err
+		}
+		blobs = blobs[end+1:]
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // elsewhereNote is the review line of a pull measured against this
@@ -173,5 +268,17 @@ func elsewhereNote(head string) string {
 		head = head[:12]
 	}
 	return fmt.Sprintf("this computer has no record of the folder you sent, so the changes are measured against this folder's last commit (%s): "+
-		"files the other computer sent that are not in that commit show as added, and files run left out there with --exclude show as deleted", head)
+		"files the other computer sent that are not in that commit show as added", head)
+}
+
+// elsewhereExcludesNote says how the --exclude of run is honoured here.
+func elsewhereExcludesNote(rec *hostRecord) string {
+	switch {
+	case !rec.ExcludesStated:
+		return "this computer does not know what run left out with --exclude, so files it left out show as deleted and the agent's files there as changes; " +
+			"--apply and --branch refuse until you pull again with the same --exclude (or --no-exclude if run had none)"
+	case len(rec.Masks) > 0:
+		return "held back on both sides, as run's --exclude: " + strings.Join(rec.Masks, ", ")
+	}
+	return ""
 }

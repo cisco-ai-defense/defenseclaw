@@ -151,6 +151,9 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	if modes > 1 {
 		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME, --patch-out FILE or --push-branch NAME"), 2)
 	}
+	if len(f.exclude) > 0 && f.noExclude {
+		return cliusage.WithExitCode(errors.New("choose --exclude GLOB (what run left out) or --no-exclude (run left out nothing), not both"), 2)
+	}
 	if f.allowFlagged && !f.apply && f.pushBranch == "" {
 		// Refused before anything is read, also on an empty pull
 		// (GAP-0531).
@@ -182,7 +185,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
 	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: ".",
-		RestoreSecretLines: f.restoreSecrets})
+		RestoreSecretLines: f.restoreSecrets, Exclude: f.exclude, ExcludesStated: len(f.exclude) > 0 || f.noExclude})
 	if err != nil {
 		var nr *workspace.NoRecordError
 		if errors.As(err, &nr) {
@@ -315,7 +318,8 @@ func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.App
 	res, err := workspace.Apply(ctx, workspace.ApplyOptions{DataDir: dataDir, Name: name, Mode: mode, Branch: branch, PatchPath: patch, AcceptSensitive: accept})
 	if err != nil {
 		var sens *workspace.SensitiveError
-		if errors.As(err, &sens) {
+		var unknown *workspace.ExcludesUnknownError
+		if errors.As(err, &sens) || errors.As(err, &unknown) {
 			// The refusal already names --allow-flagged, --branch and
 			// --patch-out; the advice is said once (GAP-0531).
 			return cliusage.WithExitCode(err, substrateExitRefused)

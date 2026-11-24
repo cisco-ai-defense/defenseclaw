@@ -57,6 +57,11 @@ type PullOptions struct {
 	// RestoreSecretLines is osw.PullOptions.RestoreSecretLines
 	// (--restore-secret-lines).
 	RestoreSecretLines bool
+	// Exclude repeats run's --exclude on a computer that did not run run,
+	// and ExcludesStated says the person said what it was (--exclude or
+	// --no-exclude); see adoptBaseline. The computer that ran run has them.
+	Exclude        []string
+	ExcludesStated bool
 }
 
 // File is one changed file of a review.
@@ -110,7 +115,7 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 	if c, ok := opts.Exec.(*Client); ok && !HasCopy(opts.DataDir, opts.Name) {
 		// Another computer than the one that ran run (GAP-0489): the
 		// baseline is this folder's last commit.
-		if err := adoptBaseline(ctx, c, opts.DataDir, opts.Name, opts.Project); err != nil {
+		if err := adoptBaseline(ctx, c, opts.DataDir, opts.Name, opts.Project, opts.Exclude, opts.ExcludesStated); err != nil {
 			return nil, err
 		}
 	}

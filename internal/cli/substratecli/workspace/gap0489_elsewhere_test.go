@@ -72,7 +72,7 @@ func TestPullOnAnotherComputerUsesTheCheckoutGAP0489(t *testing.T) {
 		t.Fatal("the second computer has a copy record before pull")
 	}
 
-	rv, err := Pull(ctx, PullOptions{Exec: c, DataDir: data2, Name: "w1", Label: "agent-1", Project: clone})
+	rv, err := Pull(ctx, PullOptions{Exec: c, DataDir: data2, Name: "w1", Label: "agent-1", Project: clone, ExcludesStated: true}) // run had no --exclude (RV-T6A)
 	if err != nil {
 		t.Fatalf("pull on the second computer: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestPullOnAnotherComputerUsesTheCheckoutGAP0489(t *testing.T) {
 		t.Errorf("the pull baseline counts as a copy record: HasCopy %v, RemoteDirOf %q", HasCopy(data2, "w1"), RemoteDirOf(data2, "w1"))
 	}
 	// A second pull goes on from the same record: nothing new since.
-	if rv, err := Pull(ctx, PullOptions{Exec: c, DataDir: data2, Name: "w1", Project: clone}); err != nil || len(rv.Changed) != 3 {
+	if rv, err := Pull(ctx, PullOptions{Exec: c, DataDir: data2, Name: "w1", Project: clone, ExcludesStated: true}); err != nil || len(rv.Changed) != 3 {
 		t.Fatalf("second pull: %v %v", err, rv)
 	}
 
