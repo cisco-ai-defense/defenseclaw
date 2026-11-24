@@ -20,6 +20,10 @@ in=$(cd "$in" 2>/dev/null && pwd) || { echo "DET111GEN NOT-READY no input dir $1
 u=$(df -P "$(dirname "$out")" 2>/dev/null | awk 'NR==2{print $5+0}'); [ "${u:-100}" -le 85 ] || { echo "DET111GEN NOT-READY disk ${u:-?}% used"; exit 2; }
 refs=(); for r in ${DET111_REFS//,/ }; do d=${r#*=}; [ -s "$d/rows.txt" ] && [ -s "$d/meta.tsv" ] || { echo "DET111GEN NOT-READY reference $r has no rows.txt/meta.tsv"; exit 2; }; refs+=("$r"); done
 mkdir -p "$out"; out=$(cd "$out" && pwd)
+# The probe's fixture trees and the gateway's own temp folders live in a TMPDIR of this run, not the shared one: a box
+# guard that sweeps empty folders of the shared TMPDIR (dc-s7-gates) changed verdicts mid-run (rel-1-0-10:GAP-2113).
+export TMPDIR=$(mktemp -d "$(dirname "$out")/det111gen-tmp.XXXXXX") || { echo "DET111GEN NOT-READY no private TMPDIR"; exit 2; }
+trap 'rm -rf "$TMPDIR"' EXIT
 kit=$(cat $here/det111-run-v5.sh $here/det111-gen-v1.sh $here/det111-noloss-v2.py $here/seeds-a64bfdb931.txt $here/gen-inputs-v1.sha256 internal/gateway/det111_gen_test.go internal/gateway/det111_probe_test.go internal/gateway/det111_rows_test.go | sha256sum | cut -c1-16)
 printf 'kit=%s sha=%s dirty=%s\n' "$kit" "$(git rev-parse --short=10 HEAD)" "$(git status --porcelain --untracked-files=no | wc -l)" > "$out/kit.txt"
 C=$in/gap-regression.cases.jsonl,$in/windows-shell.cases.jsonl,$in/win-credential-paths.cases.jsonl,$in/gaps-A.cases.jsonl,$in/gaps-B.cases.jsonl,$in/gaps-C.cases.jsonl

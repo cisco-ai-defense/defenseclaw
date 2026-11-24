@@ -45,6 +45,8 @@ The bar (det111-bar-v*.sh) still copies its pinned kit over these paths at run t
   reference run named in `DET111_REFS="t20=<dir>,t21f=<dir>,t23b=<dir>"`. `<indir>` must hold exactly the bytes in
   `gen-inputs-v1.sha256` (checked first; anything else is NOT-READY). `<outdir>/kit.txt` records the kit hash and the
   head sha: put both in the testctl row. Last line `DET111GEN PASS|FAIL|NOT-READY ...`; exit 0, 1 or 2.
+  The run uses a TMPDIR of its own next to `<outdir>`, so a box guard that sweeps the shared temp folder cannot
+  change verdicts mid-run (GAP-2113).
 - `det111-noloss-v2.py REF HEAD [--base BASE] [--out FILE]`: R-NOLOSS. Counts attack cells weaker at HEAD, benign and
   twin cells raised or newly blocked, REF cells HEAD lost, error verdicts and rows with no role; any of them fails.
   Replaces lanes/trg-nl-v1.py and trg-br-v1.py, which never saw a lost cell and always exited 0.
