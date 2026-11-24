@@ -19,8 +19,10 @@ import (
 // spelling of the member it names, on the Claude Code and Codex hook routes
 // in the five tiers. A project link to ~/.npmrc or ~/.kube/config is a
 // plain dev workflow: showing it gets the cell cat of the member gets, and
-// a count through it is never above grep -c of the member, and a write
-// through it gets the cell of the plain write. The cross-call
+// a count through it is never above grep -c of the member. A write through
+// it keeps the T23 restricted cell, never below the plain write (DET111
+// ruling on GAP-2114/GAP-2121); with the link also on disk the effect
+// reader resolves it and the write is the plain write, as at T23. The cross-call
 // alias of ~/.ssh/id_rsa keeps the cell of cat ~/.ssh/id_rsa. At
 // ac8b361121 every alias use was the restricted credentials tier, so the
 // npmrc and kubeconfig rows were CRITICAL (a block in strict) where the
@@ -45,17 +47,20 @@ func TestGAP1865AliasReadKeepsThePlainSpellingCell(t *testing.T) {
 		link, alias, member string
 		uses                []string // %s is the alias, then the member
 		exact               bool
+		write               bool // at least the plain write, and the T23 restricted CRITICAL
 	}{
 		{"ln -sf ~/.npmrc ~/proj/.npmrc", "~/proj/.npmrc", "~/.npmrc",
-			[]string{"cat %s", "head -n 3 %s", "echo registry=x >> %s"}, true},
+			[]string{"cat %s", "head -n 3 %s"}, true, false},
 		{"ln -sf ~/.npmrc ~/proj/.npmrc", "~/proj/.npmrc", "~/.npmrc",
-			[]string{"grep -c registry %s"}, false},
+			[]string{"echo registry=x >> %s", "printf x > %s"}, false, true},
+		{"ln -sf ~/.npmrc ~/proj/.npmrc", "~/proj/.npmrc", "~/.npmrc",
+			[]string{"grep -c registry %s"}, false, false},
 		{"ln -sf ~/.kube/config ~/proj/kubeconfig", "~/proj/kubeconfig", "~/.kube/config",
-			[]string{"cat %s"}, true},
+			[]string{"cat %s"}, true, false},
 		{"ln -sf ~/.kube/config ~/proj/kubeconfig", "~/proj/kubeconfig", "~/.kube/config",
-			[]string{"grep -c server %s"}, false},
+			[]string{"grep -c server %s"}, false, false},
 		{"ln -sf ~/.ssh/id_rsa ./scratch/see", "./scratch/see", "~/.ssh/id_rsa",
-			[]string{"cat %s"}, true},
+			[]string{"cat %s"}, true, false},
 	}
 	expand := func(p string) string {
 		if rest, ok := strings.CutPrefix(p, "~/"); ok {
@@ -82,6 +87,20 @@ func TestGAP1865AliasReadKeepsThePlainSpellingCell(t *testing.T) {
 					for _, use := range row.uses {
 						plain, plainSev := route.decide(t, api, session+"-plain", cwd, fmt.Sprintf(use, row.member))
 						got, sev := route.decide(t, api, session, cwd, fmt.Sprintf(use, row.alias))
+						if row.write {
+							// Only the memo alias is the T23 restricted tier: a link
+							// on disk is resolved by the effect reader itself, and
+							// the write is the plain write of the member, as at T23
+							// (ac8b361121).
+							if credentialFlowRank[got] < credentialFlowRank[plain] ||
+								aliasSeverityRank[sev] < aliasSeverityRank[plainSev] ||
+								!onDisk && sev != "CRITICAL" {
+								t.Errorf("%s %s disk link %v %q: %s/%s, want at least the plain write %q %s/%s (and the T23 restricted CRITICAL without a disk link)",
+									tier.name, route.connector, onDisk, fmt.Sprintf(use, row.alias), got, sev,
+									fmt.Sprintf(use, row.member), plain, plainSev)
+							}
+							continue
+						}
 						if row.exact && (got != plain || sev != plainSev) ||
 							credentialFlowRank[got] > credentialFlowRank[plain] ||
 							got == plain && aliasSeverityRank[sev] > aliasSeverityRank[plainSev] {

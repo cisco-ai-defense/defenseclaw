@@ -4,6 +4,10 @@
 package gateway
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
@@ -13,10 +17,10 @@ import (
 // GAP-2114): in one session, ln -sf ~/.npmrc ~/proj/npm_alias, then a write
 // through ~/proj/npm_alias. Under a pack without PATH-NPMRC the call keeps
 // the T23 restricted finding (alert CRITICAL in the default packs, a block
-// in strict), per-user and managed; under a pack with it, the class rule
-// grades the write (MEDIUM) and the restricted finding folds into it, as for
-// the plain write of ~/.npmrc. At 8711f95ef6 no finding survived without
-// the class rule.
+// in strict), per-user and managed, and so does a pack with it (the
+// stronger of the class cell and the restricted cell, DET111 ruling). At
+// 8711f95ef6 no finding survived without the class rule, and the class
+// MEDIUM cell stood alone with it.
 func TestGAP2114AliasWriteKeepsItsVerdictWithoutTheClassRule(t *testing.T) {
 	useEffectsRulesMode(t, "on")
 	link := shadowLiveRequest("ln -sf ~/.npmrc ~/proj/npm_alias")
@@ -53,23 +57,62 @@ func TestGAP2114AliasWriteKeepsItsVerdictWithoutTheClassRule(t *testing.T) {
 				}
 				got := decide.Decide(decide.Input{Findings: in, Deployment: tc.deployment,
 					Levels: decide.TierLevels(tc.tier), Tier: func() decide.Tier { return tc.tier }})
-				// Without the class rule: the T23 restricted cell. With it:
-				// the PATH-NPMRC cell of the plain write (MEDIUM: an alert in
-				// default and managed, nothing in permissive, which alerts
-				// from HIGH, a block in strict).
+				// The T23 restricted cell with or without the class rule
+				// (the stronger of it and the PATH-NPMRC MEDIUM cell).
 				wantAction, wantSev := decide.Alert, decide.SevCritical
-				if pack.name == "with PATH-NPMRC" {
-					wantSev = decide.SevMedium
-					if tc.tier == decide.TierPermissive {
-						wantAction = decide.Allow
-					}
-				}
 				if tc.tier == decide.TierStrict {
 					wantAction = decide.Block
 				}
 				if got.Action != wantAction || got.Severity != wantSev {
 					t.Errorf("%q %s pack %s: %v/%v, want %v/%v (findings %d)", command, tc.name, pack.name,
 						got.Action, got.Severity, wantAction, wantSev, len(fs))
+				}
+			}
+		}
+	}
+}
+
+// TestGAP2121AliasWriteBesideAnEffectsOnlyWriteNeverLowersTheCall (DET111
+// GAP-2121): in one session, after ln -sf ~/.npmrc ~/proj/npm_alias (or
+// ~/.kube/config as ~/proj/kc), a call that writes through the alias and
+// also writes the member by an effects-only spelling (${PWD%/proj}/.npmrc),
+// in either order, gets at least the verdict of the effects-only write
+// alone, on the Claude Code and Codex hook routes in the five tiers. At
+// 08e285b2a6 the alias class finding folded the call's restricted finding
+// away: MEDIUM, allow in permissive, where the write alone is CRITICAL.
+func TestGAP2121AliasWriteBesideAnEffectsOnlyWriteNeverLowersTheCall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home spellings")
+	}
+	home := t.TempDir()
+	for _, f := range []string{".npmrc", ".kube/config", "proj/keep"} {
+		p := filepath.Join(home, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	cwd := filepath.Join(home, "proj")
+	rows := []struct{ link, call, alone string }{
+		{"ln -sf ~/.npmrc ~/proj/npm_alias", "printf x > ~/proj/npm_alias; printf y > ${PWD%/proj}/.npmrc", "printf y > ${PWD%/proj}/.npmrc"},
+		{"ln -sf ~/.npmrc ~/proj/npm_alias", "echo y >> ${PWD%/proj}/.npmrc; echo x >> ~/proj/npm_alias", "echo y >> ${PWD%/proj}/.npmrc"},
+		{"ln -sf ~/.kube/config ~/proj/kc", "printf x > ~/proj/kc; printf y > ${PWD%/proj}/.kube/config", "printf y > ${PWD%/proj}/.kube/config"},
+	}
+	for _, tier := range boundedTestTiers {
+		for _, route := range gap2025Routes() {
+			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
+			useDefaultEffectsLane(t)
+			for n, row := range rows {
+				session := fmt.Sprintf("gap2121-%s-%s-%d", tier.name, route.connector, n)
+				route.decide(t, api, session, cwd, row.link)
+				want, wantSev := route.decide(t, api, session+"-alone", cwd, row.alone)
+				got, sev := route.decide(t, api, session, cwd, row.call)
+				if credentialFlowRank[got] < credentialFlowRank[want] || aliasSeverityRank[sev] < aliasSeverityRank[wantSev] {
+					t.Errorf("%s %s %q: %s/%s, want at least the effects-only write alone %q %s/%s",
+						tier.name, route.connector, row.call, got, sev, row.alone, want, wantSev)
 				}
 			}
 		}

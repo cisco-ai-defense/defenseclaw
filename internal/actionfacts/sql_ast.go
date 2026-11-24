@@ -336,9 +336,10 @@ func appendUniqueSQL(values []string, value string) []string {
 // start alerting (DET111 ruling on T20 review P3-1).
 func (f Facts) SQLASTCaps() bounded.CapSet { return f.sqlASTCaps }
 
-// SQLUnreadDanger reports SQL the facts reader left unread past its
-// statement cap that holds a modeled danger keyword (sqlUnreadDanger): the
-// gateway then grades the cap as the truncated row, not as a record.
+// SQLUnreadDanger reports a statement past the SQL facts reader's
+// statement cap that holds a modeled danger keyword and could not be read
+// alone (sqlStatements): the gateway then grades the cap as the truncated
+// row, not as a record.
 func (f Facts) SQLUnreadDanger() bool { return f.sqlUnreadDanger }
 
 func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact, bounded.CapSet) {

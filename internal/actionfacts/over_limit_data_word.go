@@ -61,10 +61,10 @@ type OverLimitWordSplit struct {
 	// its last statement within the bound (sqlQueryWordChunks), and the cut by
 	// itself raises nothing (DET111 ruling on FIX-T20B).
 	Query int
-	// QueryUnreadDanger counts the over-limit queries whose statements past
-	// the cut hold a modeled danger keyword (sqlUnreadDanger): the call then
-	// takes the truncated row, not the record (DET111 ruling on T23 review
-	// P3-1).
+	// QueryUnreadDanger counts the over-limit queries with a statement past
+	// the cut that holds a modeled danger keyword and could not be read alone
+	// (sqlQueryWordChunks): the call then takes the truncated row, not the
+	// record (DET111 ruling on T23 review P3-1).
 	QueryUnreadDanger int
 	// QueryChunks are the further readings of the call when a query is
 	// past the bound even shortened: the twin with each such query replaced
@@ -201,7 +201,7 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 		return split, false
 	}
 	split.Twin = twin
-	for k := 0; len(queryChunks) != 0 && len(split.QueryChunks) < maxSQLQueryChunks-1; k++ {
+	for k := 0; len(queryChunks) != 0 && len(split.QueryChunks) < maxSQLQueryChunks+maxSQLDangerReadings-1; k++ {
 		more := false
 		chunked := slices.Clone(replacements)
 		for _, query := range queryChunks {

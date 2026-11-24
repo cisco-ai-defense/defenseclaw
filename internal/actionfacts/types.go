@@ -205,8 +205,8 @@ type Facts struct {
 	kubeCut kubeCutRecord
 	// sqlASTCaps are the bounds the SQL facts reader hit (SQLASTCaps).
 	sqlASTCaps bounded.CapSet
-	// sqlUnreadDanger: SQL past the statement cap holds a modeled danger
-	// keyword (SQLUnreadDanger).
+	// sqlUnreadDanger: a statement past the statement cap holds a modeled
+	// danger keyword and was not read alone (SQLUnreadDanger).
 	sqlUnreadDanger bool
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
