@@ -261,6 +261,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 				"; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch)"
 			def = noLandlock
 		}
+		if macOS && !vmStarts && rep.OpenShellUpgradeAvailable() && openshell.MicroVMStartsOnMac(openshell.InstallerVersion) {
+			// The question is this OpenShell's; the upgrade step 3 offers
+			// installs one that starts them (rel-1-0-10:GAP-1786).
+			a.note("OpenShell " + openshell.InstallerVersion + " starts MicroVM sandboxes on a Mac: setup offers the upgrade from " + rep.CLIVersion + " after this question")
+		}
 		yes, err := a.ask(question, def, assume)
 		if err != nil {
 			return err
