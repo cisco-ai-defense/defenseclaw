@@ -202,6 +202,16 @@ func effectCall(connector string, in actionfacts.Input, windowsArg ...bool) (eff
 	if flavor == effects.FlavorWindows && windowsShapedPath(in.ActiveHome) {
 		opts.Env = map[string]string{"USERPROFILE": in.ActiveHome}
 	}
+	if (dialect == effects.DialectPOSIX || dialect == effects.DialectNone && flavor == effects.FlavorPOSIX) && in.ActiveHome != "" {
+		// A POSIX shell inherits HOME from the agent: $HOME and ${HOME} name
+		// the active home as ~ does, not an unread word (DET111 D3; the
+		// "$HOME" spellings of rel-1-0-10:GAP-1261 read as dynamic and
+		// reached no set).
+		if opts.Env == nil {
+			opts.Env = map[string]string{}
+		}
+		opts.Env["HOME"] = in.ActiveHome
+	}
 
 	switch {
 	case effectPatchTool(in.Tool) && effectPatchText(in) != "":
@@ -502,6 +512,13 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		// A target only maybe in a set reaches the unknown tier only with a
 		// reach reason (DET111 PLAN 5.3); with none it stays clean, as in
 		// 1.0.10.
+		// A copy or move onto the DefenseClaw state folder itself, or the
+		// folder moved away, is a known state write whatever member it
+		// reaches: it stands as its own proof, before the reach rule
+		// (rel-1-0-10:GAP-1261).
+		if proof, ok := stateFolderWriteProof(f, flavor); ok {
+			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+		}
 		r := factReach(f, known, unknownEffect, env, flavor)
 		if len(known) == 0 && r == "" {
 			continue
@@ -820,7 +837,12 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 			continue
 		}
 		f := RuleFinding{RuleID: ruleID, Title: "Known authorized keys write", Severity: "CRITICAL", Confidence: 1, Proof: proof}
-		if proof.Target != decide.TargetAuthorizedKeys {
+		switch proof.Target {
+		case decide.TargetAuthorizedKeys:
+		case decide.TargetState:
+			// tamper.detector_state_write is HIGH in every pack (GAP-0747).
+			f.Title, f.Severity = "DefenseClaw security state mutation", "HIGH"
+		default:
 			// The pack's class rule severity replaces it on the live path
 			// (withEffectClassWriteSeverity).
 			f.Title, f.Severity = "Known credential write", "HIGH"
@@ -876,6 +898,50 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		f.Proof = f.Proof.Enforce()
 	}
 	return append(findings, f)
+}
+
+// stateFolderWriteProof is the known DefenseClaw state write of a mutation of
+// the state folder (~/.defenseclaw) itself, the classifier's protected_dir
+// basis: a copy or move whose landing is the folder (cp -rt ~ .defenseclaw,
+// cp -rT x ~/.defenseclaw, cp -r .defenseclaw ~/: the source's contents
+// merge into the state root, over whatever members it holds), or the folder
+// moved away or removed (mv -St ~/.defenseclaw x). Which member it reaches is
+// unknown; that it rewrites DefenseClaw's own state is not, so the proof is
+// Known on the state class and takes the state-write row (the GAP-0747
+// cell: an alert in default and permissive, a block in strict, per user and
+// managed). A write that may land inside the folder as a new child
+// (dest_may_be_dir: cp -r proj ~/.defenseclaw with the folder there) and a
+// write, mode change or link of an unlisted child keep their 1.0.10 cell:
+// DefenseClaw's own tools and their users keep files there
+// (observability-stack, connector-radar, notes; owner agent traces), and a
+// new non-state entry is not state (rel-1-0-10:GAP-1285). The program must
+// write the operand (role known) and the path must be canonical and literal.
+func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (decide.Proof, bool) {
+	if f == nil || f.GetRoleState() != "known" {
+		return decide.Proof{}, false
+	}
+	switch effects.Kind(f.GetKind()) {
+	case effects.KindWrite, effects.KindAppend:
+		for _, r := range f.GetReasons() {
+			if strings.HasSuffix(r, string(effects.ReasonDestMayBeDir)) {
+				return decide.Proof{}, false
+			}
+		}
+	case effects.KindDelete:
+	default:
+		return decide.Proof{}, false
+	}
+	t := f.GetTarget()
+	if t.GetType() != "path" || t.GetGlob() != "" || !effectrules.CanonicalAbsolute(t.GetPath(), flavor) {
+		return decide.Proof{}, false
+	}
+	for _, m := range t.GetProtected() {
+		if m.GetSet() == effectrules.SetSelfProtection && m.GetState() == semantic.ProtectedUnknown && m.GetReason() == "protected_dir" {
+			return decide.Proof{Kind: effectProofKind(f.GetKind()), Target: decide.TargetState,
+				Certainty: decide.CertKnown, Source: effectProofSource}, true
+		}
+	}
+	return decide.Proof{}, false
 }
 
 // knownAuthorizedKeysMutationProof uses the resolved target, independent of

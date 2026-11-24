@@ -2870,6 +2870,21 @@ func isInPlaceFlag(p Program, name string) bool {
 // hasRowFlag reports one of the row options names among the words, before
 // "--": the word itself, its --name=value form, its GNU abbreviation, or a
 // letter of a short cluster (up to the first letter that takes a value).
+// noTargetDirFlags are GNU cp/mv/install/ln -T: the destination is the target itself.
+var noTargetDirFlags = []string{"-T", "--no-target-directory"}
+
+// rowFlags is the names of names that are flags of the row p: a spelling
+// the row does not list leaves the call unknown, never read by its meaning.
+func rowFlags(p Program, names []string) []string {
+	var out []string
+	for _, n := range names {
+		if _, ok := p.Flags[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func hasRowFlag(words []Word, p Program, names []string) bool {
 	if len(names) == 0 {
 		return false
@@ -3391,7 +3406,7 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 			out = append(out, mk(wd, RolePerm))
 		}
 	case PosSourcesDest:
-		out = append(out, sourcesDestOperands(ps, ctx.destDir, p)...)
+		out = append(out, sourcesDestOperands(ps, ctx.destDir, p, hasRowFlag(ctx.words, p, rowFlags(p, noTargetDirFlags)))...)
 	case PosLinkTargetLink:
 		if len(ps) == 2 {
 			out = append(out, mk(ps[0], RoleLinkTarget))
@@ -5011,7 +5026,10 @@ func secretStdoutCommand(program string, args []Word) bool {
 // separator, ., ~, .., a -t/--target-directory dir, or more than one source)
 // writes <dir>/<basename(source)>; a bare destination that could be a directory
 // is unknown (dest_may_be_dir) so the resolver can decide (review R3-2/R3-8).
-func sourcesDestOperands(ps []Word, destDir string, p Program) []operand {
+// With -T / --no-target-directory (GNU) the destination is never a directory
+// to write into: a single source lands at the destination itself (cp -rT x
+// ~/.defenseclaw merges x into the folder; rel-1-0-10:GAP-1261).
+func sourcesDestOperands(ps []Word, destDir string, p Program, noTarget bool) []operand {
 	var out []operand
 	var sources []Word
 	var dest Word
@@ -5052,6 +5070,9 @@ func sourcesDestOperands(ps []Word, destDir string, p Program) []operand {
 		}
 		out = append(out, w)
 		return out
+	}
+	if noTarget && destDir == "" && len(sources) == 1 && sources[0].Static {
+		return append(out, operand{value: dest.Value, static: true, role: RoleWrite, copyFrom: sources[0].Value})
 	}
 	dirDest := destDir != "" || len(sources) > 1 || looksDir(dest)
 	if !dest.Static {
