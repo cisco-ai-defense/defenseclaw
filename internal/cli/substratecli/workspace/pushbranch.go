@@ -167,14 +167,17 @@ printf 'dir\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$commit"
 // the push goes, what it carries, or what the review sees. The only
 // credential and TLS settings are image-bound paths from kit; no actor
 // config is parsed for them. Nothing in the environment the relay passes
-// on runs a command or changes the transport either: the ssh, proxy and
-// exec-path variables and every trace (GIT_CURL_VERBOSE and GIT_TRACE_CURL
-// would log the request headers) are unset, and https is the only protocol
-// (RV-T6A). g runs git.
+// on runs a command or changes the transport either: the ssh, proxy,
+// password-prompt and exec-path variables and every trace (GIT_CURL_VERBOSE
+// and GIT_TRACE_CURL would log the request headers) are unset, and https is
+// the only protocol (RV-T6A); so are every GIT_SSL_* variable (client
+// certificate and key, ciphers, version, CA), the proxy auth method, and
+// GIT_COMMON_DIR and GIT_ATTR_SOURCE, which would move the refs, config and
+// objects or the attributes the review reads (RV-T6B). g runs git.
 const pushGit = `set -u
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE GIT_SSL_CAINFO GIT_SSL_CAPATH GIT_SSL_NO_VERIFY
-unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_CURL_VERBOSE GIT_ALLOW_PROTOCOL GIT_PROTOCOL_FROM_USER
-for v in $(env | sed -n 's/^\(GIT_TRACE[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE GIT_COMMON_DIR GIT_ATTR_SOURCE
+unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_CURL_VERBOSE GIT_ALLOW_PROTOCOL GIT_PROTOCOL_FROM_USER GIT_HTTP_PROXY_AUTHMETHOD GIT_ASKPASS SSH_ASKPASS
+for v in $(env | sed -n -e 's/^\(GIT_TRACE[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(GIT_SSL_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 GIT_ALLOW_PROTOCOL=https
 g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false -c credential.helper=` + kit.CredHelper + ` -c credential.useHttpPath=false -c http.sslCAInfo=` + kit.TrustBundle + ` "$@"; }
 `
