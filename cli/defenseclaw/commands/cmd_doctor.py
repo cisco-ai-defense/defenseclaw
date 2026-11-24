@@ -306,6 +306,7 @@ class _DoctorResult:
         "gateway_holder",
         "sidecar_unverified",
         "gateway_start_waited",
+        "install_running",
     )
 
     def __init__(
@@ -347,6 +348,10 @@ class _DoctorResult:
         # True once a gateway row waited for the gateway start lock, so a
         # start, restart or stop that outlasts the wait is waited for once.
         self.gateway_start_waited = False
+        # The Install lock row's detail once it found a live installer
+        # (GAP-1068): rows after it report a failure as a warning, as the
+        # installer stops the gateway and starts it again.
+        self.install_running = ""
 
     @property
     def passive_reason(self) -> str:
@@ -563,6 +568,14 @@ def _emit(
 ) -> None:
     if label and _label_suffix:
         label = f"{label} {_label_suffix}"
+    if tag == "fail" and r is not None and r.install_running:
+        # GAP-1068: an install or upgrade stops the gateway and starts it
+        # again (on Windows for about a minute of its 2 to 5), so a gateway
+        # or hook row read meanwhile is its progress, not a fault, and its
+        # usual next step (start the gateway) would race the installer.
+        tag = "warn"
+        detail = f"{detail} ({_INSTALL_RUNNING_NOTE})" if detail else _INSTALL_RUNNING_NOTE
+        remediation = _INSTALL_RUNNING_NEXT
     if not _json_mode and not (r is not None and r.quiet):
         marker = _doctor_marker(tag)
         # Marker + label form the row's primary signal. We bold the
@@ -4099,6 +4112,24 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
     return ("held", f"an installer (pid {pid}) holds {lock}")
 
 
+_INSTALL_RUNNING_NOTE = "an upgrade is in progress, so this may be the installer at work"
+_INSTALL_RUNNING_NEXT = "wait for the installer to end, then run: defenseclaw doctor"
+
+
+def _install_lock_installer_pid(folder: str) -> int:
+    """The pid of the running installer a "held" lock names, or 0 (GAP-1068).
+
+    Of the "held" states of _install_lock_state, only the last has a valid
+    pid file whose process runs: the others name no pid or one that cannot
+    be read. So a "held" lock with such a pid is held by its live installer.
+    """
+    state, text = _install_lock_file(os.path.join(folder, ".install.lock"), "pid", 64)
+    pid = int(text) if state == "valid" and re.fullmatch(r"[1-9][0-9]{0,9}", text) else 0
+    if not pid or pid > 2_147_483_647 or pid == os.getpid():
+        return 0
+    return pid if _pid_running(pid) else 0
+
+
 def _install_lock_folders(cfg) -> list[str]:
     """The data directory and the installer's home, the folders the plugins check."""
     home = os.environ.get("DEFENSECLAW_HOME") or os.path.join(os.path.expanduser("~"), ".defenseclaw")
@@ -4158,6 +4189,25 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
                 reason_code="install-lock-interrupted-install",
                 remediation="run the DefenseClaw installer again to finish or undo the interrupted install",
             )
+        elif _install_lock_installer_pid(folder):
+            # GAP-1068: `defenseclaw upgrade` on Windows ends while its
+            # installer still runs, so this is often the first doctor run
+            # of an upgrade in progress. Say so once, and read the rows after
+            # it as that (_emit).
+            running = (
+                f"an upgrade is in progress: {detail}; it stops the gateway and starts it again, "
+                "and hooks hold tool calls until it is done"
+            )
+            _emit(
+                "warn",
+                "Install lock",
+                running,
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-in-progress",
+                remediation=_INSTALL_RUNNING_NEXT,
+            )
+            r.install_running = running
         else:
             _emit(
                 "warn",
@@ -17532,6 +17582,11 @@ def doctor(
         if r.skipped:
             parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
         ux.echo("  Health: " + ", ".join(parts))
+        if r.install_running:
+            ux.warn(
+                "An upgrade is in progress: run defenseclaw doctor again when the installer has ended",
+                indent="  ",
+            )
         if do_fix:
             repair_parts = []
             for state, count in r.repair_summary.to_dict().items():

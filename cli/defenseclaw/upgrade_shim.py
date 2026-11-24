@@ -1450,8 +1450,21 @@ def _run_installer(
             # with 0 is handled here.
             if rc == 0:
                 _drop_recovery_copy(recovery)
-            print("  → The installer continues in a new window, which shows the result when it ends.")
-            print(f"    Its log is saved in {logs} (install-<time>.log).")
+                print("  → The installer ran in its own window and ended with exit code 0.")
+                print(f"    Its log is saved in {logs} (install-<time>.log).")
+            elif rc is not None:
+                print(f"  → The installer ran in its own window and ended with exit code {rc}; the window shows why.")
+                print(f"    Its log is saved in {logs} (install-<time>.log).")
+            else:
+                # GAP-1068: the installer cannot replace the files this
+                # process runs from while it waits, so the install goes on
+                # after this command ends: say so, and how to read the result.
+                print("  → The installer continues in a new window: the install is not finished yet.")
+                print(
+                    "    It usually takes 2 to 5 minutes. It stops the gateway and starts it again, so wait for it "
+                    "to end before you run defenseclaw doctor."
+                )
+                print(f"    The window shows the result when it ends; its log is saved in {logs} (install-<time>.log).")
         elif rc == 0:
             shutil.rmtree(workdir, ignore_errors=True)
             _drop_recovery_copy(recovery)
@@ -1489,7 +1502,7 @@ def _run_installer(
                 "install, or hold an error in its window. Read that window and let the installer end before you "
                 "start another install; then check: defenseclaw --version and defenseclaw doctor"
             )
-        print("    Confirm the result afterwards with: defenseclaw --version")
+        print("    Confirm the result afterwards with: defenseclaw --version and defenseclaw doctor")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
