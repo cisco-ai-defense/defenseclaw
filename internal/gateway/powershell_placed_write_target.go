@@ -37,14 +37,56 @@ import (
 // only this one Copilot route changes (DET111 ruling 2026-11-24, option B).
 func powerShellReadingPlacesEveryWrite(request trustedActionRequest, posix actionfacts.Facts, target string,
 	isProtected func(string) bool) bool {
-	if request.Connector != "copilot" || !request.ProtectedHomeHook || !request.windowsDialectReadings ||
-		!strings.EqualFold(strings.TrimSpace(request.Input.Tool), "shell") ||
-		request.Input.DialectHint != "" || request.windowsPowerShellReading == nil {
+	tool := strings.TrimSpace(request.Input.Tool)
+	if request.Connector != "copilot" || !request.ProtectedHomeHook ||
+		!strings.EqualFold(tool, "shell") && !strings.EqualFold(tool, "powershell") {
 		return false
 	}
-	input := request.Input
-	input.DialectHint = actionfacts.DialectPowerShell
-	reading := request.windowsPowerShellReading.factsFor(input)
+	// The command-only reading of Copilot's explicit powershell tool can
+	// arrive without the dialect selector's cached reading. Rebuild both
+	// bounded readings of that same call; a generic shell without the
+	// cache has no proved PowerShell runtime (GAP-1157).
+	uncached := request.windowsPowerShellReading == nil
+	if uncached && (!strings.EqualFold(tool, "powershell") ||
+		request.simpleCommandPass || request.readingTwin) {
+		return false
+	}
+	// A simple-command pass sees only the write statement, without the cd
+	// that places it. A reading twin sees the PowerShell reading instead of
+	// the original POSIX reading. In both cases compare the *whole* original
+	// call, so neither can clear an answer for a write it has not read.
+	whole := request.Input
+	switch {
+	case request.simpleCommandPass:
+		if request.parentPatch == nil || request.parentPatch.Command == "" {
+			return false
+		}
+		whole = *request.parentPatch
+	case request.readingTwin:
+		if request.Input.DialectHint != actionfacts.DialectPowerShell ||
+			request.Input.Command != request.windowsPowerShellReading.input.Command {
+			return false
+		}
+	case request.windowsDialectReadings && request.Input.DialectHint == "":
+		// The call's own unhinted reading is the inferred POSIX one.
+	default:
+		return false
+	}
+	whole.DialectHint = actionfacts.DialectPOSIX
+	if request.simpleCommandPass || request.readingTwin || uncached {
+		posix = actionfacts.Analyze(whole)
+	}
+	if posix.Parse.Dialect != actionfacts.DialectPOSIX || posix.Parse.Unread ||
+		posix.Parse.Status != actionfacts.StatusComplete && posix.Parse.Status != actionfacts.StatusPartial {
+		return false
+	}
+	whole.DialectHint = actionfacts.DialectPowerShell
+	reading := actionfacts.Facts{}
+	if uncached {
+		reading = actionfacts.Analyze(whole)
+	} else {
+		reading = request.windowsPowerShellReading.factsFor(whole)
+	}
 	if reading.Parse.Dialect != actionfacts.DialectPowerShell || reading.Parse.Unread ||
 		reading.Parse.Status != actionfacts.StatusComplete && reading.Parse.Status != actionfacts.StatusPartial ||
 		len(reading.Commands) == 0 || len(reading.Commands) != len(posix.Commands) {
@@ -62,8 +104,18 @@ func powerShellReadingPlacesEveryWrite(request trustedActionRequest, posix actio
 		if !strings.EqualFold(command.Program, other.Program) {
 			return false
 		}
-		if len(posixWrites[other.ID]) != 0 && len(readingWrites[command.ID]) == 0 {
-			return false
+		for _, write := range posixWrites[other.ID] {
+			matched := false
+			for _, placed := range readingWrites[command.ID] {
+				if write.Access == placed.Access &&
+					placedWriteBase(write.Value) == placedWriteBase(placed.Value) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
 		}
 		for _, write := range readingWrites[command.ID] {
 			placed := write.Resolved
