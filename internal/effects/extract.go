@@ -153,11 +153,15 @@ func unionPOSIXReading(res *Result, guessed Dialect, runsNothing bool, call Call
 	// placedAt maps an alt effect (1-based, as Source.Effect) to its 1-based
 	// place in res, so the data sources of the added effects point into res.
 	placedAt := make(map[int]int, len(alt.Effects))
+	// placed is an added alt effect: its places in res, and the effects of
+	// the guessed reading it takes the place of (misread).
 	type placed struct {
-		at    int
-		remap bool // its data came from alt: its sources index alt
+		alt     int
+		at      []int
+		misread []Effect
 	}
 	var added []placed
+	guessedLen := len(res.Effects)
 	for i, e := range alt.Effects {
 		known := e.TargetState == TargetStateKnown && e.RoleState == RoleStateKnown
 		mutation := false
@@ -173,32 +177,57 @@ func unionPOSIXReading(res *Result, guessed Dialect, runsNothing bool, call Call
 			continue
 		}
 		e.Cond = true
-		var misread []int
+		p := placed{alt: i}
 		if known && mutation && e.Target.Type == TargetPath && e.Target.Path != "" {
 			have[k] = true
-			dataFromGuess := false
+			// In place, so the data sources of the guessed reading stay valid.
 			for gi, g := range res.Effects {
 				if g.Kind == e.Kind && g.Target.Path == e.Target.Path {
-					misread = append(misread, gi)
-					e, dataFromGuess = mergeGuessedInto(e, g, dataFromGuess)
+					p.at = append(p.at, gi)
+					p.misread = append(p.misread, g)
 				}
 			}
-			// In place, so the data sources of the guessed reading stay valid.
-			for _, gi := range misread {
-				res.Effects[gi] = e
-				added = append(added, placed{gi, !dataFromGuess})
+		}
+		if len(p.at) == 0 {
+			res.Effects = append(res.Effects, e)
+			p.at = []int{len(res.Effects) - 1}
+		}
+		placedAt[i+1] = p.at[0] + 1
+		added = append(added, p)
+	}
+	// An alt effect not added (a read, when only the known mutations are) is
+	// the guessed reading effect of the same kind on the same file when it
+	// has one: a POSIX write of what that read produced keeps the read as its
+	// source (GAP-2084: cat ~/.git-credentials > "C:\Temp\o.txt" lost its src,
+	// so the read had no content flow). Only a producer with no such twin is
+	// dropped.
+	twin := make(map[unionKey]int, guessedLen)
+	for gi := 0; gi < guessedLen; gi++ {
+		if g := res.Effects[gi]; g.Target.Type == TargetPath && g.Target.Path != "" {
+			if _, dup := twin[unionKeyOf(g)]; !dup {
+				twin[unionKeyOf(g)] = gi + 1
 			}
 		}
-		if len(misread) == 0 {
-			res.Effects = append(res.Effects, e)
-			misread = []int{len(res.Effects) - 1}
-			added = append(added, placed{misread[0], true})
-		}
-		placedAt[i+1] = misread[0] + 1
 	}
+	for i, e := range alt.Effects {
+		if _, ok := placedAt[i+1]; ok || e.Target.Type != TargetPath || e.Target.Path == "" {
+			continue
+		}
+		if at, ok := twin[unionKeyOf(e)]; ok {
+			placedAt[i+1] = at
+		}
+	}
+	// The sources are remapped before the merge, so mergeGuessedInto weighs
+	// the producers the effect keeps in res, not the alt indices it named.
 	for _, p := range added {
-		if p.remap {
-			res.Effects[p.at].Data = remapSources(res.Effects[p.at].Data, placedAt)
+		e := alt.Effects[p.alt]
+		e.Cond = true
+		e.Data = remapSources(e.Data, placedAt)
+		for _, g := range p.misread {
+			e = mergeGuessedInto(e, g)
+		}
+		for _, at := range p.at {
+			res.Effects[at] = e
 		}
 	}
 	if posixRuns {
@@ -227,15 +256,15 @@ func unionKeyOf(e Effect) unionKey {
 // target and role stay (they are the resolved ones) and the effect stays Cond;
 // the guessed effect's data is kept when it is the stronger (the POSIX effect
 // has none, or the guessed one names its producers or carries more), and a
-// link-target role of either is kept. fromGuess reports that e's data is now
-// the guessed reading's (its sources index res, not alt).
-func mergeGuessedInto(e, g Effect, fromGuess bool) (Effect, bool) {
+// link-target role of either is kept. Both data index res: the POSIX
+// sources are remapped before the merge.
+func mergeGuessedInto(e, g Effect) Effect {
 	if g.Data != nil && (e.Data == nil || (len(e.Data.Sources) == 0 && len(g.Data.Sources) > 0) || g.Data.Bytes > e.Data.Bytes) {
 		d := *g.Data
-		e.Data, fromGuess = &d, true
+		e.Data = &d
 	}
 	e.LinkTarget = e.LinkTarget || g.LinkTarget
-	return e, fromGuess
+	return e
 }
 
 // remapSources points the data sources of an effect taken from the POSIX
