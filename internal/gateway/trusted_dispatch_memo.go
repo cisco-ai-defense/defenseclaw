@@ -152,7 +152,7 @@ func trustedDispatchRun(request trustedActionRequest) {
 
 func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedActionRequest) []RuleFinding {
 	if request.record != nil || request.recordTelemetry != nil || request.recordEffectShadow != nil ||
-		trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
+		request.aliasPending != nil || trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
 		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(ctx, request)
 	}
