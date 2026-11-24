@@ -230,9 +230,9 @@ When a change can run code on this machine, --apply asks first (the default answ
 that safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,
 --allow-flagged writes them too.
 
-Run it on the computer you started the agent from: it compares the changes with the folder you
-sent, and only that computer keeps a record of it. From another computer, connect to the agent and
-git push its work from inside it.`,
+On the computer you started the agent from, it compares the changes with the folder you sent. On
+another computer, run it in a git checkout of that folder: it compares the agent's work with the
+checkout's last commit, so files sent that were not committed show as added.`,
 		Example: "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests\n" +
 			"defenseclaw substrate pull fix-tests-7f3a --push-branch agent/fix-tests",
 		Args: cobra.ExactArgs(1),

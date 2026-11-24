@@ -104,6 +104,10 @@ type hostRecord struct {
 	// folder pull runs in as the project, on any OS.
 	CloneURL string `json:"clone_url,omitempty"`
 	CloneRef string `json:"clone_ref,omitempty"`
+	// LocalHead is set on a computer that did not run run (GAP-0489): the
+	// baseline is this commit of Project, and the record serves pull and
+	// apply only (push, sync, checkpoint and undo still refuse here).
+	LocalHead string `json:"local_head,omitempty"`
 }
 
 func hostDir(dataDir string) string { return filepath.Join(dataDir, "substrate", "hostcopies") }
@@ -149,7 +153,7 @@ func RemoteDirOf(dataDir, name string) string {
 	if rec, err := osw.LoadCopy(dataDir, name); err == nil && rec != nil && rec.RemoteDir != "" {
 		return rec.RemoteDir
 	}
-	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.RemoteDir != "" {
+	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.RemoteDir != "" && rec.LocalHead == "" {
 		return rec.RemoteDir
 	}
 	return ""
@@ -159,17 +163,18 @@ func RemoteDirOf(dataDir, name string) string {
 // copy: on Windows, and for a clone everywhere.
 func usesHostCopy(dataDir, name string) bool {
 	rec, err := loadHostRecord(dataDir, name)
-	return err == nil && (hostCopy || rec.CloneURL != "")
+	return err == nil && (hostCopy || rec.CloneURL != "" || rec.LocalHead != "")
 }
 
-// HasCopy reports whether this computer has a copy record for name that
-// pull can read.
+// HasCopy reports whether this computer has the record of a copy it sent
+// (run or run --clone) for name. A baseline pull took from a checkout on
+// another computer (GAP-0489) is not one.
 func HasCopy(dataDir, name string) bool {
 	if _, err := osw.LoadCopy(dataDir, name); err == nil {
 		return true
 	}
-	_, err := loadHostRecord(dataDir, name)
-	return err == nil
+	rec, err := loadHostRecord(dataDir, name)
+	return err == nil && rec.LocalHead == ""
 }
 
 // --- git on this computer ---------------------------------------------------
@@ -796,6 +801,9 @@ func hostPull(ctx context.Context, opts PullOptions, label string) (*Review, err
 		}
 		b, err := hostGit(ctx, gitDir, []string{"GIT_DIR=" + gitDir}, nil, "cat-file", "blob", oid)
 		return b, err == nil
+	}
+	if rec.LocalHead != "" {
+		notes = append([]string{elsewhereNote(rec.LocalHead)}, notes...)
 	}
 	rep := osw.ReviewReport{Name: opts.Name, Project: rec.Project, Changes: changes, Warnings: notes}
 	rep.Flags = osw.ReviewFlags(changes, content, nil)

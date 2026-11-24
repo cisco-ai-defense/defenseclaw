@@ -667,9 +667,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "files,\n"
             "--allow-flagged writes them too.\n"
             "\n"
-            "Run it on the computer you started the agent from: it compares the changes with the folder you\n"
-            "sent, and only that computer keeps a record of it. From another computer, connect to the agent and\n"
-            "git push its work from inside it."
+            "On the computer you started the agent from, it compares the changes with the folder you sent. On\n"
+            "another computer, run it in a git checkout of that folder: it compares the agent's work with the\n"
+            "checkout's last commit, so files sent that were not committed show as added."
         ),
         example=(
             "defenseclaw substrate pull fix-tests-7f3a\n"

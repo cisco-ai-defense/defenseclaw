@@ -107,6 +107,13 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 	if opts.Exec == nil {
 		return nil, errors.New("workspace: pull needs a transport to the actor")
 	}
+	if c, ok := opts.Exec.(*Client); ok && !HasCopy(opts.DataDir, opts.Name) {
+		// Another computer than the one that ran run (GAP-0489): the
+		// baseline is this folder's last commit.
+		if err := adoptBaseline(ctx, c, opts.DataDir, opts.Name, opts.Project); err != nil {
+			return nil, err
+		}
+	}
 	if usesHostCopy(opts.DataDir, opts.Name) {
 		return hostPull(ctx, opts, firstNonEmpty(opts.Label, opts.Name))
 	}

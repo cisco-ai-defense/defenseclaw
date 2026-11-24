@@ -174,9 +174,6 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
-	if !workspace.HasCopy(dataDir, name) {
-		return substratePullElsewhere(a)
-	}
 	rel, err := substrateOpenRelay(ctx, s, a)
 	if err != nil {
 		return err
@@ -187,6 +184,10 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: ".",
 		RestoreSecretLines: f.restoreSecrets})
 	if err != nil {
+		var nr *workspace.NoRecordError
+		if errors.As(err, &nr) {
+			return substratePullElsewhere(a, nr)
+		}
 		return fmt.Errorf("could not read the agent's work: %w", err)
 	}
 	if asJSON {
@@ -260,20 +261,17 @@ func substratePullAccept(f *substratePullFlags, sensitive, interactive bool, ask
 }
 
 // substratePullElsewhere is pull's refusal on a computer that keeps no
-// record of the copy (GAP-0489): the agent is reachable from any computer,
-// but its work is compared with the folder that was sent, and only the
-// computer that ran run (or run --clone) keeps that baseline. The copy of it
-// in the agent's sandbox is the agent's to rewrite, a Windows copy keeps
-// none there, and only that computer knows which files were held back as
-// secrets, so another computer cannot rebuild it safely. The refusal names
-// what works from here instead. Exit 3: running it again on this computer
-// cannot help.
-func substratePullElsewhere(a api.Actor) error {
-	return cliusage.WithExitCode(fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so pull cannot tell what the agent changed: "+
-		"only the computer you ran \"defenseclaw substrate run\" on keeps it. Run pull there (--apply, --branch NAME or --patch-out FILE). "+
-		"From this computer, connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here. "+
+// record of the copy and where the folder pull runs in cannot stand in for
+// it (GAP-0489): it is not a git checkout with a commit, or the agent has no
+// folder of its name. The copy of the baseline in the agent's sandbox is the
+// agent's to rewrite, so it is never used. The refusal names what works.
+// Exit 3: running it again in this folder cannot help.
+func substratePullElsewhere(a api.Actor, why *workspace.NoRecordError) error {
+	return cliusage.WithExitCode(fmt.Errorf("%s/%s: %s. "+
+		"Run pull in a git checkout of the folder you sent (it compares the agent's work with that checkout's last commit), or on the computer you ran \"defenseclaw substrate run\" on. "+
+		"Or connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here. "+
 		"If it was started with run --clone, push the work to its origin as a branch: defenseclaw substrate pull %s --push-branch NAME",
-		a.Atespace, a.Name, a.Name, a.Name), substrateExitRefused)
+		a.Atespace, a.Name, why.Error(), a.Name, a.Name), substrateExitRefused)
 }
 
 // substratePullChoose asks what to do with the changes on a terminal; with
