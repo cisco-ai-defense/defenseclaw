@@ -1919,6 +1919,17 @@ type GuardrailConfig struct {
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
 
+	// IncludeHookEventContent adds the connector event text a hook sent to
+	// Cisco AI Defense (a compact summary, loaded instructions, a config
+	// change, an elicitation or notification, a stop error, a subagent's
+	// text) to the hook_decision record as gen_ai.input.messages, which goes
+	// to the local audit store and every guardrail.evaluation destination.
+	// Off by default, like the inventory content opt-ins
+	// (ai_discovery.include_skill_manifests): it is session content from the
+	// endpoint. The inspection itself does not depend on it. In managed mode
+	// the administrator's config.yaml sets it.
+	IncludeHookEventContent bool `mapstructure:"include_hook_event_content" yaml:"include_hook_event_content,omitempty"`
+
 	// JudgePersistQueueDepth caps the buffered channel that
 	// decouples judge persistence from the proxy hot path. Each
 	// slot holds one pending INSERT into judge_responses; the
