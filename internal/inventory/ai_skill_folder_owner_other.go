@@ -26,14 +26,11 @@ import (
 // skillFolderManaged is skillFolderAdminOwned; tests replace it.
 var skillFolderManaged = skillFolderAdminOwned
 
-// skillManagedNeedsNoLink is false: a link above the folder does not change
-// who may write it (/etc is a link on macOS), and the owner and mode are read
-// from the folder's own handle.
-const skillManagedNeedsNoLink = false
-
 // skillFolderAdminOwned reports whether only root can write the opened skill
-// folder: root owns it and neither its group nor others may write it. A
-// folder outside every home that a user made is not reported as managed.
+// folder: root owns it and neither its group nor others may write it. A link
+// above the folder does not change that (/etc is a link on macOS): the owner
+// and mode are read from the folder's own handle. A folder outside every home
+// that a user made is not reported as managed.
 func skillFolderAdminOwned(dir *os.File, _ string) bool {
 	info, err := dir.Stat()
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {

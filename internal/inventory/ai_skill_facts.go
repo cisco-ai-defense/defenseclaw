@@ -276,9 +276,9 @@ var skillReadDir = (*os.File).ReadDir
 // targets without opening those targets. It retains a root SKILL.md prefix
 // from the same bounded, stable read that supplies that file's digest, and
 // returns that manifest's exact path, so a later readback never lists again.
-// When managed is set it decides, from the handle of the folder it hashes and
-// of every folder and file it opens, whether only administrators can change
-// what was hashed (GAP-2147).
+// When managed is set it decides, from the handle of the folder it hashes
+// (and root, the path it was asked for) and of every folder and file it
+// opens, whether only administrators can change what was hashed (GAP-2147).
 func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, trusted, managed func(*os.File, string) bool) (hash, status string, manifest []byte, manifestPath string, consumed int64, adminOnly bool) {
 	dir, opened, linked, err := openSkillFolder(root, trusted)
 	if errors.Is(err, safefile.ErrSymlinkRefused) {
@@ -288,7 +288,7 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, tru
 		return "", SkillContentUnreadable, nil, "", 0, false
 	}
 	defer dir.Close()
-	folderManaged := managed != nil && !(linked && skillManagedNeedsNoLink) && managed(dir, opened)
+	folderManaged := managed != nil && managed(dir, root)
 	if limit <= 0 {
 		return "", SkillContentTooLarge, nil, "", 0, folderManaged
 	}
