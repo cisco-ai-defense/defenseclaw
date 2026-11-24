@@ -42,6 +42,12 @@ func reapCLIProbe(t *testing.T, pid int) {
 		return
 	}
 	t.Cleanup(func() {
+		// d.Stop may have reaped the probe already, and its PID and process
+		// group may then belong to another process: signal the group only
+		// while the probe still runs (RV-T6A).
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		deadline := time.Now().Add(10 * time.Second)
 		for syscall.Kill(pid, 0) == nil && time.Now().Before(deadline) {
@@ -76,6 +82,17 @@ func TestGAP1056ProbeParent(t *testing.T) {
 // the fix it slept forever with ppid 1 (10 of them held a gate box's heavy
 // slot lock for over 3 h after a -race run of this package was cut off).
 func TestGAP1056ProbeExitsWhenItsTestProcessIsGone(t *testing.T) {
+	gap1056ProbeOutlivesNoParent(t)
+}
+
+// RV-T6A: the parent exits as soon as it sees the marker, before the probe
+// read its parent. Before the fix the probe read its parent after the
+// marker, took ppid 1 for it and never exited.
+func TestGAP1056ProbeWhoseParentExitsAtTheMarker(t *testing.T) {
+	gap1056ProbeOutlivesNoParent(t, gap1056PauseEnv+"=1")
+}
+
+func gap1056ProbeOutlivesNoParent(t *testing.T, env ...string) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "probe.pid")
 	log, err := os.Create(filepath.Join(dir, "parent.log"))
@@ -86,6 +103,7 @@ func TestGAP1056ProbeExitsWhenItsTestProcessIsGone(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP1056ProbeParent$", "-test.count=1")
 	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+filepath.Join(dir, "home"),
 		cliRestartProbeEnv+"="+filepath.Join(dir, "probe-running"), gap1056ParentEnv+"="+pidFile)
+	cmd.Env = append(cmd.Env, env...)
 	// A file, not a pipe: a probe holding the pipe would keep Wait waiting.
 	cmd.Stdout, cmd.Stderr = log, log
 	runErr := cmd.Run()
