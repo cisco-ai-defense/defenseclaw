@@ -853,7 +853,10 @@ func TestSandboxHooksBindTheRegisteredEvent(t *testing.T) {
 		// registration is broken (nil: only no request is required).
 		denied func(sandboxHookRun) bool
 	}{
-		{"codex mismatched event", codex, "codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"}, nil},
+		// A Stop bound hook answers Codex's Stop block, exit 0, as the
+		// native runner does (rel-1-0-10:GAP-1770).
+		{"codex mismatched event", codex, "codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"},
+			func(run sandboxHookRun) bool { return run.exitCode == 0 && lastJSON(run)["decision"] == "block" }},
 		{"copilot no args", copilot, "copilot-hook.sh", nil, nil},
 		{"copilot unknown event", copilot, "copilot-hook.sh", []string{"--event", "futureEvent"}, nil},
 		{"copilot extra args", copilot, "copilot-hook.sh", []string{"--event", "preToolUse", "--x"}, nil},

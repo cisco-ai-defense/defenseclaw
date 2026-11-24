@@ -24,7 +24,7 @@ codex_event_can_control() {
   case "${2:-}" in
     UserPromptSubmit|PreToolUse|PermissionRequest|PostToolUse|Stop) return 0 ;;
     SessionStart|SubagentStop|PreCompact|PostCompact)
-      case "${1:-}" in codex-hooks-v3|codex-hooks-v4) return 0 ;; esac
+      case "${1:-}" in codex-hooks-v3|codex-hooks-v3-generic|codex-hooks-v4) return 0 ;; esac
       ;;
   esac
   return 1
@@ -260,11 +260,14 @@ done
 unset _dc_codex_arg _dc_codex_arg_prev
 # codex_closed_answer [REASON] answers a call this hook blocks as Codex reads
 # a block of the registered event: the event's block object on stdout and
-# exit 0, as the native hook answers (emitCodexBlock). Codex v0.130+ reads a
-# non-zero UserPromptSubmit status as a hook failure and submits the prompt,
-# so exit 2 is no block there (GAP-0949). An event Codex gives no control
-# keeps exit 2, and so do Stop and SubagentStop, where a block only keeps
-# Codex running (#1140) as exit 2 does. Codex shows REASON, else why: the
+# exit 0, as the native hook answers (emitCodexBlock), event for event (the
+# connector tests hold both to one table).
+# Codex v0.130+ reads a non-zero UserPromptSubmit status as a hook failure and
+# submits the prompt, so exit 2 is no block there (GAP-0949). A Stop or
+# SubagentStop block keeps Codex running the turn with REASON (#1140); exit 2
+# with no stderr was read as a hook failure and lost it (GAP-1770). An event
+# Codex gives no control keeps exit 2, except SessionEnd and SubagentStart,
+# which nothing can block: they exit 0. Codex shows REASON, else why: the
 # install, or the failure the hook recorded (_DC_CODEX_BLOCK_REASON). The
 # standalone managed hook answers its blocks the same way (GAP-1755), from
 # its first line: its exit guard is installed here too.
@@ -277,13 +280,18 @@ codex_closed_answer() {
   reason="${reason//\\/\\\\}"
   reason="${reason//\"/\\\"}"
   reason="${reason//[[:cntrl:]]/ }"
-  codex_event_can_control "$_DC_CODEX_CONTRACT" "$_DC_CODEX_EVENT" || exit 2
+  if ! codex_event_can_control "$_DC_CODEX_CONTRACT" "$_DC_CODEX_EVENT"; then
+    case "$_DC_CODEX_EVENT" in
+      SessionEnd|SubagentStart) exit 0 ;;
+    esac
+    exit 2
+  fi
   case "$_DC_CODEX_EVENT" in
-    Stop|SubagentStop) exit 2 ;;
     SessionStart|PreCompact|PostCompact) printf '{"continue":false,"stopReason":"%s"}\n' "$reason" ;;
     PermissionRequest) printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"%s"}}}\n' "$reason" ;;
+    UserPromptSubmit|PostToolUse|SubagentStop|Stop) printf '{"decision":"block","reason":"%s"}\n' "$reason" ;;
     PreToolUse) printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason" ;;
-    *) printf '{"decision":"block","reason":"%s"}\n' "$reason" ;;
+    *) exit 2 ;;
   esac{{if .Sandbox}} || {
     # The answer could not be written: exit 0 with nothing on stdout is a
     # Codex allow, exit 2 still blocks where a status can (GAP-1769).
