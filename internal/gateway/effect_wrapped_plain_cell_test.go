@@ -42,3 +42,37 @@ func TestOwnCredentialReadWrappedKeepsThePlainCell(t *testing.T) {
 		return "alert"
 	})
 }
+
+// TestHookConfigWrappedDeleteKeepsThePlainCell: rm -f and truncate -s0 of an
+// agent hook config behind a prefix wrapper keep the plain call's cell
+// (tamper.agent_hook_config_write: an alert in the default, permissive and
+// managed tiers, a block in strict; GAP-1493). The managed cell is an alert
+// by the owner GAP-1611/1698 ruling.
+func TestHookConfigWrappedDeleteKeepsThePlainCell(t *testing.T) {
+	home := r2Home(t)
+	var ids []string
+	for _, w := range []string{"nohup", "setsid", "sudo", "nice", "env", "timeout-5", "stdbuf-ol", "ionice-c3", "doas"} {
+		ids = append(ids, "det111/GAP-1493/rm-"+w+"/var", "det111/GAP-1493/truncate-"+w+"/var")
+	}
+	ids = append(ids, "det111/GAP-1493/seed-rm-hook/seed", "det111/GAP-1493/seed-truncate-hook/seed")
+	r2Cells(t, det111R2Rows(t, home, ids...), func(_, tier string) string {
+		if r2Strict(tier) {
+			return "block"
+		}
+		return "alert"
+	})
+}
+
+// TestCredentialMoveKeepsTheRemoveCell: mv ~/.aws/credentials elsewhere
+// removes the file as rm ~/.aws/credentials does and blocks in every tier
+// (GAP-2153); the project move stays allowed.
+func TestCredentialMoveKeepsTheRemoveCell(t *testing.T) {
+	home := r2Home(t)
+	r2Cells(t, det111R2Rows(t, home, "det111/R2D/mv-credentials/var", "det111/R2D/mv-credentials/benign"),
+		func(id, _ string) string {
+			if strings.HasSuffix(id, "/benign") {
+				return "allow"
+			}
+			return "block"
+		})
+}
