@@ -52,9 +52,14 @@ func TestGAP2154LaneEnds(t *testing.T) {
 	}
 	r.Add(answerPiece(0, "The answer."))
 	r.Add(messageEndPiece(1))
-	// The answer ends the reasoning's run at once (GAP-2162 round 3).
+	// GAP-2170 parks the reasoning's open run for a short answer: it
+	// may resume after an interleaved text block. It expires at 512 bytes.
+	if o := r.OpenSecret(); !o.open {
+		t.Fatal("short answer did not keep the reasoning run held")
+	}
+	r.Add(answerPiece(0, strings.Repeat("x", streamReasoningAnswerParkMax+1)))
 	if o := r.OpenSecret(); o.open {
-		t.Fatalf("the reasoning (answer of the same choice started) and choice 1 (ended) still hold: %+v", o)
+		t.Fatalf("reasoning stayed held past the short answer bound: %+v", o)
 	}
 	r.Add(answerPiece(1, " and 4111"))
 	if !r.OpenSecret().open {

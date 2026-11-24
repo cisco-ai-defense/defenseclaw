@@ -160,8 +160,9 @@ type secretLane struct {
 	tokenFrom int
 	// parked: the lane's block ended inside an open run, at reply text
 	// offset parkedAt; the run stays held (rel-1-0-10:GAP-2162).
-	parked   bool
-	parkedAt int
+	parked    bool
+	parkedAt  int
+	parkLimit int
 }
 
 // pem advances the private-key state over t and reports an open BEGIN line
@@ -371,8 +372,9 @@ type openSecret struct {
 	overCap bool // an open private-key block passed streamSecretMaxPEM
 }
 
-// OpenSecret advances the open-secret state of every lane over the text
-// added since the last call.
+// OpenSecret advances every lane and same-choice check boundary over text
+// added since the last call. The boundary state holds partial answer bytes
+// behind a split secret until the existing matcher reads them whole.
 func (r *responseText) OpenSecret() openSecret {
 	var o openSecret
 	for i, l := range r.lanes {
@@ -382,6 +384,10 @@ func (r *responseText) OpenSecret() openSecret {
 		o.overCap = o.overCap || over
 		o.open = o.open || pemOpen || r.secret[i].token(t)
 	}
+	for i := range r.boundaries {
+		b := &r.boundaries[i]
+		o.open = o.open || b.secret.token(r.boundaryLine(*b))
+	}
 	return o
 }
 
@@ -389,6 +395,10 @@ func (r *responseText) OpenSecret() openSecret {
 func (r *responseText) ReleaseOpenSecret() {
 	for i, l := range r.lanes {
 		r.secret[i].giveUp(l.String())
+	}
+	for i := range r.boundaries {
+		b := &r.boundaries[i]
+		b.secret.giveUp(r.boundaryLine(*b))
 	}
 }
 

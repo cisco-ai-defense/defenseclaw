@@ -54,7 +54,20 @@ func withWalkerPieces(typed []responsePiece, segs []string) []responsePiece {
 // passthroughReplyText is the model text of a buffered reply: the typed
 // lanes, then every other string of the reply on its own line.
 func passthroughReplyText(body []byte, provider string, segs []string) string {
-	typed := extractPassthroughResponseContent(body, provider)
+	return passthroughReplyTextMode(body, provider, segs, false)
+}
+
+func passthroughReplyCheckText(body []byte, provider string, segs []string) string {
+	return passthroughReplyTextMode(body, provider, segs, true)
+}
+
+func passthroughReplyTextMode(body []byte, provider string, segs []string, check bool) string {
+	var typed string
+	if check {
+		typed = extractPassthroughResponseCheckContent(body, provider)
+	} else {
+		typed = extractPassthroughResponseContent(body, provider)
+	}
 	lines := make([]string, 0, len(segs)+1)
 	if typed != "" {
 		lines = append(lines, typed)

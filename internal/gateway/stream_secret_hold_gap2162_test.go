@@ -122,9 +122,8 @@ func gap2162Rows(t *testing.T, path, tier, pack string, managed bool) []gap1265R
 // and passthrough (OpenAI chat, Anthropic, OpenAI Responses) routes, in
 // every tier, a token or a card cut by a block stop (a tool call, a
 // Responses summary part) or by another choice's text has no byte out before
-// its verdict, and a card is blocked once whole. (A value cut between the
-// thinking and the answer is not matched by any rule: the lanes are read on
-// their own lines, on the parent too; rel-1-0-10:GAP-2166.)
+// its verdict, and a card is blocked once whole. GAP-2166 covers the
+// separate reasoning-to-answer boundary.
 func TestGAP2162SecretSplitAcrossABlockStopIsHeld(t *testing.T) {
 	paths := gap0429PathsNamed(t, "llm", "raw-forward", "passthrough/"+gap0429OpenAIChat.name, "passthrough/anthropic", "passthrough/openai-responses")
 	for _, path := range paths {

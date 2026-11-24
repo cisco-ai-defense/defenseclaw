@@ -370,7 +370,7 @@ func (s *passthroughStream) run() {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.String(), label, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.CheckText(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -534,8 +534,9 @@ func (s *passthroughStream) run() {
 			}
 		}
 		if accumulated.Len() > lastScanLen {
-			initVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
-				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+			checkContent := accumulated.CheckText()
+			initVerdict := p.inspector.InspectMidStream(ctx, "completion", checkContent,
+				[]ChatMessage{{Role: "assistant", Content: checkContent}}, label, mode)
 			p.resolveConfirm(ctx, r, initVerdict, "completion", label, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
@@ -1003,8 +1004,9 @@ read:
 
 		postCtx, postCancel := p.postCallContext(ctx)
 		t0 := time.Now()
-		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
+		checkContent := accumulated.CheckText()
+		respMessages := []ChatMessage{{Role: "assistant", Content: checkContent}}
+		verdict := p.inspector.Inspect(postCtx, "completion", checkContent, respMessages, label, mode)
 		postCancel()
 		p.resolveConfirm(ctx, r, verdict, "completion", label, mode)
 		elapsed := time.Since(t0)
