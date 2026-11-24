@@ -32,14 +32,16 @@ var atomicTransformV2OwnerHealBeforeFileOpen func()
 //
 // It runs only when the account itself cannot open the file, the process may
 // repair managed objects (elevated installer or LocalSystem guardian), the
-// effective user is an ordinary account, the folder is owned by that account
-// and carries exactly that guardian setup DACL, and the file, a single-link
-// regular file reached without reparse points, is owned by LocalSystem,
-// Administrators or TrustedInstaller and has only the two ACEs it inherited
-// from that folder (GAP-1672). A file the account moved in from elsewhere
-// keeps its own DACL (a SYSTEM-only file keeps its protected one), and the
-// account cannot re-propagate inheritance onto a file it has no WRITE_DAC
-// on, so only a file a privileged writer created in the folder qualifies.
+// effective user is an ordinary account, the folder is owned by that account,
+// and the file, a single-link regular file reached without reparse points, is
+// owned by LocalSystem, Administrators or TrustedInstaller and has only the
+// two ACEs of the guardian setup shape, inherited (GAP-1672). That file DACL
+// is the provenance: a file the account moved in from elsewhere keeps its own
+// DACL (a SYSTEM-only file keeps its protected one), and the account cannot
+// re-propagate inheritance onto a file it has no WRITE_DAC on, so only a file
+// a privileged writer created in a folder of that shape qualifies. The
+// folder's current DACL proves nothing more (the account owns the folder and
+// can set it to any shape), so it is not checked (GAP-1759).
 // It then makes the
 // account the owner and adds an explicit full-control entry for it, keeping
 // every other entry and the file's inheritance state; the transaction's own
@@ -89,10 +91,6 @@ func healAtomicTransformV2ConfigLeftToAdmin(path string) error {
 		dirOwner, _, err := dirSecurity.Owner()
 		if err != nil || dirOwner == nil || !dirOwner.Equals(user) {
 			// Not the account's own folder: never hand a file in it over.
-			return nil
-		}
-		if relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(dirSecurity); err != nil || !relaxed {
-			// Not the guardian setup shape: the denial has another cause.
 			return nil
 		}
 		if atomicTransformV2OwnerHealBeforeFileOpen != nil {

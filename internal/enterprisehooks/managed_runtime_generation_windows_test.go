@@ -865,7 +865,7 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T) {
 	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
 	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
-	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, windowsSetupRelaxedDirectorySDDL)
+	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, managed.WindowsSetupRelaxedDirectorySDDL)
 	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
 		t.Fatal("relaxed hooks directory validated as canonical")
 	}
@@ -906,7 +906,7 @@ func TestWindowsManagedRuntimeResolverAcceptsTheRunningGuardiansLongSetupRelax(t
 		windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxByLiveGuardian = previousWait, previousLive
 	})
 	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
-	createWindowsManagedRuntimeTestHooksWithDACL(t, filepath.Join(fixture.options.DataDir, "hooks"), fixture.target, windowsSetupRelaxedDirectorySDDL)
+	createWindowsManagedRuntimeTestHooksWithDACL(t, filepath.Join(fixture.options.DataDir, "hooks"), fixture.target, managed.WindowsSetupRelaxedDirectorySDDL)
 	windowsSetupRelaxByLiveGuardian = func(string, *windows.SID) bool { return false }
 	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
 		t.Fatalf("a relax no running guardian made: err=%v, want untrusted", err)
@@ -955,7 +955,7 @@ func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *
 		return validateWindowsUserPathElement(fixture.options.DataDir, fixture.target, true, true, true)
 	}
 
-	setDACL(t, windowsSetupRelaxedDirectorySDDL)
+	setDACL(t, managed.WindowsSetupRelaxedDirectorySDDL)
 	if err := validate(); err == nil {
 		t.Fatal("relaxed data directory validated as canonical")
 	}
@@ -1058,7 +1058,7 @@ func TestWindowsManagedRuntimeClassifyRefusesABundleInASetupRelaxedRoot(t *testi
 				t.Fatalf("classify over canonical roots: err=%v, want the bundle refused", err)
 			}
 			relaxed := tc.relax(fixture.options.DataDir, hookDir)
-			sddl := windowsSetupRelaxedDirectorySDDL
+			sddl := managed.WindowsSetupRelaxedDirectorySDDL
 			if !tc.refused {
 				sddl += "(A;OICI;FR;;;WD)"
 			}

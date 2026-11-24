@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -51,7 +52,7 @@ func TestWindowsSetupRelaxIsLiveOnlyWithItsRecord(t *testing.T) {
 		}
 	}
 	hooks := filepath.Join(fixture.options.DataDir, "hooks")
-	createWindowsManagedRuntimeTestHooksWithDACL(t, hooks, fixture.target, windowsSetupRelaxedDirectorySDDL)
+	createWindowsManagedRuntimeTestHooksWithDACL(t, hooks, fixture.target, managed.WindowsSetupRelaxedDirectorySDDL)
 	if !windowsManagedRuntimeDirSetupRelaxed(hooks, fixture.target) {
 		t.Fatal("fixture hooks folder is not in the setup relax shape")
 	}

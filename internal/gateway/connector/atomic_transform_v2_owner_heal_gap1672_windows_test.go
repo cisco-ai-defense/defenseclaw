@@ -12,6 +12,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -114,8 +115,11 @@ func TestGAP1672SystemOnlyFileRenamedIntoTheSlotStaysSystemOwned(t *testing.T) {
 
 // TestGAP1672FolderWithoutTheGuardianShapeIsNotHealed: a SYSTEM-owned config
 // the account cannot open, in an account-owned folder whose DACL is not the
-// guardian setup shape (here one extra inheritable entry), is left alone.
-// Fails on f36b28f9db, which never looked at the folder DACL.
+// guardian setup shape (here one extra inheritable entry, which the file
+// inherits), is left alone: the file DACL is not the two inherited ACEs of
+// the setup shape. Fails on f36b28f9db, which never looked at the DACLs.
+// Since GAP-1759 the heal judges only the file DACL (the folder's current
+// DACL is the account's to set); this case still refuses through it.
 func TestGAP1672FolderWithoutTheGuardianShapeIsNotHealed(t *testing.T) {
 	path, _, _ := gap1651Fixture(t, nil)
 	other, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)(A;OICI;0x1200a9;;;BG)")
@@ -130,6 +134,11 @@ func TestGAP1672FolderWithoutTheGuardianShapeIsNotHealed(t *testing.T) {
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, otherDACL, nil); err != nil {
 		t.Fatalf("set a non-guardian folder DACL: %v", err)
+	}
+	if fileSD, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION); err != nil {
+		t.Fatal(err)
+	} else if made, err := managed.IsWindowsSetupRelaxedChildFileDACL(fileSD); err != nil || made {
+		t.Fatalf("fixture: the config did not inherit the extra entry (setup child shape %v, err %v)", made, err)
 	}
 	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("fixture: the account can read its LocalSystem-owned config (err %v)", err)
