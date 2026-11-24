@@ -1557,3 +1557,30 @@ func TestSandboxDaemonStatusNamesTheAgentsRequiredInASandbox(t *testing.T) {
 		})
 	}
 }
+
+// rel-1-0-10:GAP-2060: a managed Mac account that ran its own Homebrew
+// OpenShell gateway on the organization's gateway port was told, by
+// sandbox run, that its settings differ from the organization's and to
+// ask IT to repair them. The cause was its own gateway, which the account
+// stops itself: the pause names it and how to stop it, as the doctor's
+// Other gateway row does, and does not send the person to IT.
+func TestGAP2060DriftFromTheAccountsOwnGatewayNamesIt(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.resolve = floorResolve
+	f.os.drift = []openshell.SettingDrift{{Field: "OpenShell telemetry", Want: "false", Have: "true"}}
+	f.os.others = []string{"pid 27089: /Users/u/homebrew/opt/openshell/bin/openshell-gateway --config /Users/u/homebrew/var/openshell/gateway.toml"}
+	f.run(t)
+	_, err := sandboxapi.NewUnixClient(f.socket).Create(context.Background(), sandboxapi.CreateRequest{Harness: "claudecode"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		t.Fatalf("drifted create: %v", err)
+	}
+	text := err.Error()
+	for _, want := range []string{"another OpenShell gateway runs in your account (pid 27089: ", "OpenShell telemetry", "`kill 27089`"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("paused by the account's own gateway: %q, want %q in it", text, want)
+		}
+	}
+	if strings.Contains(text, "Ask IT") {
+		t.Fatalf("the account's own gateway sends the person to IT: %q", text)
+	}
+}

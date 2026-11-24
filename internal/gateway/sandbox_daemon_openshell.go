@@ -1184,8 +1184,15 @@ func (d *SandboxDaemon) readyOpenShell(ctx context.Context, s sandboxrelay.Daemo
 		drift = blockingOpenShellDrift(drift)
 	}
 	if len(drift) > 0 {
+		// The account's own gateway on the port (a Homebrew one started by
+		// hand) is the cause the person can act on, not IT
+		// (rel-1-0-10:GAP-2060).
+		msg := sandboxapi.SettingsDrift(driftFields(drift))
+		if others := d.openShell.OtherGateways(ctx, s); len(others) > 0 {
+			msg = sandboxapi.SettingsDriftOtherGateway(driftFields(drift), others[0])
+		}
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
-			Message: sandboxapi.SettingsDrift(driftFields(drift)), Detail: sandboxrelay.EventSettingsDrift}
+			Message: msg, Detail: sandboxrelay.EventSettingsDrift}
 	}
 	return d.prepareOpenShell(ctx, s)
 }
