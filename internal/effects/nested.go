@@ -617,9 +617,12 @@ func interpreterInvocation(args []Word) interpCall {
 }
 
 var (
-	pythonOpenArgRead     = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
-	pythonOpenSingleRead  = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
-	pythonOpenDoubleRead  = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenArgRead    = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenSingleRead = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenDoubleRead = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	// pythonPrintOpenRead is a read whose text the code prints at once:
+	// print(open(...).read()) or sys.stdout.write(open(...).read()).
+	pythonPrintOpenRead   = regexp.MustCompile(`\b(?:print|sys\s*\.\s*stdout\s*\.\s*write)\s*\(\s*open\s*\(\s*(?:sys\s*\.\s*argv\s*\[\s*[1-9][0-9]*\s*\]|'[^'\\\n]+'|"[^"\\\n]+")\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(\s*\)\s*\)`)
 	pythonOpenArgWrite    = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
 	pythonOpenSingleWrite = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
 	pythonOpenDoubleWrite = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
@@ -812,6 +815,19 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 	}
 	seen := map[string]bool{}
 	readArgs, readLiterals := pythonOpenReadSources(origin.Program, code, ic.args)
+	// The stage-level stdout proof applies to every read in this command.
+	// Keep it only when there is exactly one recognized read and that read
+	// is the direct argument of print/write, so unrelated reads stay private.
+	readCount := len(pythonOpenArgRead.FindAllStringIndex(code, maxCodeLiterals)) +
+		len(pythonOpenSingleRead.FindAllStringIndex(code, maxCodeLiterals)) +
+		len(pythonOpenDoubleRead.FindAllStringIndex(code, maxCodeLiterals))
+	if readCount == 1 && (len(readArgs) > 0 || len(readLiterals) > 0) && pythonPrintOpenRead.MatchString(code) {
+		// The code prints what it reads on the call's stdout, as cat does:
+		// the stage shows its reads unless it is piped on or redirected
+		// (commandStage), so python3 -c 'print(open(sys.argv[1]).read())'
+		// KEY is the read cat KEY is (rel-1-0-10:GAP-0893).
+		w.printsOut = true
+	}
 	writeArgs, writeLiterals := pythonOpenWriteTargets(origin.Program, code, ic.args)
 	deleteArgs, deleteLiterals := inlineDeleteTargets(origin.Program, code, ic.args)
 	emitRead := func(spelling string) {
