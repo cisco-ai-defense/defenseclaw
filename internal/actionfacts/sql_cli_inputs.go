@@ -22,9 +22,10 @@ import (
 // within its bounds; caps holds the statement cap of a query read only in
 // part.
 //
-// unreadDanger reports a query whose statements past the cap hold a modeled
-// danger keyword (sqlUnreadDanger): the cap then takes the truncated row,
-// not the record (DET111 ruling on T23 review P3-1).
+// unreadDanger reports a query with a statement past the cap that holds a
+// modeled danger keyword and could not be read alone (sqlStatements): the
+// cap then takes the truncated row, not the record (DET111 ruling on T23
+// review P3-1).
 func sqlCLIReadInputs(input Input, facts Facts) (inputs []exactSQLMutationInput, caps bounded.CapSet, unreadDanger bool) {
 	if input.Tool == "sql_query" || !facts.Authoritative() {
 		return nil, caps, false
@@ -57,11 +58,10 @@ func sqlStatementCandidates(candidate exactSQLMutationInput) (candidates []exact
 	if candidate.source == SQLMutationQueryStructured {
 		return []exactSQLMutationInput{candidate}, false, false
 	}
-	statements, capped, unread := sqlStatements(candidate.engine, candidate.query)
+	statements, capped, danger, unreadDanger := sqlStatements(candidate.engine, candidate.query)
 	if len(statements) <= 1 && !capped {
 		return []exactSQLMutationInput{candidate}, false, false
 	}
-	unreadDanger = capped && sqlUnreadDanger(candidate.engine, unread)
 	candidates = make([]exactSQLMutationInput, len(statements))
 	open := -1 // index of the first statement of the open transaction
 	undo := func(end int) {
@@ -88,6 +88,14 @@ func sqlStatementCandidates(candidate exactSQLMutationInput) (candidates []exact
 	}
 	if open >= 0 && !capped {
 		undo(len(statements))
+	}
+	// The statements past the cap with a danger keyword are judged as their
+	// bare form too (GAP-2122: the unpadded cell); a transaction around
+	// them is not read, so none is taken as rolled back.
+	for _, statement := range danger {
+		extra := candidate
+		extra.query = statement.text
+		candidates = append(candidates, extra)
 	}
 	return candidates, capped, unreadDanger
 }

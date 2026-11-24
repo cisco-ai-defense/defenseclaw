@@ -1101,17 +1101,23 @@ func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier
 // one, so the finding is dropped. The generation is read only when there is
 // such a finding.
 //
-// The call's own restricted finding on the same credential class folds into
-// a kept class finding, as the plain write's folds into the reader's
-// (decide.FoldsIntoLegacy); with no class rule in the pack it stands, so the
-// alias write keeps its restricted verdict (GAP-2114).
+// The call's own restricted finding is kept beside it: an alias write keeps
+// the T23 restricted cell in every pack, the call taking the stronger of the
+// class cell and that one (DET111 ruling on GAP-2114 and GAP-2121), and a
+// call that also writes the member by an effects-only spelling keeps the
+// cell of that write alone.
+//
+// A class finding is marked floorRaiseOnly (a reading 1.0.10 did not have:
+// its proof is the reader's, zero, but no 1.0.10 reader made it), so no
+// effect finding of the call folds into it (foldTargetsFor); a real reader
+// finding of the class still takes the restricted finding, as for the plain
+// write.
 func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *compiledRulePackCategories) []RuleFinding {
 	out := findings[:0]
-	var graded []string
 	for _, f := range findings {
 		// Only the class rule finding of a credential write: the call's
 		// effect.protected_target_<tier> finding has a credential proof too
-		// and is folded or kept below.
+		// and keeps its own grading.
 		if f.Proof.Kind != decide.KindRead && f.Proof.Source == decide.SourceEffects &&
 			(f.Proof.Target == decide.TargetCredential || f.Proof.Target == decide.TargetOtherHomeCredential) &&
 			f.RuleID != "" && f.RuleID == decide.RuleFor(f.Proof) {
@@ -1119,18 +1125,11 @@ func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *com
 			if severity == "" {
 				continue
 			}
-			graded = append(graded, f.Proof.Set)
-			f.Severity, f.Proof = severity, decide.Proof{}
+			f.Severity, f.Proof, f.floorRaiseOnly = severity, decide.Proof{}, true
 		}
 		out = append(out, f)
 	}
-	if len(graded) == 0 {
-		return out
-	}
-	return slices.DeleteFunc(out, func(f RuleFinding) bool {
-		return f.RuleID == decide.RuleEffectRestricted && f.Proof.Source == decide.SourceEffects &&
-			f.Proof.Target == decide.TargetCredential && f.Proof.Set != "" && slices.Contains(graded, f.Proof.Set)
-	})
+	return out
 }
 
 // effectRuleSeverity is the highest severity a generation (and each member
