@@ -37,7 +37,13 @@ func TestWindowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(t *testing.T) 
 		{name: "claude enrolled, control keys only", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge"}`},
 		{name: "claude enrolled, merge with policy", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge","permissions":{"deny":["Bash(curl:*)"]}}`},
 		{name: "claude enrolled, merge disables hooks", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge","disableAllHooks":true}`, refused: true},
-		{name: "claude enrolled, own hooks table", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[]}}`},
+		// GAP-1801 (a): a hooks table that names no DefenseClaw hook cannot be
+		// DefenseClaw's matrix, so it is refused before anything changes (the
+		// enrolment gate refused it at rel, after Setup changed the machine); a
+		// table that names the DefenseClaw hook still defers to enrolment, which
+		// compares it with the installed hook.
+		{name: "claude enrolled, hooks table without DefenseClaw", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[]}}`, refused: true},
+		{name: "claude enrolled, DefenseClaw hooks table", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"\"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe\" claudecode"}]}]}}`},
 		{name: "claude enrolled, no value", connectors: []string{"claudecode"}, value: ""},
 		{name: "claude not enrolled, value set", connectors: []string{"codex", "copilot"}, value: `{"env":{}}`},
 		{name: "config not loadable", loadErr: errors.New("bad config"), value: "{}"},

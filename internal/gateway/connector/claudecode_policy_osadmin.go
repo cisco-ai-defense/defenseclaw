@@ -214,8 +214,8 @@ func ClaudeCodeOSAdminPolicyMergeCaveats(opts SetupOpts) []string {
 // ClaudeCodeOSAdminPolicyPreflight is the Setup preflight's verdict on the raw
 // HKLM Settings value before anything is installed: nil when the value is
 // empty, carries only source-control keys, merges managed sources, or carries
-// its own hooks table (checked at enrolment); otherwise the refusal naming
-// the fix (GAP-1731).
+// a hooks table that names a DefenseClaw hook (checked at enrolment); otherwise
+// the refusal naming the fix (GAP-1731, GAP-1801).
 func ClaudeCodeOSAdminPolicyPreflight(raw, label string) error {
 	if strings.TrimSpace(raw) == "" {
 		return nil
