@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -420,39 +421,37 @@ func psNativeArchiveCallWords(command *psparse.Command, program, home string) (w
 	return words, static
 }
 
-// psArchiveCallDestination is the folder a native extractor call extracts
-// in when PowerShell runs it (GAP-1634): text is the one call, read with the
-// words PowerShell hands the program, so -C $env:USERPROFILE\.defenseclaw is
-// that folder of the home, where the POSIX reading of the same text has no
-// static word and the extraction could write anywhere. It is read only for
-// a Windows home (a drive path): there the agent's shell is PowerShell and
-// these spellings are its own; elsewhere, and for a call it cannot read as
-// one native extractor call, it is "" (anywhere), as before.
-func psArchiveCallDestination(text, program, cwd, home string) string {
+// psArchiveCallWords are the words PowerShell hands the native extractor of
+// text, one call (GAP-1634): -C $env:USERPROFILE\.defenseclaw is that folder
+// of the home, where the POSIX reading of the same text has a word with no
+// static spelling, so the extraction could write anywhere and any word could
+// be an option. They are read only for a Windows home (a drive path): there
+// the agent's shell is PowerShell and these spellings are its own. ok is
+// false for any other home, a text that is not one clean extractor call of
+// program, or a word with no static spelling here either.
+func psArchiveCallWords(text, program, home string) (words []string, static []bool, ok bool) {
 	if len(home) < 3 || home[1] != ':' || !strings.ContainsAny(text, `$\`) {
-		return ""
+		return nil, nil, false
 	}
 	script, _ := psparse.Parse(text, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) > 0 {
-		return ""
+		return nil, nil, false
 	}
-	destination, calls := "", 0
+	calls := 0
 	psparse.WalkCommands(script, func(command *psparse.Command) {
 		calls++
-		name, ok := psparse.LiteralString(command.Name)
-		if !ok {
+		name, named := psparse.LiteralString(command.Name)
+		if !named {
 			return
 		}
-		if found, ok := psNativeExtractor(strings.ToLower(name)); !ok || found != program {
-			return
+		if found, extractor := psNativeExtractor(strings.ToLower(name)); extractor && found == program {
+			words, static = psNativeArchiveCallWords(command, program, home)
 		}
-		words, static := psNativeArchiveCallWords(command, program, home)
-		destination = archiveDestination(program, words[1:], static[1:], cwd)
 	})
-	if calls != 1 {
-		return ""
+	if calls != 1 || len(words) == 0 || slices.Contains(static, false) {
+		return nil, nil, false
 	}
-	return destination
+	return words, static, true
 }
 
 // psNativeArchiveWords reads the words of one native extractor call. A whole

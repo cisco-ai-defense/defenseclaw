@@ -4969,6 +4969,13 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			words, static, stackSources = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
 				return archiveDestination(program, words[1:], static[1:], cwd)
 			})
+			if slices.Contains(static, false) {
+				// A PowerShell call of a Windows home names its folder in
+				// PowerShell words: read the call with those (GAP-1634).
+				if psWords, psStatic, ok := psArchiveCallWords(command[call.Pos().Offset():call.End().Offset()], program, home); ok {
+					words, static = psWords, psStatic
+				}
+			}
 		}
 		if opaqueProgram(program) {
 			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:], pipedCalls[call]) {
@@ -5163,13 +5170,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				}
 				if archiveMayLink(program, words[1:], static[1:]) &&
 					!archiveExtractionHoldsNoLink(file, call, program, words[1:], static[1:], dir, command, home, facts, record) {
-					destination := archiveDestination(program, words[1:], static[1:], dir)
-					if destination == "" {
-						// A PowerShell call of a Windows home names its folder in
-						// PowerShell words (GAP-1634).
-						destination = psArchiveCallDestination(command[call.Pos().Offset():call.End().Offset()], program, dir, home)
-					}
-					links.unknownIn(destination)
+					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
 					destination := archiveDestination(program, words[1:], static[1:], dir)
