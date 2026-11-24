@@ -4626,6 +4626,15 @@ var shellProfileNames = []string{".profile", ".bash_profile", ".bashrc", ".zprof
 // (strict) as persistence.shell_profile_write (substrate-1:GAP-1090, live
 // on dc-ent-rhel). The placed reading is the per-user one; the caller keeps
 // only its shell-profile finding.
+//
+// The per-user reading includes the cap floor (withCapFloor): a function
+// whose body runs a command the split cannot read (`f(){ $y; }`, `"$@"`,
+// `$r ~`, `eval "$c"`) puts the call at the unknown tier, and the floor
+// judges the piece `echo x >> .bashrc` alone in the folder, where it is the
+// profile write. The twin is built after the call registered its own floor,
+// in no folder, so a twin of the hook call itself gets a floor of its own in
+// the client directory (substrate-1:GAP-1091). A piece twin's profile twin
+// keeps the call's floor: its pieces are already the call's.
 func protectedHomeShellProfileTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
 	cwd, ok := protectedHomeClientDirectory(request)
 	if !ok || request.SkipLocalFilesystemResolution {
@@ -4639,6 +4648,9 @@ func protectedHomeShellProfileTwinRequest(request trustedActionRequest) (trusted
 	twin.record, twin.recordTelemetry = nil, nil
 	twin.conflictSource = nil
 	twin.Input.CWD = cwd
+	if request.capFloorDepth == 0 {
+		twin.capFloor, twin.capFloorSeen = nil, false
+	}
 	return twin, true
 }
 
