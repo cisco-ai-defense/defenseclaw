@@ -8207,6 +8207,7 @@ function Write-Info([string]$m) {{ "INFO $m" }}
 function Die([string]$m) {{ throw "DIE $m" }}
 {_ps1_function("Get-ProcessesUnder")}
 {_ps1_function("Get-GatewayDescendants")}
+{_ps1_function("Wait-UpgradeCaller")}
 {_ps1_function("Wait-VenvFree")}
 "SCANS=$((Get-GatewayDescendants | ForEach-Object {{ $_.ProcessId }}) -join ',')"
 try {{ Wait-VenvFree; "FREE sleeps=$script:sleeps" }} catch {{ "$($_.Exception.Message)" }}
