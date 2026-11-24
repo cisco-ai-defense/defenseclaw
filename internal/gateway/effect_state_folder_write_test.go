@@ -24,7 +24,9 @@ import (
 // GAP-1285, GAP-2127). The shell text is never run.
 func TestEffectStateFolderWriteTiers(t *testing.T) {
 	home := t.TempDir()
-	for _, name := range []string{".defenseclaw/config.yaml", "proj/notes.txt", "proj/alpha", "proj/beta", "backup/keep.txt", "proj.tar"} {
+	for _, name := range []string{".defenseclaw/config.yaml", "proj/notes.txt", "proj/alpha", "proj/beta", "backup/keep.txt", "proj.tar",
+		"proj/.defenseclaw/config.yaml", "proj/backup/.defenseclaw/config.yaml", "proj/newstate/config.yaml", "proj/config.yaml",
+		"proj/src/x", "proj/out/keep"} {
 		p := filepath.Join(home, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			t.Fatal(err)
@@ -51,11 +53,21 @@ func TestEffectStateFolderWriteTiers(t *testing.T) {
 		{"tar -x -C", "tar -xf proj.tar -C ~/.defenseclaw", ".", true},
 		{"mv dir", "mv proj ~/.defenseclaw/", ".", true},
 		{"mv brace (GAP-1285)", "mv {alpha,beta} ~/.defenseclaw/", "proj", true},
-		// controls the 1.0.10 readers already hold: the state folder moved
-		// away or removed (GAP-1261 mv source)
+		// the GAP-1261 rows: a folder named .defenseclaw copied onto the
+		// state root, the state folder moved away as a source
+		{"cp -rt home", "cp -rt ~ .defenseclaw", "proj", true},
+		{"cp -rt $HOME", `cp -rt "$HOME" backup/.defenseclaw`, "proj", true},
+		{"cp -rt $HOME/ slash", `cp -rt "$HOME/" "$HOME/proj/backup/.defenseclaw/"`, "proj", true},
+		{"cp -r onto $HOME/", `cp -r backup/.defenseclaw "$HOME/"`, "proj", true},
+		{"cp -rT onto $HOME state", `cp -rT backup/.defenseclaw "$HOME/.defenseclaw"`, "proj", true},
+		{"cp -rT onto state", "cp -rT newstate ~/.defenseclaw", "proj", true},
+		{"env cp -rt", "env cp -rt ~ .defenseclaw", "proj", true},
+		{"mv -St state source", "mv -St ~/.defenseclaw config.yaml", "proj", true},
+		// controls the 1.0.10 readers already hold
 		{"mv state folder away", "mv ~/.defenseclaw /tmp/dcx", ".", true},
 		{"mv -S state folder away", "mv -S .bak ~/.defenseclaw /tmp/dcx", ".", true},
 		{"rm -rf state folder", "rm -rf ~/.defenseclaw", ".", true},
+		{"xargs cp -t", "printf '%s\\n' config.yaml | xargs cp -t ~/.defenseclaw", "proj", true},
 		{"benign cp -r", "cp -r proj backup", ".", false},
 		{"benign cp -a", "cp -a proj backup", ".", false},
 		{"benign cp file", "cp proj/notes.txt backup", ".", false},
@@ -67,6 +79,9 @@ func TestEffectStateFolderWriteTiers(t *testing.T) {
 		// a stale lifecycle lock removed: a benign agent trace shape that
 		// keeps its 1.0.10 cell (decision_effect_fold_test)
 		{"benign stale lock rm", "rm -f ~/.defenseclaw/.codex-lifecycle.lock", ".", false},
+		{"benign cp -rt", "cp -rt ~/proj/out src", "proj", false},
+		{"benign cp -r $HOME project", `cp -r src "$HOME/proj/out/"`, "proj", false},
+		{"benign redirect $HOME project", `echo x > "$HOME/proj/out/notes.txt"`, "proj", false},
 	}
 	for _, tier := range boundedTestTiers {
 		want := "alert"

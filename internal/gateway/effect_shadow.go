@@ -202,6 +202,16 @@ func effectCall(connector string, in actionfacts.Input, windowsArg ...bool) (eff
 	if flavor == effects.FlavorWindows && windowsShapedPath(in.ActiveHome) {
 		opts.Env = map[string]string{"USERPROFILE": in.ActiveHome}
 	}
+	if (dialect == effects.DialectPOSIX || dialect == effects.DialectNone && flavor == effects.FlavorPOSIX) && in.ActiveHome != "" {
+		// A POSIX shell inherits HOME from the agent: $HOME and ${HOME} name
+		// the active home as ~ does, not an unread word (DET111 D3; the
+		// "$HOME" spellings of rel-1-0-10:GAP-1261 read as dynamic and
+		// reached no set).
+		if opts.Env == nil {
+			opts.Env = map[string]string{}
+		}
+		opts.Env["HOME"] = in.ActiveHome
+	}
 
 	switch {
 	case effectPatchTool(in.Tool) && effectPatchText(in) != "":
@@ -894,8 +904,9 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 // whose landing is the state folder (~/.defenseclaw) itself or a new child of
 // it: the classifier's protected_dir basis (cp -r proj ~/.defenseclaw, where
 // the copy lands at the folder or below it, dest_may_be_dir) or dir basis (a
-// direct child the set does not list, ~/.defenseclaw/new), for a write or an
-// append (content placed there). Which member the
+// direct child the set does not list, ~/.defenseclaw/new, for a write or an
+// append), or a delete, link or mode change of the folder itself. Which
+// member the
 // write reaches is unknown; that it writes DefenseClaw's own state is not, so
 // the proof is Known on the state class and takes the state-write row (the
 // GAP-0747 cell: an alert in default and permissive, a block in strict, per
@@ -906,13 +917,12 @@ func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (dec
 	if f == nil || f.GetRoleState() != "known" {
 		return decide.Proof{}, false
 	}
+	content := false
 	switch effects.Kind(f.GetKind()) {
 	case effects.KindWrite, effects.KindAppend:
+		content = true
+	case effects.KindDelete, effects.KindLink, effects.KindPermissionChange:
 	default:
-		// A delete, link or mode change of a child the set does not list
-		// keeps its 1.0.10 cell: removing a stale lifecycle lock is a benign
-		// agent trace shape (decision_effect_fold_test, trace
-		// 387bf49e98fa6eb5/481).
 		return decide.Proof{}, false
 	}
 	t := f.GetTarget()
@@ -920,8 +930,13 @@ func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (dec
 		return decide.Proof{}, false
 	}
 	for _, m := range t.GetProtected() {
+		// A delete, link or mode change of a child the set does not list
+		// keeps its 1.0.10 cell: removing a stale lifecycle lock is a benign
+		// agent trace shape (decision_effect_fold_test, trace
+		// 387bf49e98fa6eb5/481). Of the folder itself (mv -S.bak
+		// ~/.defenseclaw x moves it away) it is a state write.
 		if m.GetSet() == effectrules.SetSelfProtection && m.GetState() == semantic.ProtectedUnknown &&
-			(m.GetReason() == "protected_dir" || m.GetReason() == "dir") {
+			(m.GetReason() == "protected_dir" || content && m.GetReason() == "dir") {
 			return decide.Proof{Kind: effectProofKind(f.GetKind()), Target: decide.TargetState,
 				Certainty: decide.CertKnown, Source: effectProofSource}, true
 		}
