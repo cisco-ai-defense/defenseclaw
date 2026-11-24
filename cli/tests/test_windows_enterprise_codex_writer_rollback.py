@@ -151,6 +151,7 @@ foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseCl
     . ([ScriptBlock]::Create($definition.Extent.Text))
 }
 $script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::new()
+$script:DefenseClawRollbackHoldsMet = 0
 $script:DefenseClawRollbackCoverageDeferred = $false
 $script:DefenseClawRollbackDeferBusyWriter = $false
 $script:DefenseClawTeardownRollbackDeferBusy = $false

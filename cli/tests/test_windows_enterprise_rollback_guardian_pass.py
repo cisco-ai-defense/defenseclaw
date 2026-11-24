@@ -24,15 +24,25 @@ the file names another hook's folder than the one it resolves ("hooks.
 windows_managed_dir ... does not match protected managed directory"), so the
 rollback never activated. Which hook it resolves depends on how far the failed
 run got:
-- late (cap-f2005a: this release's services had started under the guard, so
-  the restored guardian finds this release's records and keeps the guard): the
-  file must name the guard; keeping it (fix2012b) hung the rollback;
-- early (hook_image_start_failed, nothing started): the restored guardian puts
-  its own hook back on its first start, so the file must stay as it is;
-  publishing it for the guard (fix2056 16690c62f4) hung the rollback.
-The readiness reads services_started_under_guard, which the forward run
-records, and keeps the file or publishes it for the guard. Once the restored
-hook is back it is published for that hook. The model below is that guardian.
+- The 1.0.10 guardian puts the recorded hook (hashes.hook) back at the
+  transition path only from its protected copy,
+  hook-guardian\payload\defenseclaw-hook.exe, and only when that copy has the
+  recorded digest. Setup never restores the copy; the failed run's guardian
+  refreshes it with this release's hook on its first pass.
+- early (hook_image_start_failed) and any failure before that pass: the copy is
+  still the restored hook's, the guardian puts that hook back, so the file must
+  stay as it is; publishing it for the guard (fix2056 16690c62f4, and
+  301d88df33 when the run failed between its activating phase and that pass)
+  hung the rollback.
+- late (cap-f2005a) and a missing copy: the guardian leaves the guard in place,
+  so the file must name the guard; keeping it (fix2012b, and 301d88df33 for a
+  snapshot without its field) hung the rollback.
+The readiness (Assert-DefenseClawRestoredTransactionReadyForActivation, run
+here for real) reads that copy against the restored record and keeps the file
+or publishes it for the guard. Once the restored hook is back it is published
+for that hook. The model below is that guardian, deciding from the same copy.
+A Codex writer that holds the lock at that step ends the rollback held, with no
+verify after the guardian pass (the held end, 1618).
 """
 
 from __future__ import annotations
@@ -57,11 +67,13 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tok
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 $real = @('Repair-DefenseClawRecoveredCodexRequirements', 'Read-DefenseClawSmallJson',
     'Get-DefenseClawPlainFileSha256', 'Get-DefenseClawOptionalLayoutValue',
-    'Restore-DefenseClawSnapshotHookAfterActivation', 'Get-DefenseClawEarlyHookField')
+    'Restore-DefenseClawSnapshotHookAfterActivation', 'Get-DefenseClawEarlyHookField',
+    'Assert-DefenseClawRestoredTransactionReadyForActivation', 'Get-DefenseClawRecordedHookSHA256',
+    'Copy-DefenseClawHookPreimage', 'Add-DefenseClawRollbackDeferredHold', 'Get-DefenseClawHeldMessagePath')
 # Present only with the fix; the cases judge behavior, not names.
 $optional = @('Test-DefenseClawCodexRequirementsOwnPublication', 'Complete-DefenseClawRestoredHookGuardianPass',
     'Invoke-DefenseClawRestoredHookGuardianReconcile', 'Start-DefenseClawRestoredGuardianAgain',
-    'Invoke-DefenseClawRestoredHookCodexStep')
+    'Invoke-DefenseClawRestoredHookCodexStep', 'Test-DefenseClawRestoredGuardianKeepsGuard')
 foreach ($name in @($real + $optional)) {
     $definition = $ast.Find({
         param($node)
@@ -78,28 +90,77 @@ $script:VerifyFails = $true
 $script:DefenseClawRecoveredCodexRequirementsNotes = @()
 $script:DefenseClawRollbackTransitionHookPending = $false
 $script:DefenseClawRollbackCodexVerifyDeferred = $false
+$script:DefenseClawRollbackDeferBusyWriter = $false
+$script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::new()
+$script:DefenseClawRollbackHoldsMet = 0
+$script:DefenseClawRollbackCoverageDeferred = $false
 # GAP-2056: the restored 1.0.10 gateway. The file names one hook; verify and
 # the guardian's startup reconcile refuse it unless that is the hook at the
 # transition path, and reconcile publishes it for that hook.
 $script:Model1010 = $Case -like 'restored-1010*'
 $script:GuardianStatus = if ($Case -ceq 'restored-1010-stopped') { 'Stopped' } else { 'Running' }
-# Late: the failed run had started its services under the guard.
-$script:DefenseClawRollbackGuardianKeepsGuard = $Case -in @('restored-1010', 'restored-1010-stopped', 'keep-late')
-$script:EarlyRefusal = $Case -ceq 'restored-1010-early'
+# Repair alone (keep-late): the readiness found that the guard stays.
+$script:DefenseClawRollbackGuardianKeepsGuard = $Case -ceq 'keep-late'
+# The guardian's protected copy at the rollback: still the restored hook's
+# (early, and the P3 window: the run failed after its activating phase, before
+# the forward guardian's first pass), refreshed with this release's hook by that
+# pass (late), or missing.
+$script:PayloadCopy = switch ($Case) {
+    { $_ -in @('restored-1010-early', 'restored-1010-window') } { 'previous release hook' }
+    'restored-1010-nocopy' { $null }
+    default { 'transaction guard hook' }
+}
+# The field 301d88df33 wrote before -Phase activating; this fix reads the copy.
+$script:StartedUnderGuardField = $Case -in @('restored-1010', 'restored-1010-stopped', 'restored-1010-window', 'restored-1010-busy')
+# P4-1: a Codex writer holds the lock at the first check after the hook is back.
+$script:BusyAfterActivation = $false
 function Get-NamedHook { ([IO.File]::ReadAllText($layout.CodexMachinePolicyPath)).Trim() -replace '^managed_hook = ', '' }
 function Get-LiveHook { [IO.File]::ReadAllText($layout.HookPath) }
 function Assert-RestoredGuardianStarts {
-    if ($script:EarlyRefusal) {
-        # No record of the failed release: the guardian puts its own hook back.
-        [IO.File]::WriteAllText($layout.HookPath, 'previous release hook')
+    # 1.0.10 keepWindowsStandaloneHookBinaryLocked: a transition hook that is
+    # not the recorded one is restored from the protected copy only when that
+    # copy has the recorded digest; otherwise it stays.
+    $copy = Join-Path $layout.GuardianDirectory 'payload/defenseclaw-hook.exe'
+    $want = Get-DefenseClawRecordedHookSHA256 -Layout $layout
+    if ((Get-Sha $layout.HookPath) -cne $want -and (Test-Path -LiteralPath $copy -PathType Leaf) -and (Get-Sha $copy) -ceq $want) {
+        Copy-Item -LiteralPath $copy -Destination $layout.HookPath -Force
     }
     if ((Get-NamedHook) -cne (Get-LiveHook)) { $script:calls.Add('guardian-refused') }
+}
+function Get-DefenseClawDeploymentMetadata {
+    param($Layout)
+    [pscustomobject]@{ hashes = [pscustomobject]@{ hook = $script:RecordedHook } }
+}
+# The readiness around the deployment check (stubbed as in
+# test_windows_enterprise_codex_writer_rollback.py); the deployment check runs
+# the recovery the rollback asks for.
+function Get-DefenseClawTransactionServiceStates { param($Services, $GatewayServiceName, $GuardianServiceName) @{ DefenseClawGateway = [pscustomobject]@{ existed = $true }; DefenseClawHookGuardian = [pscustomobject]@{ existed = $true }; br = [pscustomobject]@{ existed = $false }; en = [pscustomobject]@{ existed = $true } } }
+function Get-DefenseClawCMIDBrokerServiceName { param($GatewayServiceName) 'br' }
+function Get-DefenseClawEnumeratorServiceName { param($GuardianServiceName) 'en' }
+function Test-DefenseClawTransactionBrokerTopology { param($Layout) $false }
+function Test-DefenseClawServiceExists { param($Name) $false }
+function Get-DefenseClawTransactionGatewayAccount { param($Snapshot) 'acct' }
+function Assert-DefenseClawEnterpriseDeployment {
+    param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$ServicingTransaction, [switch]$RollbackRestore,
+        $TransitionHookSHA256, [switch]$AllowTransactionRecordedBrokerAbsence, [switch]$AllowTransactionRecordedEnumeratorAbsence,
+        [switch]$RepairRecoveredCodexRequirements, $ExpectedGatewayAccount)
+    if ($RepairRecoveredCodexRequirements) {
+        Repair-DefenseClawRecoveredCodexRequirements -Layout $Layout -GatewayServiceName $GatewayServiceName
+    }
 }
 function Test-DefenseClawStandaloneProfile { $true }
 function Invoke-DefenseClawCodexRequirementsCommand {
     param($Layout, $GatewayServiceName, $Action, [string]$BaseFile = '', [switch]$Teardown)
     $script:calls.Add("codex-$Action")
     if ($script:Model1010) {
+        if ($Action -ceq 'verify' -and $script:BusyAfterActivation -and $script:DefenseClawRollbackDeferBusyWriter) {
+            # GAP-0999 in Invoke-DefenseClawCodexRequirementsCommand: the hold is
+            # recorded and nothing is judged.
+            $script:BusyAfterActivation = $false
+            Add-DefenseClawRollbackDeferredHold -Message 'codex_state_unsettled: the writer is writer.exe (pid 4242) and holds the Codex writer lock'
+            $script:DefenseClawRollbackCoverageDeferred = $true
+            return $null
+        }
         if ($Action -ceq 'verify' -and (Get-NamedHook) -cne (Get-LiveHook)) {
             throw "Codex requirements verify failed: hooks.windows_managed_dir names $(Get-NamedHook), not $(Get-LiveHook)"
         }
@@ -144,7 +205,6 @@ function Start-DefenseClawService { param($Name) $script:calls.Add("start-$Name"
 function Get-DefenseClawServiceChecked { param($Name) [pscustomobject]@{ Name = $Name; Status = $script:GuardianStatus } }
 function Get-DefenseClawServiceStartMode { param($Name) 2 }
 function Test-DefenseClawRollbackHeldMessage { param($Message) $false }
-function Add-DefenseClawRollbackDeferredHold { param($Message) $script:calls.Add('held') }
 
 function Get-Sha([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -160,8 +220,10 @@ $layout = @{
     CodexRequirementsOwnershipPath = $ownership
     InstallStateDirectory = $install
     StateRoot = $state
+    GuardianDirectory = (Join-Path $state 'hook-guardian')
     HookPath = (Join-Path $Scratch 'bin/defenseclaw-hook.exe')
 }
+$script:failure = ''
 if ($script:Model1010) {
     # The 1.0.10 install published the file for its own hook before the upgrade.
     [IO.File]::WriteAllText($requirements, "managed_hook = previous release hook`n")
@@ -191,21 +253,35 @@ elseif ($script:Model1010) {
     # transaction's guard is still the hook until after activation.
     $old = Join-Path $state 'hook.bak'
     [IO.File]::WriteAllText($old, 'previous release hook')
+    $script:RecordedHook = Get-Sha $old
     [IO.File]::WriteAllText($layout.HookPath, 'transaction guard hook')
+    if ($null -ne $script:PayloadCopy) {
+        [void](New-Item -ItemType Directory -Force -Path (Join-Path $layout.GuardianDirectory 'payload'))
+        [IO.File]::WriteAllText((Join-Path $layout.GuardianDirectory 'payload/defenseclaw-hook.exe'), $script:PayloadCopy)
+    }
     $snapshot = [pscustomobject]@{
+        services = @()
         early_hook_guard_copy = 'guard.bak'
+        early_hook_guard_sha256 = (Get-Sha $layout.HookPath)
         early_hook_preimage_sha256 = (Get-Sha $old)
         gateway_service = 'DefenseClawGateway'
         guardian_service = 'DefenseClawHookGuardian'
         files = @([pscustomobject]@{ path = $layout.HookPath; existed = $true; backup = $old })
     }
-    $script:DefenseClawRollbackTransitionHookPending = $true
-    Repair-DefenseClawRecoveredCodexRequirements -Layout $layout -GatewayServiceName 'DefenseClawGateway'
-    $script:DefenseClawRollbackTransitionHookPending = $false
-    # Activation: the restored guardian's startup reconcile.
-    $script:calls.Add('activation')
-    Assert-RestoredGuardianStarts
-    Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $snapshot -Layout $layout
+    if ($script:StartedUnderGuardField) {
+        $snapshot | Add-Member -MemberType NoteProperty -Name services_started_under_guard -Value $true
+    }
+    try {
+        [void](Assert-DefenseClawRestoredTransactionReadyForActivation -Snapshot $snapshot -Layout $layout)
+        # Activation: the restored guardian's startup reconcile.
+        $script:calls.Add('activation')
+        Assert-RestoredGuardianStarts
+        $script:BusyAfterActivation = $Case -ceq 'restored-1010-busy'
+        Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $snapshot -Layout $layout
+    }
+    catch {
+        $script:failure = $_.Exception.Message
+    }
     $script:calls.Add("final-names-$(Get-NamedHook)")
 }
 elseif ($Case -in @('restore', 'restore-same')) {
@@ -233,6 +309,8 @@ $backups = @(Get-ChildItem -LiteralPath $install -Recurse -Filter 'requirements.
     backups = $backups.Count
     deferred = [bool]$script:DefenseClawRollbackCodexVerifyDeferred
     notes = @($script:DefenseClawRecoveredCodexRequirementsNotes).Count
+    holds = $script:DefenseClawRollbackDeferredHolds.Count
+    failure = $script:failure
 } | ConvertTo-Json -Compress -Depth 4
 """
 
@@ -336,3 +414,54 @@ def test_an_early_refusal_rollback_over_published_1_0_10_activates_on_the_restor
     assert result["backups"] == 0, result
     assert result["notes"] == 0, result
     assert "event-defenseclaw_recover" not in calls, calls
+
+
+def _assert_activates_on_the_restored_hook(result: dict) -> list:
+    calls = result["calls"]
+    assert result["failure"] == "", result
+    assert "guardian-refused" not in calls, calls
+    assert calls[-1] == "final-names-previous release hook", calls
+    assert result["backups"] == 0, result
+    assert result["notes"] == 0, result
+    assert "event-defenseclaw_recover" not in calls, calls
+    return calls
+
+
+def test_a_failure_before_the_forward_guardian_pass_keeps_the_file_the_restored_guardian_needs(tmp_path: Path) -> None:
+    # GAP-2056 review P3-1: the run failed after its activating phase and before
+    # its guardian's first pass (301d88df33 had already written
+    # services_started_under_guard). The protected copy is still the restored
+    # hook's, so the restored guardian puts that hook back: the readiness must
+    # keep the file, not publish it for the guard.
+    calls = _assert_activates_on_the_restored_hook(_run(tmp_path, "restored-1010-window"))
+    readiness = calls[: calls.index("activation")]
+    assert "codex-reconcile" not in readiness, calls
+
+
+def test_a_late_refusal_from_a_snapshot_without_the_field_publishes_the_file_for_the_guard(tmp_path: Path) -> None:
+    # The copy was refreshed with this release's hook, so the restored guardian
+    # keeps the guard; the snapshot (an older Setup's) says nothing about it.
+    calls = _assert_activates_on_the_restored_hook(_run(tmp_path, "restored-1010-late-nofield"))
+    readiness = calls[: calls.index("activation")]
+    assert "codex-reconcile" in readiness, calls
+
+
+def test_a_missing_protected_copy_publishes_the_file_for_the_guard(tmp_path: Path) -> None:
+    # No copy to restore from: the restored guardian leaves the guard in place.
+    calls = _assert_activates_on_the_restored_hook(_run(tmp_path, "restored-1010-nocopy"))
+    readiness = calls[: calls.index("activation")]
+    assert "codex-reconcile" in readiness, calls
+
+
+def test_a_busy_codex_writer_after_the_hook_is_back_ends_the_rollback_held(tmp_path: Path) -> None:
+    # GAP-2056 review P4-1: the check of the -RestoredHook step met a Codex
+    # writer that holds the lock; it records the hold and returns. The step must
+    # end held (1618, transaction pending), with no verify after the guardian
+    # pass, which would fail on the file still published for the guard (1603).
+    result = _run(tmp_path, "restored-1010-busy")
+    calls = result["calls"]
+    assert result["failure"] == "", result
+    assert result["holds"] == 1, result
+    wait = "guardian-wait-DefenseClawHookGuardian-True"
+    after = calls[calls.index(wait):] if wait in calls else []
+    assert "codex-verify" not in after, calls
