@@ -6,11 +6,15 @@
 package actionfacts
 
 import (
+	"fmt"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"unicode"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // DefenseClawControlKind names how a command reaches DefenseClaw's own
@@ -43,13 +47,20 @@ const (
 	// disable, a dynamic operand, an unparsed nested shell, a reading the
 	// parse bounds cut). It is judged at the unknown tier.
 	DefenseClawControlUnproven DefenseClawControlKind = "unproven"
+	// DefenseClawControlFault is a reader fault: the reading stopped on an
+	// internal error after the facts before it. The caller answers it as an
+	// evaluation fault of the call (a block in every pack), never as fewer
+	// facts (GAP-1936). Fault holds the error and its stack.
+	DefenseClawControlFault DefenseClawControlKind = "evaluator-fault"
 )
 
 // DefenseClawControlFact is one command of the call that stops or changes the
-// DefenseClaw guardrail. Proven is false for DefenseClawControlUnproven.
+// DefenseClaw guardrail. Proven is false for DefenseClawControlUnproven and
+// DefenseClawControlFault; Fault is set only for DefenseClawControlFault.
 type DefenseClawControlFact struct {
 	Kind   DefenseClawControlKind
 	Proven bool
+	Fault  string
 }
 
 // defenseClawNamespace is the product namespace every packaged program,
@@ -558,11 +569,33 @@ func fanOut(argv []string, name string) ([][]string, bool) {
 // and whose commands the parse could not resolve (a program in a variable, a
 // script fed to a shell on stdin, a reading cut by the parse bounds) is the
 // unknown tier, never a clean allow.
-func DefenseClawControl(facts Facts, text string) []DefenseClawControlFact {
+//
+// The gateway calls it outside Analyze's recovery. A reader fault is reported,
+// not hidden: the facts read before it, then one DefenseClawControlFault fact,
+// which the gateway answers as the evaluation fault of the call, a block in
+// every pack and mode (GAP-1914: a fault here reached the hook's fail-mode
+// answer; GAP-1936: answering it as fewer facts allowed the call).
+func DefenseClawControl(facts Facts, text string) (out []DefenseClawControlFact) {
 	reader := &controlReader{seen: map[DefenseClawControlFact]bool{}}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			out = append(slices.Clip(reader.out), DefenseClawControlFact{
+				Kind:  DefenseClawControlFault,
+				Fault: fmt.Sprintf("defenseclaw control reader: %v\n%s", recovered, debug.Stack()),
+			})
+		}
+	}()
+	if defenseClawControlFaultHook != nil {
+		defenseClawControlFaultHook()
+	}
 	reader.read(facts, text, 0)
 	return reader.out
 }
+
+// defenseClawControlFaultHook is a test-only seam: when non-nil it runs at the
+// start of every DefenseClawControl and after every fact the reading adds,
+// inside its recovery. Production never sets it.
+var defenseClawControlFaultHook func()
 
 type controlReader struct {
 	out  []DefenseClawControlFact
@@ -579,6 +612,9 @@ func (r *controlReader) add(fact DefenseClawControlFact) {
 	if !r.seen[fact] {
 		r.seen[fact] = true
 		r.out = append(r.out, fact)
+	}
+	if defenseClawControlFaultHook != nil {
+		defenseClawControlFaultHook()
 	}
 }
 
@@ -1136,7 +1172,7 @@ func packageManagerRemovesDefenseClaw(manager string, words, flags []string) boo
 // scratch folder) is that test's own gateway, not this host's guard.
 func pidFileInState(text, home string) bool {
 	for start := 0; ; {
-		index := strings.Index(strings.ToLower(text[start:]), ".pid")
+		index := strings.Index(asciifold.Lower(text[start:]), ".pid")
 		if index < 0 {
 			return false
 		}
@@ -2377,7 +2413,7 @@ func namesProduct(text string) bool {
 		}
 		// A Windows service or task: DefenseClaw, then an upper-case letter or
 		// an underscore (DefenseClawGateway, DefenseClawCertGuardian_<hex>).
-		if index := strings.Index(strings.ToLower(base), defenseClawNamespace); index >= 0 && index+len(defenseClawNamespace) < len(base) {
+		if index := strings.Index(asciifold.Lower(base), defenseClawNamespace); index >= 0 && index+len(defenseClawNamespace) < len(base) {
 			next := base[index+len(defenseClawNamespace)]
 			if next >= 'A' && next <= 'Z' || next == '_' {
 				return true

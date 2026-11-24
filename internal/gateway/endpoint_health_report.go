@@ -47,6 +47,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
@@ -1003,7 +1004,7 @@ func endpointHealthServiceExecutable(image string) string {
 		}
 		return image[1 : end+1]
 	}
-	if end := strings.Index(strings.ToLower(image), ".exe"); end >= 0 {
+	if end := strings.Index(asciifold.Lower(image), ".exe"); end >= 0 {
 		return image[:end+len(".exe")]
 	}
 	if end := strings.IndexAny(image, " \t"); end >= 0 {

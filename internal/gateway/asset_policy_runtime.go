@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -2415,7 +2416,7 @@ func mcpServerNameFromPromptField(value string) string {
 	// belt-and-braces guard against pathological inputs.
 	for i := 0; i < 8; i++ {
 		stripped := false
-		lower := strings.ToLower(value)
+		lower := asciifold.Lower(value)
 		for _, prefix := range []string{"mcp:", "mcp__", "mcp/"} {
 			if strings.HasPrefix(lower, prefix) {
 				value = value[len(prefix):]

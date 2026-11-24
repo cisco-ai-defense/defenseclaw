@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // stringLit builds a StringLit from a TokString token, resolving the literal
@@ -339,7 +341,7 @@ func scanEmbeddedVar(runes []rune) (Expr, int) {
 func numberLit(t Token) *Number {
 	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
 	raw := t.Raw
-	lower := strings.ToLower(raw)
+	lower := asciifold.Lower(raw)
 	// multiplier suffix (kb mb gb tb pb)
 	mult := int64(1)
 	for _, suf := range []string{"kb", "mb", "gb", "tb", "pb"} {
@@ -387,7 +389,7 @@ func numberLit(t Token) *Number {
 		}
 		break
 	}
-	low := strings.ToLower(raw)
+	low := asciifold.Lower(raw)
 	// Conservatism for numeric suffix/multiplier combinations whose exact pwsh
 	// value depends on signed-width wrap or suffix/multiplier ordering we do not
 	// model (0xFFy -> -1, 0x100y -> bareword, 1kbl, 1.5l -> 2): do not assert a
