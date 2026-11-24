@@ -27,8 +27,9 @@ func tixRelayBehindIngress(t *testing.T, h http.Handler, kp *tls.Certificate) st
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	tl, _ := relaytls.Split(ln, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
-	go func() { _ = http.Serve(tl, h) }()
+	sp := relaytls.Split(ln.Addr(), &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
+	go func() { _ = http.Serve(sp.TLS(), h) }()
+	go func() { _ = http.Serve(ln, sp.Handler(http.NotFoundHandler())) }()
 	in, err := relaytlstest.NewHTTPIngress(ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)

@@ -132,10 +132,11 @@ func tixRelayServer(t *testing.T, ca *relaytls.CA, uid string) string {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	// The relay's own listener: the upgrade, then TLS (GAP-1067).
-	tl, _ := relaytls.Split(ln, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
+	sp := relaytls.Split(ln.Addr(), &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
+	go func() { _ = http.Serve(ln, sp.Handler(http.NotFoundHandler())) }()
 	go func() {
 		for {
-			c, err := tl.Accept()
+			c, err := sp.TLS().Accept()
 			if err != nil {
 				return
 			}

@@ -267,12 +267,12 @@ func serveListeners(ln net.Listener, h http.Handler, certs *CertSource) error {
 		srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
 		return srv.Serve(ln)
 	}
-	tl, pl := relaytls.Split(ln, certs.ServerConfig(), certs.Rejected)
-	plain := &http.Server{Handler: plainOnlyHandler(), ReadHeaderTimeout: 10 * time.Second}
+	sp := relaytls.Split(ln.Addr(), certs.ServerConfig(), certs.Rejected)
+	plain := &http.Server{Handler: sp.Handler(plainOnlyHandler()), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 2)
-	go func() { errc <- plain.Serve(pl) }()
+	go func() { errc <- plain.Serve(ln) }()
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
-	go func() { errc <- srv.Serve(tl) }()
+	go func() { errc <- srv.Serve(sp.TLS()) }()
 	err := <-errc
 	_ = srv.Close()
 	_ = plain.Close()

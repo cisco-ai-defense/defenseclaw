@@ -5,6 +5,7 @@
 package relaytls
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
@@ -13,7 +14,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -96,10 +96,12 @@ func TestGAP1067NoUpgradeRefused(t *testing.T) {
 	}
 }
 
-// TestGAP1067PlainStreamReplayed: a plain request is handed on byte for
-// byte, also when its head is larger than what Split reads and when the
-// path is the upgrade path without the upgrade headers.
-func TestGAP1067PlainStreamReplayed(t *testing.T) {
+// TestGAP1067UpgradeOnAKeptAliveConnection: the worker Envoy pools its
+// upstream HTTP/1.1 connections to the relay, so the upgrade can come as a
+// later request on a connection that already carried a plain one (the
+// first e1 run of the first-request design answered such a probe 426).
+// Plain requests on the port are served unchanged.
+func TestGAP1067UpgradeOnAKeptAliveConnection(t *testing.T) {
 	ca := newCA(t)
 	key, csr, err := NewKeyAndCSR()
 	if err != nil {
@@ -118,31 +120,60 @@ func TestGAP1067PlainStreamReplayed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	_, pl := Split(ln, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
-	go func() {
-		_ = http.Serve(pl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			b, _ := io.ReadAll(r.Body)
-			sum := sha256.Sum256(b)
-			_, _ = io.WriteString(w, r.URL.Path+" "+hex.EncodeToString(sum[:])+" "+r.Header.Get("X-Big")[:4])
-		}))
-	}()
+	sp := Split(ln.Addr(), &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		sum := sha256.Sum256(b)
+		tag := "plain"
+		if r.TLS != nil {
+			tag = "tls"
+		}
+		_, _ = io.WriteString(w, tag+" "+hex.EncodeToString(sum[:]))
+	})
+	go func() { _ = http.Serve(sp.TLS(), h) }()
+	go func() { _ = http.Serve(ln, sp.Handler(h)) }()
 	body := bytes.Repeat([]byte("relay-body-"), 20000)
 	want := sha256.Sum256(body)
-	for _, tc := range []struct{ path, big string }{
-		{"/files", "abcd"},
-		{"/files", "abcd" + strings.Repeat("x", maxUpgradeHead)},
-		{UpgradePath, "abcd"},
-	} {
-		req, _ := http.NewRequest(http.MethodPost, "http://"+ln.Addr().String()+tc.path, bytes.NewReader(body))
-		req.Header.Set("X-Big", tc.big)
-		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.path, err)
-		}
-		got, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if string(got) != tc.path+" "+hex.EncodeToString(want[:])+" abcd" {
-			t.Fatalf("%s (head %d): %q", tc.path, len(tc.big), got)
-		}
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	req, _ := http.NewRequest(http.MethodPost, "http://actor.invalid/files", bytes.NewReader(body))
+	if err := req.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(raw)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(got) != "plain "+hex.EncodeToString(want[:]) {
+		t.Fatalf("plain request: %q", got)
+	}
+	if br.Buffered() != 0 {
+		t.Fatal("bytes after the plain answer")
+	}
+	conf, _ := ClientConfig(ca.Pool(), uidA)
+	tc, err := Upgrade(t.Context(), raw, conf)
+	if err != nil {
+		t.Fatalf("upgrade on a kept-alive connection: %v", err)
+	}
+	req, _ = http.NewRequest(http.MethodGet, "http://actor.invalid/readyz", nil)
+	if err := req.Write(tc); err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.ReadResponse(bufio.NewReader(tc), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	empty := sha256.Sum256(nil)
+	if string(got) != "tls "+hex.EncodeToString(empty[:]) {
+		t.Fatalf("request over the upgraded TLS: %q", got)
 	}
 }

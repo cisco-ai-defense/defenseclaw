@@ -388,11 +388,8 @@ const (
 	UpgradeProtocol = "defenseclaw.relay-tls.v1"
 	// upgradeHost is the authority of the upgrade request; the relay
 	// stream's requests all name it (attach's reverse proxy).
-	upgradeHost = "actor.invalid"
-	// maxUpgradeHead bounds what Split reads to tell an upgrade from a
-	// plain request; a larger head goes to the plain listener as is.
-	maxUpgradeHead = 16 << 10
-	wsAcceptGUID   = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	upgradeHost  = "actor.invalid"
+	wsAcceptGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
 
 // ErrNoUpgrade is a relay stream that did not switch to TLS: a relay that
@@ -471,80 +468,69 @@ func headerToken(h http.Header, name, token string) bool {
 	return false
 }
 
-// Split serves TLS and plain HTTP on one port. A stream that opens with the
-// Upgrade request is answered 101 and goes to the TLS listener once its TLS
-// handshake is done; any other stream goes, unchanged, to the plain
-// listener, so Substrate's plain wake-up probe still reaches /readyz on the
-// relay's one port (design unknown (a)). A raw TLS ClientHello is not HTTP:
-// the ingress never carries one (GAP-1067), and here it goes to the plain
-// listener, which refuses it. A failed handshake goes to failed when it is
-// not nil (the relay renews at once when the gateway refuses its
-// certificate, GAP-0929).
-func Split(ln net.Listener, tlsConf *tls.Config, failed func(error)) (tlsLn, plainLn net.Listener) {
-	s := &splitter{ln: ln, tls: newChanListener(ln.Addr()), plain: newChanListener(ln.Addr()), failed: failed}
-	go s.run(tlsConf)
-	return s.tls, s.plain
+// Splitter serves TLS and plain HTTP on the relay's one port, so
+// Substrate's plain wake-up probe still reaches /readyz (design unknown
+// (a)). The port serves plain HTTP; the Upgrade request, on any request of
+// any connection (the worker Envoy may send it on a pooled upstream
+// connection), is answered 101 and the connection goes to the TLS
+// listener once its TLS handshake is done. A raw TLS ClientHello is not
+// HTTP: no ingress carries one (GAP-1067), and the plain server refuses
+// it. A failed handshake goes to failed when it is not nil (the relay
+// renews at once when the gateway refuses its certificate, GAP-0929).
+type Splitter struct {
+	tls    *chanListener
+	conf   *tls.Config
+	failed func(error)
 }
 
-type splitter struct {
-	ln         net.Listener
-	tls, plain *chanListener
-	failed     func(error)
+// Split makes the Splitter for a port at addr.
+func Split(addr net.Addr, tlsConf *tls.Config, failed func(error)) *Splitter {
+	return &Splitter{tls: newChanListener(addr), conf: tlsConf, failed: failed}
 }
 
-func (s *splitter) run(conf *tls.Config) {
-	defer s.tls.close()
-	defer s.plain.close()
-	for {
-		c, err := s.ln.Accept()
-		if err != nil {
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
-			}
+// TLS is the listener of upgraded, handshaken TLS connections.
+func (s *Splitter) TLS() net.Listener { return s.tls }
+
+// Handler serves plain on the port and switches an Upgrade request to TLS.
+func (s *Splitter) Handler(plain http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isUpgrade(r) {
+			plain.ServeHTTP(w, r)
 			return
 		}
-		go s.route(c, conf)
-	}
-}
-
-func (s *splitter) route(c net.Conn, conf *tls.Config) {
-	// seen is every byte read from c, so a stream that is not the upgrade
-	// reaches the plain listener exactly as it came.
-	var seen bytes.Buffer
-	br := bufio.NewReaderSize(io.TeeReader(io.LimitReader(c, maxUpgradeHead), &seen), 4096)
-	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
-	req, err := http.ReadRequest(br)
-	_ = c.SetReadDeadline(time.Time{})
-	if err != nil || !isUpgrade(req) {
-		if seen.Len() == 0 {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "relay TLS needs HTTP/1.1", http.StatusHTTPVersionNotSupported)
+			return
+		}
+		c, rw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+		_, err = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+			wsAccept(r.Header.Get("Sec-WebSocket-Key")) + "\r\nSec-WebSocket-Protocol: " + UpgradeProtocol + "\r\n\r\n")
+		if err == nil {
+			err = rw.Flush()
+		}
+		if err != nil {
 			_ = c.Close()
 			return
 		}
-		s.plain.push(&prefixConn{Conn: c, prefix: bytes.NewReader(seen.Bytes())})
-		return
-	}
-	// The gateway sends nothing before the 101, but keep what was read.
-	pre, _ := br.Peek(br.Buffered())
-	pc := &prefixConn{Conn: c, prefix: bytes.NewReader(bytes.Clone(pre))}
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-	_, err = io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "+
-		wsAccept(req.Header.Get("Sec-WebSocket-Key"))+"\r\nSec-WebSocket-Protocol: "+UpgradeProtocol+"\r\n\r\n")
-	if err != nil {
-		_ = c.Close()
-		return
-	}
-	tc := tls.Server(pc, conf)
-	err = tc.Handshake()
-	_ = c.SetDeadline(time.Time{})
-	if err != nil {
-		if s.failed != nil {
-			s.failed(err)
+		// The gateway sends nothing before the 101, but keep what was read.
+		pre, _ := rw.Reader.Peek(rw.Reader.Buffered())
+		tc := tls.Server(&prefixConn{Conn: c, prefix: bytes.NewReader(bytes.Clone(pre))}, s.conf)
+		err = tc.Handshake()
+		_ = c.SetDeadline(time.Time{})
+		if err != nil {
+			if s.failed != nil {
+				s.failed(err)
+			}
+			_ = tc.Close()
+			return
 		}
-		_ = tc.Close()
-		return
-	}
-	s.tls.push(tc)
+		s.tls.push(tc)
+	})
 }
 
 type prefixConn struct {

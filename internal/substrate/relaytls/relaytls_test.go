@@ -56,7 +56,7 @@ func serve(t *testing.T, ca *CA, uid string) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	tl, pl := Split(ln, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
+	sp := Split(ln.Addr(), &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}}, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS != nil {
@@ -65,8 +65,8 @@ func serve(t *testing.T, ca *CA, uid string) string {
 		}
 		_, _ = io.WriteString(w, "plain")
 	})
-	go func() { _ = http.Serve(tl, mux) }()
-	go func() { _ = http.Serve(pl, mux) }()
+	go func() { _ = http.Serve(sp.TLS(), mux) }()
+	go func() { _ = http.Serve(ln, sp.Handler(mux)) }()
 	return ln.Addr().String()
 }
 
