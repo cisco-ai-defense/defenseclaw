@@ -3748,13 +3748,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
 		return true
 	}
-	// runFrom: the held bound behind an open token or digit run was passed;
-	// the reply text offset of the run's first byte (GAP-1306), else -1.
-	runFrom := -1
+	// pastRun: the held bound behind an open token or digit run was passed;
+	// runFrom is the reply text offset of the run's first byte (GAP-1306).
+	pastRun, runFrom := false, -1
 	// secretHeld reports that nothing may be sent now: the text ends inside
 	// an open secret, or a bound on it blocked.
 	secretHeld := func(held int) bool {
-		runFrom = -1
+		pastRun, runFrom = false, -1
 		if !holding {
 			return false
 		}
@@ -3771,8 +3771,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			// Only a token or a digit run is open (GAP-1265): what is held
 			// before the chunk with the run's first byte goes out once the
 			// check has read it, with no verdict, and the run stays held
-			// (GAP-1306).
-			runFrom = accumulated.OpenRunFrom()
+			// (GAP-1306). When the chunks from the run's first byte are over
+			// the bound themselves, the bound decides the run (GAP-1767).
+			pastRun, runFrom = true, accumulated.OpenRunFrom()
 			return false
 		}
 		return true
@@ -3785,9 +3786,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return !streamBlocked
 		}
 		cut := len(hold.buf)
-		if runFrom >= 0 {
-			if k := hold.beforeRun(runFrom); len(hold.buf)-k <= streamSecretMaxHeld {
+		if pastRun {
+			if k := hold.beforeRun(runFrom); runFrom >= 0 && len(hold.buf)-k <= streamSecretMaxHeld {
 				cut = k
+			} else if !secretBound(bounded.Bytes, streamRunHeldWhy) {
+				return false
 			}
 		}
 		if accumulated.Len() > lastScanLen && !scanMid(full) {
@@ -3809,11 +3812,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return
 		}
 		// Past the held bound, the chunks from the one with the open run's
-		// first byte join the hold (GAP-1306).
+		// first byte join the hold (GAP-1306); over the bound themselves,
+		// the bound decides the run (GAP-1767).
 		cut := len(initialChunkBuf)
-		if runFrom >= 0 {
-			if k := heldBeforeRun(initialMarks, runFrom); bufferedBytes(initialChunkBuf[k:]) <= streamSecretMaxHeld {
+		if pastRun {
+			if k := heldBeforeRun(initialMarks, runFrom); runFrom >= 0 && bufferedBytes(initialChunkBuf[k:]) <= streamSecretMaxHeld {
 				cut = k
+			} else if !secretBound(bounded.Bytes, streamRunHeldWhy) {
+				return
 			}
 		}
 		if accumulated.Len() > lastScanLen && !scanMid(true) {
@@ -3856,6 +3862,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				}
 			}
 			if c.FinishReason != nil && *c.FinishReason != "" {
+				accumulated.Add(messageEndPiece(c.Index)) // GAP-2154
 				streamFinishReasons = append(streamFinishReasons, *c.FinishReason)
 				isToolCallFinish = isToolCallFinish || *c.FinishReason == "tool_calls"
 			}
@@ -6726,15 +6733,16 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			// Only a token or a digit run is open (GAP-1265): the held
 			// frames before the one with the run's first byte, every one
 			// checked, go out with no verdict, and the run stays held with
-			// the next frame (GAP-1306). When those are over the bound
-			// themselves, all go out.
+			// the next frame (GAP-1306). When the frames from the run's
+			// first byte are over the bound themselves, the bound decides
+			// the run (TRUNCATED, GAP-1767), then all go out.
 			k := heldBeforeRun(heldMarks, accumulated.OpenRunFrom())
 			rest := heldSize + next
 			for _, f := range heldFrames[:k] {
 				rest -= len(f)
 			}
 			if k == 0 || rest > streamSecretMaxHeld {
-				return false, true
+				return false, secretBound(bounded.Bytes, streamRunHeldWhy)
 			}
 			sendHeld(k)
 			heldAt = time.Now()

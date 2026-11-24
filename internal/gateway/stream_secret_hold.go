@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -61,9 +62,12 @@ import (
 // them, with no verdict, and the rest stays held (rel-1-0-10:GAP-1306: the
 // whole queue went out, and with it the first bytes of a card number or a
 // token cut at that moment). The run is at most streamSecretMaxToken bytes,
-// so what stays is the pieces from its start. Only when those are over the
-// bound themselves (the run's lane gets no text while other lanes stream, or
-// one piece is that large) they all go out as before, with no verdict. While
+// so what stays is the pieces from its start. When those are over the bound
+// themselves (the run's lane gets no text while other lanes stream, or one
+// piece is that large), the bound decides the run as it does an open
+// private-key block: the text is checked, then the unknown tier of the pack
+// decides (TRUNCATED; rel-1-0-10:GAP-1767: they all went out with the run's
+// first bytes and no verdict). While
 // the upstream is quiet behind an open run the client gets a keep-alive, or
 // the held bytes with the run masked, every streamKeepAliveAfter
 // (rel-1-0-10:GAP-1307, stream_keepalive.go).
@@ -87,6 +91,11 @@ const (
 var _ = bounded.Register("gateway.streamSecretMaxHeld", bounded.Bytes, streamSecretMaxHeld)
 
 const pemBeginMark = "-----BEGIN "
+
+// streamRunHeldWhy is the bound reason of an open token or digit run whose
+// own held pieces, from the one with its first byte, are over
+// streamSecretMaxHeld (rel-1-0-10:GAP-1767). The same on every stream path.
+var streamRunHeldWhy = fmt.Sprintf("over %d reply stream bytes held from the first byte of an open token or digit run", streamSecretMaxHeld)
 
 // streamTokenRules are the token shapes of the secret rules (the
 // secrets.yaml of every shipped pack), each with the prefix that starts it
@@ -169,6 +178,10 @@ type secretLane struct {
 	pemLine  int  // start of the first line of the open block not yet read
 	// tokenFrom: a token run that starts before it was given up at a bound.
 	tokenFrom int
+	// parked: the lane's block ended inside an open run, at reply text
+	// offset parkedAt; the run stays held (rel-1-0-10:GAP-2162).
+	parked   bool
+	parkedAt int
 	// segs places the end of the lane in the reply text (GAP-1306): from
 	// lane byte at, the bytes were added when the reply had n bytes of text.
 	// Only the segments that reach the last streamSecretTail bytes are kept,
@@ -295,6 +308,11 @@ func (s *secretLane) giveUp(t string) {
 	s.pemOpen, s.pemFrom = false, len(t)
 	s.tokenFrom = len(t)
 }
+
+// endRun ends the token or digit run open at the end of t: the lane has
+// ended (rel-1-0-10:GAP-2154), so the run is whole. A run that starts in
+// text added later is held as before.
+func (s *secretLane) endRun(t string) { s.tokenFrom = len(t) }
 
 // pemLineEnd finds the end of the line that starts at start: a line feed,
 // or the two characters backslash n of JSON-escaped text (tool arguments);
