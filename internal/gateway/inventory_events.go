@@ -809,7 +809,7 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 // root on the endpoint, and under a managed install it runs as a service
 // account, so "the current user" is either the wrong user or no user at all.
 func inventoryHomeOwner(connectorName, home string) llmEventUser {
-	identity := useridentity.ForHome(home)
+	identity := inventoryIdentityForHome(home)
 	ownerID := sanitizeLLMEventUser(identity.ID)
 	owner := llmEventUser{
 		ID:     ownerID,
@@ -834,6 +834,13 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	}
 	return owner
 }
+
+// inventoryIdentityForHome is the owner lookup of a profile directory
+// (useridentity.ForHome: the directory's owner on Unix, its ProfileList
+// entry on Windows). A test on native Windows answers for a temporary
+// profile, which ProfileList has no entry for, so the attribution after the
+// lookup runs there too (rel-1-0-10:GAP-1690).
+var inventoryIdentityForHome = useridentity.ForHome
 
 // discoveryUserEmail is the connector account address of a discovery
 // signal's owner, read from that owner's own profile, while

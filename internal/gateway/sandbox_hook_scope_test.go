@@ -441,24 +441,24 @@ func TestSandboxPromotedArtifactReadsOnlyProject(t *testing.T) {
 	}
 	mount := sandboxCtx(p.mount)
 	for _, path := range []string{inside, "/work/app/build.sh"} {
-		body, dialect, ok := readPromotedArtifactBounded(mount, path, actionfacts.DialectNone)
+		body, dialect, ok, _ := readPromotedArtifactBounded(mount, path, actionfacts.DialectNone)
 		if !ok || dialect != actionfacts.DialectPOSIX || !bytes.Contains(body, []byte("echo hi")) {
 			t.Fatalf("in-project artifact %s: ok=%v dialect=%v", path, ok, dialect)
 		}
 	}
 	for _, path := range []string{outside, "/tmp/evil.sh", "/work/app/../home/evil.sh"} {
-		if _, _, ok := readPromotedArtifactBounded(mount, path, actionfacts.DialectPOSIX); ok {
+		if _, _, ok, _ := readPromotedArtifactBounded(mount, path, actionfacts.DialectPOSIX); ok {
 			t.Errorf("sandbox artifact %s read from outside the project", path)
 		}
 	}
-	if _, _, ok := readPromotedArtifactBounded(sandboxCtx(p.copy), inside, actionfacts.DialectPOSIX); ok {
+	if _, _, ok, _ := readPromotedArtifactBounded(sandboxCtx(p.copy), inside, actionfacts.DialectPOSIX); ok {
 		t.Fatal("copy-mode artifact read from the host")
 	}
 	nonExec := p.write(t, "plain.sh", "#!/bin/sh\necho x\n", 0o644)
-	if _, _, ok := readPromotedArtifactBounded(mount, nonExec, actionfacts.DialectNone); ok {
+	if _, _, ok, _ := readPromotedArtifactBounded(mount, nonExec, actionfacts.DialectNone); ok {
 		t.Fatal("non-executable direct script accepted")
 	}
-	if _, _, ok := readPromotedArtifactBounded(context.Background(), outside, actionfacts.DialectNone); !ok {
+	if _, _, ok, _ := readPromotedArtifactBounded(context.Background(), outside, actionfacts.DialectNone); !ok {
 		t.Fatal("host artifact read changed")
 	}
 }
