@@ -72,6 +72,14 @@ func TestGAP1024dAbsoluteSessionWorkdirMatchesLaptop(t *testing.T) {
 					}
 					localAction, localRules := gap0545Verdict(t, api, context.Background(), shape, mk(home))
 					actorAction, actorRules := gap0545Verdict(t, api, actor, shape, mk(sandboxauth.SandboxHome))
+					kitAction, kitRules := gap0545Verdict(t, api,
+						gap0545Actor(actor, shape.connector, shape.event, mk(sandboxauth.SandboxHome),
+							gap0545KitFacts(t, shape.connector, shape.event, mk(home), home)),
+						shape, mk(sandboxauth.SandboxHome))
+					if kitAction != localAction || !slices.Equal(kitRules, localRules) {
+						t.Errorf("kit workdir=%q command=%q: laptop %s %v, kit %s %v",
+							tc.workdir, tc.command, localAction, localRules, kitAction, kitRules)
+					}
 					if localAction != actorAction || !slices.Equal(localRules, actorRules) {
 						t.Errorf("workdir=%q command=%q: laptop %s %v, actor %s %v",
 							tc.workdir, tc.command, localAction, localRules, actorAction, actorRules)
