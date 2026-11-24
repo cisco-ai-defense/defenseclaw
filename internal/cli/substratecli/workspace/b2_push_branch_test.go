@@ -39,7 +39,11 @@ func localExec(ctx context.Context, argv []string, dir string, env map[string]st
 	// disable system and global config.
 	if origin := os.Getenv("DC_TEST_PUSH_ORIGIN"); origin != "" && len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.HasPrefix(argv[2], pushGit) {
 		argv = append([]string(nil), argv...)
-		argv[2] = `git() { command git -c "url.file://$DC_TEST_PUSH_ORIGIN.insteadOf=https://git.example.test/team/app.git" "$@"; }` + "\n" + argv[2]
+		fork := ""
+		if os.Getenv("DC_TEST_PUSH_FORK") != "" {
+			fork = ` -c "url.file://$DC_TEST_PUSH_FORK.insteadOf=https://git.example.test/team/fork.git"`
+		}
+		argv[2] = `git() { command git -c "url.file://$DC_TEST_PUSH_ORIGIN.insteadOf=https://git.example.test/team/app.git"` + fork + ` "$@"; }` + "\n" + argv[2]
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
@@ -97,14 +101,14 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	gitT(t, repo, "fetch", "-q", "origin")
 
 	ctx := context.Background()
-	if p, err := PrepareBranchPush(ctx, localExec, root, "a1", nil); err != nil || p.Commits != 0 {
+	if p, err := PrepareBranchPush(ctx, localExec, root, "a1", "https://git.example.test/team/app.git", nil); err != nil || p.Commits != 0 {
 		t.Fatalf("nothing new: %+v %v", p, err)
 	}
 	head := gitT(t, repo, "rev-parse", "HEAD")
 	os.MkdirAll(filepath.Join(repo, ".github/workflows"), 0o755)
 	os.WriteFile(filepath.Join(repo, ".github/workflows/ci.yml"), []byte("on: push\n"), 0o644)
 	os.WriteFile(filepath.Join(repo, "npmrc"), []byte("//r/:_authToken="+kit.PlaceholderSecret+"\n"), 0o644)
-	p, err := PrepareBranchPush(ctx, localExec, root, "a1", nil)
+	p, err := PrepareBranchPush(ctx, localExec, root, "a1", "https://git.example.test/team/app.git", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +129,7 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	os.WriteFile(filepath.Join(repo, "README"), []byte("two\n"), 0o644)
 	gitT(t, repo, "add", "-A")
 	gitT(t, repo, "commit", "-qm", "more")
-	p2, err := PrepareBranchPush(ctx, localExec, root, "a1", nil)
+	p2, err := PrepareBranchPush(ctx, localExec, root, "a1", "https://git.example.test/team/app.git", nil)
 	if err != nil || p2.Made {
 		t.Fatalf("committed work: %+v %v", p2, err)
 	}

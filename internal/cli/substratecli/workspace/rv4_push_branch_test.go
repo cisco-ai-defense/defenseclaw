@@ -88,7 +88,7 @@ func (s *rv4) commit(msg string) {
 
 func (s *rv4) prepare() *BranchPush {
 	s.t.Helper()
-	p, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", nil)
+	p, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", "https://git.example.test/team/app.git", nil)
 	if err != nil {
 		s.t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestRV4ReplacedCredentialPlaceholdersAreRefused(t *testing.T) {
 		if committed {
 			s.commit("the upload's replaced lines")
 		}
-		_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", nil)
+		_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", "https://git.example.test/team/app.git", nil)
 		var pe *BranchPushError
 		if !errors.As(err, &pe) || pe.Kind != "replaced_copy" {
 			t.Fatalf("committed=%v: %v", committed, err)
@@ -280,7 +280,7 @@ func TestRV4MergeOnlyContentIsReviewed(t *testing.T) {
 
 	s = rv4Setup(t)
 	merge(s, func() { s.write("config/app.env", "API_TOKEN=DC_SECRET_1\n") })
-	_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", nil)
+	_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", "https://git.example.test/team/app.git", nil)
 	var pe *BranchPushError
 	if !errors.As(err, &pe) || pe.Kind != "replaced_copy" {
 		t.Errorf("merge-only placeholder of a replaced upload: %v", err)

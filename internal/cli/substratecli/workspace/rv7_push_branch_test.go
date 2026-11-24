@@ -119,7 +119,7 @@ func TestRV7AuthenticatedHTTPSPushUsesImageCredentials(t *testing.T) {
 		}
 		return localExec(ctx, argv, dir, env, timeout)
 	}
-	p, err := PrepareBranchPush(context.Background(), runner, root, "a1", nil)
+	p, err := PrepareBranchPush(context.Background(), runner, root, "a1", server.URL+"/origin.git", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
