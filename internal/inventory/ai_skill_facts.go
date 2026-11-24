@@ -254,7 +254,7 @@ var skillReadDir = (*os.File).ReadDir
 // from the same bounded, stable read that supplies that file's digest, and
 // returns that manifest's exact path, so a later readback never lists again.
 func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, trusted func(*os.File, string) bool) (hash, status string, manifest []byte, manifestPath string, consumed int64) {
-	dir, opened, err := openSkillFolder(root, trusted)
+	dir, opened, linked, err := openSkillFolder(root, trusted)
 	if errors.Is(err, safefile.ErrSymlinkRefused) {
 		return "", SkillContentSymlink, nil, "", 0
 	}
@@ -266,12 +266,17 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, tru
 		return "", SkillContentTooLarge, nil, "", 0
 	}
 	walk := skillHashWalk{limit: limit, captureLimit: captureLimit}
+	if linked {
+		walk.trusted, walk.root = trusted, opened
+	}
 	walk.rootInfo, _ = dir.Stat()
 	err = walk.readDir(dir, "", 0)
 	if walk.manifestName != "" {
 		manifestPath = filepath.Join(opened, walk.manifestName)
 	}
 	switch {
+	case errors.Is(err, errSkillUntrusted):
+		return "", SkillContentSymlink, nil, "", walk.consumed
 	case errors.Is(err, errSkillTooLarge), errors.Is(err, safefile.ErrReadLimit):
 		return "", SkillContentTooLarge, walk.manifest, manifestPath, walk.consumed
 	case err != nil:
@@ -290,39 +295,52 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, tru
 // above it, such as ~/.claude linked into a dotfiles repo or /home linked to
 // /var/home, is resolved once, and the resolved folders, the skill folder
 // included, are accepted only when trusted approves each (GAP-2001). It
-// returns the spelling it opened root by.
-func openSkillFolder(root string, trusted func(*os.File, string) bool) (*os.File, string, error) {
+// returns the spelling it opened root by, and linked when that spelling is
+// the resolved one: the walk below then asks trusted for every folder and
+// file too (GAP-2008).
+func openSkillFolder(root string, trusted func(*os.File, string) bool) (*os.File, string, bool, error) {
 	lexical := filepath.Dir(root)
 	parent, resolved, err := safefile.OpenDirectoryResolved(lexical, trusted)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	defer parent.Close()
 	name := filepath.Base(root)
 	dir, err := safefile.OpenDirectoryChildNoFollow(parent, name)
 	if err != nil {
 		if _, linkErr := safefile.ReadChildLink(parent, name); linkErr == nil {
-			return nil, "", fmt.Errorf("%w: %w", safefile.ErrSymlinkRefused, err)
+			return nil, "", false, fmt.Errorf("%w: %w", safefile.ErrSymlinkRefused, err)
 		}
-		return nil, "", err
+		return nil, "", false, err
 	}
-	opened := filepath.Join(resolved, name)
-	if resolved != lexical && !trusted(dir, opened) {
+	opened, linked := filepath.Join(resolved, name), resolved != lexical
+	if linked && !trusted(dir, opened) {
 		_ = dir.Close()
-		return nil, "", fmt.Errorf("%w: %s has an untrusted owner", safefile.ErrSymlinkRefused, opened)
+		return nil, "", false, fmt.Errorf("%w: %s has an untrusted owner", safefile.ErrSymlinkRefused, opened)
 	}
-	return dir, opened, nil
+	return dir, opened, linked, nil
 }
 
 // skillFolderTrust approves the folders a skill folder at path is reached
-// through when a link above it is resolved: those of the scanned home that
-// holds path, or of the scanning account outside every home.
+// through when a link above it is resolved, and what the walk opens below it:
+// those of the scanned home that holds path, or of the scanning account
+// outside every home.
 func (s *ContinuousDiscoveryService) skillFolderTrust(path string) func(*os.File, string) bool {
 	home, _ := s.skillHome(path)
-	return skillHomeOwnerTrust(home)
+	return s.skillHomeTrust(home)
 }
 
+// errSkillUntrusted is a folder or file below a linked skill folder that the
+// trust does not approve; the folder reads as a refused link (GAP-2008).
+var errSkillUntrusted = errors.New("skill folder entry has an untrusted owner")
+
 type skillHashWalk struct {
+	// trusted, when set (a skill folder reached through a resolved link),
+	// approves every folder and file the walk opens below root, the opened
+	// spelling of the skill folder, so a link in a home cannot lead a root
+	// or SYSTEM scan into what the home owner may not list or read.
+	trusted      func(*os.File, string) bool
+	root         string
 	captureLimit int
 	rootInfo     fs.FileInfo // the opened skill folder, for skillManifestOwned
 	manifest     []byte
@@ -386,6 +404,9 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 			return err
 		}
 		defer dir.Close()
+		if err := walk.approve(dir, rel); err != nil {
+			return err
+		}
 		return walk.readDir(dir, rel+"/", depth+1)
 	}
 
@@ -404,6 +425,9 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 			return walk.openRefused(parent, name, err)
 		}
 		defer file.Close()
+		if err := walk.approve(file, rel); err != nil {
+			return err
+		}
 		captureLimit := 0
 		// Match only a root manifest, never one in a nested skill or scripts folder.
 		// Retain the lexically last case alias, like the original sorted walk.
@@ -441,13 +465,22 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 // too large for the budget by its own record (never the listing, GAP-1901) is
 // too large, as on rel, even when it cannot be opened: on Windows while a
 // writer holds it open, or one the scan may not read (GAP-2006). Only its
-// size is looked at, never its bytes.
+// size is looked at, never its bytes, and it is read relative to the held
+// parent, never by a path that could be resolved again (GAP-2009).
 func (walk *skillHashWalk) openRefused(parent *os.File, name string, err error) error {
-	info, statErr := os.Lstat(filepath.Join(parent.Name(), name))
-	if statErr == nil && info.Mode().IsRegular() && info.Size() > walk.limit-walk.consumed {
+	if size, regular, statErr := safefile.RegularChildSize(parent, name); statErr == nil && regular && size > walk.limit-walk.consumed {
 		return errSkillTooLarge
 	}
 	return err
+}
+
+// approve asks the trust about an opened folder or file at rel below a linked
+// skill folder; below an unlinked one everything is the folder's own.
+func (walk *skillHashWalk) approve(opened *os.File, rel string) error {
+	if walk.trusted == nil || walk.trusted(opened, filepath.Join(walk.root, filepath.FromSlash(rel))) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", errSkillUntrusted, rel)
 }
 
 func sameOpenedSkillFile(first, second *os.File) bool {

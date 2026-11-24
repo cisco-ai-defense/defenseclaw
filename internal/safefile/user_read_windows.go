@@ -61,11 +61,11 @@ func UsersCanRead(metadata FileMetadata) error {
 		switch ace.Header.AceType {
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 			if ordinaryUsersSID((*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()) {
-				granted |= fileAccessMask(ace.Mask)
+				granted |= FileAccessMask(ace.Mask)
 			}
 		case windows.ACCESS_DENIED_ACE_TYPE, accessDeniedCallbackACEType:
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
-			if fileAccessMask(ace.Mask)&UsersRead != 0 && !privilegedSID(sid) {
+			if FileAccessMask(ace.Mask)&UsersRead != 0 && !privilegedSID(sid) {
 				return fmt.Errorf("safefile: an access entry denies %s read access", sid)
 			}
 		case accessDeniedObjectACEType, accessDeniedCallbackObjectACEType:
@@ -169,9 +169,9 @@ func GrantUsersRead(path string) error {
 	return nil
 }
 
-// fileAccessMask maps the generic rights in mask to the file rights they
-// stand for.
-func fileAccessMask(mask windows.ACCESS_MASK) windows.ACCESS_MASK {
+// FileAccessMask maps the generic rights in mask to the file rights they
+// stand for, so an access entry's mask can be compared with file rights.
+func FileAccessMask(mask windows.ACCESS_MASK) windows.ACCESS_MASK {
 	mapped := mask &^ (windows.GENERIC_READ | windows.GENERIC_WRITE | windows.GENERIC_EXECUTE | windows.GENERIC_ALL)
 	if mask&windows.GENERIC_READ != 0 {
 		mapped |= windows.FILE_GENERIC_READ

@@ -34,9 +34,16 @@ func TestGAP2001ResolvedParentNeedsTrustedOwners(t *testing.T) {
 	if status != SkillContentOK || manifest == nil || manifestPath != filepath.Join(real, "SKILL.md") {
 		t.Fatalf("linked parent: status %s, manifest %t, path %s", status, manifest != nil, manifestPath)
 	}
-	if len(asked) == 0 || asked[0] != "/" || asked[len(asked)-1] != real ||
-		len(asked) != strings.Count(real, "/")+1 {
-		t.Fatalf("asked %v; want every folder from / to %s", asked, real)
+	// The chain from / to the skill folder first, then (GAP-2008) every entry
+	// the walk opens below it.
+	chain := strings.Count(real, "/") + 1
+	if len(asked) <= chain || asked[0] != "/" || asked[chain-1] != real {
+		t.Fatalf("asked %v; want every folder from / to %s, then the entries below it", asked, real)
+	}
+	for _, below := range asked[chain:] {
+		if !strings.HasPrefix(below, real+"/") {
+			t.Fatalf("asked %s after the chain; want only entries below %s", below, real)
+		}
 	}
 	for _, refuse := range []string{real, filepath.Dir(real), "/"} {
 		deny := func(_ *os.File, path string) bool { return path != refuse }

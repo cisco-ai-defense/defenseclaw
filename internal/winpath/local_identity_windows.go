@@ -41,15 +41,47 @@ const maxLocalPathLinks = 32
 //
 // A missing element returns an error wrapping fs.ErrNotExist.
 func LocalPathIdentity(path string) (LocalFileIdentity, error) {
+	identity, _, err := resolveLocalPath(path)
+	return identity, err
+}
+
+// LocalPathResolved is the path LocalPathIdentity reaches path by: each
+// symbolic link and junction on the way replaced by its local target, which
+// is checked the same way, with no link followed by Windows. Its errors are
+// LocalPathIdentity's: a link to a share, a device or a volume GUID, or a
+// path not on a local disk volume, is ErrPathNotLocal.
+func LocalPathResolved(path string) (string, error) {
+	_, resolved, err := resolveLocalPath(path)
+	return resolved, err
+}
+
+// LocalVolumePath reports whether path is a drive-letter path on a local disk
+// volume, from its spelling and its drive alone: nothing below the drive root
+// is opened.
+func LocalVolumePath(path string) bool {
+	abs, err := filepath.Abs(filepath.FromSlash(path))
+	if err != nil || !isLocalDriveLetterSyntax(abs) {
+		return false
+	}
+	target, err := effectiveDOSDeviceTarget(strings.ToUpper(abs[:1]) + ":")
+	return err == nil && localDiskDevice(target)
+}
+
+func resolveLocalPath(path string) (LocalFileIdentity, string, error) {
 	current := path
 	for links := 0; links <= maxLocalPathLinks; links++ {
 		identity, next, err := walkLocalPath(current)
-		if err != nil || next == "" {
-			return identity, err
+		if err != nil {
+			return identity, "", err
+		}
+		if next == "" {
+			// walkLocalPath opened the filepath.Abs spelling.
+			abs, err := filepath.Abs(filepath.FromSlash(current))
+			return identity, abs, err
 		}
 		current = next
 	}
-	return LocalFileIdentity{}, fmt.Errorf("%w: more than %d links", ErrPathNotLocal, maxLocalPathLinks)
+	return LocalFileIdentity{}, "", fmt.Errorf("%w: more than %d links", ErrPathNotLocal, maxLocalPathLinks)
 }
 
 // walkLocalPath opens path element by element. It returns the identity of

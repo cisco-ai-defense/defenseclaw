@@ -106,6 +106,21 @@ func ReadChildLink(parent *os.File, name string) (string, error) {
 	return string(buffer[:n]), nil
 }
 
+// RegularChildSize is the size of name inside parent, read relative to the
+// held parent without following a link or opening name: never by a path
+// that could be resolved again. regular is false for anything that is not a
+// regular file.
+func RegularChildSize(parent *os.File, name string) (size int64, regular bool, err error) {
+	if !validChildName(name) {
+		return 0, false, fs.ErrInvalid
+	}
+	var info unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &info, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return 0, false, err
+	}
+	return info.Size, info.Mode&unix.S_IFMT == unix.S_IFREG, nil
+}
+
 func validChildName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\x00")
 }
