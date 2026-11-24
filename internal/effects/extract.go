@@ -1827,7 +1827,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// powershell/pwsh launched from any dialect: decode -enc and unwrap its
 	// -Command / positional script as PowerShell (review N8 K4/K5).
-	if entry.PSLaunch && c.Host != nil {
+	if entry.PSLaunch && c.Host != nil && !(c.Host.Opaque && powerShellPositionalWD(inner[1:])) {
 		w.hostPayload(c, dialect, depth, cond, origin)
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
@@ -4553,6 +4553,49 @@ func isTilde(lit string, flavor Flavor) bool {
 	return flavor == FlavorWindows && strings.HasPrefix(lit, `~\`)
 }
 
+// powerShellPositionalWD identifies the one host shape psparse deliberately
+// leaves opaque: -wd with a positional body. The native 5.1 and pwsh 7
+// readings differ here (GAP-1557); a -Command or encoded value keeps
+// psparse's existing working-directory reading.
+func powerShellPositionalWD(args []Word) bool {
+	sawWD := false
+	for i := 0; i < len(args); i++ {
+		if !args[i].Static {
+			return false
+		}
+		value := strings.ToLower(args[i].Value)
+		if strings.HasPrefix(value, "-") && value != "-" {
+			name := strings.TrimPrefix(value, "-")
+			if strings.Contains(name, ":") {
+				return false
+			}
+			switch {
+			case name == "wd" || len(name) >= 3 && strings.HasPrefix("workingdirectory", name):
+				if i+1 >= len(args) || !args[i+1].Static {
+					return false
+				}
+				sawWD = true
+				i++
+			case name == "command" || name == "c" || name == "encodedcommand" ||
+				name == "enc" || name == "ec" || name == "e":
+				return false
+			case psHostSwitches[name]:
+				continue
+			case psHostValued[name]:
+				if i+1 >= len(args) || !args[i+1].Static {
+					return false
+				}
+				i++
+			default:
+				return false
+			}
+			continue
+		}
+		return sawWD
+	}
+	return false
+}
+
 // powershellLaunchCode returns the PowerShell command text a powershell/pwsh
 // invocation runs: the value of -Command/-c, a decoded -EncodedCommand/-enc/-e,
 // or the first positional script onward. ok is false when it only reads stdin.
@@ -4590,13 +4633,13 @@ var psHostValued = set("executionpolicy", "ep", "windowstyle", "w", "inputformat
 // pwsh working directory with a positional file, an unknown option, or a
 // script file. Windows PowerShell 5.1 consumes -wd without moving a
 // positional body (native TST-16012, GAP-1557).
-func powershellLaunchCode(host string, flavor Flavor, args []Word) (code string, ok, opaque bool) {
+func powershellLaunchCode(host string, _ Flavor, args []Word) (code string, ok, opaque bool) {
 	// Windows PowerShell 5.1 accepts -wd/-WorkingDirectory as a valued
 	// parameter but leaves a positional command in the caller's cwd (native
 	// TST-16012, GAP-1557). pwsh 7 binds that positional as -File instead,
-	// so its existing opaque reading must remain. A bare host outside the
-	// Windows flavor has no proven edition and also keeps the opaque floor.
-	windows51 := flavor == FlavorWindows && psLeaf(host) == "powershell"
+	// so its existing opaque reading must remain. A bare powershell host outside Windows has no proven edition: taking
+	// the writing 5.1 reading is the max of that and pwsh 7 no-write.
+	mayWrite51 := psLeaf(host) == "powershell"
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !a.Static {
@@ -4625,7 +4668,7 @@ func powershellLaunchCode(host string, flavor Flavor, args []Word) (code string,
 			}
 			switch {
 			case name == "wd" || len(name) >= 3 && strings.HasPrefix("workingdirectory", name):
-				if !windows51 || i+1 >= len(args) {
+				if !mayWrite51 || i+1 >= len(args) || !args[i+1].Static {
 					return "", false, true
 				}
 				i++ // 5.1 consumes the value but does not move the body

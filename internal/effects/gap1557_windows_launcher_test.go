@@ -47,3 +47,23 @@ func TestGAP1557PositionalWorkingDirectoryByHostEdition(t *testing.T) {
 		})
 	}
 }
+
+// An unqualified powershell host on a non-Windows flavor has an unknown
+// edition. The 5.1 writing reading is stronger than pwsh 7 no-write, so the
+// projection keeps the original-cwd write without executing either host.
+func TestGAP1557UnknownEditionTakesWritingReading(t *testing.T) {
+	const home = "/home/fixture"
+	const cwd = home + "/project"
+	res := Extract(Call{Surface: SurfaceArgv, Tool: "shell", Argv: []string{
+		"powershell", "-wd", home + "/requested", "Set-Content -Path notes.txt -Value marker",
+	}}, Options{Flavor: FlavorPOSIX, Dialect: DialectPowerShell, Home: home, CWD: cwd})
+	var writes []string
+	for _, effect := range res.Effects {
+		if effect.Kind == KindWrite || effect.Kind == KindAppend {
+			writes = append(writes, effect.Target.Path)
+		}
+	}
+	if len(writes) != 1 || writes[0] != cwd+"/notes.txt" {
+		t.Fatalf("unknown-edition write count=%d; want original-cwd placement", len(writes))
+	}
+}
