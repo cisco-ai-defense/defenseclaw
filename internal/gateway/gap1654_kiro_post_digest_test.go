@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -45,18 +46,36 @@ func TestGAP1654KiroPostDedupeKeysOnTheOutput(t *testing.T) {
 	}
 }
 
-// Copilot's two CLI dialects carry the output as a toolResult object
-// (camelCase) or a plain string; both reduce to the same text.
-func TestGAP1654CopilotToolResultDigestOneForm(t *testing.T) {
-	camel := copilotToolResultDigest(map[string]interface{}{"toolResult": map[string]interface{}{"resultType": "success", "textResultForLlm": "out"}})
-	snake := copilotToolResultDigest(map[string]interface{}{"tool_response": "out"})
-	if camel != snake {
-		t.Fatalf("camel %s != snake %s", camel, snake)
+// Copilot's two CLI dialects pair one call's post: camelCase toolResult
+// (textResultForLlm) and the snake_case tool_response string of the same
+// output. Another output with the same arguments does not pair.
+func TestGAP1654CopilotPostDedupeKeysOnTheOutput(t *testing.T) {
+	ctx := context.Background()
+	camel := func(output string) agentHookRequest {
+		args := json.RawMessage(`"{\"command\":\"cat notes.txt\"}"`)
+		return agentHookRequest{HookEventName: "postToolUse", SessionID: "cp-s1", CWD: "/project", ToolName: "bash", ToolArgs: args,
+			Payload: map[string]interface{}{"toolName": "bash", "toolArgs": string(args),
+				"toolResult": map[string]interface{}{"resultType": "success", "textResultForLlm": output}}}
 	}
-	if copilotToolResultDigest(map[string]interface{}{"tool_response": "other"}) == snake {
-		t.Fatal("another output hashed the same")
+	snake := func(output string) agentHookRequest {
+		args := json.RawMessage(`{"command":"cat notes.txt"}`)
+		return agentHookRequest{HookEventName: "PostToolUse", SessionID: "cp-s1", CWD: "/project", ToolName: "bash", ToolArgs: args,
+			Payload: map[string]interface{}{"tool_name": "bash", "tool_input": map[string]interface{}{"command": "cat notes.txt"},
+				"tool_response": output}}
 	}
-	if copilotToolResultDigest(nil) != copilotToolResultDigest(map[string]interface{}{}) {
-		t.Fatal("two deliveries without output do not pair")
+	alert := agentHookResponse{Action: "alert", Severity: "HIGH", EvaluationID: "cp-a"}
+
+	var pair copilotHookDedupe
+	_, _, a := pair.begin(ctx, "copilot", camel("same output"), "")
+	a.complete(alert)
+	if got, hit, _ := pair.begin(ctx, "copilot", snake("same output"), ""); !hit || got.EvaluationID != "cp-a" {
+		t.Fatalf("the other dialect's post of the same call did not pair: hit=%v got=%+v", hit, got)
+	}
+
+	var d copilotHookDedupe
+	_, _, first := d.begin(ctx, "copilot", camel("first output"), "")
+	first.complete(alert)
+	if got, hit, _ := d.begin(ctx, "copilot", snake("another output"), ""); hit {
+		t.Fatalf("a post with another output took the earlier post verdict: %+v", got)
 	}
 }
