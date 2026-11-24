@@ -2617,6 +2617,10 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 // view; tests replace it.
 var enterpriseHookClaudeOSAdminPolicyStatus = connector.ClaudeCodeOSAdminPolicyStatus
 
+// enterpriseHookClaudeOSAdminMergeCaveats is the connector's read-only list
+// of what a merging HKLM policy leaves to chance (GAP-1801); tests replace it.
+var enterpriseHookClaudeOSAdminMergeCaveats = connector.ClaudeCodeOSAdminPolicyMergeCaveats
+
 // enterpriseHooksReportClaudeHKLMPolicy reports, on Windows with an enrolled
 // Claude Code target, whether the HKLM Claude Code policy shadows the
 // DefenseClaw drop-in. A shadowing policy is a warning that names the fix:
@@ -2645,15 +2649,21 @@ func enterpriseHooksReportClaudeHKLMPolicy(report *enterpriseHookStatusReport, r
 	if !enrolled {
 		return
 	}
-	shadowed, merges, detail := enterpriseHookClaudeOSAdminPolicyStatus(connector.SetupOpts{
+	opts := connector.SetupOpts{
 		ManagedEnterprise: true,
 		AgentVersion:      agentVersion,
-	})
+	}
+	shadowed, merges, detail := enterpriseHookClaudeOSAdminPolicyStatus(opts)
 	report.ClaudePolicyShadowedByHKLM = shadowed
 	report.ClaudePolicyHKLMManagedSourcesMerge = merges
 	report.ClaudePolicyHKLMDetail = detail
 	if shadowed {
 		report.Warnings = append(report.Warnings, "claude_policy_shadowed_by_hklm: "+detail)
+	}
+	if merges {
+		for _, caveat := range enterpriseHookClaudeOSAdminMergeCaveats(opts) {
+			report.Warnings = append(report.Warnings, "claude_policy_hklm_merge_caveat: "+caveat)
+		}
 	}
 }
 

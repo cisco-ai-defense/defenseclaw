@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -138,15 +139,76 @@ func ClaudeCodeOSAdminPolicyAdmitsManagedHooks(raw, label string, opts SetupOpts
 
 // claudeCodeOSAdminDefersToGuardian reports a plain shadowing verdict that a
 // caller without the hook executable cannot make: the policy carries its own
-// hooks table, which may be DefenseClaw's matrix. The enrolment gate and the
-// guardian's Claude Code rows check it against the installed hook.
+// hooks table that names a DefenseClaw hook, so it may be DefenseClaw's
+// matrix. The enrolment gate and the guardian's Claude Code rows check it
+// against the installed hook. A table that names no DefenseClaw hook cannot
+// be the matrix and is not deferred: the Setup preflight refuses it before
+// anything changes (GAP-1801 (a)).
 func claudeCodeOSAdminDefersToGuardian(source *claudeCodeSettingsSource, opts SetupOpts, err error) bool {
 	var plain claudeCodeOSAdminShadowedError
 	if !errors.As(err, &plain) || strings.TrimSpace(opts.HookExecutable) != "" {
 		return false
 	}
-	_, hasHooks := source.settings["hooks"]
-	return hasHooks
+	hooks, hasHooks := source.settings["hooks"]
+	return hasHooks && claudeCodeHooksTableNamesDefenseClaw(hooks)
+}
+
+// claudeCodeHooksTableNamesDefenseClaw reports whether any value in a hooks
+// table names DefenseClaw (its hook executable lives under a DefenseClaw
+// folder and is named defenseclaw-*). A table that cannot be encoded is
+// deferred, as before.
+func claudeCodeHooksTableNamesDefenseClaw(hooks interface{}) bool {
+	data, err := json.Marshal(hooks)
+	if err != nil {
+		return true
+	}
+	return strings.Contains(strings.ToLower(string(data)), "defenseclaw")
+}
+
+// claudeCodeOSAdminMergeCaveats names what a merging OS-admin policy leaves
+// to chance (GAP-1801 (b), (c)). The policy is admitted, but status warns:
+// an explicit allowManagedHooksOnly: false can override the drop-in's lock
+// under merge, and without a requiredMinimumVersion of 2.1.242 or later a
+// Claude Code 2.1.154 to 2.1.241 that a user runs reads only this policy and
+// runs no DefenseClaw hooks.
+func claudeCodeOSAdminMergeCaveats(source *claudeCodeSettingsSource) []string {
+	if source == nil {
+		return nil
+	}
+	var caveats []string
+	if unlock, ok := source.settings["allowManagedHooksOnly"].(bool); ok && !unlock {
+		caveats = append(caveats, fmt.Sprintf(
+			"Claude Code %s sets allowManagedHooksOnly: false, which under merge can override the DefenseClaw drop-in's allowManagedHooksOnly: true, so user and project hooks may run; remove it from that source or set it to true",
+			source.label(),
+		))
+	}
+	floor, _ := source.settings["requiredMinimumVersion"].(string)
+	floor = NormalizeAgentVersion("claudecode", floor)
+	if floor == "" || compareVersion(floor, claudeCodeMergeMinimumVersion) < 0 {
+		caveats = append(caveats, fmt.Sprintf(
+			"Claude Code %s does not require %s or later, so a Claude Code 2.1.154 to 2.1.241 that a user runs reads only that source and runs no DefenseClaw hooks; add \"requiredMinimumVersion\": \"%s\" to it",
+			source.label(), claudeCodeMergeMinimumVersion, claudeCodeMergeMinimumVersion,
+		))
+	}
+	return caveats
+}
+
+// ClaudeCodeOSAdminPolicyMergeCaveats is claudeCodeOSAdminMergeCaveats for the
+// installed OS-admin policy, or nil when it does not merge managed sources or
+// cannot be read (ClaudeCodeOSAdminPolicyStatus reports those).
+func ClaudeCodeOSAdminPolicyMergeCaveats(opts SetupOpts) []string {
+	if ClaudeCodeSettingsPathOverride != "" || ClaudeCodeManagedSettingsRootOverride != "" {
+		return nil
+	}
+	sources, err := claudeCodeOSManagedSettingsLoader()
+	if err != nil {
+		return nil
+	}
+	composition, err := classifyClaudeCodeOSAdminPolicy(sources.admin, opts)
+	if err != nil || composition != claudeCodeOSAdminMerges {
+		return nil
+	}
+	return claudeCodeOSAdminMergeCaveats(sources.admin)
 }
 
 // ClaudeCodeOSAdminPolicyPreflight is the Setup preflight's verdict on the raw
