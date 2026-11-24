@@ -128,6 +128,10 @@ func pumpInput(in io.Reader, send func([]byte) error) (detached bool) {
 	}
 }
 
+// detachCloseWait bounds how long a detaching client waits for the relay to
+// answer its close frame before it drops the socket.
+const detachCloseWait = 2 * time.Second
+
 func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions) (AttachResult, error) {
 	d := o.Dialer
 	if d == nil {
@@ -243,6 +247,17 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 			wmu.Lock()
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detach"), time.Now().Add(time.Second))
 			wmu.Unlock()
+			// Let the relay answer the close before the socket is dropped.
+			// Closing a TCP connection at once while the relay's last frames
+			// are unread resets it, and a reset discards what the relay has
+			// received and not yet read: on Windows the detach frame was lost
+			// that way and the relay never saw the person detach (GAP-2164).
+			// The reader above ends when the relay's close frame arrives.
+			select {
+			case <-done:
+			case <-time.After(detachCloseWait):
+			case <-ctx.Done():
+			}
 		}
 	case <-ctx.Done():
 	}
