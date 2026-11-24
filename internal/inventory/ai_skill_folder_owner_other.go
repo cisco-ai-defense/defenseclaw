@@ -23,6 +23,10 @@ import (
 	"syscall"
 )
 
+// skillAdminUID is the owner a managed folder or file has: root. A test sets it
+// to its own user so the owner check passes without root.
+var skillAdminUID uint32
+
 // skillFolderManaged is skillFolderAdminOwned; tests replace it.
 var skillFolderManaged = skillFolderAdminOwned
 
@@ -37,7 +41,7 @@ func skillFolderAdminOwned(dir *os.File, _ string) bool {
 		return false
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	return ok && st.Uid == 0
+	return ok && st.Uid == skillAdminUID
 }
 
 // skillEntryManaged is skillEntryAdminOwned; tests replace it.
@@ -53,5 +57,5 @@ func skillEntryAdminOwned(opened *os.File, _ string) bool {
 		return false
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	return ok && st.Uid == 0
+	return ok && st.Uid == skillAdminUID
 }

@@ -87,9 +87,13 @@ func TestGAP2147ManagedFollowsTheProbe(t *testing.T) {
 // GAP-2147: a managed skill folder stays managed only while every folder and
 // file the walk opens in it is one only root can change: root owns it and
 // neither the group nor others may write it. A file others may write, or one
-// a user owns (every file of this test when it does not run as root), makes
-// the skill the user's, as on Windows.
+// a user owns, makes the skill the user's, as on Windows. The test's own user
+// stands for root (skillAdminUID), so it runs the same as a normal user and as
+// root.
 func TestGAP2147UnixEntryOthersMayChangeClearsManaged(t *testing.T) {
+	admin := skillAdminUID
+	skillAdminUID = uint32(os.Geteuid())
+	t.Cleanup(func() { skillAdminUID = admin })
 	root := t.TempDir()
 	writeSkillFiles(t, root, map[string]string{"SKILL.md": "---\nname: s\n---\n", "scripts/run.sh": "x"})
 	approve := func(*os.File, string) bool { return true }
@@ -100,7 +104,7 @@ func TestGAP2147UnixEntryOthersMayChangeClearsManaged(t *testing.T) {
 		}
 		return managed
 	}
-	// Not group or other writable; owned by root only when this test is root.
+	// Not group or other writable, owned by the stand-in for root.
 	for _, path := range []string{"SKILL.md", "scripts/run.sh"} {
 		if err := os.Chmod(filepath.Join(root, path), 0o644); err != nil {
 			t.Fatal(err)
@@ -109,23 +113,30 @@ func TestGAP2147UnixEntryOthersMayChangeClearsManaged(t *testing.T) {
 	if err := os.Chmod(filepath.Join(root, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if want := os.Geteuid() == 0; managed() != want {
-		t.Fatalf("root-owned = %t: managed = %t, want %t", want, !want, want)
+	if !managed() {
+		t.Fatal("every entry is the admin's and not writable by its group or others, and the skill does not read as managed")
 	}
-	for _, path := range []string{"scripts/run.sh", "scripts", "SKILL.md"} {
-		full := filepath.Join(root, path)
-		info, err := os.Stat(full)
-		if err != nil {
-			t.Fatal(err)
+	for _, bit := range []os.FileMode{0o020, 0o002} {
+		for _, path := range []string{"scripts/run.sh", "scripts", "SKILL.md"} {
+			full := filepath.Join(root, path)
+			info, err := os.Stat(full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(full, info.Mode().Perm()|bit); err != nil {
+				t.Fatal(err)
+			}
+			if managed() {
+				t.Fatalf("%s is writable (%o) and the skill still reads as managed", path, bit)
+			}
+			if err := os.Chmod(full, info.Mode().Perm()); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if err := os.Chmod(full, info.Mode().Perm()|0o020); err != nil {
-			t.Fatal(err)
-		}
-		if managed() {
-			t.Fatalf("%s is group-writable and the skill still reads as managed", path)
-		}
-		if err := os.Chmod(full, info.Mode().Perm()); err != nil {
-			t.Fatal(err)
-		}
+	}
+	// An entry the admin does not own clears it too.
+	skillAdminUID = uint32(os.Geteuid()) + 1
+	if managed() {
+		t.Fatal("entries a user owns and the skill still reads as managed")
 	}
 }
