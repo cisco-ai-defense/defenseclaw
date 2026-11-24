@@ -5761,19 +5761,54 @@ func proxyToolCallCWD(toolCWD string) string {
 	return proxyNeutralCWD()
 }
 
-// proxyNeutralCWD is an empty private directory the gateway creates once
-// (os.MkdirTemp, mode 0700): absolute and ~ operands are judged as on the
-// hook routes, and a relative one resolves to a file that does not exist,
-// as in a fresh project, never to a real file the call did not name. ""
-// when it cannot be created (the call is then judged without one, as
-// before).
-var proxyNeutralCWD = sync.OnceValue(func() string {
+// proxyNeutralCWD is an empty private directory of the gateway (os.MkdirTemp,
+// mode 0700): absolute and ~ operands are judged as on the hook routes, and a
+// relative one resolves to a file that does not exist, as in a fresh project,
+// never to a real file the call did not name. "" when it cannot be created
+// (the call is then judged without one, as before).
+//
+// It is checked on every call and made again when it is gone or no longer an
+// empty folder: it was made once per process, and the temp folder is cleaned
+// under a running gateway (systemd-tmpfiles ages, a disk guard that sweeps
+// empty folders), after which every later call was judged against a folder
+// that does not exist and the verdict changed with it (rel-1-0-10:GAP-2113:
+// block to allow on attack calls, allow to block on benign ones). A folder
+// that is not empty any more is left as it is and a fresh one is used.
+func proxyNeutralCWD() string {
+	proxyNeutralDir.mu.Lock()
+	defer proxyNeutralDir.mu.Unlock()
+	if dir := proxyNeutralDir.path; dir != "" && proxyNeutralDirEmpty(dir) {
+		return dir
+	}
 	dir, err := os.MkdirTemp("", "defenseclaw-proxy-cwd-")
 	if err != nil {
+		proxyNeutralDir.path = ""
 		return ""
 	}
+	proxyNeutralDir.path = dir
 	return dir
-})
+}
+
+var proxyNeutralDir struct {
+	mu   sync.Mutex
+	path string
+}
+
+// proxyNeutralDirEmpty reports that dir is still a folder (not a link) with
+// nothing in it.
+func proxyNeutralDirEmpty(dir string) bool {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	return len(names) == 0 && errors.Is(err, io.EOF)
+}
 
 // toolCallCodeGuardFindings is CodeGuard over a write call's content
 // (codeGuardScanWriteArgs), as inspectTrustedToolPolicyCtx scans it for the
