@@ -2721,3 +2721,124 @@ def test_codex_route_render_is_found(home: Path) -> None:
     assert upgrade_shim._route_only_rendered() == []
     (codex / "config.toml").write_text('model_provider = "defenseclaw_route"\n', encoding="utf-8")
     assert upgrade_shim._route_only_rendered() == ["codex"]
+
+
+# GAP-1077: the downgrade of a release that seeded new rule packs. The older
+# release's migrate keeps a pack whose files it does not know as the user's edit
+# (guardrail_profiles.refresh_stock_profiles of 1.0.10), so it ran with the
+# packs of this release. The check below is that keep check; it cannot change,
+# so this release's downgrade puts the target's own packs in place first.
+def _older_release_keeps(pack: Path, shipped: Path, known: set[str]) -> bool:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    current = profile_digest(pack)
+    return current != profile_digest(shipped) and current not in known
+
+
+def _rule_pack_downgrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: Path, *, wheel: bool = True):
+    """A 1.0.11 install with unedited seeded packs, and a 1.0.10 release dir with its own packs."""
+
+    from defenseclaw.paths import bundled_guardrail_profiles_dir
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.11")
+    bundled = bundled_guardrail_profiles_dir()
+    assert bundled is not None
+    guardrail = home / "policies" / "guardrail"
+    shipped_1010 = tmp_path / "shipped-1.0.10"
+    for name in ("default", "strict"):
+        shutil.copytree(bundled / name, guardrail / name)
+        shutil.copytree(bundled / name, shipped_1010 / name)
+        older = shipped_1010 / name / "rules" / "c2.yaml"
+        older.write_text(older.read_text(encoding="utf-8") + "\n# shipped by 1.0.10\n", encoding="utf-8")
+    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    release = _release_dir(tmp_path, "1.0.10")
+    if wheel:
+        import zipfile
+
+        name = "defenseclaw-1.0.10-py3-none-any.whl"
+        with zipfile.ZipFile(release / name, "w") as archive:
+            archive.writestr("defenseclaw/__init__.py", "")
+            for path in sorted(shipped_1010.rglob("*")):
+                if path.is_file():
+                    archive.write(path, "defenseclaw/_data/policies/guardrail/" + path.relative_to(shipped_1010).as_posix())
+        digest = hashlib.sha256((release / name).read_bytes()).hexdigest()
+        with open(release / "checksums.txt", "a", encoding="utf-8") as stream:
+            stream.write(f"{digest}  {name}\n")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
+    return guardrail, shipped_1010
+
+
+def test_a_downgrade_puts_the_older_releases_rule_packs_in_place_of_the_unedited_ones(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    guardrail, shipped = _rule_pack_downgrade(tmp_path, monkeypatch, home)
+    known_1010 = {profile_digest(shipped / "default"), profile_digest(shipped / "strict")}
+    # Before the downgrade, the older release's keep check reads this release's packs as edited.
+    assert _older_release_keeps(guardrail / "default", shipped / "default", known_1010)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+
+    for name in ("default", "strict"):
+        assert profile_digest(guardrail / name) == profile_digest(shipped / name)
+        assert not _older_release_keeps(guardrail / name, shipped / name, known_1010)
+    # The copies it replaced are kept.
+    assert len(list((home / "backups").glob("guardrail-profiles-*/default"))) == 1
+    assert "Rule packs default, strict are DefenseClaw 1.0.10's again" in capsys.readouterr().out
+    assert len(execs) == 1
+
+
+def test_a_downgrade_keeps_a_rule_pack_the_user_edited(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    guardrail, shipped = _rule_pack_downgrade(tmp_path, monkeypatch, home)
+    edited = guardrail / "default" / "rules" / "c2.yaml"
+    edited.write_text(edited.read_text(encoding="utf-8") + "# my own rule\n", encoding="utf-8")
+    mine = edited.read_bytes()
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+
+    assert edited.read_bytes() == mine
+    # The other pack was not edited and is the older release's.
+    assert profile_digest(guardrail / "strict") == profile_digest(shipped / "strict")
+    assert "Kept your edited rule packs default" in capsys.readouterr().out
+
+
+def test_a_downgrade_goes_on_when_the_older_releases_rule_packs_cannot_be_read(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw.guardrail_profiles import profile_digest
+
+    guardrail, _ = _rule_pack_downgrade(tmp_path, monkeypatch, home, wheel=False)
+    before = profile_digest(guardrail / "default")
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+
+    assert profile_digest(guardrail / "default") == before
+    assert "Could not put the rule packs of DefenseClaw 1.0.10 in place" in capsys.readouterr().out
+    assert len(execs) == 1
+
+
+def test_a_downgrade_with_no_seeded_rule_packs_fetches_no_wheel(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.11")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.10")))
+    monkeypatch.setattr(upgrade_shim, "_download", lambda *a: pytest.fail("no rule pack is seeded: nothing to fetch"))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+    assert len(execs) == 1
+
+
+def test_a_wheel_rule_pack_path_outside_its_folder_is_refused(tmp_path: Path) -> None:
+    import zipfile
+
+    wheel = tmp_path / "bad.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("defenseclaw/_data/policies/guardrail/../../../../escape.txt", "x")
+    with pytest.raises(upgrade_shim.ShimError, match="outside its folder"):
+        upgrade_shim._extract_rule_packs(str(wheel), str(tmp_path / "out"))
+    assert not (tmp_path / "escape.txt").exists()

@@ -49,6 +49,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
@@ -529,6 +530,8 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
             if released and was_running:
                 _start_gateway_again("this release's")
             raise
+    if _key(version) < _key(installed):
+        _use_target_rule_packs(repo, version, local_dir, workdir)
     # Only a downgrade to a release that keeps the newer hook helper waits
     # for its installer and drops the helper (rel-1-0-4:GAP-2503); one that
     # put the route-only settings back waits too: it stopped the gateway, so
@@ -953,6 +956,91 @@ def _set_aside_newer_keys(version: str) -> None:
         "    Installing a release that has it puts it back. If the installer stops, "
         "or after a rollback, put it back with: defenseclaw migrate"
     )
+
+
+# Where a release wheel keeps the guardrail rule packs it ships.
+_WHEEL_RULE_PACKS = "defenseclaw/_data/policies/guardrail/"
+# A wheel is about 6 MB and its rule packs about 1 MB; these only stop a damaged archive.
+_RULE_PACKS_MAX_FILE = 8 * 1024 * 1024
+_RULE_PACKS_MAX_TOTAL = 64 * 1024 * 1024
+
+
+def _use_target_rule_packs(repo: str, version: str, local_dir: str | None, workdir: str) -> None:
+    """Put DefenseClaw ``version``'s own rule packs in place of the unedited ones (GAP-1077).
+
+    The older release's migrate keeps every rule pack whose files it does not
+    know as the user's edit, and it does not know the ones this release
+    seeded, so a downgrade left them in force. That release cannot change, so
+    the packs are replaced here, before its installer runs; a pack the user
+    edited is not touched and the older release keeps it too. Best effort: a
+    pack that cannot be replaced is the old behaviour, never a failed downgrade.
+    """
+
+    try:
+        _restore_rule_packs(repo, version, local_dir, workdir)
+    except Exception as exc:  # noqa: BLE001 - the downgrade goes on; the installer reports what it kept
+        print(
+            f"  ! Could not put the rule packs of DefenseClaw {version} in place ({exc}); "
+            "the installer keeps the current ones"
+        )
+
+
+def _restore_rule_packs(repo: str, version: str, local_dir: str | None, workdir: str) -> None:
+    from defenseclaw.guardrail_profiles import restore_unedited_profiles, unedited_profiles
+    from defenseclaw.migrations import _configured_policy_dir, _read_config_text
+
+    data = _data_home()
+    policy_dir = _configured_policy_dir(data, _read_config_text(_active_config_path()) or "")
+    if not unedited_profiles(policy_dir):
+        return
+    name = f"defenseclaw-{version}-py3-none-any.whl"
+    wheel = os.path.join(workdir, name)
+    if local_dir:
+        try:
+            shutil.copyfile(os.path.join(local_dir, name), wheel)
+        except OSError as exc:
+            raise ShimError(f"could not read {name} from {local_dir}: {exc}") from None
+    else:
+        _download(f"{_source_url(repo)}/releases/download/{version}/{name}", wheel)
+    with open(wheel, "rb") as stream:
+        actual = hashlib.sha256(stream.read()).hexdigest()
+    if actual != _expected_sha256(os.path.join(workdir, "checksums.txt"), name):
+        raise ShimError(f"{name} does not match checksums.txt")
+    packs = os.path.join(workdir, "target-rule-packs")
+    _extract_rule_packs(wheel, packs)
+    result = restore_unedited_profiles(policy_dir, os.path.join(data, "backups"), packs)
+    for error in result.errors:
+        print(f"  ! Rule pack not replaced: {error}")
+    if result.refreshed:
+        print(
+            f"  → Rule packs {', '.join(result.refreshed)} are DefenseClaw {version}'s again "
+            f"(previous copies in {result.backup_dir})"
+        )
+    if result.kept_modified:
+        print(f"  → Kept your edited rule packs {', '.join(result.kept_modified)}")
+
+
+def _extract_rule_packs(wheel: str, destination: str) -> None:
+    """Unpack the rule packs of a release wheel into ``destination``; nothing else leaves the archive."""
+
+    total = 0
+    root = os.path.realpath(destination)
+    with zipfile.ZipFile(wheel) as archive:
+        for info in archive.infolist():
+            if info.is_dir() or not info.filename.startswith(_WHEEL_RULE_PACKS):
+                continue
+            relative = info.filename[len(_WHEEL_RULE_PACKS) :]
+            target = os.path.realpath(os.path.join(root, *relative.split("/")))
+            if not relative or os.path.commonpath([root, target]) != root:
+                raise ShimError(f"{wheel} holds a rule pack path outside its folder: {info.filename}")
+            total += info.file_size
+            if info.file_size > _RULE_PACKS_MAX_FILE or total > _RULE_PACKS_MAX_TOTAL:
+                raise ShimError(f"{wheel} holds more rule pack data than a release ships")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with archive.open(info) as source, open(target, "wb") as out:
+                shutil.copyfileobj(source, out)
+    if not os.path.isdir(root):
+        raise ShimError(f"{wheel} holds no rule packs")
 
 
 def _write_private_json(path: str, document: dict[str, object]) -> None:

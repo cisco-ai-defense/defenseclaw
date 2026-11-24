@@ -26,6 +26,12 @@ backup. An edited profile is kept and reported.
 
 Run ``python -m defenseclaw.guardrail_profiles`` to print the digests of the
 bundled profiles; a release that changes a profile adds its digest here.
+
+A downgrade has the same problem the other way round (GAP-1077): the older
+release only knows the digests it shipped, so it reads an unedited profile of
+this release as the user's edit and keeps it. The older release cannot change,
+so the downgrade of this release puts the target release's own profiles in
+place of the unedited ones before it hands over (``restore_unedited_profiles``).
 """
 
 from __future__ import annotations
@@ -418,13 +424,46 @@ def profile_digest(root: str | Path) -> str:
     return profile_digest_from_files({p.relative_to(root).as_posix(): p.read_bytes() for p in _profile_files(root)})
 
 
-def refresh_stock_profiles(policy_dir: str, backups_root: str) -> ProfileRefreshResult:
-    """Replace unedited seeded profiles that differ from the bundled ones."""
+def unedited_profiles(policy_dir: str) -> list[str]:
+    """The seeded profiles in ``policy_dir`` whose files are exactly those some release shipped."""
+
+    dest_root = Path(policy_dir) / "guardrail" if policy_dir else None
+    if dest_root is None or not dest_root.is_dir():
+        return []
+    names = []
+    for dst in sorted(dest_root.iterdir()):
+        if dst.is_symlink() or not dst.is_dir() or dst.name.startswith("."):
+            continue
+        try:
+            if profile_digest(dst) in STOCK_PROFILE_DIGESTS.get(dst.name, frozenset()):
+                names.append(dst.name)
+        except OSError:
+            continue
+    return names
+
+
+def restore_unedited_profiles(policy_dir: str, backups_root: str, target_profiles: str | Path) -> ProfileRefreshResult:
+    """Put a release's own profiles in place of the unedited seeded ones (GAP-1077).
+
+    A downgrade runs the older release's migrate, which keeps every profile
+    whose digest it does not know, and it does not know the digests of this
+    release. ``target_profiles`` is the older release's ``policies/guardrail``;
+    a profile the user edited is left as it is.
+    """
+
+    return refresh_stock_profiles(policy_dir, backups_root, bundled=Path(target_profiles))
+
+
+def refresh_stock_profiles(
+    policy_dir: str, backups_root: str, bundled: Path | None = None
+) -> ProfileRefreshResult:
+    """Replace unedited seeded profiles that differ from ``bundled`` (this release's by default)."""
 
     from defenseclaw.paths import bundled_guardrail_profiles_dir
 
     result = ProfileRefreshResult()
-    bundled = bundled_guardrail_profiles_dir()
+    if bundled is None:
+        bundled = bundled_guardrail_profiles_dir()
     if bundled is None or not policy_dir:
         return result
     dest_root = Path(policy_dir) / "guardrail"
