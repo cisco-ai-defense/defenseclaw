@@ -11,20 +11,26 @@
 package relaytls
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1" // the RFC 6455 accept value, not a security hash
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -366,13 +372,116 @@ func KeyPair(certPEM []byte, key *ecdsa.PrivateKey) (*tls.Certificate, error) {
 	return &c, nil
 }
 
-// Split serves TLS and plain HTTP on one port: a connection whose first
-// byte is a TLS handshake record (0x16) goes to the TLS listener, any other
-// to the plain one. The relay keeps one port, so Substrate's plain wake-up
-// probe still reaches /readyz (design unknown (a)). The TLS handshake is
-// done before the connection is handed on, and a failed one goes to
-// failed when it is not nil (the relay renews at once when the gateway
-// refuses its certificate, GAP-0929).
+// The gateway reaches a relay through the atenet router: CONNECT, then a
+// stream the worker-side Envoy parses as HTTP/1.1. It proxies HTTP and a
+// WebSocket upgrade (opaque bytes after the 101) and answers anything else,
+// a raw TLS ClientHello included, itself with 400 (GAP-1067). So TLS to the
+// relay starts with an upgrade the ingress passes: the gateway asks for
+// UpgradePath with Upgrade: websocket and the UpgradeProtocol subprotocol,
+// the relay answers 101, and TLS runs end to end on the upgraded stream.
+// The upgrade is framing only: the TLS session after it is what the
+// gateway trusts (relay CA, actor UID, live certificate).
+const (
+	// UpgradePath is the request that switches a relay stream to TLS.
+	UpgradePath = "/.defenseclaw/relay-tls"
+	// UpgradeProtocol is its Sec-WebSocket-Protocol value.
+	UpgradeProtocol = "defenseclaw.relay-tls.v1"
+	// upgradeHost is the authority of the upgrade request; the relay
+	// stream's requests all name it (attach's reverse proxy).
+	upgradeHost = "actor.invalid"
+	// maxUpgradeHead bounds what Split reads to tell an upgrade from a
+	// plain request; a larger head goes to the plain listener as is.
+	maxUpgradeHead = 16 << 10
+	wsAcceptGUID   = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+)
+
+// ErrNoUpgrade is a relay stream that did not switch to TLS: a relay that
+// does not serve TLS, one built before this handshake, or an ingress that
+// refused the upgrade. The gateway refuses the attachment; it never falls
+// back to plain for a TLS kit.
+var ErrNoUpgrade = errors.New("relay TLS: the relay did not switch the stream to TLS")
+
+// Upgrade switches c, a stream to one actor's relay, to TLS with conf: an
+// HTTP/1.1 WebSocket upgrade to UpgradePath, then a TLS client handshake on
+// the upgraded stream. ctx bounds both. The caller closes c on an error.
+func Upgrade(ctx context.Context, c net.Conn, conf *tls.Config) (*tls.Conn, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	key := base64.StdEncoding.EncodeToString(nonce[:])
+	if dl, ok := ctx.Deadline(); ok {
+		_ = c.SetDeadline(dl)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = c.SetDeadline(time.Now()) })
+	defer stop()
+	req := "GET " + UpgradePath + " HTTP/1.1\r\nHost: " + upgradeHost + "\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" +
+		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Protocol: " + UpgradeProtocol + "\r\n\r\n"
+	if _, err := io.WriteString(c, req); err != nil {
+		return nil, fmt.Errorf("relay TLS upgrade: %w", err)
+	}
+	br := bufio.NewReaderSize(c, 4096)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		return nil, fmt.Errorf("relay TLS upgrade: %w", err)
+	}
+	_ = resp.Body.Close()
+	switch {
+	case resp.StatusCode != http.StatusSwitchingProtocols:
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrNoUpgrade, resp.StatusCode)
+	case !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket"),
+		resp.Header.Get("Sec-WebSocket-Protocol") != UpgradeProtocol,
+		resp.Header.Get("Sec-WebSocket-Accept") != wsAccept(key):
+		return nil, fmt.Errorf("%w (the 101 answer is not the relay's)", ErrNoUpgrade)
+	}
+	var under net.Conn = c
+	if n := br.Buffered(); n > 0 {
+		pre, _ := br.Peek(n)
+		under = &prefixConn{Conn: c, prefix: bytes.NewReader(bytes.Clone(pre))}
+	}
+	tc := tls.Client(under, conf)
+	if err := tc.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	_ = c.SetDeadline(time.Time{})
+	return tc, nil
+}
+
+func wsAccept(key string) string {
+	sum := sha1.Sum([]byte(key + wsAcceptGUID))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// isUpgrade reports whether req asks to switch the stream to TLS.
+func isUpgrade(req *http.Request) bool {
+	if req.Method != http.MethodGet || req.URL.Path != UpgradePath || !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") ||
+		!headerToken(req.Header, "Connection", "upgrade") || !headerToken(req.Header, "Sec-WebSocket-Protocol", UpgradeProtocol) {
+		return false
+	}
+	k, err := base64.StdEncoding.DecodeString(req.Header.Get("Sec-WebSocket-Key"))
+	return err == nil && len(k) == 16
+}
+
+func headerToken(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Split serves TLS and plain HTTP on one port. A stream that opens with the
+// Upgrade request is answered 101 and goes to the TLS listener once its TLS
+// handshake is done; any other stream goes, unchanged, to the plain
+// listener, so Substrate's plain wake-up probe still reaches /readyz on the
+// relay's one port (design unknown (a)). A raw TLS ClientHello is not HTTP:
+// the ingress never carries one (GAP-1067), and here it goes to the plain
+// listener, which refuses it. A failed handshake goes to failed when it is
+// not nil (the relay renews at once when the gateway refuses its
+// certificate, GAP-0929).
 func Split(ln net.Listener, tlsConf *tls.Config, failed func(error)) (tlsLn, plainLn net.Listener) {
 	s := &splitter{ln: ln, tls: newChanListener(ln.Addr()), plain: newChanListener(ln.Addr()), failed: failed}
 	go s.run(tlsConf)
@@ -402,31 +511,42 @@ func (s *splitter) run(conf *tls.Config) {
 }
 
 func (s *splitter) route(c net.Conn, conf *tls.Config) {
+	// seen is every byte read from c, so a stream that is not the upgrade
+	// reaches the plain listener exactly as it came.
+	var seen bytes.Buffer
+	br := bufio.NewReaderSize(io.TeeReader(io.LimitReader(c, maxUpgradeHead), &seen), 4096)
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
-	b := make([]byte, 1)
-	n, err := c.Read(b)
+	req, err := http.ReadRequest(br)
 	_ = c.SetReadDeadline(time.Time{})
-	if err != nil || n != 1 {
+	if err != nil || !isUpgrade(req) {
+		if seen.Len() == 0 {
+			_ = c.Close()
+			return
+		}
+		s.plain.push(&prefixConn{Conn: c, prefix: bytes.NewReader(seen.Bytes())})
+		return
+	}
+	// The gateway sends nothing before the 101, but keep what was read.
+	pre, _ := br.Peek(br.Buffered())
+	pc := &prefixConn{Conn: c, prefix: bytes.NewReader(bytes.Clone(pre))}
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	_, err = io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "+
+		wsAccept(req.Header.Get("Sec-WebSocket-Key"))+"\r\nSec-WebSocket-Protocol: "+UpgradeProtocol+"\r\n\r\n")
+	if err != nil {
 		_ = c.Close()
 		return
 	}
-	pc := &prefixConn{Conn: c, prefix: bytes.NewReader(b)}
-	if b[0] == 0x16 {
-		tc := tls.Server(pc, conf)
+	tc := tls.Server(pc, conf)
+	err = tc.Handshake()
+	_ = c.SetDeadline(time.Time{})
+	if err != nil {
 		if s.failed != nil {
-			_ = tc.SetDeadline(time.Now().Add(10 * time.Second))
-			err := tc.Handshake()
-			_ = tc.SetDeadline(time.Time{})
-			if err != nil {
-				s.failed(err)
-				_ = tc.Close()
-				return
-			}
+			s.failed(err)
 		}
-		s.tls.push(tc)
+		_ = tc.Close()
 		return
 	}
-	s.plain.push(pc)
+	s.tls.push(tc)
 }
 
 type prefixConn struct {

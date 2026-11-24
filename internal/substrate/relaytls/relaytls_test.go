@@ -5,6 +5,7 @@
 package relaytls
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -71,12 +72,24 @@ func serve(t *testing.T, ca *CA, uid string) string {
 
 func get(t *testing.T, addr string, conf *tls.Config) (string, error) {
 	t.Helper()
-	c := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: conf}}
-	scheme := "http"
+	tr := &http.Transport{DisableKeepAlives: true}
 	if conf != nil {
-		scheme = "https"
+		// TLS as the gateway dials it: the upgrade, then TLS (GAP-1067).
+		tr.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
+			raw, err := (&net.Dialer{}).DialContext(ctx, network, a)
+			if err != nil {
+				return nil, err
+			}
+			tc, err := Upgrade(ctx, raw, conf)
+			if err != nil {
+				_ = raw.Close()
+				return nil, err
+			}
+			return tc, nil
+		}
 	}
-	resp, err := c.Get(scheme + "://" + addr + "/readyz")
+	c := &http.Client{Timeout: 5 * time.Second, Transport: tr}
+	resp, err := c.Get("http://" + addr + "/readyz")
 	if err != nil {
 		return "", err
 	}
