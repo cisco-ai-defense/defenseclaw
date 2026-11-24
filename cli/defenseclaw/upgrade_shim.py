@@ -50,6 +50,10 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from defenseclaw.guardrail_profiles import ProfileRefreshResult
 
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
@@ -530,18 +534,35 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
             if released and was_running:
                 _start_gateway_again("this release's")
             raise
+    packs = None
     if _key(version) < _key(installed):
-        _use_target_rule_packs(repo, version, local_dir, workdir)
+        try:
+            packs = _use_target_rule_packs(repo, version, local_dir, workdir)
+        except BaseException:
+            # Ctrl-C while the older release's wheel downloads: the gateway
+            # _release_route_only stopped must not stay down (GAP-1081).
+            shutil.rmtree(workdir, ignore_errors=True)
+            if released and was_running:
+                _start_gateway_again("this release's")
+            raise
     # Only a downgrade to a release that keeps the newer hook helper waits
     # for its installer and drops the helper (rel-1-0-4:GAP-2503); one that
     # put the route-only settings back waits too: it stopped the gateway, so
     # the older installer saw none running and does not start one.
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
     rc = 1
+    outcome_unknown = False
     try:
         args = (["--yes"] if yes else []) + extra
-        rc = _run_installer(installer, args, workdir, newer=newer, rerun=rerun, wait=released)
+        # With swapped rule packs the shim waits too: it puts them back when
+        # the installer fails (an exec would leave no one to do it).
+        rc = _run_installer(installer, args, workdir, newer=newer, rerun=rerun, wait=released or packs is not None)
+    except ShimOutcomeUnknownError:
+        outcome_unknown = True  # the installer may be running or may have changed things: leave the packs
+        raise
     finally:
+        if packs is not None and rc != 0 and not outcome_unknown:
+            _put_back_rule_packs(packs, version)
         if released and was_running:
             # The installed gateway: the older one after a success, this
             # release's (which writes the route settings again) otherwise.
@@ -965,7 +986,7 @@ _RULE_PACKS_MAX_FILE = 8 * 1024 * 1024
 _RULE_PACKS_MAX_TOTAL = 64 * 1024 * 1024
 
 
-def _use_target_rule_packs(repo: str, version: str, local_dir: str | None, workdir: str) -> None:
+def _use_target_rule_packs(repo: str, version: str, local_dir: str | None, workdir: str) -> ProfileRefreshResult | None:
     """Put DefenseClaw ``version``'s own rule packs in place of the unedited ones (GAP-1077).
 
     The older release's migrate keeps every rule pack whose files it does not
@@ -974,18 +995,69 @@ def _use_target_rule_packs(repo: str, version: str, local_dir: str | None, workd
     the packs are replaced here, before its installer runs; a pack the user
     edited is not touched and the older release keeps it too. Best effort: a
     pack that cannot be replaced is the old behaviour, never a failed downgrade.
+    Returns what was swapped, for ``_put_back_rule_packs`` when the installer fails.
     """
 
+    swapped = None
     try:
-        _restore_rule_packs(repo, version, local_dir, workdir)
+        from defenseclaw.guardrail_profiles import ProfileRefreshResult
+
+        swapped = ProfileRefreshResult()
+        _restore_rule_packs(repo, version, local_dir, workdir, swapped)
     except Exception as exc:  # noqa: BLE001 - the downgrade goes on; the installer reports what it kept
         print(
             f"  ! Could not put the rule packs of DefenseClaw {version} in place ({exc}); "
             "the installer keeps the current ones"
         )
+    except BaseException:
+        # Ctrl-C part way through the swap: the downgrade ends, so no older release's pack stays.
+        if swapped is not None:
+            _put_back_rule_packs(swapped, version)
+        raise
+    return swapped if swapped is not None and swapped.refreshed else None
 
 
-def _restore_rule_packs(repo: str, version: str, local_dir: str | None, workdir: str) -> None:
+def _put_back_rule_packs(swapped: ProfileRefreshResult, version: str) -> None:
+    """The downgrade did not happen: this release's rule packs go back in place of the target's (GAP-1081)."""
+
+    from defenseclaw.guardrail_profiles import undo_profile_refresh
+    from defenseclaw.migrations import _configured_policy_dir, _read_config_text
+
+    try:
+        policy_dir = _configured_policy_dir(_data_home(), _read_config_text(_active_config_path()) or "")
+        restored, problems = undo_profile_refresh(policy_dir, swapped)
+    except Exception as exc:  # noqa: BLE001 - say so; the copies stay in the backup folder
+        restored, problems = [], [str(exc)]
+    if restored:
+        print(f"  → The downgrade did not finish: rule packs {', '.join(restored)} are this release's again")
+    for problem in problems:
+        print(f"  ! Rule pack not put back: {problem}; the previous copies are in {swapped.backup_dir}")
+
+
+def _fetch_checksums(repo: str, version: str, local_dir: str | None, workdir: str) -> str:
+    """``workdir/checksums.txt`` of release ``version``, its signature verified as for an installer.
+
+    ``_fetch_installer`` writes it for every path that downloads an installer;
+    a Windows downgrade runs the saved installer instead (GAP-1081).
+    """
+
+    checksums = os.path.join(workdir, "checksums.txt")
+    if os.path.isfile(checksums):
+        return checksums
+    if local_dir:
+        try:
+            shutil.copyfile(os.path.join(local_dir, "checksums.txt"), checksums)
+        except OSError as exc:
+            raise ShimError(f"could not read checksums.txt from {local_dir}: {exc}") from None
+    else:
+        _download(f"{_source_url(repo)}/releases/download/{version}/checksums.txt", checksums)
+    _verify_release_signature(repo, version, local_dir, workdir, checksums)
+    return checksums
+
+
+def _restore_rule_packs(
+    repo: str, version: str, local_dir: str | None, workdir: str, result: ProfileRefreshResult | None = None
+) -> None:
     from defenseclaw.guardrail_profiles import restore_unedited_profiles, unedited_profiles
     from defenseclaw.migrations import _configured_policy_dir, _read_config_text
 
@@ -995,6 +1067,7 @@ def _restore_rule_packs(repo: str, version: str, local_dir: str | None, workdir:
         return
     name = f"defenseclaw-{version}-py3-none-any.whl"
     wheel = os.path.join(workdir, name)
+    checksums = _fetch_checksums(repo, version, local_dir, workdir)
     if local_dir:
         try:
             shutil.copyfile(os.path.join(local_dir, name), wheel)
@@ -1004,11 +1077,11 @@ def _restore_rule_packs(repo: str, version: str, local_dir: str | None, workdir:
         _download(f"{_source_url(repo)}/releases/download/{version}/{name}", wheel)
     with open(wheel, "rb") as stream:
         actual = hashlib.sha256(stream.read()).hexdigest()
-    if actual != _expected_sha256(os.path.join(workdir, "checksums.txt"), name):
+    if actual != _expected_sha256(checksums, name):
         raise ShimError(f"{name} does not match checksums.txt")
     packs = os.path.join(workdir, "target-rule-packs")
     _extract_rule_packs(wheel, packs)
-    result = restore_unedited_profiles(policy_dir, os.path.join(data, "backups"), packs)
+    result = restore_unedited_profiles(policy_dir, os.path.join(data, "backups"), packs, result)
     for error in result.errors:
         print(f"  ! Rule pack not replaced: {error}")
     if result.refreshed:

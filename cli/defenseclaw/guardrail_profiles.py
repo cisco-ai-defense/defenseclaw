@@ -395,6 +395,9 @@ class ProfileRefreshResult:
     kept_modified: list[str] = field(default_factory=list)
     backup_dir: str = ""
     errors: list[str] = field(default_factory=list)
+    # The digest each refreshed profile had right after the swap, so an undo
+    # puts a profile back only while it is still exactly that copy.
+    refreshed_digests: dict[str, str] = field(default_factory=dict)
 
 
 def _profile_files(root: Path) -> list[Path]:
@@ -442,26 +445,70 @@ def unedited_profiles(policy_dir: str) -> list[str]:
     return names
 
 
-def restore_unedited_profiles(policy_dir: str, backups_root: str, target_profiles: str | Path) -> ProfileRefreshResult:
+def restore_unedited_profiles(
+    policy_dir: str, backups_root: str, target_profiles: str | Path, result: ProfileRefreshResult | None = None
+) -> ProfileRefreshResult:
     """Put a release's own profiles in place of the unedited seeded ones (GAP-1077).
 
     A downgrade runs the older release's migrate, which keeps every profile
     whose digest it does not know, and it does not know the digests of this
     release. ``target_profiles`` is the older release's ``policies/guardrail``;
-    a profile the user edited is left as it is.
+    a profile the user edited is left as it is. A caller that passes ``result``
+    keeps what was swapped so far even when this is interrupted, to undo it.
     """
 
-    return refresh_stock_profiles(policy_dir, backups_root, bundled=Path(target_profiles))
+    return refresh_stock_profiles(policy_dir, backups_root, bundled=Path(target_profiles), result=result)
+
+
+def undo_profile_refresh(policy_dir: str, result: ProfileRefreshResult) -> tuple[list[str], list[str]]:
+    """Put back the profiles a refresh replaced, from its backup (GAP-1081).
+
+    Used when the downgrade that asked for the swap did not happen. A profile
+    changed since the swap is left alone. Returns the profiles put back and
+    the problems met.
+    """
+
+    restored: list[str] = []
+    problems: list[str] = []
+    dest_root = Path(policy_dir) / "guardrail"
+    for name in result.refreshed:
+        backup = Path(result.backup_dir) / name
+        dst = dest_root / name
+        staged = dst.with_name(f".{name}.undo")
+        try:
+            if not backup.is_dir():
+                problems.append(f"{name}: its backup is gone")
+                continue
+            if result.refreshed_digests.get(name) != profile_digest(dst):
+                problems.append(f"{name}: changed since the swap, left as it is")
+                continue
+            shutil.rmtree(staged, ignore_errors=True)
+            shutil.move(str(dst), str(staged))
+            try:
+                shutil.move(str(backup), str(dst))
+            except OSError:
+                shutil.move(str(staged), str(dst))
+                raise
+            shutil.rmtree(staged, ignore_errors=True)
+            restored.append(name)
+        except OSError as exc:
+            problems.append(f"{name}: {exc}")
+    try:
+        os.rmdir(result.backup_dir)  # only when every backup left it
+    except OSError:
+        pass
+    return restored, problems
 
 
 def refresh_stock_profiles(
-    policy_dir: str, backups_root: str, bundled: Path | None = None
+    policy_dir: str, backups_root: str, bundled: Path | None = None, result: ProfileRefreshResult | None = None
 ) -> ProfileRefreshResult:
     """Replace unedited seeded profiles that differ from ``bundled`` (this release's by default)."""
 
     from defenseclaw.paths import bundled_guardrail_profiles_dir
 
-    result = ProfileRefreshResult()
+    if result is None:
+        result = ProfileRefreshResult()
     if bundled is None:
         bundled = bundled_guardrail_profiles_dir()
     if bundled is None or not policy_dir:
@@ -486,6 +533,7 @@ def refresh_stock_profiles(
                 os.makedirs(result.backup_dir, exist_ok=True)
             _swap_in(profile, dst, Path(result.backup_dir) / profile.name)
             result.refreshed.append(profile.name)
+            result.refreshed_digests[profile.name] = profile_digest(dst)
         except OSError as exc:
             result.errors.append(f"{profile.name}: {exc}")
     return result
