@@ -18,6 +18,9 @@ func TestRunsProgramLauncherChildren(t *testing.T) {
 		{"parallel apply_patch ::: x | head", true},
 		{"systemd-run --scope apply_patch | head", true},
 		{"find . -exec echo apply_patch \\; | head", false},
+		{"find . -exec apply_patch < patch.txt", false},
+		{"find . -exec apply_patch < patch.txt ;", false},
+		{"find . -execdir apply_patch < patch.txt", false},
 		{"flock lockfile echo apply_patch | head", false},
 		{"watch echo apply_patch | head", false},
 		{"su -c 'echo apply_patch' | head", false},
@@ -25,8 +28,17 @@ func TestRunsProgramLauncherChildren(t *testing.T) {
 		{"parallel echo ::: apply_patch | head", false},
 		{"systemd-run echo apply_patch | head", false},
 	} {
-		if got := RunsProgram(tc.command, "apply_patch"); got != tc.want {
+		if got := RunsProgramIncludingLaunchers(tc.command, "apply_patch"); got != tc.want {
 			t.Errorf("launcher child for %q: %t, want %t", tc.command, got, tc.want)
 		}
+	}
+}
+
+func TestRunsProgramKeepsShellLevelMeaning(t *testing.T) {
+	if RunsProgram("find . -exec mv {} build/ \\;", "mv") {
+		t.Fatal("find child is not a direct shell command")
+	}
+	if !RunsProgramIncludingLaunchers("find . -exec mv {} build/ \\;", "mv") {
+		t.Fatal("launcher-aware reading missed the child")
 	}
 }

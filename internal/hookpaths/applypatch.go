@@ -838,11 +838,11 @@ func invokesApplyPatch(text string) bool {
 	if !tactics.MayNameProgram(text, applyPatchNames...) {
 		return false
 	}
-	if tactics.RunsProgram(text, applyPatchNames...) {
+	if tactics.RunsProgramIncludingLaunchers(text, applyPatchNames...) {
 		return true
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if tactics.RunsProgram(line, applyPatchNames...) {
+		if tactics.RunsProgramIncludingLaunchers(line, applyPatchNames...) {
 			return true
 		}
 	}

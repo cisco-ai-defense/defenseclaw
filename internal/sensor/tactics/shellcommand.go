@@ -446,10 +446,18 @@ func knownWrapperOption(wrapper, option string, valued []string) bool {
 // is uncertain, or a script nested past the limit, counts when one of its
 // words names one of programs.
 func RunsProgram(cmdline string, programs ...string) bool {
-	return runsProgramAtDepth(cmdline, programs, 0)
+	return runsProgramAtDepth(cmdline, programs, 0, false)
 }
 
-func runsProgramAtDepth(cmdline string, programs []string, depth int) bool {
+// RunsProgramIncludingLaunchers also follows known command operands of
+// launchers such as find -exec and flock. Callers that only need shell-level
+// commands should use RunsProgram: a launcher child may not have the same
+// path and side effects as a direct command.
+func RunsProgramIncludingLaunchers(cmdline string, programs ...string) bool {
+	return runsProgramAtDepth(cmdline, programs, 0, true)
+}
+
+func runsProgramAtDepth(cmdline string, programs []string, depth int, includeLaunchers bool) bool {
 	names := func(text string) bool {
 		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
 			return unicode.IsSpace(r) || r == 34 || r == 39 || r == 96 ||
@@ -471,9 +479,11 @@ func runsProgramAtDepth(cmdline string, programs []string, depth int) bool {
 		if slices.Contains(programs, program) || !certain && names(joinWords(command.words, false)) {
 			return true
 		}
-		for _, child := range launchedProgramTexts(program, args) {
-			if runsProgramAtDepth(child, programs, depth+1) {
-				return true
+		if includeLaunchers {
+			for _, child := range launchedProgramTexts(program, args) {
+				if runsProgramAtDepth(child, programs, depth+1, true) {
+					return true
+				}
 			}
 		}
 	}
@@ -494,7 +504,9 @@ func launchedProgramTexts(program string, args []shellWord) []string {
 				for i < len(args) && args[i].text != ";" && args[i].text != "+" {
 					i++
 				}
-				if start < i {
+				// An unterminated -exec/-ok is an invalid find expression: it
+				// cannot launch the words it names.
+				if i < len(args) && start < i {
 					children = append(children, joinWords(args[start:i], true))
 				}
 			}
