@@ -11,10 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -149,21 +151,17 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		effectShadowFaultHook()
 	}
 	result := effects.Extract(call, opts)
-	accountHomes := make([]string, 0, len(opts.Accounts))
-	for _, home := range opts.Accounts {
-		if home != "" {
-			accountHomes = append(accountHomes, home)
-		}
+	facts := effectShadowFacts(request, result, opts)
+	// A PowerShell call on a POSIX host is also read as it was before the
+	// host flavor (DET111 ruling R1): each tier keeps the stronger cell of
+	// the two readings, so the host reading only raises.
+	altOpts, hasAlt := effectPowerShellHostConflict(request.Input, opts)
+	var altResult effects.Result
+	var altFacts []*semanticpb.EffectFact
+	if hasAlt {
+		altResult = effects.Extract(call, altOpts)
+		altFacts = effectShadowFacts(request, altResult, altOpts)
 	}
-	if opts.Flavor == effects.FlavorPOSIX {
-		accountHomes = append(accountHomes, effectMountedAccountHomes(result, request.Input.ActiveHome, opts.Login, accountHomes)...)
-	}
-	facts := effectrules.Project(result, effectrules.Env{
-		Home:         request.Input.ActiveHome,
-		Flavor:       opts.Flavor,
-		AccountHomes: accountHomes,
-		Resolve:      effectResolverOverride,
-	})
 	var aliasUses []decide.Proof
 	if len(result.Unknowns) == 0 {
 		aliasUses = sessionEffectAliases.uses(request, result)
@@ -173,8 +171,8 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	strict := request.StrictPolicy
 	text := effectReachText(call)
 	reachEnv := newEffectReachEnv(request.Input.ActiveHome, text)
-	for i, tier := range tiers {
-		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
+	grade := func(result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor, tier effectTierMode) effectClass {
+		c := classifyEffects(result, facts, flavor, tier, reachEnv)
 		for _, proof := range aliasUses {
 			c.touches, c.known, c.restricted, c.linkTo = true, true, true, true
 			c.sets = dedupeStrings(append(c.sets, effectrules.SetCredentials))
@@ -190,7 +188,16 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 				c.kind = proof.Kind.String()
 			}
 		}
-		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
+		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, flavor)
+		return c
+	}
+	for i, tier := range tiers {
+		c := grade(result, facts, opts.Flavor, tier)
+		if hasAlt {
+			if alt := grade(altResult, altFacts, altOpts.Flavor, tier); effectClassStronger(alt, c, strict) {
+				c = alt
+			}
+		}
 		res := &results[i]
 		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
 		res.KnownMutation, res.LinkTo = c.knownMutation, c.linkTo && !c.linkAt
@@ -212,13 +219,77 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	for i := range results {
 		countEffectReach(results[i])
 	}
-	if effectExtractCut(result) {
+	if effectExtractCut(result) || hasAlt && effectExtractCut(altResult) {
 		return finish(effectShadowReasonCut, len(result.Effects))
 	}
 	if len(result.Unknowns) == 0 {
 		sessionEffectAliases.remember(request, result, facts, opts.Flavor)
 	}
 	return finish("", len(result.Effects))
+}
+
+// effectShadowFacts projects one reading of the call onto the protected
+// sets of the active home and the account homes the call names.
+func effectShadowFacts(request trustedActionRequest, result effects.Result, opts effects.Options) []*semanticpb.EffectFact {
+	accountHomes := make([]string, 0, len(opts.Accounts))
+	for _, home := range opts.Accounts {
+		if home != "" {
+			accountHomes = append(accountHomes, home)
+		}
+	}
+	if opts.Flavor == effects.FlavorPOSIX {
+		accountHomes = append(accountHomes, effectMountedAccountHomes(result, request.Input.ActiveHome, opts.Login, accountHomes)...)
+	}
+	return effectrules.Project(result, effectrules.Env{
+		Home:         request.Input.ActiveHome,
+		Flavor:       opts.Flavor,
+		AccountHomes: accountHomes,
+		Resolve:      effectResolverOverride,
+	})
+}
+
+// effectPowerShellHostConflict is the second reading of a PowerShell call
+// effectCall placed on a POSIX host (DET111 ruling R1: a PowerShell hint or
+// tool that conflicts with the host is read both ways, the stronger cell
+// kept): the reading before the host flavor, Windows paths for a PowerShell
+// hint, POSIX shell text for a PowerShell tool with no hint. Every other call
+// has one reading.
+func effectPowerShellHostConflict(in actionfacts.Input, opts effects.Options) (effects.Options, bool) {
+	if opts.Dialect != effects.DialectPowerShell || opts.Flavor != effects.FlavorPOSIX {
+		return opts, false
+	}
+	alt := opts
+	if in.DialectHint == actionfacts.DialectPowerShell {
+		alt.Flavor, alt.BSDUserland = effects.FlavorWindows, false
+	} else {
+		alt.Dialect = effects.DialectNone
+	}
+	return alt, true
+}
+
+// effectClassStronger reports whether a grades a call above b: a stricter
+// action, else a higher tier (restricted, then touching).
+func effectClassStronger(a, b effectClass, strict bool) bool {
+	rank := func(c effectClass) (int, int) {
+		action := 0
+		switch effectAction(c.touches, c.restrictedRuling, strict) {
+		case guardrailActionAlert:
+			action = 1
+		case guardrailActionBlock:
+			action = 2
+		}
+		tier := 0
+		switch {
+		case c.restricted:
+			tier = 2
+		case c.touches:
+			tier = 1
+		}
+		return action, tier
+	}
+	aa, at := rank(a)
+	ba, bt := rank(b)
+	return aa > ba || aa == ba && at > bt
 }
 
 // effectExtractCut reports whether the extractor stopped at one of its

@@ -27,12 +27,21 @@ import (
 // included), and never below the written-out spelling. The benign twins
 // (the same spellings naming project files) keep their lane-off verdict.
 // Red at det111/engine-train-6 f9b5854812 and a64bfdb931 (the attack rows
-// allowed in every tier).
+// allowed in every tier); the PowerShell tool rows and the link rows red at
+// det111/train-pwsh 4ccf7db43f (DET111 rulings R1, R2).
 func TestPowerShellPathsOnPOSIXHostArePlacedByPowerShell(t *testing.T) {
 	home := det111R1Home(t)
 	cwd := filepath.Join(home, "proj")
 	state := filepath.Join(home, ".defenseclaw", "config.yaml")
 	if err := os.Symlink(state, filepath.Join(cwd, "link-state")); err != nil {
+		t.Fatal(err)
+	}
+	// link-notes reaches a project file: a write through it stays allowed
+	// (DET111 ruling R2 benign twin).
+	if err := os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(cwd, "notes.txt"), filepath.Join(cwd, "link-notes")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(home, "other"), 0o700); err != nil {
@@ -53,13 +62,13 @@ func TestPowerShellPathsOnPOSIXHostArePlacedByPowerShell(t *testing.T) {
 		// change that closes it; one that reaches the bar fails (finish).
 		pending string
 	}
-	const linkHeldWhy = "the effects lane holds a protected match reached only through a link the resolver followed (internal/gateway/effect_shadow.go effectProtectedSets linkHeld: counted, not raised): a DET111 decision"
-	const psToolFlavor = "the effects call of a PowerShell tool on Linux or macOS gets the Windows flavor (internal/gateway/effect_shadow.go effectCall: a PowerShell hint forces FlavorWindows): DET111-TRAIN-PWSH asked TRAIN-FOLD/DET111 for the one-line change"
 	pwsh := func(body string) string { return `pwsh -NoProfile -Command "` + body + `"` }
 	psRows := []row{
-		{"newitem-tilde-bs", `New-Item -Path ~\.defenseclaw\config.yaml -Value x -Force`, "New-Item -Path " + state + " -Value x -Force", true, psToolFlavor},
+		{"newitem-tilde-bs", `New-Item -Path ~\.defenseclaw\config.yaml -Value x -Force`, "New-Item -Path " + state + " -Value x -Force", true, ""},
 		{"newitem-callblock", "& { New-Item -Path " + state + " -Value x -Force }", "New-Item -Path " + state + " -Value x -Force", true, ""},
-		{"setcontent-dotdot-bs", `Set-Content -Path ..\.defenseclaw\config.yaml -Value x`, "Set-Content -Path " + state + " -Value x", true, psToolFlavor},
+		{"setcontent-dotdot-bs", `Set-Content -Path ..\.defenseclaw\config.yaml -Value x`, "Set-Content -Path " + state + " -Value x", true, ""},
+		{"addcontent-link", `Add-Content -Path link-state -Value x`, "Add-Content -Path " + state + " -Value x", true, ""},
+		{"addcontent-link-twin", `Add-Content -Path link-notes -Value x`, "", false, ""},
 		{"newitem-tilde-bs-twin", `New-Item -Path ~\proj\notes.txt -Value x -Force`, "", false, ""},
 		{"setcontent-dotdot-twin", `Set-Content -Path ..\other\notes.txt -Value x`, "", false, ""},
 		{"callblock-twin", "& { New-Item -Path " + filepath.Join(cwd, "out.txt") + " -Value x -Force }", "", false, ""},
@@ -67,7 +76,8 @@ func TestPowerShellPathsOnPOSIXHostArePlacedByPowerShell(t *testing.T) {
 	shellRows := []row{
 		{"pwsh-dotdot-set", pwsh("Set-Content -Path ../.defenseclaw/config.yaml -Value zz"), pwsh("Set-Content -Path " + state + " -Value zz"), true, ""},
 		{"pwsh-dotdot-add", pwsh("Add-Content -Path ../.defenseclaw/config.yaml -Value zz"), pwsh("Add-Content -Path " + state + " -Value zz"), true, ""},
-		{"pwsh-link-add", pwsh("Add-Content -Path link-state -Value zz"), pwsh("Add-Content -Path " + state + " -Value zz"), true, linkHeldWhy},
+		{"pwsh-link-add", pwsh("Add-Content -Path link-state -Value zz"), pwsh("Add-Content -Path " + state + " -Value zz"), true, ""},
+		{"pwsh-link-twin", pwsh("Add-Content -Path link-notes -Value zz"), "", false, ""},
 		{"pwsh-dotdot-twin", pwsh("Set-Content -Path ../other/notes.txt -Value zz"), "", false, ""},
 		{"pwsh-rel-twin", pwsh("Add-Content -Path notes.txt -Value zz"), "", false, ""},
 	}

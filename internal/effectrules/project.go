@@ -112,7 +112,7 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 			// lexical target; a bare exact spelling cannot.
 			for _, match := range target.GetProtected() {
 				switch match.GetReason() {
-				case "link", "other_home", "inode":
+				case "link", ReasonLinkExact, "other_home", "inode":
 					if match.GetState() == string(gradeKnown) {
 						fact.TargetState = string(effects.TargetStateKnown)
 						break
@@ -189,10 +189,18 @@ func projectTarget(
 		if grade == gradeNo {
 			continue // absence folds to "no" in protected(); keep the list bounded
 		}
+		reason := matchBasis(t, grade, sets[name], flavor)
+		if reason == "link" && t.Path != "" {
+			// The resolver walked the spelling to an exact member: a write
+			// that opens the path writes that member (DET111 ruling R2).
+			if resolved, ok := rsv(t.Path); ok && resolved != "" && memberExact(resolved, sets[name], flavor) {
+				reason = ReasonLinkExact
+			}
+		}
 		pt.Protected = append(pt.Protected, &semanticpb.ProtectedMatch{
 			Set:    name,
 			State:  string(grade),
-			Reason: matchBasis(t, grade, sets[name], flavor),
+			Reason: reason,
 		})
 	}
 	// A hard link of a member is the member under another name: the name
