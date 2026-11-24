@@ -744,41 +744,36 @@ def test_windows_no_log_failure_prints_the_release_command_when_the_recovery_cop
     assert _recovery_dirs(home) == []
 
 
-@pytest.mark.parametrize("damage", ["missing", "changed"])
-def test_windows_downgrade_no_log_failure_with_a_damaged_recovery_copy_names_the_command_the_user_ran(
-    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], damage: str
+def test_windows_downgrade_names_the_kept_copy_and_the_command_the_user_ran_for_a_failure_in_the_window(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # A downgrade stages the current saved installer, because an older one
-    # cannot read the recovery receipts of this install. When the kept copy is
-    # damaged, the fallback must not hand the user the older release installer.
+    # cannot read the recovery receipts of this install. The shim ends before
+    # the installer can fail (GAP-1084), so it names the way back up front: the
+    # verified copy the watcher keeps after a failure, and the command the user
+    # ran, never the older release installer.
     monkeypatch.setattr("defenseclaw.__version__", "1.0.9")
     _windows_rollback_with_desktop(home, monkeypatch)
-    created: list[str] = []
-    cleanup = _installer_that_cleans_up_then_fails(created)
     launched: list[list[str]] = []
 
     def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
         if "-File" not in argv:  # a hardware probe of the upgrade, not the installer
             raise FileNotFoundError(argv[0])
         launched.append(argv)
-        child = cleanup(argv, **kwargs)
-        recovery = _recovery_dirs(home)[0]
-        if damage == "missing":
-            shutil.rmtree(recovery)
-        else:
-            (recovery / "install.ps1").write_bytes(b"changed")
-        return child
+        return _child(lambda: None)
 
     monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
 
-    assert upgrade_shim.run(["upgrade", "--version", "v1.0.5", "--yes"]) == 1
+    assert upgrade_shim.run(["upgrade", "--version", "v1.0.5", "--yes"]) == 0
 
-    err = capsys.readouterr().err
+    out = capsys.readouterr().out
     assert "-Version 1.0.5" in " ".join(launched[0]), launched
-    assert "run this command again (the kept copy is not available)" in err, err
-    assert err.rstrip().splitlines()[-2].strip() == "defenseclaw upgrade --version 1.0.5 --yes", err
-    assert "releases/" not in err and "irm " not in err and "scriptblock" not in err, err
-    assert _recovery_dirs(home) == []
+    kept = _recovery_dirs(home)
+    assert len(kept) == 1
+    saved = (kept[0] / "install.ps1").read_bytes()
+    assert hashlib.sha256(saved).hexdigest() in out and str(kept[0] / "install.ps1") in out, out
+    assert "run this command again:" in out and "defenseclaw upgrade --version 1.0.5 --yes" in out, out
+    assert "/releases/" not in out and "irm https" not in out and "scriptblock" not in out, out
 
 
 def test_windows_recovery_copy_is_removed_when_the_installer_ended_with_exit_code_0(
