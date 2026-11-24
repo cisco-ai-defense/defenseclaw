@@ -72,6 +72,14 @@ func TestRuleForNamesEveryPlainWriteRule(t *testing.T) {
 			t.Errorf("%+v: rule %q has no plain write severity", p, rule)
 		}
 	}
+	// T23b still names the own key class for link and permission proofs;
+	// GAP-1878 excludes its write, append and delete spellings only.
+	for _, kind := range []ProofKind{KindLink, KindPerm} {
+		p := Proof{Kind: kind, Target: TargetCredential, Certainty: CertKnown, Set: SetSSHPrivateKey}
+		if got := RuleFor(p); got != "PATH-SSH-KEY" {
+			t.Errorf("own SSH private key %v names %q, want PATH-SSH-KEY", kind, got)
+		}
+	}
 	// rm FILE fires the hook config guard and the credential file rules, so a
 	// Known delete names them as the plain spelling does (GAP-1478).
 	if got := RuleFor(Proof{Kind: KindDelete, Target: TargetHookConfig, Certainty: CertKnown}); got != RuleHookConfigWrite {

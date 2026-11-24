@@ -369,9 +369,10 @@ func RuleFor(p Proof) string {
 	case TargetAuthorizedKeys:
 		return RuleAuthorizedKeysWrite
 	case TargetCredential:
-		if p.Set != SetSSHPrivateKey {
-			return setRules[p.Set]
+		if p.Set == SetSSHPrivateKey && (p.Kind == KindWrite || p.Kind == KindAppend || p.Kind == KindDelete) {
+			return ""
 		}
+		return setRules[p.Set]
 	case TargetOtherHomeCredential:
 		return setRules[p.Set]
 	}
