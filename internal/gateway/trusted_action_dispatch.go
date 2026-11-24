@@ -501,6 +501,12 @@ func dispatchTrustedActionOnce(
 	if request.Input.ActiveShell == "" {
 		request.Input.ActiveShell = trustedActiveShell(parent)
 	}
+	// A literal chroot that can only write ordinary files under its
+	// child root does not mutate the caller's security state (GAP-1483).
+	// This runs after every deferred whole-call reading and child twin.
+	defer func() {
+		findings = withoutOrdinaryChrootStateFinding(request, findings)
+	}()
 	// A call judged as the twin of its data word leaves a detection-only
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
