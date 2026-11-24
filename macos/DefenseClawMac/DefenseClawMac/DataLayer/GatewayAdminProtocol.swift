@@ -76,6 +76,13 @@ enum GatewayAdminPolicy {
     /// repair returns the rest (GAP-2003).
     static let repairWalkSeconds = 200
 
+    /// The helper's exit code when a walk stopped at that deadline and the
+    /// repair is unfinished: unlike 1 (what is left cannot be returned by
+    /// repeating the repair), repairing again returns the rest. The app keeps
+    /// offering the repair while the helper answers it, whatever the
+    /// top-level files then show (GAP-2003).
+    static let repairUnfinishedExitCode: Int32 = 3
+
     /// Explicit per-operation administrator authentication. Both ends verify
     /// this definition so a preexisting same-name `allow` rule is never trusted.
     static let authorizationDefinition: [String: Any] = [

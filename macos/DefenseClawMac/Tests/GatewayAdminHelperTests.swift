@@ -1077,6 +1077,19 @@ private enum GatewayAdminHelperTests {
         calls = []; found = GatewayAdminRootProcess.Found()
         result = try perform()
         check(result.0 == 0 && calls == ["live?", "restore", "remove"], "Leftover root files are returned when nothing runs")
+
+        // GAP-2003: a walk that stopped at its deadline has its own exit code,
+        // so the app offers the repair again; other incomplete outcomes keep 1.
+        for (outcome, code) in [
+            (GatewayAdminOwnershipRepair.Outcome(incomplete: true, unfinished: true), GatewayAdminPolicy.repairUnfinishedExitCode),
+            (GatewayAdminOwnershipRepair.Outcome(incomplete: true), 1),
+            (GatewayAdminOwnershipRepair.Outcome(restored: ["gateway.pid"]), 0),
+        ] {
+            let reply = try GatewayAdminRepair.perform(
+                liveRootProcesses: { GatewayAdminRootProcess.Found() }, stop: { _ in true },
+                restoreOwnership: { outcome }, removeStagedGateway: {})
+            check(reply.0 == code, "A repair outcome must answer \(code), not \(reply.0): \(outcome)")
+        }
     }
 
     private static func testRootProcessRecord(root: URL) throws {

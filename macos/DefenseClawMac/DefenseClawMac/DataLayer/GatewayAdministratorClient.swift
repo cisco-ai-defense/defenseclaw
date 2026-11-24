@@ -110,6 +110,12 @@ enum GatewayRootState {
 struct GatewayRepairMemory: Sendable {
     static let key = "gatewayRootRepairUnresolved"
 
+    /// Stored instead of a fingerprint when the helper's repair stopped at its
+    /// walk deadline: root-owned files may remain below the top-level files
+    /// whatever they show, so the next gateway start repairs again. It is no
+    /// fingerprint, so it never refuses a repair (GAP-2003).
+    static let unfinished = "repair-unfinished"
+
     var load: @Sendable () -> String?
     var save: @Sendable (String?) -> Void
 

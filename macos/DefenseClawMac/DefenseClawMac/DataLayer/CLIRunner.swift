@@ -554,9 +554,12 @@ actor CLIRunner {
     nonisolated static func rootStateToRepair(
         binary: String, arguments: [String], home: URL, rootOwnedState: (URL) -> [GatewayRootState.Marker]
     ) -> [GatewayRootState.Marker] {
-        guard binary == "defenseclaw-gateway", arguments.count == 1,
-              gatewayLifecycleActions.contains(arguments[0]) else { return [] }
+        guard isGatewayLifecycleCommand(binary: binary, arguments: arguments) else { return [] }
         return rootOwnedState(home)
+    }
+
+    nonisolated static func isGatewayLifecycleCommand(binary: String, arguments: [String]) -> Bool {
+        binary == "defenseclaw-gateway" && arguments.count == 1 && gatewayLifecycleActions.contains(arguments[0])
     }
 
     private let rootOwnedState: @Sendable (URL) -> [GatewayRootState.Marker]
@@ -1003,7 +1006,11 @@ actor CLIRunner {
         }
         let rootOwned = Self.rootStateToRepair(binary: binaryName, arguments: arguments,
                                                home: installationContext.homeRoot, rootOwnedState: rootOwnedState)
-        if !rootOwned.isEmpty {
+        // A repair that stopped at its walk deadline left files root-owned
+        // that the top-level markers may no longer show: repair again.
+        let resumesRepair = Self.isGatewayLifecycleCommand(binary: binaryName, arguments: arguments)
+            && repairMemory.load() == GatewayRepairMemory.unfinished
+        if !rootOwned.isEmpty || resumesRepair {
             // A gateway run as root for this per-user home (the administrator
             // switch of app versions up to 1.0.8, or sudo) is moved back to
             // this account first: the administrator helper stops the root
@@ -1027,7 +1034,10 @@ actor CLIRunner {
             let operation = GatewayAdministratorOperation()
             runStates[executionID] = .administrator(operation)
             if let onLine {
-                await onLine("This installation's gateway ran as root (root-owned: \(rootOwned.map(\.name).joined(separator: ", "))). "
+                let leftover = rootOwned.isEmpty
+                    ? "an earlier repair stopped before it reached every file"
+                    : "root-owned: \(rootOwned.map(\.name).joined(separator: ", "))"
+                await onLine("This installation's gateway ran as root (\(leftover)). "
                     + "Requesting macOS administrator authorization to stop it and return these files to your account, "
                     + "so the gateway runs as you…")
             }
@@ -1041,6 +1051,12 @@ actor CLIRunner {
                 for line in repaired.output.split(separator: "\n", omittingEmptySubsequences: false) {
                     await onLine(String(line))
                 }
+            }
+            // The walk stopped at its deadline: repairing again returns the rest,
+            // so nothing is recorded as unresolved and the next start asks again.
+            if !repaired.cancelled, repaired.exitCode == GatewayAdminPolicy.repairUnfinishedExitCode {
+                repairMemory.save(GatewayRepairMemory.unfinished)
+                return repaired
             }
             // The helper ran (not cancelled, authorization not refused): remember
             // what it could not clear so the prompt does not come back for it.

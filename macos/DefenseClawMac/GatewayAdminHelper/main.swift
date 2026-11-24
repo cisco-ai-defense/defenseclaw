@@ -1375,7 +1375,8 @@ enum GatewayAdminRepair {
         let outcome = try restoreOwnership()
         try removeStagedGateway()
         output += outcome.summary
-        return (outcome.incomplete ? 1 : 0, output)
+        let code: Int32 = outcome.unfinished ? GatewayAdminPolicy.repairUnfinishedExitCode : outcome.incomplete ? 1 : 0
+        return (code, output)
     }
 }
 
