@@ -77,3 +77,23 @@ func TestEnterpriseHookImagePathsIn(t *testing.T) {
 		t.Fatalf("EnterpriseHookImagePathsIn(no paths) = %q", got)
 	}
 }
+
+// GAP-1859: offsets found in strings.ToLower(text) sliced text. A folder
+// letter whose lower case is longer in UTF-8 (U+023A is 2 bytes, U+2C65 3)
+// pushed them past len(text) and panicked; one whose lower case is shorter
+// (U+0130 and U+212A lower to ASCII i and k) shifted them and lost the path.
+// The path is found at its own offsets now.
+func TestEnterpriseHookImagePathsInNonASCII(t *testing.T) {
+	for _, folder := range []string{"\u023a\u023a", "\u0130\u0130\u0130", "\u0130\u015fler", "\u212a\u0130\u00c9\u023e"} {
+		launch := `C:\` + folder + `\bin\defenseclaw-hook.exe`
+		text := `& "` + launch + `" hook; ` + launch
+		got := EnterpriseHookImagePathsIn(text)
+		if len(got) != 2 || got[0] != launch || got[1] != launch {
+			t.Fatalf("EnterpriseHookImagePathsIn(%q) = %q", text, got)
+		}
+	}
+	upper := `C:\` + "\u0130" + `\BIN\DEFENSECLAW-HOOK.EXE`
+	if got := EnterpriseHookImagePathsIn(upper); len(got) != 1 || got[0] != upper {
+		t.Fatalf("EnterpriseHookImagePathsIn(%q) = %q", upper, got)
+	}
+}

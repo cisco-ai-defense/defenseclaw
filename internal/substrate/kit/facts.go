@@ -70,6 +70,11 @@ var readTools = map[string]map[string]bool{
 	"claudecode": {"Read": true, "NotebookRead": true},
 }
 
+// skillTools are the tools that load a skill by name (B5.4 use gate).
+var skillTools = map[string]map[string]bool{
+	"claudecode": {"Skill": true},
+}
+
 // payloadView is the part of a hook payload the kit inspects; the tool's
 // arguments are read by ToolArgsOf.
 type payloadView struct {
@@ -140,6 +145,12 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 				f.readsSkill = true
 			}
 		}
+	}
+	// The Claude Code Skill tool loads a skill: the folder pass runs in this
+	// call too (B5.4 use gate), so the folder is re-digested before the skill
+	// reaches the model and a receipt only holds for the same content.
+	if isPre && skillTools[connector][view.ToolName] {
+		f.readsSkill = true
 	}
 	// Every MCP config the connector reads (project, user and local scope)
 	// and the in-repository server files: at SessionStart (the agent starts

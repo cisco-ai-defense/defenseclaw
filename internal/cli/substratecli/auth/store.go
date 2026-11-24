@@ -17,7 +17,6 @@
 package auth
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/keystore"
 )
 
 // Store keeps sign-ins by context name. Load returns nil, nil when there
@@ -64,7 +65,7 @@ const storeTimeout = 30 * time.Second
 
 // cmdRunner runs a helper (security, secret-tool). exit is the exit code;
 // err is set only when the helper could not run.
-type cmdRunner func(ctx context.Context, stdin []byte, name string, args ...string) (stdout []byte, stderr string, exit int, err error)
+type cmdRunner = keystore.Runner
 
 // firstLine is a short, printable first line of a helper's stderr.
 func firstLine(s string) string {

@@ -40,7 +40,7 @@ func shareBudgetFixture(t *testing.T, count int, liveDelay time.Duration) (home,
 		dead = append(dead, dir)
 	}
 	release := make(chan struct{})
-	restore := hookpaths.OverrideNetworkSharesForTest(func(path string) string {
+	restore := overrideNetworkSharesIdle(t, func(path string) string {
 		for _, root := range append(append([]string{}, dead...), live) {
 			if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
 				return root

@@ -232,7 +232,7 @@ func substrateRestartOnly(boot, cur *config.Config) []string {
 		{"deployment_mode", boot.DeploymentMode, cur.DeploymentMode},
 		{"llm_providers", boot.LLMProviders, cur.LLMProviders},
 		{"substrate.api", b.API, c.API},
-		{"substrate.identity", b.Identity, c.Identity},
+		{"substrate.identity (sign-in, including kube_sign_in)", b.Identity, c.Identity},
 		{"substrate.services", b.Services, c.Services},
 		{"substrate.rate_limits", b.RateLimits, c.RateLimits},
 		{"substrate.llm", b.LLM, c.LLM},

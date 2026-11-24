@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -32,22 +34,32 @@ type Runtime struct {
 
 	mu     sync.Mutex
 	ledger *Ledger
-	ids    []string // budget ids of the newest generation
+	ids    []string       // budget ids of the newest generation
+	capped []CappedBudget // its actor and batch budgets (CappedBudgets)
 	last   *config.Config
 	lastEv *evaluator
-	ctx    context.Context
-	local  SpendCounter // this device's store (per-device budgets and the fallback)
-	fleet  SpendCounter // optional: shared by devices or gateway replicas
-	keys   FleetKeys    // local <-> fleet key forms (nil: the same keys)
+	// applied is the newest generation Apply installed (start and every
+	// reload). A request still pinned to an older one gets its evaluator from
+	// For but never replaces the newest budget ids or restarts the sync loop
+	// of budgets the reload removed (GAP-1856). nil (no Apply yet) leaves
+	// every generation newest.
+	applied *config.Config
+	ctx     context.Context
+	local   SpendCounter // this device's store (per-device budgets and the fallback)
+	fleet   SpendCounter // optional: shared by devices or gateway replicas
+	keys    FleetKeys    // local <-> fleet key forms (nil: the same keys)
 	// feed is true once agent call costs reach Charge (the usage engine
 	// records agent calls with a computed cost); until then budgets read
 	// as not loaded, so a managed deny budget refuses instead of counting 0.
 	feed     bool
 	interval time.Duration
-	epoch    string
-	writer   string      // the last fleet writer id (device), kept while no fleet is set
-	syncW    *syncWorker // the running sync loop (nil: none)
-	kick     chan struct{}
+	// staleAfter is the ledger's trust window of remote spend (0: none).
+	staleAfter time.Duration
+	epoch      string
+	writer     string      // the last fleet writer id (device), kept while no fleet is set
+	syncW      *syncWorker // the running sync loop (nil: none)
+	sumsAt     time.Time   // the last good PrefixSums read
+	kick       chan struct{}
 	// budgeted mirrors len(ids) > 0, so For with no routing.admin (the
 	// per-request default) stays lock-free while no budget ever ran.
 	budgeted atomic.Bool
@@ -81,6 +93,19 @@ func (rt *Runtime) SetInterval(d time.Duration) {
 	rt.mu.Lock()
 	rt.interval = d
 	rt.mu.Unlock()
+}
+
+// SetStaleAfter sets how long remote spend is trusted after the last answer
+// of the counter (a cluster replica: 3 x the sync interval; 0: for ever).
+func (rt *Runtime) SetStaleAfter(d time.Duration) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.staleAfter = d
+	ledger := rt.ledger
+	rt.mu.Unlock()
+	ledger.SetStaleAfter(d)
 }
 
 // DefaultSyncInterval is how often the ledger stores this process's spend
@@ -199,6 +224,7 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 	if rotate {
 		rt.epoch = newEpoch()
 	}
+	next := rt.epoch
 	if fleet != nil {
 		rt.writer = writerOf(fleet)
 	}
@@ -206,22 +232,23 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 	rt.last, rt.lastEv = nil, nil
 	rt.mu.Unlock()
 	if rotate && ledger != nil {
-		if rows := ledger.TakeLocal(); len(rows) > 0 {
+		if p := ledger.TakePush(); !p.Empty() {
 			if ctx == nil {
 				ctx = context.Background()
 			}
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			var err error
 			if local != nil {
-				err = local.Push(pctx, epoch, rows)
+				err = pushTo(pctx, local, ledger, p)
 			}
-			if old != nil && old != fleet {
+			if old != nil && old != fleet && len(p.Main) > 0 {
 				// The old credential's last word, so other devices see it.
-				_ = old.Push(pctx, epoch, toFleet(rows, oldKeys))
+				_ = old.Push(pctx, epoch, toFleet(p.Main, oldKeys))
 			}
 			ledger.PushResult(err)
 			cancel()
 		}
+		ledger.Rotate(next)
 	}
 	rt.pushMu.Unlock()
 	rt.startSync()
@@ -277,8 +304,30 @@ func (rt *Runtime) Add(callID string, keys []string, usd float64, known bool, at
 	l.Charge(keys, usd, at)
 }
 
+// Apply makes cfg the newest generation and compiles it (start and every
+// reload): its budget ids replace the old ones, so the sync loop stops when a
+// reload removes every budget and starts when one adds them. It returns the
+// evaluator of cfg, as For.
+func (rt *Runtime) Apply(cfg *config.Config) engine.AdminEvaluator {
+	if rt == nil || cfg == nil {
+		return nil
+	}
+	rt.mu.Lock()
+	rt.applied = cfg
+	rt.mu.Unlock()
+	return rt.For(cfg)
+}
+
+// newestLocked reports whether cfg is the newest generation: the one Apply
+// installed last, or any while Apply never ran. rt.mu is held.
+func (rt *Runtime) newestLocked(cfg *config.Config) bool {
+	return rt.applied == nil || rt.applied == cfg
+}
+
 // For returns the admin evaluator of cfg, or nil when cfg has no
-// routing.admin rules or budgets (the engine then skips it).
+// routing.admin rules or budgets (the engine then skips it). Only the newest
+// generation sets the budget ids and the sync loop; a request pinned to an
+// older one during a reload gets its own evaluator and changes neither.
 func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	if rt == nil || cfg == nil {
 		return nil
@@ -287,8 +336,10 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 		// routing.admin removed: stop the sync loop of the budgets it had.
 		if rt.budgeted.Load() {
 			rt.mu.Lock()
-			rt.last, rt.lastEv = cfg, nil
-			rt.setIDsLocked(nil)
+			if rt.newestLocked(cfg) {
+				rt.last, rt.lastEv = cfg, nil
+				rt.setIDsLocked(nil)
+			}
 			rt.mu.Unlock()
 		}
 		return nil
@@ -305,10 +356,13 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	rt.mu.Unlock()
 	a := cfg.Routing.Admin
 	policy := Compile(a.Rules, a.Budgets, cfg.StandaloneEnterprise())
+	policy.SetLauncherAtespaces(cfg.Substrate.LauncherAtespaces)
 	if policy == nil {
 		rt.mu.Lock()
-		rt.last, rt.lastEv = cfg, nil
-		rt.setIDsLocked(nil)
+		if rt.newestLocked(cfg) {
+			rt.last, rt.lastEv = cfg, nil
+			rt.setIDsLocked(nil)
+		}
 		rt.mu.Unlock()
 		return nil
 	}
@@ -322,12 +376,23 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	rt.mu.Lock()
 	if len(a.Budgets) > 0 && rt.ledger == nil {
 		rt.ledger = NewLedgerClock(rt.now)
+		rt.ledger.SetStaleAfter(rt.staleAfter)
+		rt.ledger.SetEpoch(rt.epoch)
+	}
+	if rt.ledger != nil {
+		rt.ledger.SetHoldFull(policy.HoldFullIDs())
 	}
 	if rt.feed {
 		ev.ledger = rt.ledger
 	}
+	if !rt.newestLocked(cfg) {
+		// An older generation still in flight: its evaluator only.
+		rt.mu.Unlock()
+		return ev
+	}
 	rt.last, rt.lastEv = cfg, ev
 	rt.setIDsLocked(policy.BudgetIDs())
+	rt.capped = policy.CappedBudgets()
 	rt.mu.Unlock()
 	rt.startSync()
 	return ev
@@ -341,7 +406,7 @@ type syncWorker struct{ stop context.CancelFunc }
 // no SQLite read, spend write or fleet request outlives the budgets
 // (rel-1-0-10:GAP-1716). rt.mu is held.
 func (rt *Runtime) setIDsLocked(ids []string) {
-	rt.ids = ids
+	rt.ids, rt.capped = ids, nil
 	rt.budgeted.Store(len(ids) > 0)
 	if len(ids) == 0 && rt.syncW != nil {
 		rt.syncW.stop()
@@ -406,18 +471,48 @@ func (rt *Runtime) syncLoop(ctx context.Context, w *syncWorker) {
 func (rt *Runtime) SyncOnce(ctx context.Context) {
 	rt.mu.Lock()
 	ledger, local, fleet, keys, ids, epoch := rt.ledger, rt.local, rt.fleet, rt.keys, append([]string(nil), rt.ids...), rt.epoch
+	capped, interval, sumsAt := rt.capped, rt.interval, rt.sumsAt
 	rt.mu.Unlock()
+	now := rt.clock()
 	if ledger == nil || local == nil {
 		return
 	}
 	rt.push(ctx)
-	since := time.Unix(int64(dayNumber(rt.clock())-LedgerDays)*86400, 0).UTC()
+	since := KeepSince(rt.clock())
 	var rows []SeedRow
 	var err error
 	// This device's earlier processes always count: a fleet answer that
 	// leaves them out (a user with no fleet id, a store that lost data) can
 	// never lower what this device already knows.
-	localRows, localErr := local.Totals(ctx, epoch, since, nil)
+	// The capped keys (actor:, batch:) are read by list: only the ones this
+	// process holds, so launcher-minted keys never make the read too large
+	// (a key new here gets the others' spend at the next sync). A counter
+	// that reads by key (the cluster leader) also names the keys at or over
+	// a blocking budget's limit, so a blocked key this process let go stays
+	// blocked here until the next read (GAP-0892).
+	var localRows []SeedRow
+	var localErr error
+	var overFull []string
+	if or, ok := local.(OverReader); ok && len(capped) > 0 {
+		localRows, overFull, localErr = or.TotalsOver(ctx, epoch, since, ledger.CappedKeys(), overQueries(capped, ledger.KeyCap(), now))
+	} else {
+		localRows, localErr = local.Totals(ctx, epoch, since, ledger.CappedKeys())
+	}
+	if localErr == nil {
+		ledger.SetOverFull(overFull)
+	}
+	// The admin view of an actor or batch budget sums every replica's keys:
+	// the leader's per-budget sums, read at most once per interval
+	// (GAP-0894). A failed read keeps the last sums until they expire.
+	if sr, ok := local.(SumReader); ok && len(capped) > 0 && (sumsAt.IsZero() || now.Sub(sumsAt) >= interval) {
+		q := sumQueries(capped, now)
+		if sums, err := sr.PrefixSums(ctx, epoch, q); err == nil {
+			ledger.SetPrefixSums(q, sums, now.Add(2*interval))
+			rt.mu.Lock()
+			rt.sumsAt = now
+			rt.mu.Unlock()
+		}
+	}
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
 			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), rt.clock())
@@ -439,6 +534,92 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 		ledger.SyncFailed(fmt.Errorf("%w (%v)", errFleetFallback, err))
 	}
 }
+
+// OverReader is a counter that answers a by-key read with the keys at or
+// over the limits of over too (LeaderCounter), and lists the budgets of
+// over with more such keys than OverQuery.Max.
+type OverReader interface {
+	TotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []OverQuery) ([]SeedRow, []string, error)
+}
+
+// overQueries asks, per blocking budget, for at most keyCap of its keys at
+// or over the limit in the period that contains now.
+func overQueries(budgets []CappedBudget, keyCap int, now time.Time) []OverQuery {
+	if keyCap <= 0 {
+		keyCap = DefaultKeyCap
+	}
+	out := make([]OverQuery, 0, len(budgets))
+	for _, b := range budgets {
+		if b.Blocks {
+			out = append(out, OverQuery{Prefix: b.Prefix, Since: windowDate(b.Period, now), Limit: b.LimitUSD, Max: keyCap})
+		}
+	}
+	return out
+}
+
+// SumReader is a counter that sums the stored spend of a budget's keys,
+// every epoch, in the leader (LeaderCounter): the admin view of a cluster.
+type SumReader interface {
+	PrefixSums(ctx context.Context, epoch string, q []SumQuery) ([]PrefixSum, error)
+}
+
+// KeyReader is a counter that reads every other epoch's spend of the listed
+// keys only (LeaderCounter): the substrate actor list of a cluster.
+type KeyReader interface {
+	TotalsKeys(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error)
+}
+
+func sumQueries(budgets []CappedBudget, now time.Time) []SumQuery {
+	out := make([]SumQuery, 0, len(budgets))
+	for _, b := range budgets {
+		out = append(out, SumQuery{Prefix: b.Prefix, Since: windowDate(b.Period, now), Limit: b.LimitUSD})
+	}
+	return out
+}
+
+// windowDate is the first UTC day of period's window that contains now.
+func windowDate(period string, now time.Time) time.Time {
+	return time.Unix(int64(windowStart(period, now))*86400, 0).UTC()
+}
+
+// ReadViewKeys reads, for an administrator's view (the substrate actor
+// list), every other replica's spend of the listed actor and batch keys
+// this replica may not hold, at most maxViewKeys of them, kept for one sync
+// interval (Ledger.ViewSpend). A device counter reads every key already: it
+// does nothing then.
+func (rt *Runtime) ReadViewKeys(ctx context.Context, keys []string) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	ledger, local, epoch, interval := rt.ledger, rt.local, rt.epoch, rt.interval
+	rt.mu.Unlock()
+	kr, ok := local.(KeyReader)
+	if !ok || ledger == nil {
+		return
+	}
+	want := make([]string, 0, len(keys))
+	seen := map[string]bool{}
+	for _, k := range keys {
+		if capped(k) && !seen[k] {
+			seen[k] = true
+			want = append(want, k)
+		}
+	}
+	if len(want) == 0 || len(want) > maxViewKeys {
+		return
+	}
+	sort.Strings(want)
+	now := rt.clock()
+	rows, err := kr.TotalsKeys(ctx, epoch, KeepSince(now), want)
+	if err != nil {
+		return
+	}
+	ledger.SetViewKeys(want, rows, now.Add(interval))
+}
+
+// maxViewKeys bounds one ReadViewKeys.
+const maxViewKeys = 20000
 
 // maxRows merges two spend answers per (key, day), keeping the larger.
 func maxRows(a, b []SeedRow) []SeedRow {
@@ -488,22 +669,73 @@ func (rt *Runtime) push(ctx context.Context) {
 	if ledger == nil {
 		return
 	}
-	rows := ledger.LocalRows()
-	if len(rows) == 0 {
+	p := ledger.TakePush()
+	if p.Empty() {
 		return
 	}
 	var failed error
 	if local != nil {
-		if err := local.Push(ctx, epoch, rows); err != nil {
-			failed = err
-		}
+		failed = pushTo(ctx, local, ledger, p)
 	}
-	if fleet != nil {
-		if err := fleet.Push(ctx, epoch, toFleet(rows, rt.fleetKeys())); err != nil && failed == nil {
+	// The retired generation and the evicted keys' rows (Stored, Unstored,
+	// Old) are of capped keys (actor:, batch:), which have no fleet form:
+	// they stay with this device's or cluster's counter.
+	if fleet != nil && len(p.Main) > 0 {
+		if err := fleet.Push(ctx, epoch, toFleet(p.Main, rt.fleetKeys())); err != nil && failed == nil {
 			failed = err
 		}
 	}
 	ledger.PushResult(failed)
+}
+
+// pushTo stores p with c: the frozen generation of evicted keys' spend
+// first, under its own epoch, then the process epoch. An evicted key's rows
+// there hold what this process still has of it: with the generation stored
+// that is its local spend (0 clears what moved), without it the moved
+// spend too, so a failed push counts it twice for a sync interval at worst,
+// never not at all. The rows under earlier epochs wait for the generation.
+func pushTo(ctx context.Context, c SpendCounter, ledger *Ledger, p PushSet) error {
+	var failed error
+	note := func(err error) {
+		if failed == nil {
+			failed = err
+		}
+	}
+	retiredOK := true
+	if len(p.Retired) > 0 {
+		if err := c.Push(ctx, p.RetiredEpoch, p.Retired); err != nil {
+			note(err)
+			retiredOK = false
+		} else {
+			ledger.RetiredStored(p)
+		}
+	}
+	rows, tombs := p.Main, p.Unstored
+	if retiredOK {
+		tombs = p.Stored
+	}
+	if len(tombs) > 0 {
+		rows = append(append(make([]SeedRow, 0, len(p.Main)+len(tombs)), p.Main...), tombs...)
+	}
+	ok := retiredOK
+	if len(rows) > 0 {
+		if err := c.Push(ctx, p.Epoch, rows); err != nil {
+			note(err)
+			ok = false
+		}
+	}
+	if retiredOK {
+		for _, epoch := range slices.Sorted(maps.Keys(p.Old)) {
+			if err := c.Push(ctx, epoch, p.Old[epoch]); err != nil {
+				note(err)
+				ok = false
+			}
+		}
+	}
+	if ok {
+		ledger.TombsStored(p)
+	}
+	return failed
 }
 
 func (rt *Runtime) fleetKeys() FleetKeys {
@@ -585,7 +817,8 @@ func (e *evaluator) Policy() *Policy { return e.policy }
 // Evaluate narrows p by the rules and budgets that apply to r.
 func (e *evaluator) Evaluate(_ context.Context, p engine.Policy, r engine.Request, category string, classifierFailed bool) engine.AdminVerdict {
 	req := Request{
-		Caller:           CallerFromEngine(r.Caller, e.policy.Managed),
+		Caller:           CallerFromEngine(r.Caller, e.policy.Managed || r.Caller.Actor != nil),
+		Actor:            r.Caller.Actor,
 		Connector:        config.NormalizeConnectorName(r.Connector),
 		Category:         category,
 		ClassifierFailed: classifierFailed,
@@ -624,9 +857,10 @@ func (e *evaluator) Gate(v engine.AdminVerdict, target engine.GateTarget, manage
 
 // CallerFromEngine maps the engine caller. On OSS every request of a
 // per-user gateway is its owner's: one key for * budgets, and identity
-// selectors (meant for managed multi-user devices) do not match.
-func CallerFromEngine(c engine.Caller, managed bool) Caller {
-	if !managed {
+// selectors (meant for managed multi-user devices) do not match. perCaller
+// is true on a managed device and for an actor call (its person key).
+func CallerFromEngine(c engine.Caller, perCaller bool) Caller {
+	if !perCaller {
 		return Caller{Verified: true, Key: OwnerKey, Match: func(config.ProfileMatch) MatchState { return No }}
 	}
 	out := Caller{Verified: c.Verified, Key: c.Key}
@@ -683,7 +917,7 @@ func ToEngineVerdict(p engine.Policy, v Verdict) engine.AdminVerdict {
 		}
 	}
 	out := engine.AdminVerdict{Policy: narrowed, Bind: v.Bind, Force: clone(v.Force), Warnings: clone(v.Warnings),
-		RuleIDs: clone(v.RuleIDs), BindRuleIDs: clone(v.BindRuleIDs), ChargeKeys: clone(v.ChargeKeys)}
+		RuleIDs: clone(v.RuleIDs), BindRuleIDs: clone(v.BindRuleIDs), ChargeKeys: clone(v.ChargeKeys), Enforce: v.Enforce}
 	if v.Deny != nil {
 		out.Deny = &engine.DenyReason{Code: v.Deny.Code, Message: v.Deny.Message}
 	}

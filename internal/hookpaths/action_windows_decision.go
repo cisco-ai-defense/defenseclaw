@@ -925,7 +925,7 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 			value = option == "-n" || option == "--adjustment"
 			known = value || strings.HasPrefix(option, "-n") || strings.HasPrefix(option, "--adjustment=")
 		case "ionice":
-			value = option == "-c" || option == "-n" || option == "-p" || option == "-P"
+			value = option == "-c" || option == "-n" || option == "-p"
 			known = value || option == "-t" || strings.Contains(option, "=")
 		case "timeout":
 			value = option == "-s" || option == "--signal" || option == "-k" || option == "--kill-after"

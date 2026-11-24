@@ -576,7 +576,45 @@ const (
 	openLoopProbeSpin        = 200 * time.Millisecond
 	openLoopProbeMinShare    = 0.7
 	openLoopProbeMaxPressure = 0.5
+	// The calls the gateway answers each end in a journal and audit write
+	// that is fsynced, so a box whose disk is busy (other test binaries
+	// syncing) answers slowly with every core idle: the CPU readings above
+	// read quiet while the baseline of the real path doubles (GAP-0865).
+	// The probe times openLoopProbeSyncs write+fsync pairs of 4 KiB in the
+	// temp directory and takes the median; it reads
+	// 4.4 ms on the shared build box (EBS) with nothing else running, and 7 ms
+	// while other processes fsync, where the baseline of the real path grew
+	// from 36-39 ms to 58-64 ms and the run failed at utilisation 0.81 (limit
+	// 0.80); openLoopProbeMaxSync sits between the two. A slower disk reads as
+	// starved, so its run is inconclusive, never a pass.
+	openLoopProbeSyncs   = 7
+	openLoopProbeMaxSync = 6 * time.Millisecond
 )
+
+// openLoopSyncLatency is the median time of openLoopProbeSyncs write+fsync
+// pairs in the temp directory, and false where the file cannot be written.
+func openLoopSyncLatency() (time.Duration, bool) {
+	file, err := os.CreateTemp("", "open-loop-probe-")
+	if err != nil {
+		return 0, false
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	block := make([]byte, 4096)
+	took := make([]time.Duration, 0, openLoopProbeSyncs)
+	for i := 0; i < openLoopProbeSyncs; i++ {
+		start := time.Now()
+		if _, err := file.WriteAt(block, int64(i)*int64(len(block))); err != nil {
+			return 0, false
+		}
+		if err := file.Sync(); err != nil {
+			return 0, false
+		}
+		took = append(took, time.Since(start))
+	}
+	sort.Slice(took, func(a, b int) bool { return took[a] < took[b] })
+	return took[len(took)/2], true
+}
 
 // openLoopCPUPressure is the cumulative "some" CPU stall time of the box
 // (Linux PSI), and false where the kernel does not report it.
@@ -610,6 +648,8 @@ var openLoopProbeSink atomic.Uint64
 // where the kernel does not report it).
 type openLoopProbe struct {
 	share, pressure float64
+	// sync is the median write+fsync latency (0 where it cannot be read).
+	sync time.Duration
 }
 
 // openLoopBoxProbe takes one reading, and false when the thread CPU clock
@@ -636,6 +676,7 @@ func openLoopBoxProbe() (openLoopProbe, bool) {
 	}
 	openLoopProbeSink.Add(x)
 	reading := openLoopProbe{share: float64(after.Nano()-before.Nano()) / float64(wall.Nanoseconds()), pressure: -1}
+	reading.sync, _ = openLoopSyncLatency()
 	if havePressure && pressureAfter {
 		reading.pressure = float64(stallAfter-stallBefore) / float64(wall)
 	}
@@ -654,7 +695,7 @@ func (p *openLoopProbes) take() {
 // starved reports whether any reading found the box short of CPU.
 func (p openLoopProbes) starved() bool {
 	for _, r := range p {
-		if r.share < openLoopProbeMinShare || r.pressure >= openLoopProbeMaxPressure {
+		if r.share < openLoopProbeMinShare || r.pressure >= openLoopProbeMaxPressure || r.sync >= openLoopProbeMaxSync {
 			return true
 		}
 	}
@@ -664,14 +705,16 @@ func (p openLoopProbes) starved() bool {
 func (p openLoopProbes) String() string {
 	shares := make([]string, len(p))
 	pressures := make([]string, len(p))
+	syncs := make([]string, len(p))
 	for i, r := range p {
 		shares[i] = fmt.Sprintf("%.2f", r.share)
+		syncs[i] = r.sync.Round(100 * time.Microsecond).String()
 		pressures[i] = "n/a"
 		if r.pressure >= 0 {
 			pressures[i] = fmt.Sprintf("%.2f", r.pressure)
 		}
 	}
-	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f)", strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure)
+	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f), median write+fsync [%s] (limit %v)", strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure, strings.Join(syncs, " "), openLoopProbeMaxSync)
 }
 
 // settleOpenLoop ends an open-loop test on its verdict. An INCONCLUSIVE verdict

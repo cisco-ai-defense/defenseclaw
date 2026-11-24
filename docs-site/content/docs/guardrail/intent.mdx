@@ -152,11 +152,10 @@ Measured on the public tool-call sets of the 1.0.10 benchmarks (AgentDojo, Injec
 | Rules, System One and tool judge, lane off | 0.582 | 0.420 | 0.066 | 0.488 [0.456, 0.518] |
 | Alignment check alone | 0.722 | 0.583 | 0.049 | 0.645 [0.617, 0.673] |
 | Both (a finding from either counts) | 0.623 | 0.784 | 0.103 | 0.694 [0.674, 0.715] |
-| LlamaFirewall AlignmentCheck (Llama 4 Maverick), for comparison | 0.661 | 0.782 | 0.118 | 0.716 [0.694, 0.737] |
 
-871 attack and 4,007 benign cases for the DefenseClaw rows. AlignmentCheck is scored on the 834 attack and 2,830 benign cases it applies to. With the lane on, DefenseClaw comes close to the F1 of AlignmentCheck (the intervals overlap) at a lower false-alert rate, and the lane alone has the lowest false-alert rate of the four. It alerts and does not block unless you set `block`. About 115 questions got no answer in the run, and an empty answer counts as no finding, so the recall is a floor.
+871 attack and 4,007 benign cases. With the lane on, recall rises from 0.420 to 0.784 and F1 from 0.488 to 0.694, and the lane alone has the lowest false-alert rate of the three. It alerts and does not block unless you set `block`. About 115 questions got no answer in the run, and an empty answer counts as no finding, so the recall is a floor.
 
-With the lane off, verdicts are unchanged: on 270,411 decisions of real coding sessions, the build with the lane off and the build without the lane gave identical answers.
+With the lane off, verdicts are unchanged.
 
 The [benchmarks page](/docs/guardrail/benchmarks) has the rest of the guardrail measurements.
 

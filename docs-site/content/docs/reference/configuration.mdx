@@ -878,6 +878,8 @@ openshell:
   approvals:
     debounce_ms: 3000          # batch approvals until hooks are quiet this long
     agent_proposals: null      # null = true
+  vault:
+    auto_capture: null         # null = true
   resources:
     cpu: ""                    # "" = unlimited
     memory: ""                 # "" = unlimited
@@ -928,6 +930,7 @@ openshell:
 | `image.harness_versions` | `{}` | Harness name to exact version, at most 64 entries. The image build refuses a version outside DefenseClaw's reviewed hook contract. |
 | `approvals.debounce_ms` | `3000` | 0–600000. How long hooks must be quiet before the sandbox manager applies a batch of approvals: every OpenShell policy reload closes open connections. |
 | `approvals.agent_proposals` | `null` | Whether the agent may submit its own connection requests for triage; `false` rejects them. `null` means `true`. |
+| `vault.auto_capture` | `null` | Whether a secret with a well-known shape (Anthropic, OpenAI, GitHub, Slack, Stripe, Google API keys) that a sandboxed Claude Code or Codex agent is given in a prompt or writes into a tool call goes into your [vault](/docs/sandboxes/vault) and the call is stopped. `null` means `true`. On a managed computer the administrator's value applies. The gateway or sandbox daemon reads it when it starts. |
 | `resources.cpu` | `""` | CPU request: cores (`"2"`, `"1.5"`) or millicores (`"500m"`). Empty means unlimited. `sandbox run --cpu` overrides it. |
 | `resources.memory` | `""` | Memory request: bytes with an optional `Ki`, `Mi`, `Gi`, `Ti` or `k`, `K`, `M`, `G`, `T` suffix (`"512Mi"`, `"4Gi"`). Empty means unlimited. `sandbox run --memory` overrides it. |
 | `harnesses` | `[]` | The harnesses set up for sandboxes, such as `claudecode` and `codex`. `sandbox setup` writes it, and `setup`, `image build`, and `doctor` default to it (then to Claude Code and Codex). At most 64, unique. |
@@ -1154,6 +1157,7 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.templates.registry_auth.docker_config` | none | A docker config.json (the chart's `controller.templateRegistrySecret` mount). Each `auths` entry is sent only to its own registry host, after that host asks. Re-read when it changes; a missing file is anonymous, a broken one refuses. |
 | `substrate.templates.registry_auth.ecr_hosts` | none | Amazon ECR registry hosts (`<account>.dkr.ecr.<region>.amazonaws.com`) logged in to with `ecr:GetAuthorizationToken` through the AWS SDK default chain (IRSA or EKS Pod Identity). |
 | `substrate.identity.admin_groups` | none | Groups (OIDC groups claim, or Kubernetes groups with the Kubernetes sign-in) whose members are Substrate administrators; the gateway's `--admin-groups` (chart `gateway.adminGroups`) adds to it. |
+| `substrate.identity.kube_sign_in` | `true` | With no `oidc` issuer on an open-source cluster, people sign in with their Kubernetes credentials. `false` turns that sign-in off, as the gateway's `--no-kube-sign-in` flag does; `kubernetes` is then not a trusted issuer for `users:` entries and named user budgets, and the chart renders no auth-delegator binding. |
 | `substrate.templates.allowed_images`, `.profile_images` | none | Repository globs (`registry/path/*`, the registry host named exactly) every template container must match, and a narrower list per profile. The controller fetches attestations only from these registry hosts, so with none no template is admitted. Required in `managed_enterprise`, where `require_attested_templates: false` is refused. |
 | `substrate.templates.volume_images` | none | Repository globs a template may mount as read-only image volumes. Any other image volume refuses the template. |
 | `substrate.templates.plain_http_registries`, `.revoked_digests` | none | Registries reached over plain HTTP (dev clusters only), and image digests never admitted again. |

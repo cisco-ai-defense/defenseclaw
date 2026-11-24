@@ -145,6 +145,12 @@ func TestForeignGuardCleanSessionOutageCheck(t *testing.T) {
 func newCleanOutageFixture(t *testing.T, id string, tc cleanOutageCase) *foreignGuardFixture {
 	t.Helper()
 	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+	// The guard also scans the hook process's own working directory and every
+	// ancestor up to a git root. A test run started under the account's real
+	// profile (the native Windows standard-user run) would find that
+	// account's own .cursor\hooks.json there and block the cursor cases, so
+	// run from the fixture project, whose .git ends the walk.
+	t.Chdir(fixture.project)
 	// The scan reads the agent environment: XDG_CONFIG_HOME (set on the
 	// GitHub Ubuntu runners) moves the OpenCode and Amp user folders away
 	// from the fixture home, and Windows Hermes reads LOCALAPPDATA, so pin

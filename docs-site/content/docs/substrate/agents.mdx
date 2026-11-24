@@ -83,7 +83,7 @@ A managed refusal comes back before any actor exists, as `403` with the reason `
 | Tool-call checks (hooks) | Yes | Yes | Yes, same rules and messages |
 | Tool chains and intent | Per session | Per session | Per session and per actor, kept across suspend and resume |
 | Model request and reply guardrails | Through the guardrail proxy, where the connector routes to it | The model call goes to the provider directly | **Always**, for the agents that route through the gateway, because the provider is only reachable through the proxy |
-| Routing, budgets and cost | Where the proxy is used | Where the proxy is used | Not merged yet. See [Feature coverage](/docs/substrate/features#routing-budgets-and-cost) |
+| Routing, budgets and cost | Where the proxy is used | Where the proxy is used | Preview. See [Feature coverage](/docs/substrate/features#routing-budgets-and-cost) |
 | Network control | Not isolated | Egress proxy, block and allow lists, asks | Denied by default; DefenseClaw writes each agent's allow list and checks each request; asks |
 | Secrets | In the user's environment | Placeholder key in the sandbox | No secret value in the actor; the egress gateway swaps placeholders on bound hosts only |
 | Asks and approvals | In the agent | In the activity feed and `approvals` | In your terminal session and `approvals`, so you can answer after detaching |

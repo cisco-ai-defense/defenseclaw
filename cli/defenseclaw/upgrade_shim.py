@@ -88,6 +88,8 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # migrate puts it back only on that item (rel-1-0-10:GAP-0644).
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
+    # The sandbox vault block (openshell.vault, with auto_capture) is new in 1.0.11.
+    ("openshell.vault", (1, 0, 11)),
     ("guardrail.internal_domains", (1, 0, 6)),
     ("guardrail.chains", (1, 0, 6)),
     ("connectors", (1, 0, 6)),
@@ -140,6 +142,27 @@ NEWER_CONFIG_KEYS = (
     ("notifications.substrate", (1, 0, 11)),
     ("notifications.substrate.asks", (1, 0, 11)),
     ("notifications.substrate.task_end", (1, 0, 11)),
+    # Under substrate (1.0.10), so a downgrade to 1.0.10 kept it (GAP-2035).
+    ("substrate.bundles.oci", (1, 0, 11)),
+    # The same: 1.0.10 has substrate and refuses these (fold of the skill scan,
+    # sign-in and spend/usage units; test_every_key_new_since_1_0_10 lists them).
+    ("substrate.identity.kube_sign_in", (1, 0, 11)),
+    ("substrate.skills", (1, 0, 11)),
+    ("substrate.usage", (1, 0, 11)),
+    # The same for this release's Substrate blocks (activity, files, git, interactive, launcher, relay TLS,
+    # secrets, revocation): 1.0.10 has substrate and refuses them.
+    ("substrate.activity", (1, 0, 11)),
+    ("substrate.admin.git_push", (1, 0, 11)),
+    ("substrate.egress.no_swap_hosts", (1, 0, 11)),
+    ("substrate.files", (1, 0, 11)),
+    ("substrate.git", (1, 0, 11)),
+    ("substrate.identity.revocation", (1, 0, 11)),
+    ("substrate.interactive", (1, 0, 11)),
+    ("substrate.launcher", (1, 0, 11)),
+    ("substrate.relay_cert_reissue", (1, 0, 11)),
+    ("substrate.relay_tls", (1, 0, 11)),
+    ("substrate.secret_templates", (1, 0, 11)),
+    ("substrate.self_service_secrets", (1, 0, 11)),
 )
 # More keys added after 1.0.9, in the same path language: a "*" segment is
 # one entry of a map of named entries (a connector, a profile). 1.0.9

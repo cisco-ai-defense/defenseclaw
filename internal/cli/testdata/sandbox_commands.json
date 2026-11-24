@@ -897,6 +897,11 @@
         "default": "[]"
       },
       {
+        "name": "vault",
+        "type": "stringArray",
+        "default": "[]"
+      },
+      {
         "name": "yes",
         "shorthand": "y",
         "type": "bool",
@@ -1101,6 +1106,120 @@
         "shorthand": "y",
         "type": "bool",
         "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox vault",
+    "use": "vault",
+    "short": "Keep your secrets for your sandboxes: list, add, replace, bind and remove",
+    "long": "The vault keeps your secrets for your sandboxes. Each secret is bound to the one host\nit may be sent to. Start a sandbox with \"--vault NAME\" and the agent inside sees only a\nplaceholder in $NAME; OpenShell puts the real value in on the way out, to that host only.\n\nDefenseClaw also captures secrets for you: when an agent in a sandbox is given a secret\nwith a well-known shape (an Anthropic, OpenAI, GitHub, Slack, Stripe or Google API key),\nin a prompt or a tool call, the secret goes into your vault and the call is stopped\nbefore the value reaches the model.\n\nThe vault is a file only your account can read, in your DefenseClaw state directory.\nValues are never printed: list and show give names, hosts and status only."
+  },
+  {
+    "path": "sandbox vault add",
+    "use": "add \u003cname\u003e --host HOST",
+    "short": "Add a secret bound to one host (asks for the value with echo off)",
+    "long": "Adds a secret. NAME is the environment variable the sandbox sees (for example\nSTRIPE_API_KEY); --host is the only host the value is ever sent to (api.stripe.com, or\nhost:port). The value is typed with echo off, or piped with --value-stdin; it never goes\non the command line.",
+    "flags": [
+      {
+        "name": "host",
+        "type": "string"
+      },
+      {
+        "name": "value-stdin",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox vault bind",
+    "use": "bind \u003cname\u003e --host HOST",
+    "short": "Set the one host a secret may be sent to",
+    "flags": [
+      {
+        "name": "host",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox vault confirm",
+    "use": "confirm \u003cname\u003e",
+    "short": "Confirm a captured secret is yours, so sandboxes can use it",
+    "long": "A secret DefenseClaw captured from a sandbox is unconfirmed until you confirm it:\nan agent in a sandbox can make a call that looks like your prompt, so a captured value\nmay be one it planted. confirm shows where the secret came from and the last 4\ncharacters of its value, then asks.",
+    "flags": [
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox vault list",
+    "use": "list",
+    "short": "List your secrets (names, hosts and status; never values)",
+    "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox vault remove",
+    "use": "remove \u003cname\u003e",
+    "short": "Remove a secret from the vault",
+    "flags": [
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox vault rename",
+    "use": "rename \u003cname\u003e \u003cnew-name\u003e",
+    "short": "Rename a secret (the variable the sandbox sees)"
+  },
+  {
+    "path": "sandbox vault replace",
+    "use": "replace \u003cname\u003e",
+    "short": "Replace a secret's value (after you rotate it)",
+    "flags": [
+      {
+        "name": "value-stdin",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox vault show",
+    "use": "show \u003cname\u003e",
+    "short": "Show one secret's host, status, source and use (never its value)",
+    "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
       }
     ]
   }

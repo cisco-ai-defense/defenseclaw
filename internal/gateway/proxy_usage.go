@@ -77,6 +77,19 @@ func usageIdentity(ctx context.Context, f *modelusage.CallFacts) {
 	if s, ok := verifiedSubjectFromContext(ctx); ok {
 		f.Subject, f.SubjectKind, f.IdentityVerified = s.UserID, s.Source, true
 		f.SubjectName = s.UserName
+		if key, ok := substrateActorPersonKey(ctx); ok {
+			// The owner of an actor call is its person's key, the same
+			// one the usage API reads for that person. Subject stays the
+			// verified subject, so model.usage user.id matches the hook
+			// and llm events of the same actor.
+			f.OwnerKey, f.OwnerKind = key, substrateUsageOwnerKind
+		}
+	}
+	if reg, ok := substrateRegistrationFrom(ctx); ok && isSubstrateActorRequest(ctx) {
+		// The cluster usage rows are by actor, batch and atespace, from the
+		// registration on the actor listener, never from headers. An
+		// attributed actor has them too (no person).
+		f.Actor, f.BatchID, f.Atespace = reg.Name, reg.BatchID, reg.Atespace
 	}
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && f.IdentityVerified {
 		f.ProfileName, f.ProfileDigest = resolved.decision.Name, resolved.decision.Digest

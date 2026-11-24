@@ -34,12 +34,15 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
@@ -397,6 +400,69 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 	// 8. The egress callout: another one in Substrate's slot turns
 	// DefenseClaw's egress checks off (GAP-0497).
 	d.checks = append(d.checks, doctorEgressCallout(ctx, s, adminOK))
+	// 9. Cluster budgets: the leader, the spend feed and the price table.
+	if signedIn {
+		u, err := s.Client.Usage(ctx, api.UsageQuery{By: "model", Since: "24h"})
+		if c, ok := doctorBudgetsRow(u, err); ok {
+			d.checks = append(d.checks, c)
+		}
+		if err == nil {
+			d.checks = append(d.checks, substrateCheck{ID: "usage_person_key", Status: doctorOK, Summary: doctorPersonKeyNotice})
+		}
+	}
+}
+
+// doctorPersonKeyNotice names the one change to how an agent's usage is
+// owned: its calls are counted under the person key (issuer and subject), not
+// the bare subject, which two sign-in servers can share. Usage rows exported
+// before the change keep the old id and are not rewritten (until 1.0.13).
+const doctorPersonKeyNotice = "usage of your agents is counted under your person key (issuer and subject), not the bare subject, so " +
+	"one subject at two sign-in servers is two people; usage rows exported before this change keep the old id and are not rewritten"
+
+// doctorBudgetsRow is the cluster_budgets row: whether the cluster's leader
+// answers usage (the leader), whether every budget has a spend (the feed) and
+// whether the calls of the last day had a price (the price table). ok is
+// false when the cluster cannot say (an older cluster, no access).
+func doctorBudgetsRow(u api.UsageAnswer, err error) (substrateCheck, bool) {
+	const id = "cluster_budgets"
+	if err != nil {
+		e, ok := api.AsError(err)
+		if !ok {
+			return substrateCheck{}, false
+		}
+		switch e.Reason {
+		case "usage_disabled":
+			return substrateCheck{ID: id, Status: doctorSkip, Summary: "usage is turned off on this cluster (substrate.usage.enabled: false), so actor and batch budgets are not counted across its replicas"}, true
+		case "usage_unavailable":
+			return substrateCheck{ID: id, Status: doctorWarn, Summary: "the cluster's leader did not answer usage, so budget spend cannot be read",
+				Fix: "ask your administrator to check the leader pods (kubectl get pods -l app.kubernetes.io/component=leader)"}, true
+		}
+		return substrateCheck{}, false
+	}
+	var unpriced int64
+	for _, r := range u.Rows {
+		if d := r.UsageCalls - r.CostCalls; d > 0 {
+			unpriced += d
+		}
+	}
+	unknown := 0
+	for _, b := range u.Budgets {
+		if b.SpentUSD == nil && !b.Exceeded {
+			unknown++
+		}
+	}
+	var problems []string
+	if unknown > 0 {
+		problems = append(problems, fmt.Sprintf("the spend of %d budget(s) is not known yet (the leader's spend feed has not answered)", unknown))
+	}
+	if unpriced > 0 {
+		problems = append(problems, fmt.Sprintf("%d call(s) in the last day had no known price (the model is not in the price table), so budgets do not count them", unpriced))
+	}
+	if len(problems) == 0 {
+		return substrateCheck{ID: id, Status: doctorOK, Summary: "the leader answers usage, every budget has a spend and the calls of the last day were priced"}, true
+	}
+	return substrateCheck{ID: id, Status: doctorWarn, Summary: strings.Join(problems, "; "),
+		Fix: "ask your administrator to add the model to observability.pricing in the chart values, or to check the leader"}, true
 }
 
 const (
@@ -683,7 +749,7 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags, tokenGroup
 		}
 	}
 	rows = append(rows, doctorComponents(r.Health, o.Namespace))
-	return rows
+	return append(rows, doctorSkillScan(ctx, kf))
 }
 
 // doctorComponentsID is the row that reads the components' ready pods.
@@ -732,6 +798,130 @@ func doctorComponents(h fleet.Health, ns string) substrateCheck {
 	}
 	return substrateCheck{ID: doctorComponentsID, Status: doctorOK, Summary: "ready pods: " + strings.Join(up, ", ")}
 }
+
+// doctorSkillScan is the substrate.skill_scan row (B5.4, GAP-0477): the
+// gateway pods' skill-scanner sidecar, from the pods' container status, and
+// the gateway config (substrate.skills.scan.enabled, deployment_mode, the
+// hook policy tier). A scanner that is not running fails where the gateway
+// refuses new skills unscanned (managed installs, the strict tier) and warns
+// on the others (new skills are allowed with an alert).
+func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCheck {
+	const id = "substrate.skill_scan"
+	gc := doctorSkillScanConfig(ctx, kf)
+	if gc.read && !gc.scanOn {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "Skill scanning is turned off (substrate.skills.scan.enabled: false)."}
+	}
+	raw, err := substrateKubectl(ctx, kf, "get", "pods", "-n", kf.namespace, "-l", "app.kubernetes.io/component=gateway", "-o", "json")
+	if err != nil {
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the skill scanner was not read: " + doctorFirstLine(err), Fix: "check your kubectl access, then run doctor again"}
+	}
+	var pods struct {
+		Items []struct {
+			Spec struct {
+				Containers []struct{ Name, Image string } `json:"containers"`
+			} `json:"spec"`
+			Status struct {
+				ContainerStatuses []struct {
+					Name  string `json:"name"`
+					Ready bool   `json:"ready"`
+				} `json:"containerStatuses"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &pods); err != nil {
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the skill scanner was not read: " + doctorFirstLine(err), Fix: "run doctor again"}
+	}
+	if len(pods.Items) == 0 {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "not checked: no gateway pod runs"}
+	}
+	version, with, down := "", 0, 0
+	for _, p := range pods.Items {
+		for _, c := range p.Spec.Containers {
+			if c.Name == skillScannerContainer {
+				with++
+				version = imageTag(c.Image)
+			}
+		}
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Name == skillScannerContainer && !cs.Ready {
+				down++
+			}
+		}
+	}
+	if with == 0 && !gc.read {
+		// No sidecar and no config to say otherwise: the chart renders none
+		// when gateway.skillScanner.enabled is false.
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "Skill scanning is turned off (substrate.skills.scan.enabled: false)."}
+	}
+	if n := down + len(pods.Items) - with; n > 0 {
+		status, outcome := doctorWarn, "allowed with an alert"
+		switch {
+		case !gc.read:
+			status, outcome = doctorFail, "refused on managed installs and allowed with an alert on others"
+		case gc.refusedAll:
+			status, outcome = doctorFail, "refused"
+		case len(gc.refused) > 0:
+			status, outcome = doctorFail, "refused for "+strings.Join(gc.refused, ", ")+" and allowed with an alert for the other agents"
+		}
+		return substrateCheck{ID: id, Status: status, Summary: fmt.Sprintf("Skill scanner is not running on %d of %d gateway pods. New skills are %s there.", n, len(pods.Items), outcome),
+			Fix: "kubectl -n " + kf.namespace + " logs deploy/defenseclaw-gateway -c " + skillScannerContainer}
+	}
+	return substrateCheck{ID: id, Status: doctorOK, Summary: "Skill scanner ready (skill-scanner image " + doctorWord(version, "untagged") + ")."}
+}
+
+// skillScanConfig is what the substrate.skill_scan row reads of the gateway
+// config; read is false when there was none to read. refused are the
+// connectors whose new skills the gateway refuses unscanned (managed
+// installs: every one; else the strict-tier ones).
+type skillScanConfig struct {
+	read, scanOn, refusedAll bool
+	refused                  []string
+}
+
+// doctorSkillScanConfig reads the gateway config doctor checks (--config, or
+// the cluster's config map, as the fleet checks do).
+func doctorSkillScanConfig(ctx context.Context, kf *substrateClusterFlags) skillScanConfig {
+	text := ""
+	if kf.configFile != "" {
+		b, err := os.ReadFile(kf.configFile)
+		if err != nil {
+			return skillScanConfig{}
+		}
+		text = string(b)
+	} else {
+		cms, err := kubeGetList(ctx, kf, "get", "configmaps", "-n", kf.namespace)
+		if err != nil {
+			return skillScanConfig{}
+		}
+		for _, c := range cms {
+			if t := c.Data["config.yaml"]; strings.Contains(t, "substrate:") {
+				text = t
+				break
+			}
+		}
+	}
+	if text == "" {
+		return skillScanConfig{}
+	}
+	var doc config.Config
+	if yaml.Unmarshal([]byte(text), &doc) != nil {
+		return skillScanConfig{}
+	}
+	// GAP-0936: the gateway's own check (managed, or the connector's strict
+	// tier), for each connector an actor can run.
+	blocks := substrateBlocksUnscannedSkills(&doc)
+	var refused []string
+	all := slices.Concat(kit.Wave1Connectors, kit.Wave2Connectors, kit.Wave3Connectors)
+	for _, c := range all {
+		if blocks(c) {
+			refused = append(refused, c)
+		}
+	}
+	return skillScanConfig{read: true, scanOn: doc.Substrate.SkillScanEnabled(), refusedAll: len(refused) == len(all), refused: refused}
+}
+
+// skillScannerContainer is the chart's scanner sidecar container name.
+const skillScannerContainer = "skill-scanner"
 
 func fleetCheckFix(id string) string {
 	switch id {

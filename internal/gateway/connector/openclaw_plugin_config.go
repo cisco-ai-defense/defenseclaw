@@ -30,8 +30,16 @@ import (
 var openClawPluginConfigMigrator func(document map[string]interface{}, current interface{}) (kept interface{}, migrated bool, removed []string, err error)
 
 // SetOpenClawPluginConfigMigrator registers the plugin config check. Call it
-// from package init.
+// from package init. A nil check or a second registration panics, as the
+// config registries do (RegisterV8SchemaCheck), so a program never runs with
+// a check other than the one it linked (GAP-1862).
 func SetOpenClawPluginConfigMigrator(migrate func(document map[string]interface{}, current interface{}) (kept interface{}, migrated bool, removed []string, err error)) {
+	if migrate == nil {
+		panic("connector: SetOpenClawPluginConfigMigrator with a nil check")
+	}
+	if openClawPluginConfigMigrator != nil {
+		panic("connector: the OpenClaw plugin config check is registered twice")
+	}
 	openClawPluginConfigMigrator = migrate
 }
 

@@ -422,6 +422,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		HookContractID:             lockEntry.ContractID,
 		HookContractLockUpdatedAt:  lockUpdatedAt,
 		HookContractEntryUpdatedAt: entryUpdatedAt,
+		RouteOnly:                  windowsRouteOnlyInstalledProof(conn, targetSID, home, setup.DataDir, opts.RouteOnly),
 	}, nil
 }
 

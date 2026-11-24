@@ -585,6 +585,10 @@ func TestPersonVerifierUnverifiedEmailIsNotThePrincipal(t *testing.T) {
 		if got.Principal != tc.want || got.Subject != "00u1" || got.Kind != PersonHuman {
 			t.Errorf("%s: principal %q, want %q (person %+v)", tc.name, got.Principal, tc.want, got)
 		}
+		// GAP-0640: the unverified email is marked, never silently dropped.
+		if want := tc.verified == false || tc.verified == "false"; got.EmailUnverified != want {
+			t.Errorf("%s: EmailUnverified = %v, want %v", tc.name, got.EmailUnverified, want)
+		}
 	}
 }
 

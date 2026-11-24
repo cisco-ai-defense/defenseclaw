@@ -133,6 +133,8 @@ func (s *Sidecar) runWithSubstrate(ctx context.Context, api *APIServer, serveAPI
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Before the first actor call: budget spend and usage go to the leader.
+	s.startSubstrateSpend(ctx, cfg, cfg.UsageSyncInterval)
 	errs := make(chan error, 2)
 	var wg sync.WaitGroup
 	for _, run := range []func(context.Context) error{serveAPI, api.RunSubstrate} {

@@ -201,8 +201,16 @@ func TestCheckpointWALIfLargeTrimsAnIdleOversizedFile(t *testing.T) {
 // store is never quiet for a whole pass. The file is still trimmed once the
 // log in use is short and copied.
 func TestCheckpointWALIfLargeTrimsAnOversizedFileUnderATrickleOfWrites(t *testing.T) {
-	store, cleanup := newTestStore(t)
-	defer cleanup()
+	// The WAL it sizes is the one the migrations leave behind, so the store
+	// replays them (GAP-0964).
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "test.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
 	ctx := context.Background()
 	logWALGuardEvents(t, store, 200)
 	grown := walFileSize(t, store)

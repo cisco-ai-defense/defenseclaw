@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -1378,143 +1379,92 @@ func SkillDirsForOpenClaw(homeDir string) []string {
 //
 // Used by callers that need to enumerate paths for a connector other than
 // the running one (e.g. multi-connector audits, doctor). Unknown connector
-// names return no paths. OpenClaw has its own explicit branch.
+// names return no paths. OpenClaw has its own explicit branch; every other
+// connector reads the one table in internal/agentpaths (GAP-0788), which the
+// actor kit and the gateway's skill-path regexes read too.
 func (c *Config) SkillDirsForConnector(connector string) []string {
-	home, _ := os.UserHomeDir()
-	cwd := c.ConnectorWorkspaceDir()
-
-	switch normalizeConnectorKey(connector) {
-	case "claudecode":
-		configDir := c.ConnectorHomeDir("claudecode")
-		dirs := []string{
-			filepath.Join(configDir, "skills"),
-			filepath.Join(configDir, "commands"),
-			workspaceJoin(cwd, ".claude", "commands"),
-		}
-		dirs = append(dirs, claudecodepath.ProjectSkillDirs(cwd)...)
-		return dedupNonEmpty(dirs)
-	case "codex":
-		dirs := make([]string, 0, 5)
-		for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
-			dirs = append(dirs, filepath.Join(layer, ".agents", "skills"))
-		}
-		dirs = append(dirs, gatewayconnector.CodexPersonalSkillsPath())
-		dirs = append(dirs, filepath.Join(c.ConnectorHomeDir("codex"), "skills"))
-		if runtime.GOOS != "windows" {
-			dirs = append(dirs, filepath.FromSlash("/etc/codex/skills"))
-		}
-		return dedupNonEmpty(dirs)
-	case "zeptoclaw":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".zeptoclaw", "skills"),
-			workspaceJoin(cwd, ".zeptoclaw", "skills"),
-		})
-	case "hermes":
-		return []string{filepath.Join(hermespath.HomeDir(), "skills")}
-	case "cursor":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".cursor", "skills"),
-			filepath.Join(home, ".agents", "skills"),
-			workspaceJoin(cwd, ".cursor", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-		})
-	case "devin":
-		configHome, err := devinConfigHome()
-		if err != nil {
-			return nil
-		}
-		// Devin CLI and Devin Local share these roots; the pre-rename Devin
-		// Desktop locations the vendor still loads are read-only extras.
-		return dedupNonEmpty(append([]string{
-			filepath.Join(configHome, "skills"),
-			filepath.Join(home, ".agents", "skills"),
-			workspaceJoin(cwd, ".devin", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-		}, legacyconnector.DesktopLegacySkillPaths(home, cwd)...))
-	case "opencode", "kiro":
-		// These connectors have no documented local skills surface (Kiro's
-		// reusable context is steering docs and specs). Keep them isolated
-		// from OpenClaw's skill directories: the install watcher creates the
-		// folders it watches, so falling through would leave an empty
-		// ~/.openclaw tree behind.
-		return nil
-	case "amp":
-		return ampSkillDirs(home, cwd)
-	case "antigravity":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".gemini", "config", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-			workspaceJoin(cwd, ".agent", "skills"),
-		})
-	case "copilot":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".copilot", "skills"),
-			workspaceJoin(cwd, ".github", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-		})
-	case "openclaw":
+	key := normalizeConnectorKey(connector)
+	if key == "openclaw" {
 		return c.skillDirsOpenClaw()
-	default:
-		return nil
 	}
+	return agentpaths.Dirs(key, c.agentPathInputs(key), agentpaths.Skills, agentpaths.Commands)
 }
 
 // PluginDirsForConnector returns plugin directories for a specific connector,
 // independent of the config's active connector. Unknown and empty names
 // return no paths.
 func (c *Config) PluginDirsForConnector(connector string) []string {
+	key := normalizeConnectorKey(connector)
+	if key == "openclaw" {
+		return c.pluginDirsOpenClaw()
+	}
+	return agentpaths.Dirs(key, c.agentPathInputs(key), agentpaths.Plugins)
+}
+
+// agentPathInputs resolves the agentpaths table on the laptop: the home,
+// the pinned workspace, the connector's config home and the folders the
+// laptop finds by reading files (agentPathDynamic).
+func (c *Config) agentPathInputs(key string) agentpaths.Inputs {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
-
-	switch normalizeConnectorKey(connector) {
-	case "claudecode":
-		configDir := c.ConnectorHomeDir("claudecode")
-		pluginParent := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PLUGIN_CACHE_DIR"))
-		if pluginParent == "" {
-			pluginParent = filepath.Join(configDir, "plugins")
-		} else {
-			pluginParent = expandPath(pluginParent)
-		}
-		dirs := []string{
-			filepath.Join(pluginParent, "cache"),
-			filepath.Join(configDir, "skills"),
-		}
-		dirs = append(dirs, claudecodepath.ProjectSkillDirs(cwd)...)
-		return dedupNonEmpty(dirs)
-	case "codex":
-		base := filepath.Join(c.ConnectorHomeDir("codex"), "plugins")
-		return dedupNonEmpty(append(
-			gatewayconnector.CodexPluginSourceDirs(cwd),
-			filepath.Join(base, "cache"),
-		))
-	case "zeptoclaw":
-		return []string{
-			filepath.Join(home, ".zeptoclaw", "plugins"),
-		}
-	case "hermes":
-		return dedupNonEmpty([]string{
-			filepath.Join(hermespath.HomeDir(), "plugins"),
-			workspaceJoin(cwd, ".hermes", "plugins"),
-		})
-	case "antigravity":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".gemini", "config", "plugins"),
-			filepath.Join(home, ".gemini", "antigravity-cli", "plugins"),
-			workspaceJoin(cwd, ".agents", "plugins"),
-			workspaceJoin(cwd, "_agents", "plugins"),
-		})
-	case "amp":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".config", "amp", "plugins"),
-			workspaceJoin(cwd, ".amp", "plugins"),
-		})
-	case "cursor", "devin", "copilot", "opencode", "kiro":
-		return nil
-	case "openclaw":
-		return c.pluginDirsOpenClaw()
-	default:
-		return nil
+	return agentpaths.Inputs{
+		Home:       home,
+		Cwd:        cwd,
+		ConfigHome: c.ConnectorHomeDir(key),
+		GOOS:       runtime.GOOS,
+		Dynamic:    func(dyn string) []string { return c.agentPathDynamic(dyn, home, cwd) },
 	}
+}
+
+// agentPathDynamic returns the laptop folders of a Dynamic table entry.
+func (c *Config) agentPathDynamic(key, home, cwd string) []string {
+	switch key {
+	case agentpaths.DynClaudeProjectSkills:
+		return claudecodepath.ProjectSkillDirs(cwd)
+	case agentpaths.DynClaudePluginCache:
+		parent := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PLUGIN_CACHE_DIR"))
+		if parent == "" {
+			parent = filepath.Join(c.ConnectorHomeDir("claudecode"), "plugins")
+		} else {
+			parent = expandPath(parent)
+		}
+		return []string{filepath.Join(parent, "cache")}
+	case agentpaths.DynCodexProjectLayers:
+		var dirs []string
+		for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
+			dirs = append(dirs, filepath.Join(layer, ".agents", "skills"))
+		}
+		return dirs
+	case agentpaths.DynCodexPersonalSkills:
+		return []string{gatewayconnector.CodexPersonalSkillsPath()}
+	case agentpaths.DynCodexPluginSources:
+		return gatewayconnector.CodexPluginSourceDirs(cwd)
+	case agentpaths.DynDevinLegacySkills:
+		// Devin CLI and Devin Local share the table's roots; the pre-rename
+		// Devin Desktop locations the vendor still loads are read-only extras.
+		return legacyconnector.DesktopLegacySkillPaths(home, cwd)
+	case agentpaths.DynAmpSkills:
+		return ampSkillDirs(home, cwd)
+	case agentpaths.DynOpenCodeProjectConfig:
+		// OpenCode resolves project folders upward to the repository root,
+		// like Claude Code (connector_paths._opencode_project_dirs).
+		var dirs []string
+		for _, dir := range claudecodepath.ProjectDirs(cwd) {
+			dirs = append(dirs, filepath.Join(dir, ".opencode", "skill"), filepath.Join(dir, ".opencode", "skills"))
+		}
+		return dirs
+	case agentpaths.DynOpenCodeProjectShared:
+		projects := claudecodepath.ProjectDirs(cwd)
+		dirs := make([]string, 0, 2*len(projects))
+		for _, dir := range projects {
+			dirs = append(dirs, filepath.Join(dir, ".claude", "skills"))
+		}
+		for _, dir := range projects {
+			dirs = append(dirs, filepath.Join(dir, ".agents", "skills"))
+		}
+		return dirs
+	}
+	return nil
 }
 
 // --- Connector-specific MCP readers ---

@@ -38,6 +38,33 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{/* The skill scanner sidecar's image (gateway.skillScanner.image). */}}
+{{- define "dc.scannerImage" -}}
+{{- $img := .Values.gateway.skillScanner.image -}}
+{{- if $img.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $img.digest) -}}
+{{- fail "gateway.skillScanner.image.digest must be sha256:<64 hex>" -}}
+{{- end -}}
+{{ $img.repository }}@{{ $img.digest }}
+{{- else -}}
+{{ $img.repository }}:{{ $img.tag | default .Chart.AppVersion }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The skill scanner sidecar's uid and gid: the gateway's, from
+podSecurityContext (GAP-0876). The jobs folder (0700) and the worker's
+socket (0600) belong to the one user both containers run as; a sidecar of
+another user could not read the gateway's jobs, and scanning would be off.
+*/}}
+{{- define "dc.scannerUser" -}}
+{{- $id := index .Values.podSecurityContext .field -}}
+{{- if or (not $id) (eq (int64 $id) 0) -}}
+{{- fail (printf "gateway.skillScanner needs podSecurityContext.%s set to a non-root id: the scanner sidecar runs as the gateway's user" .field) -}}
+{{- end -}}
+{{ int64 $id }}
+{{- end -}}
+
 {{/* The pod-identity SPIFFE ID of a component's ServiceAccount. */}}
 {{- define "dc.spiffe" -}}spiffe://cluster.local/ns/{{ .ctx.Release.Namespace }}/sa/defenseclaw-{{ .component }}{{- end -}}
 
@@ -92,6 +119,15 @@ name this release's Services and the Substrate API filled in.
 {{- $cfg := deepCopy .Values.config -}}
 {{- $sub := get $cfg "substrate" | default dict -}}
 {{- $_ := set $sub "enabled" (ternary true $sub.enabled (not (hasKey $sub "enabled"))) -}}
+{{- /* No scanner sidecar: the gateway does not scan skills (B5.4), so the
+fail mode decides (managed installs refuse new skills). */ -}}
+{{- if not .Values.gateway.skillScanner.enabled -}}
+{{- $sk := get $sub "skills" | default dict -}}
+{{- $sc := get $sk "scan" | default dict -}}
+{{- $_ := set $sc "enabled" false -}}
+{{- $_ := set $sk "scan" $sc -}}
+{{- $_ := set $sub "skills" $sk -}}
+{{- end -}}
 {{- if not (hasKey $sub "services") -}}
 {{- $_ := set $sub "services" (dict "actor" (include "dc.actorHost" .) "admin" (include "dc.adminHost" .)) -}}
 {{- end -}}
@@ -163,6 +199,19 @@ chart's profile is the observability default unless config names one. */ -}}
 {{- $_ := set $obs "defaults" $obsDefaults -}}
 {{- $_ := set $cfg "observability" $obs -}}
 {{- end -}}
+{{- /* Cost for budgets and usage: the gateway prices a call from
+observability.pricing and counts nothing without tokenomics, so the chart turns
+tokenomics on and seeds the reviewed price table unless config sets them. */ -}}
+{{- if .Values.observability.tokenomics.enabled -}}
+{{- $obs := get $cfg "observability" | default dict -}}
+{{- $tok := get $obs "tokenomics" | default dict -}}
+{{- if not (hasKey $tok "enabled") }}{{ $_ := set $tok "enabled" true }}{{ end -}}
+{{- $_ := set $obs "tokenomics" $tok -}}
+{{- if and .Values.observability.tokenomics.defaultPricing (not (hasKey $obs "pricing")) -}}
+{{- $_ := set $obs "pricing" (omit (.Files.Get "files/default-pricing.json" | fromJson) "_comment" "_sources") -}}
+{{- end -}}
+{{- $_ := set $cfg "observability" $obs -}}
+{{- end -}}
 {{- /* The local collector (observability.local.enabled) is the try-out
 target: export to it unless config names a destination chart-collector
 (GAP-0272). Its Service address is private, so the destination allows
@@ -225,13 +274,14 @@ would never start.
 */}}
 {{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
 {{/* The gateway's Kubernetes sign-in is on (internal/cli substrateKubeSignIn):
-no substrate.identity.oidc.issuer, not a managed install, and not turned
-off with --no-kube-sign-in in custom gateway args. The flag is a Go bool:
+no substrate.identity.oidc.issuer, not a managed install, not turned off by
+substrate.identity.kube_sign_in false, and not turned off with
+--no-kube-sign-in in custom gateway args. The flag is a Go bool:
 --no-kube-sign-in and --no-kube-sign-in=<true value> turn it off, =false
 keeps it on, and the last one wins, as the gateway parses it. */}}
 {{- define "dc.kubeSignIn" -}}
 {{- $issuer := dig "substrate" "identity" "oidc" "issuer" "" (.Values.config | default dict) -}}
-{{- $off := false -}}
+{{- $off := eq (toString (dig "substrate" "identity" "kube_sign_in" "" (.Values.config | default dict))) "false" -}}
 {{- range (.Values.gateway.args | default list) -}}
 {{- $a := toString . -}}
 {{- if eq $a "--no-kube-sign-in" -}}

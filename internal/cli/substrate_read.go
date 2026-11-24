@@ -24,7 +24,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -219,20 +221,7 @@ them and how long ago they started. Administrators see only their own agents unl
 				fmt.Fprintln(cmd.OutOrStdout(), "You have no agents running. Start one with: defenseclaw substrate run claude")
 				return nil
 			}
-			now := time.Now()
-			rows := make([][]string, 0, len(live))
-			for _, a := range live {
-				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateActivityCell(a, now), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
-				if all {
-					row = append(row, substrateListOwner(a))
-				}
-				rows = append(rows, row)
-			}
-			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "ACTIVITY", "AGE", "BATCH"}
-			if all {
-				header = append(header, "OWNER")
-			}
-			substrateTable(cmd.OutOrStdout(), header, rows)
+			printSubstrateActors(cmd.OutOrStdout(), live, all, time.Now())
 			return nil
 		},
 	}
@@ -241,6 +230,23 @@ them and how long ago they started. Administrators see only their own agents unl
 	cmd.Flags().StringVar(&batch, "batch", "", "only the agents of this batch")
 	cmd.Flags().BoolVar(&all, "all", false, "every person's agents (administrators only)")
 	return cmd
+}
+
+// printSubstrateActors is the table of substrate list.
+func printSubstrateActors(w io.Writer, live []api.Actor, all bool, now time.Time) {
+	rows := make([][]string, 0, len(live))
+	for _, a := range live {
+		row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateActivityCell(a, now), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID), substrateDash(safetext.Line(a.Budget))}
+		if all {
+			row = append(row, substrateListOwner(a))
+		}
+		rows = append(rows, row)
+	}
+	header := []string{"NAME", "AGENT", "PROFILE", "STATE", "ACTIVITY", "AGE", "BATCH", "BUDGET"}
+	if all {
+		header = append(header, "OWNER")
+	}
+	substrateTable(w, header, rows)
 }
 
 // substrateListOwner is list --all's OWNER column: the person, or that the
@@ -331,6 +337,9 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
+				}
+				if a.Budget != "" {
+					fmt.Fprintf(w, "Budget:    %s\n", safetext.Line(a.Budget))
 				}
 				if a.Unattended {
 					fmt.Fprintf(w, "Mode:      %s\n", substrateUnattendedMode(a))
@@ -814,21 +823,59 @@ func substrateDecide(cmd *cobra.Command, com *substrateCommon, id, decision stri
 
 // --- usage ------------------------------------------------------------------
 
+// substrateUsageBys are the rollups of substrate usage, with the heading and
+// column word of each.
+var substrateUsageBys = map[string][2]string{
+	"actor": {"agent", "AGENT"}, "model": {"model", "MODEL"}, "batch": {"batch", "BATCH"},
+	"atespace": {"group", "GROUP"}, "day": {"day", "DAY"}, "connector": {"connector", "CONNECTOR"},
+	"provider": {"provider", "PROVIDER"}, "person": {"person", "PERSON"},
+}
+
+// substrateUsageSince validates --since (<n>h or <n>d, at most 31 days, the
+// usage retention) and returns the window for the heading.
+func substrateUsageSince(v string) error {
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(v, "h"), "d"))
+	if err != nil || n <= 0 || (!strings.HasSuffix(v, "h") && !strings.HasSuffix(v, "d")) {
+		return cliusage.WithExitCode(errors.New("--since takes a window such as 24h or 7d"), 2)
+	}
+	if (strings.HasSuffix(v, "h") && n > 31*24) || (strings.HasSuffix(v, "d") && n > 31) {
+		return cliusage.WithExitCode(errors.New("--since can reach back at most 31 days (the usage retention)"), 2)
+	}
+	return nil
+}
+
 func newSubstrateUsageCmd() *cobra.Command {
 	var (
-		out   substrateOutput
-		com   substrateCommon
-		batch string
-		all   bool
+		out       substrateOutput
+		com       substrateCommon
+		batch, by string
+		since     string
+		all       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Show what your agents used: model calls, tokens and cost",
-		Long:  `Shows the model use of your agents, grouped the way the cluster reports it. You see only your own use.`,
-		Args:  cobra.NoArgs,
+		Long: `Shows the model use of your agents and what it cost, rolled up by agent (the default),
+model, batch, atespace, day, connector or provider. You see only your own use; an
+administrator adds --all for everyone and --by person for one line per person.
+Calls whose model is not in the price table show no cost and are not in the total.`,
+		Example: `  defenseclaw substrate usage
+  defenseclaw substrate usage --by model --since 24h
+  defenseclaw substrate usage --all --by person`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, err := out.wantJSON()
 			if err != nil {
+				return err
+			}
+			words, ok := substrateUsageBys[by]
+			if !ok {
+				return cliusage.WithExitCode(errors.New("--by is one of actor, model, batch, atespace, day, connector, provider or person"), 2)
+			}
+			if by == "person" && !all {
+				return cliusage.WithExitCode(errors.New("--by person needs --all (administrators only)"), 2)
+			}
+			if err := substrateUsageSince(since); err != nil {
 				return err
 			}
 			s, err := substrateOpen(cmd, &com)
@@ -837,26 +884,115 @@ func newSubstrateUsageCmd() *cobra.Command {
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			u, err := s.Client.Usage(ctx, batch, all)
+			u, err := s.Client.Usage(ctx, api.UsageQuery{By: by, Since: since, Batch: batch, All: all})
 			if err != nil {
 				return substrateFail(err)
 			}
 			if asJSON {
 				return writeSubstrateJSON(cmd.OutOrStdout(), u)
 			}
-			if len(u) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No use recorded yet.")
-				return nil
-			}
-			printSubstrateMap(cmd.OutOrStdout(), u, "")
+			printSubstrateUsage(cmd.OutOrStdout(), u, words, since, all)
 			return nil
 		},
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().StringVar(&by, "by", "actor", "roll up by actor, model, batch, atespace, day, connector, provider or person (person needs --all)")
+	cmd.Flags().StringVar(&since, "since", "7d", "window, as <n>h or <n>d (at most 31d)")
 	cmd.Flags().StringVar(&batch, "batch", "", "only this batch")
 	cmd.Flags().BoolVar(&all, "all", false, "everyone's use (administrators only)")
 	return cmd
+}
+
+// printSubstrateUsage writes the usage table: one line per key, a total, the
+// budget lines the caller may see, and a note for calls with no known cost.
+func printSubstrateUsage(w io.Writer, u api.UsageAnswer, words [2]string, since string, all bool) {
+	who := "Your"
+	if all {
+		who = "Everyone's"
+	}
+	if len(u.Rows) == 0 {
+		fmt.Fprintf(w, "No use recorded in the last %s.\n", since)
+	} else {
+		fmt.Fprintf(w, "%s usage by %s, last %s (UTC):\n", who, words[0], since)
+		person := words[1] == "PERSON"
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		if person {
+			fmt.Fprintf(tw, "  %s\tCALLS\tCOST\n", words[1])
+		} else {
+			fmt.Fprintf(tw, "  %s\tCALLS\tINPUT\tOUTPUT\tCOST\n", words[1])
+		}
+		var calls, in, outTok, noCost int64
+		var total float64
+		for _, r := range u.Rows {
+			name := safetext.Line(r.Key)
+			if r.Name != "" {
+				name = safetext.Line(r.Name)
+			}
+			if name == "" {
+				name = "(none)"
+			}
+			calls, in, outTok = calls+r.Calls, in+r.Input, outTok+r.Output
+			if d := r.UsageCalls - r.CostCalls; d > 0 {
+				noCost += d
+			}
+			if r.CostUSD != nil {
+				total += *r.CostUSD
+			}
+			if person {
+				fmt.Fprintf(tw, "  %s\t%d\t%s\n", name, r.Calls, substrateUSD(r.CostUSD))
+			} else {
+				fmt.Fprintf(tw, "  %s\t%d\t%s\t%s\t%s\n", name, r.Calls, substrateTokens(r.Input), substrateTokens(r.Output), substrateUSD(r.CostUSD))
+			}
+		}
+		t := total
+		if person {
+			fmt.Fprintf(tw, "  total\t%d\t%s\n", calls, substrateUSD(&t))
+		} else {
+			fmt.Fprintf(tw, "  total\t%d\t%s\t%s\t%s\n", calls, substrateTokens(in), substrateTokens(outTok), substrateUSD(&t))
+		}
+		_ = tw.Flush()
+		if noCost > 0 {
+			noun := "calls had"
+			if noCost == 1 {
+				noun = "call had"
+			}
+			fmt.Fprintf(w, "%d %s no known cost (the model is not in the price table); not in the total.\n", noCost, noun)
+		}
+	}
+	for _, b := range u.Budgets {
+		if b.SpentUSD == nil {
+			continue
+		}
+		pct := 0.0
+		if b.PercentUsed != nil {
+			pct = *b.PercentUsed
+		}
+		state := fmt.Sprintf("(%.0f %%)", pct)
+		if b.Exceeded {
+			state = "(used up)"
+		}
+		fmt.Fprintf(w, "Budget %s: $%.2f of $%.2f %s %s, resets %s\n", safetext.Line(b.ID), *b.SpentUSD, b.LimitUSD,
+			map[string]string{"day": "today", "week": "this week", "month": "this month"}[b.Period], state, safetext.Line(b.ResetsAt))
+	}
+}
+
+func substrateUSD(v *float64) string {
+	if v == nil {
+		return "-"
+	}
+	return fmt.Sprintf("$%.2f", *v)
+}
+
+// substrateTokens writes a token count as 412, 88.1K or 2.2M.
+func substrateTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	}
+	return strconv.FormatInt(n, 10)
 }
 
 // --- secrets ----------------------------------------------------------------
