@@ -35,15 +35,16 @@ import (
 // localExec runs the actor scripts in a local shell (the relay exec runs
 // them the same way in the actor).
 func localExec(ctx context.Context, argv []string, dir string, env map[string]string, _ time.Duration) (string, string, int, error) {
-	// The HTTPS fixture uses an explicit git command setting. The scripts
-	// disable system and global config.
+	// The HTTPS fixture uses an explicit git command setting, and a file
+	// repository: the scripts disable system and global config and allow
+	// only https, so the fixture's git allows file too.
 	if origin := os.Getenv("DC_TEST_PUSH_ORIGIN"); origin != "" && len(argv) >= 3 && argv[0] == "sh" && argv[1] == "-c" && strings.HasPrefix(argv[2], pushGit) {
 		argv = append([]string(nil), argv...)
 		fork := ""
 		if os.Getenv("DC_TEST_PUSH_FORK") != "" {
 			fork = ` -c "url.file://$DC_TEST_PUSH_FORK.insteadOf=https://git.example.test/team/fork.git"`
 		}
-		argv[2] = `git() { command git -c "url.file://$DC_TEST_PUSH_ORIGIN.insteadOf=https://git.example.test/team/app.git"` + fork + ` "$@"; }` + "\n" + argv[2]
+		argv[2] = `git() { GIT_ALLOW_PROTOCOL=https:file command git -c "url.file://$DC_TEST_PUSH_ORIGIN.insteadOf=https://git.example.test/team/app.git"` + fork + ` "$@"; }` + "\n" + argv[2]
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
