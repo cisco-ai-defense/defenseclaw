@@ -85,6 +85,10 @@ func TestGAP0768PushUsesTheRecordedOrigin(t *testing.T) {
 			gap0768File(s.t, inc, "[remote \"origin\"]\n\turl = "+gap0768Fork+"\n")
 			gitT(s.t, s.repo, "config", "includeIf.gitdir:"+s.repo+"/.git.path", inc)
 		}},
+		{"the actor's XDG git config (RV-T6A)", func(s *rv4, _ string) {
+			gap0768File(s.t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "config"),
+				"[url \""+gap0768Fork+"\"]\n\tpushInsteadOf = "+gap0768Origin+"\n\tinsteadOf = "+gap0768Origin+"\n[remote \"origin\"]\n\tpushurl = "+gap0768Fork+"\n")
+		}},
 		{"core.sshCommand with an ssh origin", func(s *rv4, _ string) {
 			gitT(s.t, s.repo, "config", "core.sshCommand", "false")
 			gitT(s.t, s.repo, "remote", "set-url", "origin", "git@git.example.test:team/fork.git")
