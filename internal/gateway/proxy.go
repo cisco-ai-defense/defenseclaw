@@ -2141,12 +2141,25 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 				Type      string          `json:"type"`
 				Name      string          `json:"name"`
 				Arguments json.RawMessage `json:"arguments"`
+				Input     json.RawMessage `json:"input"`
+				Action    json.RawMessage `json:"action"`
 			} `json:"output"`
 		}
 		if json.Unmarshal(body, &respAPI) == nil {
 			for _, o := range respAPI.Output {
-				if o.Type == "function_call" {
+				switch o.Type {
+				case "function_call":
 					addCall(o.Name, o.Arguments)
+				case "custom_tool_call":
+					// A custom (free-form) tool's input is the tool's one
+					// argument, plain text: a shell command for a shell
+					// tool. Judged as that tool's call, as the stream judges
+					// its custom_tool_call_input (rel-1-0-10:GAP-2144).
+					addCall(o.Name, respJSONString(o.Input))
+				case "local_shell_call":
+					// The built-in local shell's exec action, named as the
+					// stream names it (sseToolCalls.judgeTexts).
+					addCall("local_shell", o.Action)
 				}
 			}
 		}
@@ -5717,7 +5730,7 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // relative target resolves in an empty directory (proxyNeutralCWD).
 func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args string) trustedActionRequest {
 	connectorName := p.connectorName()
-	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, json.RawMessage(args))
+	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, proxyFreeformToolArgs(toolName, args))
 	actionTool, trusted := agentHookNativeFileView(agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS), trusted)
 	cfg := proxyDecisionConfig(ctx)
 	proxyTier, proxyTiers := p.toolCallTierTable(ctx, cfg)
@@ -5745,6 +5758,31 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 	}
 	withWindowsShellDialect(&action, windowsHookHost() && !p.toolCallSecureClient(ctx))
 	return action
+}
+
+// proxyFreeformToolArgs is the argument object of a tool call whose
+// arguments are not a JSON object: a Responses custom (free-form) tool's
+// input is plain text, the tool's one argument. A shell execution tool's
+// text is its command ({"command": text}); any other tool's is {"input":
+// text}, the field the patch and content readers take a free-form input
+// from. Without it the text reached no command rule: a destructive or
+// exfiltrating command in a custom_tool_call was forwarded where the same
+// command as a function_call was blocked (rel-1-0-10:GAP-2144). An object,
+// and an empty argument, are returned as they are.
+func proxyFreeformToolArgs(toolName, args string) json.RawMessage {
+	text := strings.TrimSpace(args)
+	if text == "" || (strings.HasPrefix(text, "{") && json.Valid([]byte(text))) {
+		return json.RawMessage(args)
+	}
+	key := "input"
+	if actionfacts.IsImmediateShellExecutionTool(strings.TrimSpace(toolName)) {
+		key = "command"
+	}
+	wrapped, err := json.Marshal(map[string]string{key: args})
+	if err != nil {
+		return json.RawMessage(args)
+	}
+	return wrapped
 }
 
 // proxyToolCallCWD is the directory a tool call names for its command when
