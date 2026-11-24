@@ -24,7 +24,7 @@ var gap1079Canaries = []string{
 	"correct-Horse-4-battery",
 	"P@ssw0rd2026",
 	"tr0ub4dor&3",
-	"Zq81_aB3x.Kp7",
+	"Zq81_aB3x-Kp7",
 }
 
 func gap1079Redact(t *testing.T, input string, class observability.FieldClass) string {
@@ -167,5 +167,26 @@ func TestProsePasswordBenignCorpusGAP1079(t *testing.T) {
 	t.Logf("benign sentences: 5000, changed: %d", changed)
 	if changed != 0 {
 		t.Fatalf("%d of 5000 benign sentences changed", changed)
+	}
+}
+
+// Every profile that redacts secrets takes the prose password, so each sink
+// (the laptop and cluster audit stores, OTLP, Galileo, the local destination)
+// that projects through DetectAndRedact with one of them is covered.
+func TestProsePasswordInEveryRedactingProfileGAP1079(t *testing.T) {
+	t.Parallel()
+	for _, name := range []ProfileName{ProfileSensitive, ProfileContent, ProfileStrict} {
+		profile, ok := BuiltInProfile(name)
+		if !ok {
+			t.Fatalf("no %s profile", name)
+		}
+		input := "summarise: my password is " + gap1079Canaries[0] + " and keep it"
+		result, err := DetectAndRedact(input, observability.FieldClassContent, profile.DetectorGroups(), bytes.Repeat([]byte{0x42}, 32), nil)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(result.Value, gap1079Canaries[0]) {
+			t.Errorf("%s: the prose password stays in %q", name, result.Value)
+		}
 	}
 }

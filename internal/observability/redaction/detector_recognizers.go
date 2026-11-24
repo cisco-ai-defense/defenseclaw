@@ -547,7 +547,8 @@ func overlapsAnyRange(start, end int, ranges [][]int) bool {
 }
 
 func recognizeAssignments(input string) []candidate {
-	return append(scanKeyValues(input, assignmentKeyRE, false), recognizeCredentialKeys(input)...)
+	result := append(scanKeyValues(input, assignmentKeyRE, false), recognizeCredentialKeys(input)...)
+	return append(result, recognizeProseCredentials(input)...)
 }
 
 func scanKeyValues(input string, keyPattern *lazyregexp.Regexp, dsn bool) []candidate {
