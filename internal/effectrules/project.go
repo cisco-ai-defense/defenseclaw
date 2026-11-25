@@ -5,6 +5,8 @@
 package effectrules
 
 import (
+	"os"
+
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -30,6 +32,9 @@ type Env struct {
 	// AgentCreated reports whether an earlier call of this session wrote the
 	// target keyed by effects.Target.Key(). Nil means no session memory.
 	AgentCreated func(key string) bool
+	// DestStat reads a copy or move destination that may be a directory
+	// (settleDestFile); nil is os.Lstat on the write resolver's answer.
+	DestStat func(path string) (os.FileInfo, error)
 	// Truncated is the call's one bound record: a cap of the projection
 	// (maxIdentityStats) that cut the reading short hits it. Nil: the hit is
 	// only counted (IdentityCounts).
@@ -69,6 +74,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 	for i := range effs {
 		e := effs[i]
 		stepUps.promote(&e, flavor)
+		settleDestFile(&e, flavor, rsv, env.DestStat)
 		fact := &semanticpb.EffectFact{
 			Index:       int64(i + 1),
 			Kind:        string(e.Kind),
@@ -95,6 +101,44 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 	}
 	holdKnownOnNameMaybe(out)
 	return out
+}
+
+// settleDestFile is the resolver's answer for a copy or move destination
+// that may be a directory (dest_may_be_dir: cp, mv, rsync, Copy-Item with
+// one bare destination). When the write resolver's path is, on disk, an
+// existing regular file, the program writes that file itself, so the target
+// is Known and takes the cell of the same write spelled by redirection
+// (rel-1-0-10:GAP-1677/GAP-1678: cp proj/notes.txt ~alias/.claude/settings.json
+// against the ~/ control). A directory, a missing or unreadable path, a
+// glob, a link the resolver could not walk, a non-canonical spelling or a
+// path of the other flavor keeps the reason (unknown), as before.
+func settleDestFile(e *effects.Effect, flavor effects.Flavor, rsv resolver, stat func(string) (os.FileInfo, error)) {
+	if e.Kind != effects.KindWrite && e.Kind != effects.KindAppend || e.TargetState == effects.TargetStateKnown ||
+		e.RoleState != effects.RoleStateKnown || e.Target.Type != effects.TargetPath || e.Target.Path == "" ||
+		e.Target.Glob != "" || len(e.Reasons) == 0 {
+		return
+	}
+	for _, r := range e.Reasons {
+		if r.Code != effects.ReasonDestMayBeDir || r.Scope != effects.ScopeTarget {
+			return
+		}
+	}
+	if (flavor == effects.FlavorWindows) != (hostGOOS == "windows") || !CanonicalAbsolute(e.Target.Path, flavor) {
+		return
+	}
+	resolved, ok := rsv(e.Target.Path)
+	if !ok || resolved == "" {
+		return
+	}
+	if stat == nil {
+		stat = os.Lstat
+	}
+	info, err := stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	e.TargetState = effects.TargetStateKnown
+	e.Reasons = nil
 }
 
 // holdKnownOnNameMaybe prevents one target/set from being both Known and

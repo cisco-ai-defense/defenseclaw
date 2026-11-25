@@ -52,10 +52,8 @@ type r3TierRoute struct {
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
 	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-1677":  "alias/peer tilde targets remain Maybe until every row is resolver-known (S4-R3)",
 	"GAP-0443":  "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
 	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
-	"GAP-1678":  "cp destination file/directory ambiguity remains Maybe (S4-R3)",
 	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
 	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
 	"GAP-1556":  "an unknown PowerShell environment folder stays Maybe (S4-R3)",
@@ -142,7 +140,12 @@ func r3TierHome(t *testing.T) (home, login string) {
 func r3PosixTierRows(home, login string) []r3TierRow {
 	rows := []r3TierRow{
 		// home spellings
-		{gap: "GAP-1677 ~other/../login keys", command: `echo k >> ~root/../` + login + `/.ssh/authorized_keys`, want: "maybe"},
+		// GAP-1677: ~root/.. is / here (the test home is a temp folder),
+		// so the word names /<login>/.ssh/authorized_keys, a Known path that
+		// is no account's home: it keeps its 1.0.10 cell. The reach of the
+		// gap (~other/.. a sibling of the active home) is Known and blocks
+		// in TestDET111R3AccountTildeFiveTiers.
+		{gap: "GAP-1677 fp: ~root/.. is not the active home", command: `echo k >> ~root/../` + login + `/.ssh/authorized_keys`, want: "allow"},
 		{gap: "GAP-0948 fp: ~.. is a literal folder", command: `echo k >> ~../x`, want: "allow"},
 		{gap: "GAP-0898 other account credential", command: `cat /srv/homes/bob/.aws/credentials`, want: "maybe"},
 		// GAP-0899: a mounted home the passwd lookup names is
