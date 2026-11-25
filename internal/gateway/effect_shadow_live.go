@@ -154,6 +154,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		effectShadowFaultHook()
 	}
 	result := effects.Extract(call, opts)
+	result = withAwkInetRecordEffects(request, result, opts)
 	facts := effectShadowFacts(request, result, opts)
 	// A PowerShell call on a POSIX host is also read with the host's paths
 	// (DET111 ruling R1): each tier keeps the stronger cell of the two

@@ -4,8 +4,12 @@
 package gateway
 
 import (
+	"strings"
+
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
+	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -125,4 +129,79 @@ func awkStartsCommands(facts actionfacts.Facts) bool {
 // deciding on their own.
 func withAwkDynamicCommand(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
 	return withUnknownFinding(findings, unknownReasonFinding(awkDynamicTitle, awkprog.DynamicReason, enforcementCapable))
+}
+
+// withAwkInetRecordEffects carries a proven gawk record-to-network flow into
+// the effect reading. awkprog proves the sole unguarded record action and a
+// bounded list of static input files; the ordinary shell extractor then
+// resolves those files and links each read to the send exactly as it does for
+// the equivalent plain redirect. A sink without that proof adds no effects.
+func withAwkInetRecordEffects(request trustedActionRequest, base effects.Result, opts effects.Options) effects.Result {
+	if opts.Flavor != effects.FlavorPOSIX || len(base.Unknowns) != 0 ||
+		request.Input.DialectHint != "" && request.Input.DialectHint != actionfacts.DialectPOSIX {
+		return base
+	}
+	command, ok := trustedBashCommandInput(request.Input)
+	if !ok || !strings.Contains(command, "awk") {
+		return base
+	}
+	facts := actionfacts.Analyze(request.Input)
+	if facts.Parse.Status == actionfacts.StatusLimitExceeded {
+		return base
+	}
+	var body string
+	for _, command := range facts.Commands {
+		if !actionfacts.IsAwkCall(command) || command.ParentCommandID != 0 ||
+			command.ControlFlowUncertain {
+			continue
+		}
+		reading := actionfacts.AwkCall(command).Read()
+		if !reading.NetworkSink || !reading.NetworkRecordFlow || reading.Body == "" {
+			continue
+		}
+		if body != "" {
+			return base // several proven flows need their own ordering proof
+		}
+		body = reading.Body
+	}
+	if body == "" {
+		return base
+	}
+	projected := effects.Extract(effects.Call{Surface: effects.SurfaceShell,
+		Tool: request.Input.Tool, Command: body}, opts)
+	if len(projected.Unknowns) != 0 {
+		return base
+	}
+	sentRead := false
+	for i, effect := range projected.Effects {
+		if effect.Kind == effects.KindRead {
+			if flow, _ := effectReadFlowTo(projected, i); flow == decide.FlowSent {
+				sentRead = true
+				break
+			}
+		}
+	}
+	if !sentRead {
+		return base
+	}
+	offset := len(base.Effects)
+	extra := make([]effects.Effect, 0, len(projected.Effects))
+	for _, effect := range projected.Effects {
+		if effect.Data != nil {
+			data := *effect.Data
+			data.Sources = append([]effects.Source(nil), data.Sources...)
+			for i := range data.Sources {
+				if data.Sources[i].Kind == effects.SourceEffect {
+					if data.Sources[i].Effect <= 0 || data.Sources[i].Effect > len(projected.Effects) {
+						return base
+					}
+					data.Sources[i].Effect += offset
+				}
+			}
+			effect.Data = &data
+		}
+		extra = append(extra, effect)
+	}
+	base.Effects = append(base.Effects, extra...)
+	return base
 }
