@@ -87,6 +87,9 @@ func TestFetchedScriptLegacyFindingFold(t *testing.T) {
 		{"different rule", RuleFinding{RuleID: "CMD-PIPE-WGET", Severity: "HIGH", Proof: advisoryProof}, 2},
 		{"effects source", effect, 2},
 		{"floor reading", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: advisoryProof, floorRaiseOnly: true}, 2},
+		{"recorded legacy", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: recordProof}, 2},
+		{"unproven enforcing", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: enforcingProof}, 2},
+		{"another profile", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: advisoryProof, profile: "member-a"}, 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

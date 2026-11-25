@@ -1558,7 +1558,9 @@ func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *com
 }
 
 // effectRuleSeverity is the highest severity a generation (and each member
-// of a profile combination) gives rule id; "" when no rule has the id.
+// of a profile combination) gives rule id; "" when the pack has no live
+// tool-call rule with that id. A false expression is a pack tombstone, not
+// authority for an effects finding.
 func effectRuleSeverity(g *compiledRulePackCategories, id string) string {
 	if g == nil {
 		return ""
@@ -1566,7 +1568,8 @@ func effectRuleSeverity(g *compiledRulePackCategories, id string) string {
 	best := ""
 	for _, category := range g.categories {
 		for _, rule := range category.Rules {
-			if strings.EqualFold(rule.ID, id) && decide.ParseSeverity(rule.Severity) > decide.ParseSeverity(best) {
+			if strings.EqualFold(rule.ID, id) && strings.TrimSpace(rule.Expression) != "false" &&
+				decide.ParseSeverity(rule.Severity) > decide.ParseSeverity(best) {
 				best = strings.ToUpper(strings.TrimSpace(rule.Severity))
 			}
 		}

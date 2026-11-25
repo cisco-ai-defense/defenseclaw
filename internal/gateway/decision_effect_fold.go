@@ -48,8 +48,8 @@ func redundantFetchedScriptFinding(f RuleFinding, findings []RuleFinding) bool {
 		return false
 	}
 	for _, prior := range findings {
-		if !strings.EqualFold(prior.RuleID, f.RuleID) || isEffectFinding(prior) ||
-			prior.floorRaiseOnly || findingEnforcementRank(prior) < 2 {
+		if !strings.EqualFold(prior.RuleID, f.RuleID) || prior.profile != f.profile ||
+			isEffectFinding(prior) || prior.floorRaiseOnly || findingEnforcementRank(prior) < 2 {
 			continue
 		}
 		if decide.ParseSeverity(prior.Severity) >= decide.ParseSeverity(f.Severity) {
