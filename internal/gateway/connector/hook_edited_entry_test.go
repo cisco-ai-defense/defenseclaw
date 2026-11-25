@@ -140,8 +140,62 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 // as text, so this runs on Linux and macOS; Windows renders native commands.
 func TestEditedHookGoldenReportedExactlyWhenSetupRemoves(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Setup registers the native hook launcher on Windows; the golden's script entries are read as text elsewhere")
+		t.Skip("Setup registers the native hook launcher on Windows; TestEditedHookGoldenReportedExactlyWhenTheRemovalPassRemoves runs the same golden through the removal passes there")
 	}
+	editedHookGoldenCrossCheck(t, false)
+}
+
+// GAP-1951 on every OS, Windows included: the same golden and the same
+// reported-is-removed check, with Claude Code's and Codex's repair being the
+// removal pass Setup runs (removeOwnedClaudeCodeHooks, removeOwnedCodexHooksFromTOML)
+// instead of the whole Setup, which on Windows renders the native launcher and
+// verifies a registration this check does not need. The other connectors run the
+// patch function Setup calls. The Linux-only cross-check missed a Windows
+// divergence once (GAP-1981), so this one is not skipped there.
+func TestEditedHookGoldenReportedExactlyWhenTheRemovalPassRemoves(t *testing.T) {
+	editedHookGoldenCrossCheck(t, true)
+}
+
+// claudeCodeRemovalPass is the removal Claude Code's Setup runs on settings.json.
+func claudeCodeRemovalPass(path, hooksDir string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return err
+	}
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	for key, hk := range hooks {
+		remaining, err := removeOwnedClaudeCodeHooks(hk, hooksDir, nil)
+		if err != nil {
+			return err
+		}
+		hooks[key] = remaining
+	}
+	out, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+// codexRemovalPass is the removal Codex's Setup and restore run on config.toml.
+func codexRemovalPass(path, hooksDir string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	cleaned, _, err := removeOwnedCodexHooksFromTOML(raw, path, hooksDir)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, cleaned, 0o600)
+}
+
+func editedHookGoldenCrossCheck(t *testing.T, removalPassOnly bool) {
+	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "hook_edited_entries.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +233,14 @@ func TestEditedHookGoldenReportedExactlyWhenSetupRemoves(t *testing.T) {
 		"kiro":        func(_ *testing.T, _, path, hookScript string) error { return patchKiroV3Hooks(path, hookScript) },
 		"antigravity": func(_ *testing.T, _, path, hookScript string) error { return patchAntigravityHooks(path, hookScript) },
 	}
+	if removalPassOnly {
+		repair["claudecode"] = func(_ *testing.T, root, path, _ string) error {
+			return claudeCodeRemovalPass(path, filepath.Join(opts(root).DataDir, "hooks"))
+		}
+		repair["codex"] = func(_ *testing.T, root, path, _ string) error {
+			return codexRemovalPass(path, filepath.Join(opts(root).DataDir, "hooks"))
+		}
+	}
 	decode := func(t *testing.T, path string) interface{} {
 		t.Helper()
 		decoded, err := decodeHookConfigFile(path)
@@ -200,7 +262,18 @@ func TestEditedHookGoldenReportedExactlyWhenSetupRemoves(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeEditedHookGoldenMarkers(t, tc, dataDir)
+			want := tc.Edited
+			if runtime.GOOS == "windows" {
+				// Windows registers native launcher commands and opens no hook
+				// script, so a case reported only because its copy carries the
+				// generated-hook marker has no marker to read: the golden's
+				// drive_edited is its answer (as in TestEditedHookEntriesGolden).
+				if len(tc.Marked) > 0 {
+					want = tc.driveEdited()
+				}
+			} else {
+				writeEditedHookGoldenMarkers(t, tc, dataDir)
+			}
 			document := strings.ReplaceAll(tc.Document, "{data_dir}", filepath.ToSlash(dataDir))
 			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
 				t.Fatal(err)
@@ -234,8 +307,8 @@ func TestEditedHookGoldenReportedExactlyWhenSetupRemoves(t *testing.T) {
 			// golden copies Setup removes stay unreported by design (another
 			// account's copy with no binding, a shell wrapper), which leaves
 			// the hook guard idle, never looping.
-			if reported != tc.Edited {
-				t.Errorf("reported %v (golden %v), Setup removed %q", reported, tc.Edited, removed)
+			if reported != want {
+				t.Errorf("reported %v (golden %v), Setup removed %q", reported, want, removed)
 			}
 			if reported && after[reportedCommand] {
 				t.Errorf("reported %q, which Setup keeps (removed %q)", reportedCommand, removed)
