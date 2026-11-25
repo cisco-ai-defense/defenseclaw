@@ -6,6 +6,7 @@
 package actionfacts
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,7 +47,7 @@ func searchReads(t *testing.T, dir, home, command string) []string {
 	t.Helper()
 	out := parsePOSIX(command, 1, 0)
 	classifyOutput(&out)
-	rec := resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, dir, home, out.commands, out.paths)
+	rec := resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), defaultCredentialPathLimits, out.credentialWords, dir, home, out.commands, out.paths)
 	var got []string
 	if rec == nil {
 		return nil

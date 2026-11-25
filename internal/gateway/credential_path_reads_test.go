@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -165,7 +166,7 @@ func TestGAP1029ResolveCapIsTheUnknownTier(t *testing.T) {
 	limit := actionfacts.MaxCredentialPathCandidates
 	for _, size := range []int{limit, limit + 1} {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: gap1029LaneCommand(size), CWD: "/work"})
-		if got := facts.CredentialPathReadCaps().Has(bounded.Items); got != (size > limit) {
+		if got := facts.CredentialPathReadCaps(context.Background()).Has(bounded.Items); got != (size > limit) {
 			t.Fatalf("%d candidates: items cap %v: the resolve cap moved", size, got)
 		}
 	}

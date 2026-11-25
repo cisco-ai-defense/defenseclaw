@@ -51,6 +51,14 @@ func Analyze(input Input) (facts Facts) {
 // runtime-expanded redirect targets of that parse
 // (analyzeWithRedirectTargets).
 func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Facts {
+	facts := analyzeReading(input, twinCommand, capture)
+	if facts.credentialPaths != nil {
+		facts.credentialPaths.budget = input.CredentialWalkBudget
+	}
+	return facts
+}
+
+func analyzeReading(input Input, twinCommand string, capture *redirectTargetCapture) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
 	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(

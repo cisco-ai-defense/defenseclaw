@@ -72,6 +72,17 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 	}
 	caps := profile.Capabilities
 	preExecutionBoundary := caps.CanBlock && eventIn(req.HookEventName, caps.BlockEvents)
+	// artifactCtx ends the stage's own work at promotedArtifactHookBudget, but
+	// not a member's wait for a walk slot: the walks draw on the request's
+	// wait (hookWalkBudgetFrom(ctx), RV-0674T F4), whose done is the handler's
+	// ctx, and getWithin ignores the ctx it is read with when a budget is
+	// set. So when the request has waited nothing before, a walk of the
+	// artifact stage can wait up to the request budget (about 1 s), past this
+	// 750 ms, and the stage can run that long, about 250 ms over the stage
+	// bound. The whole request waits at most about 1.0 s for slots, where the
+	// evaluation and the stage waited separately before (about 1.0 s and
+	// 0.75 s: 1.75 s). No verdict depends on it: the rule loop stops on
+	// artifactCtx.Err() at 750 ms either way (substrate-1:GAP-1114).
 	artifactCtx, cancel := context.WithTimeout(ctx, promotedArtifactHookBudget)
 	defer cancel()
 	findings := promotedArtifactFindings(
@@ -186,6 +197,12 @@ func promotedArtifactFindings(
 			ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,
 			ActiveAgentFilesUncertain:                facts.ActiveAgentFilesUncertain,
 			DialectHint:                              dialect,
+			// The script's walks draw on the request's wait, the artifact's
+			// facts the chain reads (recordArtifactTrustedAction) as the
+			// dispatch's (RV-0674T F4). That wait ends with the request, not
+			// with the stage's 750 ms artifactCtx, so a walk here can wait up
+			// to the request budget of about 1 s (substrate-1:GAP-1114).
+			CredentialWalkBudget: hookWalkBudgetFrom(ctx),
 		}
 		artifactFacts := actionfacts.Analyze(input)
 		bodyFacts := promotedArtifactBodyEnforcementFacts(input, artifactFacts)
