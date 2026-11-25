@@ -25,6 +25,12 @@ var readerClockReads = map[string]string{
 	// bound of the registry.
 	"internal/hookpaths/network_path.go:askNetworkShare":  "network-share answer wait",
 	"internal/hookpaths/network_path_links.go:stillPlain": "network-share answer wait",
+	// The walk slot wait of a credential path resolve (substrate-1
+	// GAP-1083): a recursive search waits for a free walk slot only within
+	// what the hook call may still wait. It decides whether the walk runs,
+	// never what it reads; a walk that gets no slot is cut, and a cut
+	// resolve is TRUNCATED (CredentialPathReadCaps), never an allow.
+	"internal/actionfacts/credential_path_reads.go:take": "walk slot wait in the hook's answer budget",
 	// The settle check of a file system fingerprint (activeStateSettleLimit):
 	// a folder changed in the clock tick of the walk could change again with
 	// the same stamp, so its view is not kept across calls. It decides only

@@ -41,4 +41,8 @@ var (
 	_ = bounded.Register("hookpaths.maxWalkFactComponents", bounded.Items, int(maxWalkFactComponents))
 	_ = bounded.Register("hookpaths.maxWalkFactWords", bounded.Items, int(maxWalkFactWords))
 	_ = bounded.Register("hookpaths.maxWalkFacts", bounded.Items, int(maxWalkFacts))
+	_ = bounded.Register("hookpaths.maxMemoParseBytes", bounded.Bytes, int(maxMemoParseBytes))
+	_ = bounded.Register("hookpaths.maxMemoParses", bounded.Items, int(maxMemoParses))
+	_ = bounded.Register("hookpaths.maxPlacedBodyReads", bounded.Items, int(maxPlacedBodyReads))
+	_ = bounded.Register("hookpaths.maxPlacedWordDirs", bounded.Paths, int(maxPlacedWordDirs))
 )
