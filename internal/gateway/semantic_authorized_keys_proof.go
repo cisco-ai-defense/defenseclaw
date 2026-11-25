@@ -1774,11 +1774,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		posixShell := trustedPOSIXShellCall(input, facts)
 		readMentions = fixturefs.Unread
 		readMentions(func() {
-			memo := hookpaths.NewTargetMemo().WithShellStartup(request.targetMemo.ShellStartup())
-			decision = memo.ActionCommandDecisionInShell(input.Command, guestCWD, facts.ActiveHome, globFacts, posixShell)
-			if input.DialectHint != "" {
-				decision = memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, guestCWD, facts.ActiveHome, input.DialectHint, globFacts)
-			}
+			// One memo for every by-name decision of the call, apart from
+			// the host's answers; a repeat is answered once (FIX-F3PERF).
+			decision = request.targetMemo.UnreadCommandDecision(input.Command, guestCWD, facts.ActiveHome, input.DialectHint, globFacts, posixShell)
 		})
 		if decision != "" {
 			mentionCWD = guestCWD

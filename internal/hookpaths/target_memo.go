@@ -71,6 +71,12 @@ type TargetMemo struct {
 	// short (hookCall.keepsSince): the share may answer later in the call,
 	// and an evaluation after that reads it (rel-1-0-10:GAP-1606).
 	owner *hookCall
+	// unread is the memo of this evaluation's decisions that read no file
+	// system (UnreadCommandDecision), and unreadDecisions their answers by
+	// input. Nothing they read is the host's, so they keep apart from this
+	// memo's own answers.
+	unread          *TargetMemo
+	unreadDecisions map[unreadDecisionKey]string
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not
