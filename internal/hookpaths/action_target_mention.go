@@ -2209,7 +2209,7 @@ type actionGlobs struct {
 	// nested body's scan shares it.
 	memo *TargetMemo
 	// dots is set when the command may make * and ? match a leading dot
-	// (actionCommandMayDotglob).
+	// (CommandMayDotglob).
 	dots bool
 }
 
@@ -2220,7 +2220,7 @@ func (g *actionGlobs) forCommand(command string) *actionGlobs {
 	if g != nil {
 		scan = *g
 	}
-	scan.dots = actionCommandMayDotglob(command)
+	scan.dots = CommandMayDotglob(command)
 	return &scan
 }
 
@@ -2260,17 +2260,14 @@ func actionDotglobSettingIn(folded string) bool {
 	return false
 }
 
-// actionCommandMayDotglob reads the command with plain substring checks
-// first: the regular expression is an automaton run over every byte, which
-// costs a large heredoc body hundreds of milliseconds, and it can match only
-// where a glob character is followed by an opening parenthesis.
-func actionCommandMayDotglob(command string) bool {
-	return CommandMayDotglob(command)
-}
-
-// CommandMayDotglob is actionCommandMayDotglob, for the gateway's lexical
-// gate on the by-name reading (copyModeCallMayNameSSHFolder): a call that
-// may turn dotglob on lets any pattern select the SSH folder.
+// CommandMayDotglob reports a command whose own words may make * and ?
+// match a leading dot. The glob scan of each command and the gateway's
+// lexical gate on the by-name reading (copyModeCallMayNameSSHFolder: a call
+// that may turn dotglob on lets any pattern select the SSH folder) read it.
+// It reads the command with plain substring checks first: the regular
+// expression is an automaton run over every byte, which costs a large
+// heredoc body hundreds of milliseconds, and it can match only where a glob
+// character is followed by an opening parenthesis.
 func CommandMayDotglob(command string) bool {
 	if actionDotglobSettingIn(strings.ReplaceAll(textlower.Lower(command), "_", "")) {
 		return true
@@ -2306,7 +2303,7 @@ func UseSystemShellProfilesForTests(files []string, dropInDir string) (restore f
 // A decision by name alone (fixturefs.Unread) reads no startup file: the
 // actor's files are not on this host, so it reads the actor's home as the
 // laptop reads a home whose files set no dotglob, and only the call's own
-// words (actionCommandMayDotglob) or the inherited options turn it on.
+// words (CommandMayDotglob) or the inherited options turn it on.
 // Taking the unread home as one that may set dotglob made ~/* and ~/?ssh
 // select .ssh: the actor blocked tar cz ~/* and cp -r ~/?ssh /tmp/x, which
 // the laptop, the parent and rel allow (substrate-1 GAP-1023).
