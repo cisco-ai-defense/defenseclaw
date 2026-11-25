@@ -1599,9 +1599,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			return findings
 		}
 	}
+	// The proof without the link write and the guest's proof are each asked
+	// for up to three times below with the same arguments: each is made
+	// once, when first asked (both are lexical answers of this call, and
+	// the order of the asks is unchanged; GAP-2215).
+	plainProof := onceBool(func() bool {
+		return trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo)
+	})
+	guestProof := onceBool(func() bool { return trustedSandboxGuestAuthorizedKeysWrite(request) })
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo) ||
-			trustedSandboxGuestAuthorizedKeysWrite(request)) {
+		(symlinkWrite && trustedAuthorizedKeysWriteProofWith(input, facts, true, clientGlobFacts(request), request.targetMemo) ||
+			!symlinkWrite && plainProof() || guestProof()) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
 			// A file tool write whose every target is a sudoers file keeps
@@ -1636,8 +1644,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			unprovenOnly := symlinkWrite && unprovenTarget.class != "" && named.ID == rule.ID &&
 				unprovenKeyWriteMayWarn(request, commandText, facts.ActiveHome, unprovenTarget) &&
 				!trustedAuthorizedKeysSymlinkWrite(input) &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
-				!trustedSandboxGuestAuthorizedKeysWrite(request)
+				!plainProof() && !guestProof()
 			if unprovenOnly {
 				enforcement = findingEnforcementAlertOnly
 			}
@@ -1682,8 +1689,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
 			} else if symlinkWrite && named.ID == rule.ID && request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook &&
 				unprovenTarget.class == hookpaths.UnprovenTargetUnresolved && !unresolved &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
-				!trustedSandboxGuestAuthorizedKeysWrite(request) {
+				!plainProof() && !guestProof() {
 				// A copy-mode sandbox's write whose target the call builds at
 				// run time (cd /abs && eval '... > $x'): this gateway cannot
 				// read the sandbox's files to place it, so it keeps the block
@@ -1692,8 +1698,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				// write the call does not make.
 				title = sandboxRuntimeWriteTargetTitle
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
-				!trustedSandboxGuestAuthorizedKeysWrite(request) {
+				!plainProof() && !guestProof() {
 				// The only write found is one the hook client and this
 				// gateway could not resolve: it still fails closed, named as
 				// what it is, not as a key write (rel-1-0-2:GAP-0690).
@@ -1934,6 +1939,13 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil, memo.ShellStartup()) {
 		return false
 	}
+	if symlinkWrite {
+		// The link walk already found the write: every reading below only
+		// adds to an answer that is already yes, so none is made. The title
+		// branches of appendTrustedHomeResolvedSSHKeyWriteFinding ask for the
+		// proof without the link write; that one runs in full (GAP-2215).
+		return true
+	}
 	if input.Command != "" &&
 		memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
 		return true
@@ -2103,13 +2115,25 @@ func trustedSandboxGuestAuthorizedKeysWrite(request trustedActionRequest) bool {
 	}
 	input := request.Input
 	input.CWD = guestCWD
-	facts := actionfacts.Analyze(input)
+	facts := request.guestMemo.analyze(input)
 	if input.Command == "" {
 		if command, ok := trustedBashCommandInput(input); ok {
 			input.Command = command
 		}
 	}
 	return trustedAuthorizedKeysWriteProof(input, facts, false, nil)
+}
+
+// onceBool returns a function that calls answer on its first call and gives
+// that answer on every call.
+func onceBool(answer func() bool) func() bool {
+	asked, value := false, false
+	return func() bool {
+		if !asked {
+			asked, value = true, answer()
+		}
+		return value
+	}
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(

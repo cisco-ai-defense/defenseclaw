@@ -4818,9 +4818,9 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 		child.Command, child.CWD = placement.text, placement.cwd
 		child.Args, child.Argv = nil, nil
 		if placement.candidate {
-			candidates = append(candidates, actionfacts.Analyze(child))
+			candidates = append(candidates, memo.analyze(child))
 		} else {
-			children = append(children, actionfacts.Analyze(child))
+			children = append(children, memo.analyze(child))
 		}
 	}
 	if stopped {
