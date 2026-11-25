@@ -4,7 +4,6 @@
 package actionfacts
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +29,7 @@ func TestGAP1668RepeatedSearchFolderIsProbedOnce(t *testing.T) {
 	command := "grep -rn TODO" + strings.Repeat(" .", 200)
 	out := parsePOSIX(command, 1, 0)
 	classifyOutput(&out)
-	record := resolveCredentialPathReadsWithin(context.Background(), limits, out.credentialWords, dir, dir, out.commands, out.paths)
+	record := resolveCredentialPathReadsWithin(limits, out.credentialWords, dir, dir, out.commands, out.paths)
 	if record == nil {
 		t.Fatal("no record: the credentials file under the searched folder was not found")
 	}

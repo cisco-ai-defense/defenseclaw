@@ -4,17 +4,14 @@
 package actionfacts
 
 import (
-	"context"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -80,97 +77,6 @@ const (
 	credentialPathWalkWorkers    = 4
 )
 
-// credentialPathWalkSlots bounds the walks the process runs at once to
-// max(2, GOMAXPROCS/4) (substrate-1:GAP-0674). The gateway answers many hook
-// calls at once, up to a caller's 64 in flight, and each call that searches a
-// folder recursively walks it. On Windows a walk of 2,047 folders under
-// 2,000-character paths costs about 26 MB and 0.2 s of system calls, so 64
-// of them at once held every walk's found paths and slowed one another: the
-// gateway peaked at 1.3 to 2.3 GB on 2,048 such calls in a minute (1.0.10,
-// which walks nothing: 0.45 to 0.6 GB). A walk waits for a slot before it
-// reads anything, so a call that waits holds none of the walk's memory, and
-// the walk's result is the one it would have had: nothing is cut or skipped.
-var credentialPathWalkSlots = make(chan struct{}, max(2, runtime.GOMAXPROCS(0)/4))
-
-// HoldCredentialPathWalkSlots takes every walk slot, as walks of a slow folder
-// hold them, and returns the function that gives them back. It is the seam of
-// the gateway's hook-route test of the slot wait (substrate-1:GAP-1083); a
-// slot that stays taken for 10 s reports ok false.
-func HoldCredentialPathWalkSlots() (release func(), ok bool) {
-	held := 0
-	release = func() {
-		for ; held > 0; held-- {
-			<-credentialPathWalkSlots
-		}
-	}
-	for range cap(credentialPathWalkSlots) {
-		select {
-		case credentialPathWalkSlots <- struct{}{}:
-			held++
-		case <-time.After(10 * time.Second):
-			release()
-			return func() {}, false
-		}
-	}
-	return release, true
-}
-
-// credentialPathWalkSlotWait is the longest one resolve waits for walk slots
-// (substrate-1:GAP-1083). The slots are the gateway's, shared by every call:
-// two walks of a slow folder (a home on an SMB share, sshfs or NFS) can hold
-// them for seconds, and a call that waited for them without a limit answered
-// past the hook's 3.5 s budget, where the client applies its fail mode. A walk
-// that gets no slot in time is cut before it reads anything: probeUnder and
-// the file-unknown read (searchFolder), as for a walk past its budget, the
-// chain's unknown tier and no cap of the resolve.
-const credentialPathWalkSlotWait = time.Second
-
-// credentialWalkWait is what one resolve may still wait for walk slots, and
-// the context of the call it resolves for (nil: none).
-type credentialWalkWait struct {
-	ctx  context.Context
-	left time.Duration
-}
-
-func newCredentialWalkWait(ctx context.Context) *credentialWalkWait {
-	return &credentialWalkWait{ctx: ctx, left: credentialPathWalkSlotWait}
-}
-
-// take takes a walk slot: a free one at once, else the first one freed within
-// what the resolve may still wait. A call whose context is done (its client
-// has gone, its deadline has passed) walks nothing and waits for nothing, so
-// it holds no slot and no place among the walks that wait.
-func (w *credentialWalkWait) take() bool {
-	var done <-chan struct{}
-	if w.ctx != nil {
-		if w.ctx.Err() != nil {
-			return false
-		}
-		done = w.ctx.Done()
-	}
-	select {
-	case credentialPathWalkSlots <- struct{}{}:
-		return true
-	default:
-	}
-	if w.left <= 0 {
-		return false
-	}
-	start := time.Now()
-	timer := time.NewTimer(w.left)
-	defer func() {
-		timer.Stop()
-		w.left -= time.Since(start)
-	}()
-	select {
-	case credentialPathWalkSlots <- struct{}{}:
-		return true
-	case <-timer.C:
-	case <-done:
-	}
-	return false
-}
-
 // MaxCredentialPathCandidates is the candidate cap of the resolve
 // (bounded.Items), for the gateway's bound-rule lane test.
 const MaxCredentialPathCandidates = maxCredentialPathCandidates
@@ -205,12 +111,8 @@ func (f Facts) HasCredentialPathReads() bool {
 
 // CredentialPathReadCaps is the caps the resolve hit: TRUNCATED, the one
 // bound rule.
-//
-// The dispatch reads them first, with the call's context: a resolve that
-// waits for a walk slot stops waiting when the call is done
-// (substrate-1:GAP-1083).
-func (f Facts) CredentialPathReadCaps(ctx context.Context) bounded.CapSet {
-	record := f.credentialPaths.getWithin(ctx)
+func (f Facts) CredentialPathReadCaps() bounded.CapSet {
+	record := f.credentialPaths.get()
 	if record == nil {
 		return bounded.CapSet{}
 	}
@@ -228,62 +130,16 @@ func (f Facts) PlaceCredentialPathReads(reported string) Facts {
 	}
 	placed := &credentialPathRecord{reads: slices.Clone(record.reads), caps: record.caps}
 	for i, candidate := range placed.reads {
-		if candidate.CredentialReadPlaceable() {
-			placed.reads[i].Resolved = path.Join(reported, candidate.Value)
+		value := candidate.Value
+		if candidate.Absolute || candidate.Resolved != "" || candidate.Flavor == PathFlavorWindows ||
+			value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") ||
+			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
+			continue
 		}
+		placed.reads[i].Resolved = path.Join(reported, value)
 	}
 	f.credentialPaths = &credentialPathResult{record: placed}
 	return f
-}
-
-// CredentialReadPlaceable reports a read of the private record that
-// PlaceCredentialPathReads places under the directory the hook reports: a
-// plain relative POSIX spelling the resolve could not place.
-func (f PathFact) CredentialReadPlaceable() bool {
-	value := f.Value
-	return !f.Absolute && f.Resolved == "" && f.Flavor != PathFlavorWindows &&
-		value != "" && !strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "~") &&
-		!strings.ContainsAny(value, "\\$*?[]{}`\x00")
-}
-
-// ThinCredentialPathReads keeps, of a private record of more than whole
-// reads, the reads keep marks (keep returns one mark per read, in order) and
-// drops the others, for every copy of the facts (substrate-1:GAP-0674). The
-// caps stay as they are, the kept reads keep their order and are not
-// changed, and a record that had a read keeps at least one. A recursive
-// search of a deep tree has hundreds of reads of paths thousands of bytes
-// long, and the facts of the call are kept until its verdict is written,
-// behind every check of the call that comes after the resolve. The caller
-// marks the reads its checks can still tell apart; the record is never read
-// in full after that. A mark list of another length changes nothing.
-func (f Facts) ThinCredentialPathReads(whole int, keep func(reads []PathFact) []bool) {
-	l := f.credentialPaths
-	record := l.get()
-	if record == nil || len(record.reads) <= whole {
-		return
-	}
-	marks := keep(record.reads)
-	if len(marks) != len(record.reads) {
-		return
-	}
-	var reads []PathFact
-	for i, kept := range marks {
-		if kept {
-			reads = append(reads, record.reads[i])
-		}
-	}
-	if len(reads) == len(record.reads) {
-		return
-	}
-	if len(reads) == 0 {
-		reads = []PathFact{record.reads[0]}
-	}
-	thinned := &credentialPathRecord{reads: slices.Clip(reads), caps: record.caps}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.record == record {
-		l.record = thinned
-	}
 }
 
 // credentialPathWord is parse evidence the commands do not keep: an input
@@ -600,7 +456,6 @@ type credentialPathResolver struct {
 	held       map[credentialHeldRead]bool
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
-	wait       *credentialWalkWait      // the wait for walk slots left
 	// walkedBy holds the folders each command already searched, as named
 	// and as resolved: a folder named again by the same command adds
 	// nothing, so grep -r K . . . walks it once (rel-1-0-10:GAP-1668).
@@ -621,9 +476,7 @@ type credentialPathResolver struct {
 // (rel-1-0-10:GAP-1045, substrate-1:GAP-0674). Copies of the Facts share
 // it; it is safe for concurrent use.
 type credentialPathResult struct {
-	once sync.Once
-	// mu guards record once resolved: ThinCredentialPathReads replaces it.
-	mu      sync.Mutex
+	once    sync.Once
 	record  *credentialPathRecord
 	pending bool // the resolve has not run: the input below is its own
 	// The resolve's input, a copy of the parse's, dropped once resolved.
@@ -648,29 +501,22 @@ func lazyCredentialPathReads(words []credentialPathWord, cwd, home string, comma
 }
 
 func (l *credentialPathResult) get() *credentialPathRecord {
-	return l.getWithin(context.Background())
-}
-
-// getWithin is get, the resolve (when it runs now) within ctx.
-func (l *credentialPathResult) getWithin(ctx context.Context) *credentialPathRecord {
 	if l == nil {
 		return nil
 	}
 	l.once.Do(func() {
 		if l.pending {
-			l.record = resolveCredentialPathReads(ctx, l.words, l.cwd, l.home, l.commands, l.paths)
+			l.record = resolveCredentialPathReads(l.words, l.cwd, l.home, l.commands, l.paths)
 		}
 		l.pending, l.words, l.commands, l.paths = false, nil, nil, nil
 	})
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	return l.record
 }
 
 // resolveCredentialPathReads makes the private record of one call (nil when
 // the call reads no credentials file the record adds and no cap was hit).
-func resolveCredentialPathReads(ctx context.Context, words []credentialPathWord, cwd, home string, commands []CommandFact, paths []PathFact) *credentialPathRecord {
-	return resolveCredentialPathReadsWithin(ctx, defaultCredentialPathLimits, words, cwd, home, commands, paths)
+func resolveCredentialPathReads(words []credentialPathWord, cwd, home string, commands []CommandFact, paths []PathFact) *credentialPathRecord {
+	return resolveCredentialPathReadsWithin(defaultCredentialPathLimits, words, cwd, home, commands, paths)
 }
 
 // credentialHeldRead is a read the ordinary path projection already holds
@@ -683,7 +529,6 @@ type credentialHeldRead struct {
 }
 
 func resolveCredentialPathReadsWithin(
-	ctx context.Context,
 	limits credentialPathLimits,
 	words []credentialPathWord,
 	cwd, home string,
@@ -693,7 +538,7 @@ func resolveCredentialPathReadsWithin(
 	if !credentialPathResolveNeeded(words, commands) {
 		return nil
 	}
-	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands, wait: newCredentialWalkWait(ctx)}
+	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands}
 	counted := make(map[int64]bool)
 	for _, command := range commands {
 		if command.Effect == EffectExecute && slices.ContainsFunc(command.Operations, func(op OperationKind) bool {
@@ -1593,59 +1438,11 @@ func (r *credentialPathResolver) argument(id int64, argument ArgumentFact, unkno
 	}
 }
 
-// credentialCandidateCounted reports a word candidate takes of the resolve's
-// caps: one candidate and its length in work. Any other word (empty, a URL,
-// without a dot, slash or underscore) takes nothing.
-func credentialCandidateCounted(value string) bool {
-	return value != "" && !strings.Contains(value, "://") && strings.ContainsAny(value, "./_")
-}
-
-// credentialWalkRoom is what the resolve can still take of the files a walk
-// finds, in the order the walk finds them (the resolver reads them with
-// candidate, which takes one candidate and the file's length in work). The
-// first file past it trips the resolve's cap, which stops the resolve, so the
-// files after that one are never read: the walk keeps none of them.
-type credentialWalkRoom struct {
-	candidates, work int
-	over             bool
-}
-
-// admit reports whether the walk keeps file. The file that trips a cap is kept
-// (the resolve trips on it as before, and records the cap); the files after it
-// are not.
-func (room *credentialWalkRoom) admit(file string) bool {
-	if room.over {
-		return false
-	}
-	if !credentialCandidateCounted(file) {
-		return true
-	}
-	room.candidates--
-	room.work -= len(file)
-	room.over = room.candidates < 0 || room.work < 0
-	return true
-}
-
-// walkRoom is the room the files of a walk of this resolve can take. A resolve
-// that has stopped reads none: the first file found is kept so that the
-// resolve sees a walk with files and stops, as it did with the whole list.
-func (r *credentialPathResolver) walkRoom() credentialWalkRoom {
-	if r.stopped() {
-		return credentialWalkRoom{}
-	}
-	return credentialWalkRoom{candidates: r.candidates.Left(), work: r.work.Left()}
-}
-
-// credentialWalkRoomOf is the walk room of a resolve (walkRoom). The walk
-// room differential swaps in a room that keeps every file, the resolve
-// before substrate-1:GAP-0674, as its reference.
-var credentialWalkRoomOf = (*credentialPathResolver).walkRoom
-
 // candidate checks one word. A glob or an unknown read is file-unknown; an
 // exact read keeps its value, and a read of a name the call linked, copied or
 // moved a file to before it also reads that file.
 func (r *credentialPathResolver) candidate(id int64, value string, glob, unknown bool) {
-	if !credentialCandidateCounted(value) || r.stopped() {
+	if value == "" || strings.Contains(value, "://") || !strings.ContainsAny(value, "./_") || r.stopped() {
 		return
 	}
 	if !r.candidates.Take() || !r.work.TakeN(len(value)) {
@@ -1873,7 +1670,7 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 		r.add(id, "", true)
 		return
 	}
-	walk := credentialPathWalk(r.wait, dir, shown, filter, left, credentialWalkRoomOf(r))
+	walk := credentialPathWalk(dir, shown, filter, left)
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	for _, file := range walk.found {
 		if r.stopped() {
@@ -2048,24 +1845,7 @@ type credentialPathWalkResult struct {
 // read, about 7 ms on every grep -r or rg call there. A level's folders
 // are named only once it is known to fit (credentialPathFolderScan keeps
 // the names), so a level that does not fit costs no path either.
-//
-// room is what the resolve can still take of the files found (candidate takes
-// one candidate and the file's length in work for each): the walk keeps the
-// files in order up to the one that trips a cap, which the resolve then trips
-// on as it did with every file kept, and no file after it, which the stopped
-// resolve never read. The folders it reads, its cut and its budget are the
-// same either way: a walk that stopped reading there would leave a later folder
-// of the call a budget it did not have (substrate-1:GAP-0674).
-//
-// The walk runs in a walk slot (credentialPathWalkSlots), taken through wait.
-// One it does not get in time is a walk cut before it read anything and
-// charged all of limits, so every folder the call names after it is spent
-// too and waits no more (substrate-1:GAP-1083).
-func credentialPathWalk(wait *credentialWalkWait, dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits, room credentialWalkRoom) (walk credentialPathWalkResult) {
-	if !wait.take() {
-		return credentialPathWalkResult{cut: true, used: limits}
-	}
-	defer func() { <-credentialPathWalkSlots }()
+func credentialPathWalk(dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits) (walk credentialPathWalkResult) {
 	groups := credentialProbeFirstSegments()
 	budget := credentialPathWalkBudget{limits: limits}
 	folders := int64(0)
@@ -2111,11 +1891,7 @@ func credentialPathWalk(wait *credentialWalkWait, dir, shown string, filter cred
 		}
 		count := 0
 		for _, s := range scans {
-			for _, file := range s.found {
-				if room.admit(file) {
-					walk.found = append(walk.found, file)
-				}
-			}
+			walk.found = append(walk.found, s.found...)
 			count += len(s.ends)
 		}
 		if budget.stop.Load() {
@@ -2159,24 +1935,6 @@ func (b *credentialPathWalkBudget) take(counter *atomic.Int64, limit int64) bool
 	return true
 }
 
-// credentialWalkSearchChecked: the system checks a folder's search (x)
-// permission apart from its read permission. Windows does not: every user
-// holds the bypass traverse checking privilege, and a folder that can be
-// listed names files whose attributes can be read.
-const credentialWalkSearchChecked = runtime.GOOS != "windows"
-
-// credentialWalkWindowsPathBytes is the longest path, in bytes, of a file
-// the walk finds that Windows surely can name: its paths end at 32,767
-// UTF-16 units, the \\?\ prefix and the closing NUL among them, and a path
-// has no more units than bytes. A longer one is looked up.
-const credentialWalkWindowsPathBytes = 32_000
-
-// credentialWalkPathTooLong reports a path the walk looks up before it
-// counts the file, as one Windows may not name.
-func credentialWalkPathTooLong(file string) bool {
-	return runtime.GOOS == "windows" && len(file) > credentialWalkWindowsPathBytes
-}
-
 // credentialPathFolderScan is one folder of a walk: the credentials files
 // found in it and the folders below it to read next, by name (names[e:f]
 // for consecutive ends e, f, the first from 0) and, when rg globs read the
@@ -2194,19 +1952,8 @@ type credentialWalkFolder struct {
 }
 
 // scan reads one folder (readCredentialWalkFolder).
-//
-// A file the folder read names is looked up by its path only where the lookup
-// can fail when the read did not (substrate-1:GAP-0674, RV-T6C P4-1): the
-// first of a folder on a system that checks a folder's search permission
-// apart from its read permission (a folder of mode 0644 lists its files, but
-// no file in it can be opened, by the walk or by the agent's grep), unless a
-// check of the open folder (credentialWalkSearchable, Linux) shows it can be
-// entered, and a path
-// past what Windows can name (credentialWalkPathTooLong). The resolve then
-// adds no read the agent cannot make, as before the lookups were skipped.
 func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter credentialWalkFilter, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
-	entered, checked := !credentialWalkSearchChecked, false
-	readCredentialWalkFolder(folder.dir, func(name []byte, isDir, regular bool, dirfd int) bool {
+	readCredentialWalkFolder(folder.dir, func(name []byte, isDir bool) bool {
 		if !b.take(&b.entries, b.limits.entries) {
 			return false
 		}
@@ -2218,21 +1965,8 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter cred
 				return false
 			}
 			file := filepath.Join(folder.dir, filepath.FromSlash(probe.value))
-			named := regular && probe.value == string(name)
-			if named && !entered && !checked {
-				checked = true
-				entered = dirfd >= 0 && credentialWalkSearchable(dirfd)
-			}
-			if named && entered && !credentialWalkPathTooLong(file) {
-				// The entry is the probe's file, a regular file as the folder
-				// read has it, in a folder a lookup has entered: no lookup of
-				// it by its path (on Windows, a 2,000-character path costs a
-				// 7 KB conversion and a system call for each of up to 1,024
-				// files, substrate-1:GAP-0674).
+			if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
 				s.found = append(s.found, file)
-			} else if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
-				s.found = append(s.found, file)
-				entered = entered || named
 			}
 		}
 		if !isDir || credentialWalkSkips[string(name)] {
@@ -2273,38 +2007,6 @@ func (r *credentialPathResolver) add(id int64, value string, unknown bool) {
 	}
 	if !r.seen[fact] {
 		r.seen[fact] = true
-		fact.storeOnce()
 		r.reads = append(r.reads, fact)
 	}
-}
-
-// storeOnce makes the spellings of a read share the memory of the longest one
-// where they are the same text or a part of it (a resolved path is the working
-// folder, a slash and the value; a normalized one is the value). A walk of a
-// deep tree names a file with a path of thousands of bytes, and the record of
-// the call keeps each read for as long as the call is judged, so the
-// spellings it kept as separate strings were two or three times the path
-// (substrate-1:GAP-0674). The strings are equal, byte for byte, as they were.
-func (f *PathFact) storeOnce() {
-	host := f.Value
-	for _, s := range []string{f.Normalized, f.Resolved} {
-		if len(s) > len(host) {
-			host = s
-		}
-	}
-	f.Value, f.Normalized, f.Resolved = within(host, f.Value), within(host, f.Normalized), within(host, f.Resolved)
-}
-
-// within is s as a part of host (the same bytes, in host's memory) when host
-// ends or begins with s, and s as it is otherwise.
-func within(host, s string) string {
-	switch {
-	case s == "" || len(s) > len(host):
-		return s
-	case strings.HasSuffix(host, s):
-		return host[len(host)-len(s):]
-	case strings.HasPrefix(host, s):
-		return host[:len(s)]
-	}
-	return s
 }

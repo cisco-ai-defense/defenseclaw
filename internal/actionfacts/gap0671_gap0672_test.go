@@ -17,7 +17,6 @@
 package actionfacts
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -96,7 +95,7 @@ func TestGAP0671RgTypeAddReadsHidden(t *testing.T) {
 			if row.read && !slices.ContainsFunc(named, func(v string) bool { return filepath.Base(v) == ".env" || filepath.Base(v) == ".npmrc" }) {
 				t.Fatalf("%q: the hidden file is not named (named %v)", row.cmd, named)
 			}
-			if caps := facts.CredentialPathReadCaps(context.Background()); caps.Any() {
+			if caps := facts.CredentialPathReadCaps(); caps.Any() {
 				t.Fatalf("%q: TRUNCATED %v in a small folder", row.cmd, caps)
 			}
 		})
@@ -162,7 +161,7 @@ func TestGAP0672OneWalkBudgetPerCall(t *testing.T) {
 			dir, names := g0672Tree(t, n, shape.subs, shape.flat)
 			in := Input{Tool: "exec", Command: "grep -r KEY " + strings.Join(names, " "), CWD: dir, ActiveHome: t.TempDir()}
 			first := Analyze(in)
-			if caps := first.CredentialPathReadCaps(context.Background()); caps.Any() {
+			if caps := first.CredentialPathReadCaps(); caps.Any() {
 				t.Fatalf("a spent walk budget is a cap of the resolve: %v", caps)
 			}
 			named := g0671Named(first)
