@@ -445,6 +445,8 @@ try {
             $hookLayout = @{ HookPath = $hookPath; StateRoot = $hookStateRoot; InstallRoot = $Scratch }
             $hookSnapshot = [pscustomobject]@{
                 early_hook_guard_copy = 'guard'
+                gateway_service = "DefenseClawGateway"
+                guardian_service = "DefenseClawGuardian"
                 early_hook_preimage_sha256 = $hookSha
                 files = @([pscustomobject]@{ path = $hookPath; existed = $true; backup = $hookBackup })
             }

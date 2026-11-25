@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -62,28 +63,73 @@ func TestForeignGuardCleanSessionOutageHookTime(t *testing.T) {
 	for _, id := range []string{"copilot", "cursor", "devin", "opencode"} {
 		for _, tc := range cleanOutageCases() {
 			t.Run(id+"/"+tc.name, func(t *testing.T) {
-				fixture := newCleanOutageFixture(t, id, tc)
-				event := tc.event
-				if event == "" {
-					event = outageGuardCallFor(id).Event
-				}
-				if id == "opencode" && tc.event == "sessionStart" {
-					event = "session.start"
-				}
-				payload := cleanOutagePayload(t, fixture, event)
-				opts := hookexec.Options{Connector: id, Event: event, ManagedEnterprise: true, FailMode: "open",
-					Home: filepath.Join(fixture.home, "managed-data"), Stdin: bytes.NewReader(payload), Stderr: &bytes.Buffer{}}
-				hookcli.ApplyEnterpriseForeignHookGuard(&opts)
-				if id == "opencode" && event != "tool.execute.before" {
+				blocked, reason, guarded := cleanOutageHookTimeBlocked(t, id, tc)
+				if !guarded {
 					return // the plugin's lifecycle events are not guarded at hook time
 				}
-				blocked := opts.ManagedRuntimeFailure != ""
 				if blocked != tc.wantGuardBlock {
-					t.Fatalf("guard blocked %v (%q), want %v", blocked, opts.ManagedRuntimeFailure, tc.wantGuardBlock)
+					t.Fatalf("guard blocked %v (%q), want %v", blocked, reason, tc.wantGuardBlock)
 				}
 			})
 		}
 	}
+}
+
+// GAP-1788: the guard also scans the process working directory and its
+// ancestors up to a git root or a home. A test binary run from a tree with
+// no .git (the native Windows gate runs a copied tree under the account
+// profile) therefore reached the real account's .cursor\hooks.json and
+// blocked the rows that expect an outage allow. The fixture moves the
+// process into an empty repository of its own, so these rows hold wherever
+// the process starts, not by the luck of the account that runs them.
+func TestCleanOutageFixtureIgnoresHooksAboveTheProcessFolder(t *testing.T) {
+	outer := t.TempDir()
+	process := filepath.Join(outer, "tree", "pkg")
+	if err := os.MkdirAll(process, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(outer, ".cursor", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooks, []byte(`{"version":1,"hooks":{"preToolUse":[{"command":"/tmp/x.sh"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(process)
+	tc := cleanOutageCases()[0]
+	if tc.wantGuardBlock {
+		t.Fatal("the first outage row must be an allow")
+	}
+	blocked, reason, guarded := cleanOutageHookTimeBlocked(t, "cursor", tc)
+	if !guarded {
+		t.Fatal("cursor is guarded at hook time")
+	}
+	if blocked {
+		t.Fatalf("a hook file above the process folder blocked the row: %q", reason)
+	}
+}
+
+// cleanOutageHookTimeBlocked runs one guarded hook call of connector id and
+// reports whether the guard refused it. guarded is false for an OpenCode
+// lifecycle event, which the guard never sees at hook time.
+func cleanOutageHookTimeBlocked(t *testing.T, id string, tc cleanOutageCase) (blocked bool, reason string, guarded bool) {
+	t.Helper()
+	fixture := newCleanOutageFixture(t, id, tc)
+	event := tc.event
+	if event == "" {
+		event = outageGuardCallFor(id).Event
+	}
+	if id == "opencode" && tc.event == "sessionStart" {
+		event = "session.start"
+	}
+	payload := cleanOutagePayload(t, fixture, event)
+	opts := hookexec.Options{Connector: id, Event: event, ManagedEnterprise: true, FailMode: "open",
+		Home: filepath.Join(fixture.home, "managed-data"), Stdin: bytes.NewReader(payload), Stderr: &bytes.Buffer{}}
+	hookcli.ApplyEnterpriseForeignHookGuard(&opts)
+	if id == "opencode" && event != "tool.execute.before" {
+		return false, "", false
+	}
+	return opts.ManagedRuntimeFailure != "", opts.ManagedRuntimeFailure, true
 }
 
 // The --foreign-hook-check path (OpenCode, Amp and the Hermes hook) has no
@@ -198,12 +244,13 @@ func cleanOutagePayload(t *testing.T, fixture *foreignGuardFixture, event string
 // the account's lock and before the first ledger record; if they cannot be
 // removed the hook file and the ledger stay as they were.
 func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
-	skipForeignHookCleanupFixtureOnWindows(t)
+	skipForeignHookLedgerOnWindows(t)
 	useForeignHookGuardian(t, nil)
 	useInProcessCleanupAsSelf(t)
 	trace := traceForeignHookRemovals(t)
+	home := t.TempDir()
 	root := managed.ForeignHookCleanDir(cfg.DataDir)
-	entry := filepath.Join(root, "1001", "p-entry.json")
+	entry := filepath.Join(root, foreignHookTestIdentity(home), "p-entry.json")
 	if err := os.MkdirAll(filepath.Dir(entry), 0o711); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +263,6 @@ func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
 		trace.add("drop")
 		return previous(dir, identity)
 	}
-	home := t.TempDir()
 	foreignHookTestCursorHook(t, home)
 	result, err := cleanEnterpriseForeignHooksFenced(foreignHookTestTarget(home), foreignHookTestInProcessRequest("cursor", home), time.Now())
 	if err != nil || len(result.Removed) != 1 {
@@ -225,7 +271,10 @@ func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
 	if got := trace.String(); !strings.HasPrefix(got, "lock,drop,ledger,") {
 		t.Fatalf("the entries must go after the lock and before the first record: %s", got)
 	}
-	if _, err := os.Lstat(filepath.Dir(entry)); !os.IsNotExist(err) {
+	// Windows publishes no clean-session entries
+	// (DropForeignHookCleanMirrorsForAccount does nothing there): the drop
+	// still runs in its place, and the files are this test's own.
+	if _, err := os.Lstat(filepath.Dir(entry)); runtime.GOOS != "windows" && !os.IsNotExist(err) {
 		t.Fatalf("the account's entries must be gone: %v", err)
 	}
 }
@@ -234,11 +283,12 @@ func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
 // removal of the account's entries: the commit removes them again before it
 // lets go of the lock.
 func TestForeignHookRemovalDropsCleanEntriesAgainAtTheCommit(t *testing.T) {
-	skipForeignHookCleanupFixtureOnWindows(t)
+	skipForeignHookLedgerOnWindows(t)
 	useForeignHookGuardian(t, nil)
 	useInProcessCleanupAsSelf(t)
+	home := t.TempDir()
 	root := managed.ForeignHookCleanDir(cfg.DataDir)
-	late := filepath.Join(root, "1001", "p-late.json")
+	late := filepath.Join(root, foreignHookTestIdentity(home), "p-late.json")
 	previous := enterpriseForeignHookDropCleanMirrors
 	t.Cleanup(func() { enterpriseForeignHookDropCleanMirrors = previous })
 	drops := 0
@@ -255,7 +305,6 @@ func TestForeignHookRemovalDropsCleanEntriesAgainAtTheCommit(t *testing.T) {
 		}
 		return err
 	}
-	home := t.TempDir()
 	foreignHookTestCursorHook(t, home)
 	if result, err := cleanEnterpriseForeignHooksFenced(foreignHookTestTarget(home), foreignHookTestInProcessRequest("cursor", home), time.Now()); err != nil || len(result.Removed) != 1 {
 		t.Fatalf("cleanup %+v: %v", result, err)
@@ -263,7 +312,8 @@ func TestForeignHookRemovalDropsCleanEntriesAgainAtTheCommit(t *testing.T) {
 	if drops != 2 {
 		t.Fatalf("the entries are removed before the first record and at the commit, got %d removals", drops)
 	}
-	if _, err := os.Lstat(late); !os.IsNotExist(err) {
+	// Windows publishes no clean-session entries (see above).
+	if _, err := os.Lstat(late); runtime.GOOS != "windows" && !os.IsNotExist(err) {
 		t.Fatalf("an entry written after the first removal must be gone: %v", err)
 	}
 }

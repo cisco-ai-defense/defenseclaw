@@ -228,7 +228,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 	// The organization's refusals come first; then what this gateway
 	// cannot do, and what the run needs from this terminal.
-	if err := a.dockerDesktopRefusal(ctx, drv, spec); err != nil {
+	if err := a.dockerDesktopRefusal(ctx, drv, spec, a.DockerVMLandlock); err != nil {
 		return err
 	}
 	if len(o.Context) > 0 && !drv.HostMounts {
@@ -770,10 +770,22 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, run sandb
 	if st, err = a.readyManaged(ctx, api, st, run, beforeReady); err != nil {
 		return nil, err
 	}
+	st = a.accountStatus(ctx, st, run.Harness)
+	if !st.Available && st.Managed != nil {
+		// Why sandboxes are off for the account is sandboxapi.Status.ManagedOff,
+		// the order `sandbox status` and `sandbox doctor` read: a reason that
+		// holds before another account's gateway (the install's, here: no
+		// release that runs a sandbox) is the one named, never the retry
+		// hint that cannot help (GAP-2024).
+		switch st.ManagedOff() {
+		case sandboxapi.ManagedOffOrganization, sandboxapi.ManagedOffProfile, sandboxapi.ManagedOffUnavailable:
+			return nil, &DisabledError{Message: st.OffMessage(), Enabled: st.Enabled}
+		}
+	}
 	if !st.Available && st.Managed != nil && st.PortConflict != nil {
 		return nil, errors.New(st.PortConflict.Message())
 	}
-	if !st.Available && st.Managed != nil && st.GatewayElsewhere != "" {
+	if !st.Available && st.Managed != nil && st.ManagedOff() == sandboxapi.ManagedOffElsewhere {
 		// Another account runs sandboxes on this computer now: the daemon's
 		// one-account-at-a-time text and who to contact (GAP-0461).
 		if ready {
@@ -833,9 +845,14 @@ func (a *App) refuseForbiddenAccount(ctx context.Context, harness string) error 
 	if err != nil || view == nil || view.Provisional || view.Allowed {
 		return nil
 	}
+	if a.ManagedOrganizationOff != nil && a.ManagedOrganizationOff(ctx) {
+		// The organization's switch outranks the account's profile
+		// (sandboxapi.Status.ManagedOff): the words of `sandbox status`.
+		return &DisabledError{Message: sandboxapi.OrganizationOffMessage(view.RequestAccess) + sandboxRuntimeMissing()}
+	}
 	a.managedSeen = managedStatusOfExplain(view)
 	return apiError(&sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
-		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed})
+		Message: sandboxapi.AccountNotAllowedMessage, Detail: sandboxrelay.ReasonNotAllowed})
 }
 
 // readyCheck judges a run before its ready installs or starts anything
@@ -959,17 +976,18 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 // as on Linux.
 //
 // It is the one verdict on that VM: the doctor's last line asks it too
-// (spec nil), with the same probe (App.DockerVMLandlock, which the doctor's
-// Landlock row reads), so the doctor never calls ready a Mac where every
-// run is refused (rel-1-0-10:GAP-1746).
-func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec *harness.Spec) error {
+// (spec nil), with the answer its Landlock row read (probe: the doctor's
+// App.doctorLandlock, run's App.DockerVMLandlock), so the doctor never
+// calls ready a Mac where every run is refused (rel-1-0-10:GAP-1746). Only
+// a run says it built and created nothing (rel-1-0-10:GAP-1758).
+func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec *harness.Spec, probe func(context.Context) (int, string, error)) error {
 	if a.GOOS != "darwin" || d.Name != openshell.DriverDocker {
 		return nil
 	}
 	if engine, err := a.DockerEngine(ctx); err != nil || !openshell.IsDockerDesktop(engine) {
 		return nil
 	}
-	abi, _, err := a.DockerVMLandlock(ctx)
+	abi, _, err := probe(ctx)
 	if err == nil && abi >= openshell.MinLandlockABI {
 		return nil
 	}
@@ -994,7 +1012,11 @@ func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec
 	case err == nil && abi > 0:
 		why = fmt.Sprintf("Docker Desktop's Linux VM has Landlock ABI %d, and OpenShell sandboxes need ABI %d or newer", abi, openshell.MinLandlockABI)
 	}
-	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and "+why+"; nothing was built or created"), step)
+	msg := "no sandbox can start on this gateway: it runs sandboxes on the docker driver, and " + why
+	if spec != nil {
+		msg += "; nothing was built or created"
+	}
+	return withNextStep(errors.New(msg), step)
 }
 
 // withNextStep puts DefenseClaw's way on after err on a line of its own

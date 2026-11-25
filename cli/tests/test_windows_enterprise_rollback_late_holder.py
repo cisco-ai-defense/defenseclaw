@@ -50,8 +50,9 @@ def test_every_deferral_is_standalone_only() -> None:
     # GAP-0977 added the eighth: a guardian state file a holder keeps the guardian from publishing.
     # GAP-0999 added the ninth to the eleventh: a stuck Codex writer (the state check of the readiness
     # check, the Codex verify of it, the guardian proof that cannot publish); the twelfth is the
-    # managed-hook teardown rollback that meets the same writer first.
-    assert len(sites) == 12, len(sites)
+    # managed-hook teardown rollback that meets the same writer first. GAP-2012 added the thirteenth:
+    # the Codex check a rollback defers until the restored hook is back.
+    assert len(sites) == 13, len(sites)
     for site in sites:
         window = text[max(0, site - 1700) : site]
         assert "Test-DefenseClawStandaloneProfile" in window, text[site - 200 : site + 100]
@@ -254,14 +255,16 @@ def test_a_guardian_state_hold_is_found_before_anything_stops() -> None:
     assert transaction.rindex(condition, 0, gate) > transaction.index("$codexReadHolds = $null") - 1200
     assert "-Phase Gate" in _function_body(text, "Assert-DefenseClawGuardianStateNotHeld")
     # The class is the critical files only (the others did not stop a repair when held),
-    # and never a file a standard account can open (N2). The CLI list is the same four.
+    # and never a file a standard account can open (N2). The CLI list is the same five
+    # (the enrolled-accounts record since GAP-1800).
     files = _function_body(text, "Get-DefenseClawGuardianStateFiles")
-    for needle in ("'protected_targets.json', 'activation.json', 'user-cleanup.json'", "hook_guardian_state.json", "Test-DefenseClawGuardianStateFileUserOpenable"):
+    for needle in ("'protected_targets.json', 'activation.json', 'user-cleanup.json', 'enrolled-accounts.json'", "hook_guardian_state.json", "Test-DefenseClawGuardianStateFileUserOpenable"):
         assert needle in files, needle
     for gone in ("hook_guardian_*.json", "ManifestPath", "-Filter", "off-roster"):
         assert gone not in files, gone
     go = (ROOT / "internal" / "cli" / "windows_enterprise_guardian_state_held_windows.go").read_text(encoding="utf-8")
-    assert "[]string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, managed.HookGuardianUserCleanupFile}" in go
+    assert ("[]string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, "
+            "managed.HookGuardianUserCleanupFile, managed.HookGuardianEnrolledAccountsFile}") in go
     assert "[]string{hookGuardianStateFile}" in go and "windowsEnterpriseGuardianStateUserOpenable(path)" in go
     readable = _function_body(text, "Test-DefenseClawGuardianStateFileUserOpenable")
     # Any Allow entry with any access for a principal other than SYSTEM, Administrators

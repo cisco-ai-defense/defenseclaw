@@ -2876,7 +2876,7 @@ func gatewaySnapshotReady(
 	default:
 		return false, nil
 	}
-	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
+	if !watcherMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
 		return false, nil
 	}
 	switch {
@@ -3157,6 +3157,16 @@ func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool)
 		return state == gateway.StateRunning
 	}
 	return state == gateway.StateDisabled
+}
+
+// watcherMatchesConfiguredState is subsystemMatchesConfiguredState for the
+// watcher, which also runs Degraded: some connector roots unwatched (a folder
+// this account cannot open, one another account can write), each named by
+// the gateway log, status and doctor. Only the user can fix such a folder, so
+// the start waited for Running until its readiness deadline and `defenseclaw
+// setup opencode` hung for minutes on an unreadable plugin folder (GAP-1965).
+func watcherMatchesConfiguredState(state gateway.SubsystemState, enabled bool) bool {
+	return subsystemMatchesConfiguredState(state, enabled) || (enabled && state == gateway.StateDegraded)
 }
 
 func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {

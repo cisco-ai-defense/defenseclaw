@@ -1221,6 +1221,12 @@ type ArgumentFact struct {
 	// with "~" for it ("$HOME/.dotfiles" -> "~/.dotfiles"). It is empty when
 	// the action may rebind HOME.
 	homeSpelling string
+	// homeTilde is an unquoted "~" or "~/..." word with no pattern
+	// character: the home of the calling shell, which the parser keeps as a
+	// static glob (StaticGlob). Empty when the action may rebind HOME. Only
+	// a recursive search reads it, to walk the folder it names
+	// (substrate-1:GAP-0689).
+	homeTilde string
 }
 
 // HomeSpelling is the word with its leading $HOME written as "~", or "".

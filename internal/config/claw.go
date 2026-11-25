@@ -305,6 +305,15 @@ func (c *Config) ActiveConnectors() []string {
 	return c.activeConnectors()
 }
 
+// PrimaryConnector is the one connector the config names as primary
+// (guardrail.connector, else the roster's primary, else claw.mode), or ""
+// for an install with no connector configured. A command that has to name
+// one connector without being given one (`defenseclaw sandbox status`'s
+// reason sandboxes are off) asks a managed policy view for this one.
+func (c *Config) PrimaryConnector() string {
+	return c.activeConnector()
+}
+
 // ReadMCPServers returns the MCP servers for the active connector.
 // When guardrail.connector is set, it dispatches to the connector-specific
 // reader. An unconfigured install reads no agent state.

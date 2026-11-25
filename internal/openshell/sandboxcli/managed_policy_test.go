@@ -751,7 +751,7 @@ func TestDoctorRowsOnAManagedComputer(t *testing.T) {
 	}
 	// GAP-0175: before the first sandbox no profile is known; the row
 	// names the policy, never "profile your organization's policy".
-	if c := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{}); c.Status != openshell.StatusFail ||
+	if c := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{}, sandboxapi.ManagedOffNone); c.Status != openshell.StatusFail ||
 		!strings.HasPrefix(c.Detail, "your organization's policy: sandbox authorization could not be confirmed") {
 		t.Errorf("unnamed policy row = %+v", c)
 	}
@@ -1054,7 +1054,7 @@ func TestDoctorNamesTheRequestLimitNotAFailedPolicy(t *testing.T) {
 	ta := newTestApp(t, "")
 	limited := &sandboxapi.ManagedStatus{PolicyLimited: true,
 		PolicyUnread: "DefenseClaw is limiting the hook requests of this account; retry shortly"}
-	c := ta.managedPolicyCheck(bg, limited)
+	c := ta.managedPolicyCheck(bg, limited, sandboxapi.ManagedOffNone)
 	if c.Status != openshell.StatusWarn {
 		t.Errorf("limited row status = %v, want warn: %+v", c.Status, c)
 	}
@@ -1063,13 +1063,13 @@ func TestDoctorNamesTheRequestLimitNotAFailedPolicy(t *testing.T) {
 	if c.Fix == nil || !strings.Contains(c.Fix.Summary, "doctor again") {
 		t.Errorf("limited row fix = %+v", c.Fix)
 	}
-	unread := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{PolicyUnread: "the managed DefenseClaw gateway is not reachable"})
+	unread := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{PolicyUnread: "the managed DefenseClaw gateway is not reachable"}, sandboxapi.ManagedOffNone)
 	if unread.Status != openshell.StatusFail {
 		t.Errorf("unread row status = %v", unread.Status)
 	}
 	has(t, unread.Detail, "could not be confirmed for your account: the managed DefenseClaw gateway is not reachable")
 	// A denial stays a failure even when another harness was limited.
-	denied := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{DeniedHarnesses: []string{"codex"}, PolicyLimited: true, PolicyUnread: "limited"})
+	denied := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{DeniedHarnesses: []string{"codex"}, PolicyLimited: true, PolicyUnread: "limited"}, sandboxapi.ManagedOffNone)
 	if denied.Status != openshell.StatusFail || !strings.Contains(denied.Detail, "doesn't allow sandboxes for codex") {
 		t.Errorf("denied row = %+v", denied)
 	}

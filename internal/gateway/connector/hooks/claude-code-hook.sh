@@ -841,7 +841,17 @@ fi
   fail_unreachable "sandbox hook receipt was not acknowledged (status ${DC_SANDBOX_RECEIPT_STATUS})"
 fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  printf '%s\n' "$OUTPUT"
+  # A deny that cannot be written (stdout closed by the parent) ended the
+  # hook with exit 1, a non-blocking error for Claude Code: a block or a
+  # confirmation exits 2, which Claude Code blocks on (GAP-1782, as the
+  # Codex hook's failed write, GAP-1769).
+  printf '%s\n' "$OUTPUT" || case "$ACTION" in
+    block|confirm)
+      printf '%s\n' "DefenseClaw blocked this: its sandbox hook could not write its answer (sandbox hooks fail closed)" >&2
+      exit 2
+      ;;
+    *) exit 1 ;;
+  esac
 fi
 {{end}}
 # Anthropic's Claude Code hook protocol — like Codex's — is strictly

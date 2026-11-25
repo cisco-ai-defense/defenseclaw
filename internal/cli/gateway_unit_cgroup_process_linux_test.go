@@ -86,12 +86,14 @@ func TestGAP0205UnitProcessChild(t *testing.T) {
 		fmt.Printf("\nGAP0205-CHILD start err=%v\n", err)
 	case "stop-own":
 		d := daemon.New(home)
-		if _, err := d.Start([]string{"-test.run=^TestCLIRestartProcessProbe$"}); err != nil {
+		pid, err := d.Start([]string{"-test.run=^TestCLIRestartProcessProbe$"})
+		if err != nil {
 			fmt.Printf("\nGAP0205-CHILD stop-own start err=%v\n", err)
 			return
 		}
+		reapCLIProbe(t, pid)
 		waitForCLIProbe(t, d, os.Getenv(cliRestartProbeEnv))
-		err := runStop(stopCmd, nil)
+		err = runStop(stopCmd, nil)
 		running, _ := d.IsRunning()
 		fmt.Printf("\nGAP0205-CHILD stop-own err=%v running=%v\n", err, running)
 	}

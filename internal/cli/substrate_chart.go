@@ -110,15 +110,16 @@ func init() {
 				if substrateChartOwnerToken == "" {
 					return setup.StepReport{Step: "bootstrap"}, fmt.Errorf("--owner-token is required")
 				}
-				if _, err := os.Stat(substrateChartOwnerToken); errors.Is(err, os.ErrNotExist) {
-					// The first bootstrap deleted the owner token Secret; an
-					// upgrade without a new one keeps the grants as they are.
-					return setup.StepReport{Step: "bootstrap", Notes: []string{"no owner token Secret: the access policies " +
-						"were not touched. Doctor checks them; create the Secret again to rewrite them."}}, nil
-				}
 				kube, err := substrateChartKube()
 				if err != nil {
 					return setup.StepReport{Step: "bootstrap"}, err
+				}
+				if _, err := os.Stat(substrateChartOwnerToken); errors.Is(err, os.ErrNotExist) {
+					// The first bootstrap deleted the owner token Secret; an
+					// upgrade without a new one keeps the access policies as
+					// they are and writes only the credential provider grant
+					// (GAP-1076).
+					return setup.Bootstrap(ctx, plan, nil, kube)
 				}
 				api, err := substrateChartAPI(plan, substrateChartOwnerToken)
 				if err != nil {

@@ -2643,6 +2643,11 @@
           "default": true,
           "description": "Whether raw judge responses are retained in the local forensic store."
         },
+        "include_hook_event_content": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to adding the connector event text a hook sent to Cisco AI Defense (compact summaries, loaded instructions, config changes, elicitations and notifications, stop errors, subagent text) to hook_decision records as gen_ai.input.messages, bounded to 32 KiB and with destination redaction applied. Off by default: it is session content from the endpoint. Inspection and verdicts do not depend on it."
+        },
         "judge_persist_queue_depth": {
           "type": "integer",
           "minimum": 0,

@@ -470,9 +470,9 @@ func (s *scanner) openFile(path string) (*os.File, bool) {
 // for a link to another profile in between would otherwise put that
 // profile's plugins in this home's inventory (GAP-1138). It compares the
 // path the system gives the opened handle with the root's. Where the system
-// cannot name an opened file (macOS), the folders above path are checked
-// again after the open and the opened object must be the one path names
-// now. A Windows file with more than one name is refused: through a hard
+// cannot name an opened file (neither /proc/self/fd nor F_GETPATH), the
+// folders above path are checked again after the open and the opened object
+// must be the one path names now. A Windows file with more than one name is refused: through a hard
 // link another profile's file would be read as this one's. A scan that
 // follows links and the machine-wide scan keep the checks made before the
 // open.

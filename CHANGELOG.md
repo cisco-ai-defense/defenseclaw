@@ -10,11 +10,11 @@ for current behavior.
 
 ## [Unreleased] — 1.0.11
 
-DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 0.1.9 and adds one managed config key, `enterprise.openshell.allow_downgrade`. It fixes how blocked tool calls end a streamed reply, Windows managed install, upgrade and uninstall, routing budgets and cost records, sandbox setup on macOS, and a set of smaller connector and CLI issues.
+DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 0.1.9 and adds five config keys: `enterprise.openshell.allow_downgrade` for managed installs, `ai_discovery.include_skill_content_hashes` (on by default), the opt-ins `ai_discovery.include_skill_manifests` and `guardrail.include_hook_event_content` (off by default), and `substrate.bundles.oci` for Agent Substrate (Preview). It fixes how blocked tool calls end a streamed reply, Windows managed install, upgrade and uninstall, routing budgets and cost records, sandbox setup on macOS, and a set of smaller connector and CLI issues.
 
 ### Upgrading
 
-- **From 1.0.10 or an earlier 1.0.x:** run the 1.0.11 installer for your install type: `install.sh`, `install.ps1`, `defenseclaw upgrade`, the rpm, the deb, the macOS pkg or the Windows Setup. Your config and saved modes are kept. The only new config key is `enterprise.openshell.allow_downgrade`; `defenseclaw rollback` to 1.0.10 sets it aside for you, because 1.0.10 does not know it.
+- **From 1.0.10 or an earlier 1.0.x:** run the 1.0.11 installer for your install type: `install.sh`, `install.ps1`, `defenseclaw upgrade`, the rpm, the deb, the macOS pkg or the Windows Setup. Your config and saved modes are kept. The new config keys, such as `enterprise.openshell.allow_downgrade` and `guardrail.include_hook_event_content`, are set aside for you by `defenseclaw rollback` to 1.0.10, because 1.0.10 does not know them.
 - **Managed Linux and macOS, edited Codex `requirements.toml`:** if you edited `/etc/codex/requirements.toml` since your last 1.0.10 `ensure` and want to keep the edit, run `reconcile` before you upgrade. The 1.0.11 upgrade puts back the file DefenseClaw published and keeps a copy of your edited file beside it, in the `defenseclaw-replaced` folder.
 - **gpt-5.2 prices:** an install that seeded its price table from the 1.0.10 default keeps its old gpt-5.2 row, so gpt-5.2 calls still show no cost after the upgrade. Run `defenseclaw setup tokenomics` again to re-seed the table, or add the gpt-5.2 rows by hand.
 - **OpenShell 0.1.9:** DefenseClaw now installs OpenShell 0.1.9, and sandboxes still run on OpenShell 0.1.6 or later. `defenseclaw sandbox setup` offers the upgrade. An OpenShell upgrade cannot be undone; see Known issues before you upgrade a computer you may roll back.
@@ -23,6 +23,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **DefenseClawMac administrator repair:** the holding folder it keeps for files it could not return is removed once nothing is held, and the macOS app guide now names the folder, the `.defenseclaw-kept` name and the refusal of a home on another volume.
 
 ### Added
+- **Claude Code hook decisions can carry the event text that AI Defense inspected (off by default).** With `guardrail.include_hook_event_content: true` in `config.yaml`, the `hook_decision` record of a Claude Code event that has no prompt or tool record of its own (a compact summary, loaded instructions, a config change, an elicitation or notification, a `StopFailure` error, a subagent's text) carries the text sent to Cisco AI Defense in `gen_ai.input.messages`, at most 32 KiB, through the destination's redaction profile. A `StopFailure` record keeps its error text even when a model response record has the same text, because a destination may collect only one of them. When AI Defense gives no redaction directive, Bearer and Basic credentials and signed-URL query credentials are removed first. Text that only the local rules, the judge or a file scan saw is never added. With the key off, the default, the record carries no event text; the text is still inspected and the verdict is the same. In managed mode the administrator's `config.yaml` sets it.
 - **The managed skill inventory sends each skill's declared description and version, its SKILL.md size and the agent's vendor.** The description the SKILL.md frontmatter declares goes in `defenseclaw.inventory.item.description` (it was empty for skills), folded to one line; the version in `defenseclaw.inventory.skill.version`; the file size in `defenseclaw.inventory.skill.manifest_size`; and the record's `defenseclaw.ai.component.vendor` is the vendor of the agent that reads the folder, from the discovery catalog, so AI Defense can name the agent's vendor. The description and version are the skill author's text and content fields: the managed destination's redaction profile masks a secret in them like in the SKILL.md.
 - **The managed skill inventory sends a content hash for each skill.** `defenseclaw.inventory.skill.content_hash` is a SHA-256 over every file of the skill folder, scripts and binaries included, so the same skill has the same hash on every endpoint. `content_status` says why a record has none (`symlink`, `too_large`, `unreadable`). Links are never followed.
 - **`ai_discovery.include_skill_content_hashes` (on by default) lets you keep skill discovery without reading skill folders.** Set it to `false` and skill records carry no content hash, no SKILL.md facts and no SKILL.md text; the skills are still listed. Per-user and standalone installs apply the change on reload; a Secure Client endpoint applies it after a restart.
@@ -51,8 +52,6 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 
 ### Changed
 - Telemetry that a sandboxed agent sends to DefenseClaw has API-key-shaped values masked before it is stored or forwarded.
-
-### Changed
 - **Agent Substrate push (Preview).** `defenseclaw substrate push NAME [PATH...]` sends your newer local changes into a running agent with the same masking and upload limit as `run`, after a restore point. A file both sides changed is listed and not sent unless you choose `--mine`, `--theirs` or `--patch-out FILE`. Administrators can turn it off with `substrate.files.push`.
 - **Agent Substrate sync (Preview).** `defenseclaw substrate sync NAME --watch` keeps sending your local changes into a running agent while you work, one way, with the rules of `push`, a restore point at the start and every 10 minutes, and an hourly cap. A file the agent also changed keeps the agent's version. Administrators can turn it off with `substrate.files.sync`.
 - **Agent Substrate run --clone . (Preview).** `defenseclaw substrate run AGENT --clone .` starts the agent from this checkout with its full history: the agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent, with the same masking (secret files and their committed versions stay on your computer). On Windows it needs the branch pushed and clean. A remote that is a local path, an ssh address, or a branch that shares no commit with its remote is refused with what to use instead.
@@ -63,6 +62,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 
 ### Security
 
+- **Python installs require OpenTelemetry 1.45.2 or newer.** This excludes the vulnerable `opentelemetry-api` releases affected by CVE-2026-126360, and the wheel security contract now enforces the same API and SDK floors as the locked install.
 - **GitHub Copilot CLI:** when the guardrail blocks a prompt in action mode, the prompt is now replaced before it reaches the model on every install (Copilot CLI 1.0.76 or later), not only on some profiles.
 - **Streamed tool calls:** when DefenseClaw refuses a tool call in the middle of a streamed reply, the stream now ends with an error the agent shows as a failed turn. Before, the agent could receive the refused call as complete.
 - **Shell hooks:** per-user and standalone managed shell hooks now follow the configured fail mode when the hook exits unexpectedly.
@@ -130,6 +130,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - `doctor` and `sandbox run` agree on Docker Desktop's Landlock support.
 
 #### Connectors and CLI
+- `defenseclaw setup codex` no longer fails, and no longer leaves the gateway stopped, when `~/.codex/config.toml` holds a second copy of the DefenseClaw hook (for example one copied from another account, with a Windows or a macOS path). Setup removes the copy and keeps your own hooks. When the copy, or the DefenseClaw hook itself, sits in a hook group with your own hooks and cannot be taken out or rewritten without changing them, Setup stops before it changes anything, the running gateway keeps working, and the message names the entry to delete.
 - Kiro: `setup remove kiro` also removes this install's older hooks from the user's earlier default agent; a broken Kiro agent file is reported once.
 - OpenClaw: the permission message for `openclaw.json` names the first folder the account cannot open.
 - A Claude Code tool call that the guardrail allows now writes one local hook row on a per-user gateway, not two.

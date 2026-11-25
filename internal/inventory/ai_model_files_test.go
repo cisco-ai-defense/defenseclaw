@@ -441,7 +441,7 @@ func TestModelScanSkipsSymlinkIntoMacOSProtectedFolder(t *testing.T) {
 	discoveryGOOS = "darwin"
 	macOSFullDiskAccess = func() bool { return false }
 
-	home := t.TempDir()
+	home := realTempDir(t)
 	target := filepath.Join(home, "Documents", "private.gguf")
 	writeModelTestFile(t, target, strings.Repeat("g", 64))
 	work := filepath.Join(home, "work")

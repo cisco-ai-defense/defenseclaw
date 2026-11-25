@@ -61,7 +61,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     # Each part has its own runner: gwN runs shard N of 32 of the gateway
-    # package and cnN shard N of 16 of the connector package, both balanced
+    # package and cnN shard N of 18 of the connector package, both balanced
     # on recorded Windows test times (scripts/test-timings/go-windows.json).
     # The two packages ran one after the other on each gw runner (a compile
     # and up to 7 minutes of gateway tests, then a compile and about 3
@@ -132,6 +132,8 @@ jobs:
           - { shard: cn13, kind: connector, index: 13 }
           - { shard: cn14, kind: connector, index: 14 }
           - { shard: cn15, kind: connector, index: 15 }
+          - { shard: cn16, kind: connector, index: 16 }
+          - { shard: cn17, kind: connector, index: 17 }
           - { shard: pk0, kind: packages, index: 0 }
           - { shard: pk1, kind: packages, index: 1 }
           - { shard: pk2, kind: packages, index: 2 }
@@ -380,7 +382,7 @@ jobs:
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 32
-          $connectorTestShardCount = 16
+          $connectorTestShardCount = 18
           $remainingPackageShardCount = 17
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'

@@ -85,6 +85,7 @@ Each `hook_decision` record has:
 | **Enforced** | `true` only when the connector was told to stop. |
 | **Would block** | `true` when a raw block became advisory. |
 | **Evaluation / rule IDs** | Join keys to the verdict and findings. |
+| **Inspected content** (`gen_ai.input.messages`) | Only with `guardrail.include_hook_event_content: true` (off by default): the Claude Code event text sent to Cisco AI Defense for an event with no prompt or tool record of its own, such as a compact summary, a notification or a stop error. At most 32 KiB, through the destination's redaction profile. |
 
 An enforced block does not guarantee a retry. When no later row appears, no further hook event was seen; DefenseClaw does not infer a retry.
 

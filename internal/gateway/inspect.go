@@ -158,6 +158,11 @@ type ToolInspectRequest struct {
 	// of any send tool, whatever the tool is named (trustedActionSendsMessage).
 	// Set only by the message lane, never from the wire.
 	sendDestination bool
+	// blockMessageEchoNormalized marks content whose connector adapter already
+	// removed the configured block-message echo. It prevents a second,
+	// non-idempotent replacement while preserving Direction for policy logic.
+	// Set only by a connector adapter, never from the public inspect wire.
+	blockMessageEchoNormalized bool
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -203,6 +208,11 @@ type ToolInspectVerdict struct {
 	// escalation. It is intentionally absent from every caller-controlled wire
 	// shape.
 	aiDefenseBlock bool
+	// aiDefenseSubmitted is trusted in-process provenance set when content is
+	// submitted to the configured Cisco AI Defense hook client, including
+	// transport/error paths that return no verdict. Local rules and the optional
+	// judge must not set it.
+	aiDefenseSubmitted bool
 	// managedAIDFailOpenReason is an internal accounting marker. The generic
 	// HTTP handler consumes it only after selecting an allow result, so
 	// a timed-out request that the connector fails closed cannot be counted as
@@ -372,10 +382,11 @@ func (a *APIServer) inspectManagedAIDOnlyCall(
 		failOpenReason = aidFailOpenUnwired
 	}
 	var aid *ScanVerdict
+	var submitted bool
 	if call != nil {
-		aid = a.hookAIDInspectToolCall(ctx, *call, content)
+		aid, submitted = a.hookAIDInspectToolCallWithSubmission(ctx, *call, content)
 	} else {
-		aid = a.hookAIDInspect(ctx, toolName, content)
+		aid, submitted = a.hookAIDInspectWithSubmission(ctx, toolName, content)
 	}
 	if aid == nil {
 		// Fail-open surface: managed_enterprise's local detectors are
@@ -391,6 +402,7 @@ func (a *APIServer) inspectManagedAIDOnlyCall(
 			Severity:                 "NONE",
 			Findings:                 []string{},
 			managedAIDFailOpenReason: failOpenReason,
+			aiDefenseSubmitted:       submitted,
 		}
 		if gate := managedAIDFailOpenNativeHookGateFromContext(ctx); gate != nil {
 			gate.enqueue(verdict)
@@ -399,7 +411,9 @@ func (a *APIServer) inspectManagedAIDOnlyCall(
 		}
 		return verdict
 	}
-	return mergeWithAIDVerdict(nil, aid)
+	verdict := mergeWithAIDVerdict(nil, aid)
+	verdict.aiDefenseSubmitted = submitted
+	return verdict
 }
 
 type managedAIDFailOpenAccountingContextKey struct{}
@@ -512,15 +526,23 @@ func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
+	verdict, _ := a.hookAIDInspectWithSubmission(ctx, toolName, content)
+	return verdict
+}
+
+// hookAIDInspectWithSubmission separates request provenance from the returned
+// verdict. submitted becomes true exactly when the configured AID client is
+// invoked, including transport/error paths where Inspect returns nil.
+func (a *APIServer) hookAIDInspectWithSubmission(ctx context.Context, toolName string, content string) (*ScanVerdict, bool) {
 	inspector := a.currentCiscoInspector()
 	if inspector == nil {
-		return nil
+		return nil, false
 	}
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
-		return nil
+		return nil, false
 	}
 	if !managedAIDHookContentIsInspectable(toolName, content) {
-		return nil
+		return nil, false
 	}
 	// Prepend the tool name to the content so AID classifiers that
 	// match on tool-name strings (e.g. "Limit JIRA actions" /
@@ -530,7 +552,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	defer yieldHookRunSlot(ctx)()
 	return inspector.Inspect(ctx, []ChatMessage{
 		{Role: "user", Content: hookAIDToolText(toolName, content)},
-	})
+	}), true
 }
 
 // toolCallArgsCarryable reports whether the invocation can stand as tool-call
@@ -669,16 +691,29 @@ func (a *APIServer) hookAIDInspectTool(
 	req *ToolInspectRequest,
 	toolName, argsStr string,
 ) *ScanVerdict {
+	verdict, _ := a.hookAIDInspectToolWithSubmission(ctx, req, toolName, argsStr)
+	return verdict
+}
+
+// hookAIDInspectToolWithSubmission reports whether the invocation reached the
+// configured AID client, including transport paths that return no verdict.
+func (a *APIServer) hookAIDInspectToolWithSubmission(
+	ctx context.Context,
+	req *ToolInspectRequest,
+	toolName, argsStr string,
+) (*ScanVerdict, bool) {
 	// hookAIDInspect and hookAIDInspectToolCall return nil without a wired
 	// hook surface too; checking first skips parsing the arguments.
+	// skipAID: AID reads this call once on its own reading (RV-0841b F6),
+	// so this reading is never submitted.
 	if req.skipAID || !a.aidHookSurfaceWired(ctx) {
-		return nil
+		return nil, false
 	}
 	if reason := toolCallNotCarriedReason(req); reason != "" {
 		a.logAIDToolCallTextOnly(ctx, req.Connector, req.hookEvent, toolName, req.toolNameIsLabel, reason)
-		return a.hookAIDInspect(ctx, toolName, argsStr)
+		return a.hookAIDInspectWithSubmission(ctx, toolName, argsStr)
 	}
-	return a.hookAIDInspectToolCall(ctx, aidToolCall{
+	return a.hookAIDInspectToolCallWithSubmission(ctx, aidToolCall{
 		Connector: req.Connector,
 		Event:     req.hookEvent,
 		Name:      toolName,
@@ -714,19 +749,30 @@ func (a *APIServer) hookAIDInspectToolCall(
 	call aidToolCall,
 	content string,
 ) *ScanVerdict {
+	verdict, _ := a.hookAIDInspectToolCallWithSubmission(ctx, call, content)
+	return verdict
+}
+
+// hookAIDInspectToolCallWithSubmission reports whether the structured tool
+// call reached the configured AID client, including nil-verdict failures.
+func (a *APIServer) hookAIDInspectToolCallWithSubmission(
+	ctx context.Context,
+	call aidToolCall,
+	content string,
+) (*ScanVerdict, bool) {
 	inspector := a.currentCiscoInspector()
 	if inspector == nil {
-		return nil
+		return nil, false
 	}
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
-		return nil
+		return nil, false
 	}
 	if len(call.Args) == 0 {
-		return nil
+		return nil, false
 	}
 	if strings.TrimSpace(call.Name) == "" {
 		a.logAIDToolCallTextOnly(ctx, call.Connector, call.Event, call.Name, false, "blank_tool_name")
-		return a.hookAIDInspect(ctx, call.Name, content)
+		return a.hookAIDInspectWithSubmission(ctx, call.Name, content)
 	}
 	wireID := toolCallWireID(call)
 	toolCalls, err := json.Marshal([]map[string]interface{}{{
@@ -738,18 +784,18 @@ func (a *APIServer) hookAIDInspectToolCall(
 		},
 	}})
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	if len(toolCalls) > aidToolCallMaxBytes {
 		a.logAIDToolCallTextOnly(ctx, call.Connector, call.Event, call.Name, false, "oversized")
-		return a.hookAIDInspect(ctx, call.Name, content)
+		return a.hookAIDInspectWithSubmission(ctx, call.Name, content)
 	}
 	logAIDToolCallCarried(call, wireID)
 	defer yieldHookRunSlot(ctx)()
 	return inspector.Inspect(ctx, []ChatMessage{
 		{Role: "assistant", ToolCalls: toolCalls},
 		{Role: "user", Content: hookAIDToolText(call.Name, content)},
-	})
+	}), true
 }
 
 // hookAIDToolText is the flattened form AID's text classifiers read.
@@ -1356,8 +1402,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		// turn — operators with custom AID policies (e.g. block
 		// `createJiraIssue`, throttle `addComment`) want their rules to
 		// fire even when no DefenseClaw built-in pattern matched.
-		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
-			verdict = mergeWithAIDVerdict(nil, aid)
+		if aid, submitted := a.hookAIDInspectToolWithSubmission(ctx, req, toolName, argsStr); submitted {
+			verdict.aiDefenseSubmitted = true
+			if aid != nil && aid.Action != "allow" && aid.Action != "" {
+				verdict = mergeWithAIDVerdict(verdict, aid)
+				verdict.aiDefenseSubmitted = true
+			}
 		}
 	} else {
 		// The verdict's severity counts every finding. The action below takes
@@ -1427,8 +1477,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		// configured a key. Strictest verdict wins via mergeWithAIDVerdict.
 		// The lane is silent when no AID client is wired or when
 		// ScanHookSurface=false.
-		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil {
-			verdict = mergeWithAIDVerdict(verdict, aid)
+		if aid, submitted := a.hookAIDInspectToolWithSubmission(ctx, req, toolName, argsStr); submitted {
+			verdict.aiDefenseSubmitted = true
+			if aid != nil {
+				verdict = mergeWithAIDVerdict(verdict, aid)
+				verdict.aiDefenseSubmitted = true
+			}
 		}
 	}
 
@@ -1983,7 +2037,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		return verdict
 	}
 
-	if req.Direction == "response" || req.Direction == "tool_result" {
+	if !req.blockMessageEchoNormalized && (req.Direction == "response" || req.Direction == "tool_result") {
 		content = withoutBlockMessageEcho(a.decisionConfig(ctx), req.Connector, content)
 	}
 	if content == "" {
@@ -2048,8 +2102,15 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		// Regex found nothing locally. Give the AID lane a turn —
 		// custom AID policies (e.g. organisation-specific PII rules)
 		// may match where the bundled regex pack didn't.
-		if aid := a.hookAIDInspect(ctx, "message", content); aid != nil && aid.Action != "allow" && aid.Action != "" {
-			verdict = mergeWithAIDVerdict(nil, aid)
+		if aid, submitted := a.hookAIDInspectWithSubmission(ctx, "message", content); submitted {
+			verdict.aiDefenseSubmitted = true
+			if aid != nil && aid.RedactionEnabled != nil {
+				verdict.RedactionEnabled = aid.RedactionEnabled
+			}
+			if aid != nil && aid.Action != "allow" && aid.Action != "" {
+				verdict = mergeWithAIDVerdict(verdict, aid)
+				verdict.aiDefenseSubmitted = true
+			}
 		}
 	} else {
 		severity := HighestSeverity(ruleFindings)
@@ -2084,8 +2145,12 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		// configured. mergeWithAIDVerdict escalates strictness — AID block
 		// trumps regex alert, AID HIGH trumps regex MEDIUM, etc. Lane is a
 		// no-op when no client is wired.
-		if aid := a.hookAIDInspect(ctx, "message", content); aid != nil {
-			verdict = mergeWithAIDVerdict(verdict, aid)
+		if aid, submitted := a.hookAIDInspectWithSubmission(ctx, "message", content); submitted {
+			verdict.aiDefenseSubmitted = true
+			if aid != nil {
+				verdict = mergeWithAIDVerdict(verdict, aid)
+				verdict.aiDefenseSubmitted = true
+			}
 		}
 	}
 

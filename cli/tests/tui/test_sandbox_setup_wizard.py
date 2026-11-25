@@ -1278,3 +1278,13 @@ def test_a_mac_on_openshell_0_1_9_drops_the_do_not_start_text_and_keeps_docker()
     missing = {**MAC_MICROVM, "cli_version": "", "openshell_install_version": "0.1.9"}
     assert sandbox_machine_check(missing).microvm_starts is True
     assert sandbox_machine_check({**LINUX_MICROVM, "cli_version": "0.1.9"}).microvm_starts is False
+
+
+def test_gap1786_a_mac_report_with_no_versions_starts_microvms_as_go_says() -> None:
+    # GAP-1786: Go reads an empty OpenShell version as the release setup
+    # installs (openshell.MicroVMStartsOnMac); the wizard read a report with
+    # neither cli_version nor openshell_install_version as one that does not
+    # start MicroVMs on a Mac, so its Compute Driver text said they do not.
+    both = {**MAC_MICROVM, "cli_version": "", "openshell_install_version": ""}
+    assert sandbox_machine_check(both).microvm_starts is True
+    assert sandbox_machine_check({**MAC_MICROVM, "cli_version": "0.1.8", "openshell_install_version": ""}).microvm_starts is False

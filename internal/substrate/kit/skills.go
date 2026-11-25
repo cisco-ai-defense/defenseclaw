@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
@@ -127,6 +129,29 @@ func skillRoots(home, cwd string) []string {
 	return roots
 }
 
+// pluginSkillsDir is the name of the skills folder inside a plugin.
+const pluginSkillsDir = "skills"
+
+// isSkillRoot reports whether root is a skill root by name: the last element
+// of a Skills entry of the connector table (skills, and the singular skill of
+// the OpenCode roots), or a plugin's skills folder. quarantineSkillFolder
+// asks it, so the roots the scan lists (skillRoots, from the same table) and
+// the roots a refused folder can be moved out of cannot differ (GAP-1074:
+// the quarantine knew only "skills" and left a refused folder in
+// .opencode/skill, ~/.config/opencode/skill and Config/skill in reach).
+func isSkillRoot(root string) bool {
+	name := filepath.Base(root)
+	if name == pluginSkillsDir {
+		return true
+	}
+	for _, e := range agentpaths.ActorEntries() {
+		if e.Kind == agentpaths.Skills && path.Base(e.Rel) == name {
+			return true
+		}
+	}
+	return false
+}
+
 // actorDirs resolves one table entry in the actor. A Config entry is looked
 // at both under the default config home and under the vendor variable's
 // folder (CLAUDE_CONFIG_DIR, CODEX_HOME, HERMES_HOME, OPENCODE_CONFIG_DIR)
@@ -187,7 +212,7 @@ func pluginSkillRoots(plugins string) (roots []string, complete bool) {
 				continue
 			}
 			p := filepath.Join(d, e.Name())
-			if e.Name() == "skills" {
+			if e.Name() == pluginSkillsDir {
 				roots = append(roots, p)
 				continue
 			}
@@ -832,7 +857,27 @@ func quarantinePlugins(dir string, now time.Time) bool {
 	if os.MkdirAll(qdir, 0o700) != nil {
 		return false
 	}
-	return renameFolder(dir, filepath.Join(qdir, fmt.Sprintf("plugins-%d", now.UnixNano()))) == nil
+	return renameFolder(dir, filepath.Join(qdir, fmt.Sprintf("plugins-%d", quarantineStamp(now)))) == nil
+}
+
+var lastQuarantineStamp atomic.Int64
+
+// quarantineStamp is now in nanoseconds, made strictly increasing: one answer
+// quarantines several folders with one now, and two roots that share a parent
+// (.opencode/skill and .opencode/skills, which the table lists side by side)
+// share one quarantine folder, so two refused folders of the same name got the
+// same destination and the second move failed (GAP-1074).
+func quarantineStamp(now time.Time) int64 {
+	for {
+		last := lastQuarantineStamp.Load()
+		n := now.UnixNano()
+		if n <= last {
+			n = last + 1
+		}
+		if lastQuarantineStamp.CompareAndSwap(last, n) {
+			return n
+		}
+	}
 }
 
 // quarantineSkillFolder moves one folder out of its skill root, into
@@ -844,12 +889,12 @@ func quarantinePlugins(dir string, now time.Time) bool {
 // locked is not reported again.
 func quarantineSkillFolder(dir string, now time.Time) bool {
 	root := filepath.Dir(dir)
-	if filepath.Base(root) != "skills" {
+	if !isSkillRoot(root) {
 		return false
 	}
 	qdir := filepath.Join(filepath.Dir(root), quarantineDirName)
 	if os.MkdirAll(qdir, 0o700) == nil {
-		dst := filepath.Join(qdir, fmt.Sprintf("%s-%d", filepath.Base(dir), now.UnixNano()))
+		dst := filepath.Join(qdir, fmt.Sprintf("%s-%d", filepath.Base(dir), quarantineStamp(now)))
 		if renameFolder(dir, dst) == nil {
 			return true
 		}

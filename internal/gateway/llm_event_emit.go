@@ -633,7 +633,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		meta.PromptID = hookPromptID("codex", req.SessionID, req.TurnID, req.Prompt, rawPayload)
 		promptID := a.emitLLMPromptEventV8(ctx, meta, req.Prompt, rawPayload)
 		a.rememberHookPromptID(ctx, "codex", req.SessionID, req.TurnID, promptID)
-		a.rememberHookLLMSpanPrompt(meta, req.Prompt)
+		a.rememberHookLLMSpanPrompt(ctx, meta, req.Prompt)
 		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case "SubagentStart":
@@ -643,7 +643,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		}
 		meta.PromptID = hookPromptID("codex", req.SessionID, req.TurnID, prompt, rawPayload)
 		a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
-		a.rememberHookLLMSpanPrompt(meta, prompt)
+		a.rememberHookLLMSpanPrompt(ctx, meta, prompt)
 		a.rememberHookSessionState(ctx, meta)
 	case "PreToolUse", "PermissionRequest":
 		meta.PromptID = firstNonEmpty(a.lastHookPromptIDForTurn(ctx, "codex", req.SessionID, req.TurnID), a.lastHookPromptID(ctx, "codex", req.SessionID), promptIDForTurn("codex", req.SessionID, req.TurnID))
@@ -745,7 +745,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 		meta.PromptID = hookPromptID(source, req.SessionID, req.TurnID, prompt, rawPayload)
 		promptID := a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookPromptID(ctx, source, req.SessionID, req.TurnID, promptID)
-		a.rememberHookLLMSpanPrompt(meta, prompt)
+		a.rememberHookLLMSpanPrompt(ctx, meta, prompt)
 		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case isModelCompletionEvent(req.HookEventName), isStopCompletionEvent(req.HookEventName):
@@ -846,7 +846,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		meta.PromptID = hookPromptID("claudecode", req.SessionID, "", prompt, rawPayload)
 		promptID := a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookPromptID(ctx, "claudecode", req.SessionID, "", promptID)
-		a.rememberHookLLMSpanPrompt(meta, prompt)
+		a.rememberHookLLMSpanPrompt(ctx, meta, prompt)
 		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case "MessageDisplay":
@@ -862,13 +862,10 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		// pieces (GAP-0511).
 		a.bufferClaudeCodeDisplay(ctx, meta, req.DisplayIndex, req.Delta, req.DisplayFinal)
 	case "SubagentStart":
-		prompt := firstString(req.Payload, "task", "prompt", "description")
-		if prompt == "" {
-			prompt = hookLifecycleContent(meta, "subagent_input_not_reported")
-		}
+		prompt := claudeCodeSubagentPrompt(req, hookLifecycleContent(meta, "subagent_input_not_reported"))
 		meta.PromptID = hookPromptID("claudecode", req.SessionID, "", prompt, rawPayload)
 		a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
-		a.rememberHookLLMSpanPrompt(meta, prompt)
+		a.rememberHookLLMSpanPrompt(ctx, meta, prompt)
 		a.rememberHookSessionState(ctx, meta)
 	case "PreToolUse", "PermissionRequest":
 		meta.PromptID = a.lastHookPromptID(ctx, "claudecode", req.SessionID)
@@ -946,6 +943,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hookSource, agentID, agentName, agentType string, payload map[string]interface{}) llmEventMeta {
 	user := resolveHookUserIdentity(ctx, firstNonEmpty(source, hookSource), payload)
 	provider := hookReportedProvider(source, model, hookSource, payload)
+	requestID := strings.TrimSpace(audit.EnvelopeFromContext(ctx).RequestID)
 	lifecycleEvent := canonicalHookLifecycleEvent(firstString(payload,
 		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName",
 	))
@@ -1045,6 +1043,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		Provider:  provider,
 		Model:     telemetryModelID(model),
 		SessionID: sessionID,
+		RequestID: requestID,
 		TurnID:    turnID,
 		AgentID:   agentID,
 		// Prefer a readable runtime name in UIs. The stable opaque identity is
@@ -1404,11 +1403,12 @@ const hookPromptCacheMaxEntries = 8192
 const hookLLMSpanMaxContentBytes = 32 * 1024
 
 type hookLLMSpanPrompt struct {
-	meta          llmEventMeta
-	content       string
-	originalBytes int64
-	truncated     bool
-	startedAt     time.Time
+	meta             llmEventMeta
+	content          string
+	redactionEnabled *bool
+	originalBytes    int64
+	truncated        bool
+	startedAt        time.Time
 }
 
 // hookLLMSpanUsage is the bounded correlation bridge between connector-native
@@ -2647,7 +2647,7 @@ func deleteHookLLMSpanPrompt(m map[string]hookLLMSpanPrompt, order *[]string, ke
 // Stop event arrives. Content remains in process memory, is size-bounded, and
 // still passes through telemetry.SetGenAIInput's persistent-sink redaction
 // before it can enter an exported span.
-func (a *APIServer) rememberHookLLMSpanPrompt(meta llmEventMeta, prompt string) {
+func (a *APIServer) rememberHookLLMSpanPrompt(ctx context.Context, meta llmEventMeta, prompt string) {
 	if a == nil || strings.TrimSpace(prompt) == "" {
 		return
 	}
@@ -2657,7 +2657,7 @@ func (a *APIServer) rememberHookLLMSpanPrompt(meta llmEventMeta, prompt string) 
 	}
 	bounded := boundedHookLLMSpanContent(prompt)
 	snapshot := hookLLMSpanPrompt{
-		meta: meta, content: bounded, originalBytes: int64(len(prompt)),
+		meta: meta, content: bounded, redactionEnabled: redactionDecisionFromContext(ctx), originalBytes: int64(len(prompt)),
 		truncated: len(bounded) < len(prompt), startedAt: time.Now(),
 	}
 	a.llmPromptMu.Lock()
@@ -2681,9 +2681,14 @@ func (a *APIServer) takeHookLLMSpanPrompt(meta llmEventMeta, response string) (h
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 
+	turnID := strings.TrimSpace(meta.TurnID)
 	var snapshot hookLLMSpanPrompt
 	for _, key := range hookLLMSpanPromptKeys(meta) {
 		candidate, exists := a.hookLLMSpanPrompts[key]
+		candidateTurnID := strings.TrimSpace(candidate.meta.TurnID)
+		if exists && turnID != "" && candidateTurnID != "" && candidateTurnID != turnID {
+			continue
+		}
 		if snapshot.content == "" && exists {
 			snapshot = candidate
 		}
@@ -2710,20 +2715,40 @@ func (a *APIServer) emitHookLLMSpan(ctx context.Context, meta llmEventMeta, resp
 	if !emit {
 		return ctx
 	}
+	completionDirective := redactionDecisionFromContext(ctx)
+	spanCtx := ctx
+	// A chat span contains both the cached prompt and this completion. Apply the
+	// stricter inspection decision only when a prompt was cached. A response-only
+	// span keeps the completion decision, and the standalone response log below
+	// receives that same completion-scoped policy after correlation is attached.
+	if snapshot.content != "" {
+		spanCtx = withRedactionDecision(spanCtx, stricterHookRedactionDirective(
+			snapshot.redactionEnabled, completionDirective,
+		))
+	}
 	if emitter := a.observabilityV8RuntimeEmitter(); emitter != nil {
 		// Runtime ownership is sticky. Once config v8 is authoritative, a
 		// missing generated capability, disabled collection, or sampled-out
 		// trace must never resurrect the legacy SDK provider.
 		metricRuntime, _ := emitter.(hookLifecycleMetricV8Runtime)
 		if runtime, ok := emitter.(lifecycleV8Runtime); ok {
-			return a.emitHookLLMSpanV8(ctx, runtime, metricRuntime, snapshot, meta, response)
+			correlated := a.emitHookLLMSpanV8(spanCtx, runtime, metricRuntime, snapshot, meta, response)
+			return withRedactionDecision(correlated, completionDirective)
 		}
 		observation := a.hookModelV8Observation(snapshot, meta, response)
-		a.recordHookModelMetricsV8(ctx, metricRuntime, observation)
+		a.recordHookModelMetricsV8(spanCtx, metricRuntime, observation)
 		return ctx
 	}
 	_ = a.takeHookLLMSpanUsage(meta)
 	return ctx
+}
+
+func stricterHookRedactionDirective(first, second *bool) *bool {
+	if first == nil || second == nil {
+		return nil
+	}
+	enabled := *first || *second
+	return &enabled
 }
 
 // putBoundedPromptID inserts key=>value into m, ordered by insertion

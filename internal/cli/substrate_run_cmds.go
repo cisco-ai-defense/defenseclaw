@@ -211,6 +211,10 @@ type substratePullFlags struct {
 	pushBranch string
 	// restoreSecrets is --restore-secret-lines (B1 S9a).
 	restoreSecrets bool
+	// exclude and noExclude say, on another computer, what run left out
+	// with --exclude (GAP-0489).
+	exclude   []string
+	noExclude bool
 }
 
 func newSubstratePullCmd() *cobra.Command {
@@ -230,9 +234,11 @@ When a change can run code on this machine, --apply asks first (the default answ
 that safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,
 --allow-flagged writes them too.
 
-Run it on the computer you started the agent from: it compares the changes with the folder you
-sent, and only that computer keeps a record of it. From another computer, connect to the agent and
-git push its work from inside it.`,
+On the computer you started the agent from, it compares the changes with the folder you sent. On
+another computer, run it in a git checkout of that folder: it compares the agent's work with the
+checkout's last commit, so files sent that were not committed show as added. That computer cannot know
+what run left out with --exclude, so repeat it (--exclude GLOB, once for each) or say there was none
+(--no-exclude) before --apply or --branch; until then they refuse, and --patch-out still works.`,
 		Example: "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests\n" +
 			"defenseclaw substrate pull fix-tests-7f3a --push-branch agent/fix-tests",
 		Args: cobra.ExactArgs(1),
@@ -249,6 +255,8 @@ git push its work from inside it.`,
 	fl.BoolVar(&f.allowFlagged, "allow-flagged", false, "with --apply or --push-branch: also take the flagged files (review them first)")
 	fl.StringVar(&f.pushBranch, "push-branch", "", "push the agent's work to its origin as a new branch of this name (Preview)")
 	fl.DurationVar(&f.timeout, "timeout", 0, "stop reading the agent's work after this long (default 10m)")
+	fl.StringArrayVar(&f.exclude, "exclude", nil, "on another computer: a path or glob run was given with --exclude, held back on both sides (repeatable)")
+	fl.BoolVar(&f.noExclude, "no-exclude", false, "on another computer: run was given no --exclude")
 	fl.BoolVar(&f.restoreSecrets, "restore-secret-lines", false, "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back (default: keep your line)")
 	return cmd
 }

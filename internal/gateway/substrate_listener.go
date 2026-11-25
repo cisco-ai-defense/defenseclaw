@@ -550,6 +550,11 @@ func (a *APIServer) RunSubstrate(ctx context.Context) error {
 	a.startPendingHookRecovery(ctx)
 	if st.cfg.Relay != nil {
 		st.cfg.Relay.Record = a.recordSubstrateRelay
+		// GAP-0486: the leader knows this replica before it serves a hook
+		// call. Bounded: a leader out of reach only delays the marks.
+		jctx, cancel := context.WithTimeout(ctx, substrateRelayJoinWait)
+		_ = st.cfg.Relay.Join(jctx)
+		cancel()
 		go st.cfg.Relay.Run(ctx)
 	}
 	if st.cfg.SignInServer != nil {
@@ -851,10 +856,22 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
 		w.Header().Set(substrateModeHeader, substrateMode(reg))
 		w.Header().Set(substrateFailModeHeader, substrateFailMode(st.cfg, reg))
+		hook := route.class == sandboxauth.RouteHook && r.Method == http.MethodPost
+		var claim *substrateResumeClaim
+		if hook && st.cfg.Relay != nil && st.cfg.Relay.Resumes().Hook(actor.UID, start) {
+			// Maybe its first hook call after a resume: the leader decides,
+			// while the call is served (GAP-0486).
+			claim = startSubstrateResumeClaim(st.cfg.Relay, actor.UID, start)
+			ctx = withFirstHookAfterResume(ctx, claim)
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
-		if route.class == sandboxauth.RouteHook && r.Method == http.MethodPost {
+		if hook {
 			// A hook call; the kit's GET warm-up pings are not counted.
-			a.recordSubstrateHookRTT(time.Since(start))
+			d := time.Since(start)
+			a.recordSubstrateHookRTT(d)
+			if claim.isFirst() {
+				a.recordSubstrateFirstHookAfterResume(d)
+			}
 		}
 	})
 }

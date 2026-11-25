@@ -105,10 +105,12 @@ func TestGAP1781SetupConflictForStatus(t *testing.T) {
 	if reason != want || !strings.Contains(recovery, "ask IT to pin OpenShell "+openshell.InstallerVersion+" or newer") {
 		t.Fatalf("status conflict = %q, %q", reason, recovery)
 	}
-	// Outside setup mode the daemon installs nothing, so there is nothing
-	// to say.
+	// In prerequisite mode the administrator's gateway at the release that
+	// migrated it opens it (GAP-2070 covers the older one).
 	p := s
 	p.Enterprise.Install = "prerequisite"
+	r.o.adminBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	r.gatewayVersion = "openshell-gateway " + openshell.InstallerVersion
 	if reason, _ := r.o.SetupConflict(context.Background(), p); reason != "" {
 		t.Fatalf("prerequisite mode conflict = %q", reason)
 	}
@@ -135,5 +137,71 @@ func TestReadGatewayDBMigration(t *testing.T) {
 		if e.Name() != "openshell.db" {
 			t.Errorf("the read left %s", e.Name())
 		}
+	}
+}
+
+// rel-1-0-10:GAP-2070: on a managed computer whose gateway runs the
+// administrator's OpenShell (install: prerequisite), the administrator put
+// back an older OpenShell after an account's gateway had run a newer one:
+// ensure and the daemon said nothing, and the account's gateway then could
+// not open its database (migration N previously applied but missing).
+// The daemon reads the release of the administrator's gateway binary and,
+// over a database a newer release migrated, refuses the start and says
+// why in status and doctor, as in setup mode. A release it does not know
+// counts at the level of the oldest known release at or above it (older
+// than every known one: the oldest one's), and a binary whose release it
+// cannot read, over a database that is there, is refused too: the start
+// is never shown safe by a guess.
+func TestGAP2070PrerequisiteGatewayBelowTheAccountDatabase(t *testing.T) {
+	fastGatewayWaits(t)
+	rig := func(t *testing.T, version string, dbLevel int) *openShellRig {
+		r := newOpenShellRig(t, "linux")
+		r.o.adminBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+		if version == "" {
+			r.fail["openshell-gateway --version"] = "error: unknown flag"
+		} else {
+			r.gatewayVersion = "openshell-gateway " + version
+		}
+		if dbLevel >= 0 {
+			writeGatewayDB(t, r.o.home, dbLevel)
+		}
+		return r
+	}
+	s := prerequisiteSettings()
+	for _, tc := range []struct {
+		name, version string
+		level         int
+		refuse        string // "" = no conflict
+	}{
+		{"0.1.3 over 0.1.9's database", "0.1.3", 10, openshell.GatewayDBNewerText("0.1.9", "0.1.3")},
+		{"0.1.6 over 0.1.9's database", "0.1.6", 10, openshell.GatewayDBNewerText("0.1.9", "0.1.6")},
+		{"0.1.9 over its own database", "0.1.9", 10, ""},
+		{"0.1.3 over 0.1.6's database", "0.1.3", 8, ""},
+		{"no database", "0.1.3", -1, ""},
+		{"unreadable release over a database", "", 10, "could not read the release of your organization's OpenShell gateway"},
+		{"unreadable release, no database", "", -1, ""},
+	} {
+		t.Run(strings.ReplaceAll(tc.name, " ", "_"), func(t *testing.T) {
+			r := rig(t, tc.version, tc.level)
+			reason, recovery := r.o.SetupConflict(context.Background(), s)
+			if tc.refuse == "" {
+				if reason != "" {
+					t.Fatalf("conflict %q, want none", reason)
+				}
+				return
+			}
+			if !strings.Contains(reason, tc.refuse) || recovery == "" {
+				t.Fatalf("status conflict = %q, %q; want %q with a way on", reason, recovery, tc.refuse)
+			}
+			_, err := r.o.Prepare(context.Background(), s)
+			if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || !strings.Contains(fmtErr(err), tc.refuse) {
+				t.Fatalf("prepare: %v, want the refusal %q", err, tc.refuse)
+			}
+			for _, c := range r.ran() {
+				if strings.HasPrefix(c, "systemctl --user start ") {
+					t.Fatalf("the gateway was started over a database it cannot open: %v", r.ran())
+				}
+			}
+		})
 	}
 }

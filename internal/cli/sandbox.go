@@ -54,6 +54,10 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			settings, ok := sandboxOpenShellDaemonSettings(ctx)
 			return settings.Operational.TrustedCAs, settings.Operational.TrustedCAError, ok
 		},
+		ManagedOrganizationOff: func(ctx context.Context) bool {
+			settings, ok := sandboxOpenShellDaemonSettings(ctx)
+			return ok && !settings.Enabled
+		},
 		ManagedAccountHome: sandboxAccountHome,
 		ManagedAccountPolicy: func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
 			return launcherAccountPolicy(ctx, harness)

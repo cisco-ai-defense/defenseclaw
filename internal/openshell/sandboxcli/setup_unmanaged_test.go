@@ -205,7 +205,9 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 					"then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it)",
 					"✓ openshell.enabled is on")
 				if leavesVM {
-					has(t, out, "not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver; then `defenseclaw sandbox run ")
+					// The restart is the user's, and it stops what runs on it (GAP-1743).
+					has(t, out, "not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver (restarting it stops every ",
+						"); then `defenseclaw sandbox run ")
 					lacks(t, out, "Done →")
 				} else {
 					has(t, out, "Done →")

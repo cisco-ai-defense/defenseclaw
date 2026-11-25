@@ -52,14 +52,14 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 17838,
-      "sha256": "aaf4ad0dbfffc6c1457757e681254182a454b24570f373d957395d5c03ebd9d9"
+      "size": 18048,
+      "sha256": "96e4f1c27e498b353e0382156ac66fc6b0972c645151ccbd245f0d4b1b3c1271"
     },
     "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 14444,
-      "sha256": "28d3d4df10b7c5805959e132a26edf71d1be1ecfe6562c712414e865291b3222"
+      "size": 14915,
+      "sha256": "18120aae1a41930dbcf38f32bc5e2d67ba6be01995cdb085523bf76c680573cf"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

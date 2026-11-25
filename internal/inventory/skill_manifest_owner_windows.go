@@ -25,3 +25,7 @@ import (
 // needs write access to its target, so a user cannot link in a file they
 // cannot read.
 func skillManifestOwned(*os.File, fs.FileInfo) bool { return true }
+
+// skillHardLinked is false on Windows: a hard link there needs write access
+// to its target, so a user cannot link in a file they cannot reach.
+func skillHardLinked(*os.File) bool { return false }

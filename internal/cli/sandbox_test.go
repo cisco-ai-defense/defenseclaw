@@ -34,6 +34,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -560,8 +561,15 @@ func TestSandboxDisabledJSONOutput(t *testing.T) {
 		if err := cmd.Flags().Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		if err := fail(cmd, nil); err == nil {
+		err := fail(cmd, nil)
+		if err == nil {
 			t.Fatalf("%v: disabled sandboxes returned no error", args)
+		}
+		// The exit status of every command that ends with a DisabledError:
+		// `sandbox run`, and `sandbox activity -f` once its feed ended while
+		// sandboxes are off for the account (GAP-2050).
+		if code := cliusage.ExitCode(err); code != 1 {
+			t.Fatalf("%v: exit status %d, want 1", args, code)
 		}
 		if !strings.Contains(stderr.String(), "OpenShell sandboxes are disabled") {
 			t.Fatalf("%v: stderr = %q", args, stderr.String())

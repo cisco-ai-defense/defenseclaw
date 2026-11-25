@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func gap0641Payload(cwd, command string) []byte {
@@ -109,9 +111,7 @@ func TestGAP0641ProcessRelativeProtectedAliasIsNotOrdinary(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, filepath.Join(cwd, "alias"))
 	if err := os.WriteFile(filepath.Join(cwd, "notes"), []byte("notes"), 0o600); err != nil {
 		t.Fatal(err)
 	}

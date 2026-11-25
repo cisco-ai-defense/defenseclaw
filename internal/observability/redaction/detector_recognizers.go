@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	providerTokenRE = lazyregexp.New(`(?:AKIA|ASIA|AROA|AGPA|AIDA|AIPA|ANPA|ANVA)[A-Z0-9]{16}|(?:ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|glpat-[A-Za-z0-9_-]{20,255}|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,128}|(?:xoxp-|xoxa-|xoxr-|xoxs-)[A-Za-z0-9-]{24,200}|(?:sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|pk_test_)[A-Za-z0-9]{20,128}|AIza[A-Za-z0-9_-]{35}|sk-proj-[A-Za-z0-9_+=.-]{16,248}|sk-ant-[A-Za-z0-9_+=.-]{17,249}|sk-or-[A-Za-z0-9_+=.-]{18,250}|sk-[A-Za-z0-9_+=.-]{21,253}|eyJ[A-Za-z0-9_-]*={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}`)
+	providerTokenRE = lazyregexp.New(`(?:AKIA|ASIA|AROA|AGPA|AIDA|AIPA|ANPA|ANVA)[A-Z0-9]{16,32}|(?:ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|glpat-[A-Za-z0-9_-]{20,255}|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,128}|(?:xoxp-|xoxa-|xoxr-|xoxs-)[A-Za-z0-9-]{24,200}|(?:sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|pk_test_)[A-Za-z0-9]{20,128}|AIza[A-Za-z0-9_-]{35}|sk-proj-[A-Za-z0-9_+=.-]{16,248}|sk-ant-[A-Za-z0-9_+=.-]{17,249}|sk-or-[A-Za-z0-9_+=.-]{18,250}|sk-[A-Za-z0-9_+=.-]{21,253}|eyJ[A-Za-z0-9_-]*={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}`)
 	authorizationRE = lazyregexp.New(`(?i)^(authorization|proxy-authorization)[\t ]*[:=][\t ]*(bearer|basic|digest|token|apikey)[\t ]+([^\r\n]+)$`)
 	assignmentKeyRE = lazyregexp.New(`(?i)(password|passwd|pwd|secret|client_secret|api_key|apikey|access_token|refresh_token|private_key|signing_key)`)
 	dsnKeyRE        = lazyregexp.New(`(?i)(password|passwd|pwd|pass|secret|client_secret|api_key|apikey|access_token|refresh_token|token|signature|credential)`)
@@ -111,9 +111,45 @@ func recognizeProviderTokens(input string) []candidate {
 		if strings.HasPrefix(value, "eyJ") && strings.Count(value, ".") == 2 {
 			accepted = accepted && validJWT(value)
 		}
+		if isAWSKeyIDPrefix(value) {
+			accepted = awsKeyBoundary(input, index[0], index[1]) &&
+				(len(value) == awsKeyIDLength || awsNearKey(value[4:]))
+		}
 		result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
 	}
 	return result
+}
+
+// awsKeyIDLength is the length of an AWS access key id: a four-letter
+// prefix and 16 key characters.
+const awsKeyIDLength = 20
+
+func isAWSKeyIDPrefix(value string) bool {
+	switch value[:4] {
+	case "AKIA", "ASIA", "AROA", "AGPA", "AIDA", "AIPA", "ANPA", "ANVA":
+		return true
+	}
+	return false
+}
+
+// awsNearKey: a run of 17-32 key characters after an AWS key id prefix is a
+// near-key (GAP-0426: the J22 canaries AKIA+17 and AKIA+18, a key id with a
+// pasted suffix) and is redacted like the key id, which the exact 20-character
+// shape alone missed. A near-key needs a digit, so an upper-case word or
+// heading that starts like a key id (ASIAPACIFIC...) stays readable; a real
+// 20-character key id needs none.
+func awsNearKey(suffix string) bool {
+	return strings.ContainsAny(suffix, "0123456789")
+}
+
+// awsKeyBoundary is providerBoundary for an AWS key id, whose characters are
+// only A-Z and 0-9: on the right, '.', '-', '+' and '=' end it, so a key id
+// at the end of a sentence ("my key is AKIA....") or before a separator is
+// still a key id (GAP-0426). A letter, digit or '_' still joins it to a
+// longer token on either side.
+func awsKeyBoundary(input string, start, end int) bool {
+	return (start == 0 || input[start-1] == '=' || afterEncodedEquals(input, start) || !isProviderByte(input[start-1])) &&
+		(end == len(input) || !isASCIIAlphaNum(input[end]) && input[end] != '_')
 }
 
 // providerBoundary: a token stands alone, or follows an assignment's '='
@@ -511,7 +547,8 @@ func overlapsAnyRange(start, end int, ranges [][]int) bool {
 }
 
 func recognizeAssignments(input string) []candidate {
-	return append(scanKeyValues(input, assignmentKeyRE, false), recognizeCredentialKeys(input)...)
+	result := append(scanKeyValues(input, assignmentKeyRE, false), recognizeCredentialKeys(input)...)
+	return append(result, recognizeProseCredentials(input)...)
 }
 
 func scanKeyValues(input string, keyPattern *lazyregexp.Regexp, dsn bool) []candidate {

@@ -964,6 +964,9 @@ enum GatewayAdminOwnershipRepair {
         var held: [String] = []
         /// Not on the holding folder's volume, so not handed over.
         var refused: [String] = []
+        /// The walk reached its deadline and stopped where it was, so the
+        /// helper could answer inside the app's reply budget (GAP-2003).
+        var unfinished = false
 
         mutating func merge(_ other: Outcome) {
             restored += other.restored
@@ -972,6 +975,7 @@ enum GatewayAdminOwnershipRepair {
             kept += other.kept
             held += other.held
             refused += other.refused
+            unfinished = unfinished || other.unfinished
         }
 
         /// Records one handover of shown; false when the file is not settled.
@@ -1026,7 +1030,10 @@ enum GatewayAdminOwnershipRepair {
                     + "\(GatewayAdminHandover.holdingParent), where the repair holds a file while it hands it over: "
                     + refused.prefix(listed).joined(separator: ", ") + ".")
             }
-            if incomplete {
+            if unfinished {
+                lines.append("The repair stopped before it reached every file so that it could answer in time; "
+                    + "repair again to return the rest.")
+            } else if incomplete {
                 lines.append("Part of the home was left root-owned because it could not be inspected or other accounts can "
                     + "write it; run `defenseclaw doctor` to see what is still root-owned and how to fix it.")
             }
@@ -1047,10 +1054,14 @@ enum GatewayAdminOwnershipRepair {
     /// unlisted root-owned children. The DefenseClaw home walk keeps the
     /// account's access first: each folder is returned before its contents.
     /// `base` is root's path below the root of a shared handover (`given`).
+    /// Past `deadline` the walk stops where it is and reports itself
+    /// unfinished: every file it handed over is settled, and the next repair
+    /// returns the rest (GAP-2003).
     static func restore(home root: Int32, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
                         names allowed: Set<String>? = GatewayAdminOwnershipRepair.ownedNames,
                         privateOnly: Bool = false,
                         maximumEntries: Int = GatewayAdminOwnershipRepair.maximumEntries,
+                        until deadline: ContinuousClock.Instant? = nil,
                         handover given: GatewayAdminHandover? = nil,
                         at base: String = "",
                         change: ((Int32, String) -> Int32)? = nil) throws -> Outcome {
@@ -1063,6 +1074,13 @@ enum GatewayAdminOwnershipRepair {
         defer { if given == nil { handover.finish() } }
         var outcome = Outcome()
         var visited = 0
+
+        func late() -> Bool {
+            guard let deadline, ContinuousClock.now >= deadline else { return false }
+            outcome.incomplete = true
+            outcome.unfinished = true
+            return true
+        }
 
         func give(_ descriptor: Int32, _ relative: String) -> Bool {
             if apply(descriptor, relative) == 0 {
@@ -1115,6 +1133,7 @@ enum GatewayAdminOwnershipRepair {
                     outcome.incomplete = true
                     return false
                 }
+                if late() { return false }
                 let relative = prefix.isEmpty ? name : prefix + "/" + name
                 var entry = stat()
                 guard fstatat(directory, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
@@ -1167,7 +1186,7 @@ enum GatewayAdminOwnershipRepair {
             }
             return complete
         }
-        _ = folder(root, metadata, ".", "", 0)
+        if !late() { _ = folder(root, metadata, ".", "", 0) }
         if given == nil { outcome.merge(handover.recover(change: apply)) }
         return outcome
     }
@@ -1237,6 +1256,7 @@ enum GatewayAdminAgentConfigRepair {
 
     static func restore(home: Int32, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
                         paths: [String] = GatewayAdminAgentConfigRepair.relativePaths,
+                        until deadline: ContinuousClock.Instant? = nil,
                         change: ((Int32, String) -> Int32)? = nil) -> GatewayAdminOwnershipRepair.Outcome {
         let apply = change ?? { descriptor, _ in fchown(descriptor, account.uid, account.gid) }
         var outcome = GatewayAdminOwnershipRepair.Outcome()
@@ -1246,6 +1266,12 @@ enum GatewayAdminAgentConfigRepair {
         defer { handover.finish() }
         var returnedFolders: [String] = []
         for path in paths {
+            if let deadline, ContinuousClock.now >= deadline {
+                // GAP-2003: answer in time; the next repair returns the rest.
+                outcome.incomplete = true
+                outcome.unfinished = true
+                break
+            }
             if returnedFolders.contains(where: { path.hasPrefix($0 + "/") }) { continue }
             let components = path.split(separator: "/").map(String.init)
             var parent = dup(home)
@@ -1285,13 +1311,15 @@ enum GatewayAdminAgentConfigRepair {
                     if opened.st_uid == owner {
                         let inside = { (inner: String) in inner == "." ? shown : shown + "/" + inner }
                         let folder = (try? GatewayAdminOwnershipRepair.restore(
-                            home: child, from: owner, to: account, names: nil, privateOnly: true, handover: handover,
+                            home: child, from: owner, to: account, names: nil, privateOnly: true, until: deadline,
+                            handover: handover,
                             at: relative + "/", change: { descriptor, inner in apply(descriptor, inside(inner)) }))
                             ?? GatewayAdminOwnershipRepair.Outcome(incomplete: true)
                         outcome.merge(GatewayAdminOwnershipRepair.Outcome(
                             restored: folder.restored.map(inside), skipped: folder.skipped.map(inside),
                             incomplete: folder.incomplete, kept: folder.kept.map(inside),
-                            held: folder.held.map(inside), refused: folder.refused.map(inside)))
+                            held: folder.held.map(inside), refused: folder.refused.map(inside),
+                            unfinished: folder.unfinished))
                         returnedFolders.append(relative)
                     }
                     close(child)
@@ -1347,7 +1375,8 @@ enum GatewayAdminRepair {
         let outcome = try restoreOwnership()
         try removeStagedGateway()
         output += outcome.summary
-        return (outcome.incomplete ? 1 : 0, output)
+        let code: Int32 = outcome.unfinished ? GatewayAdminPolicy.repairUnfinishedExitCode : outcome.incomplete ? 1 : 0
+        return (code, output)
     }
 }
 
@@ -1519,6 +1548,9 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
             reply(64, "Unsupported administrator gateway action. This helper only repairs a gateway an earlier DefenseClawMac version ran as administrator; it never starts one.")
             return
         }
+        // The walks stop in time for the reply to reach the app inside its
+        // budget (GAP-2003), counted from the request, as the app counts.
+        let walkDeadline = ContinuousClock.now.advanced(by: .seconds(GatewayAdminPolicy.repairWalkSeconds))
         lifetime.operationStarted()
         queue.async { [uid, lifetime] in
             defer { lifetime.operationFinished() }
@@ -1540,7 +1572,7 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
                         },
                         restoreOwnership: {
                             var outcome = try GatewayAdminOwnershipRepair.restore(
-                                home: installation.descriptor, to: (account.uid, account.gid))
+                                home: installation.descriptor, to: (account.uid, account.gid), until: walkDeadline)
                             guard let accountHome = try? GatewayAdminAgentConfigRepair.openAccountHome(
                                 account.home, uid: account.uid) else {
                                 outcome.incomplete = true
@@ -1548,7 +1580,7 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
                             }
                             defer { close(accountHome) }
                             outcome.merge(GatewayAdminAgentConfigRepair.restore(
-                                home: accountHome, to: (account.uid, account.gid)))
+                                home: accountHome, to: (account.uid, account.gid), until: walkDeadline))
                             // Held by an earlier repair of a folder neither walk reached now.
                             let unclaimed = GatewayAdminHandover.unclaimed(
                                 account: account.uid, roots: [installation.descriptor, accountHome])

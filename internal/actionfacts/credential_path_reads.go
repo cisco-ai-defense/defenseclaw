@@ -825,19 +825,23 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 				filter.rg = rgSearchFilterOf(command, argv, r.rgWorkingFolder(command))
 			}
 		}
-		base, placed := r.searchWorkFolder(command)
+		bases, placed := r.searchWorkFolders(command, program != "rg")
 		for _, index := range operands {
 			argument := command.Arguments[index]
 			r.argument(command.ID, argument, false)
-			if recursive && !argument.Expands && argument.Value != "" {
-				r.searchFolder(command.ID, argument.Value, base, placed, filter)
+			if folder := r.searchFolderWord(argument); recursive && folder != "" {
+				for _, base := range bases {
+					r.searchFolder(command.ID, folder, base, placed, filter)
+				}
 			}
 		}
 		if recursive && len(operands) == 0 && (program != "rg" || (!r.pipedStdin(command) && !parseRgCommandLine(argv).stdin)) {
 			// No folder operand: grep -r and rg search the working folder
 			// (an rg fed by a pipe, or given -, searches its input instead,
 			// substrate-1:GAP-0344).
-			r.searchFolder(command.ID, ".", base, placed, filter)
+			for _, base := range bases {
+				r.searchFolder(command.ID, ".", base, placed, filter)
+			}
 		}
 		return operands
 	case credentialReadsSources:
@@ -1575,25 +1579,70 @@ var credentialWalkSkips = map[string]bool{
 	".git": true, "node_modules": true, "site-packages": true, "dist-packages": true,
 }
 
-// searchWorkFolder is the folder a recursive search of command reads a
-// relative folder operand in: the call's folder, or the one the static cd
+// searchWorkFolders are the folders a recursive search of command reads a
+// relative folder operand in: the call's folder, or the ones the static cd
 // steps before it reach. placed is false where a cd moved the search to a
-// folder the walk cannot place. A relative folder was joined to the call's
-// folder whatever cd came before, so cd ~/.config && grep -r KEY gh read
-// nothing (substrate-1 GAP-0925).
-func (r *credentialPathResolver) searchWorkFolder(command CommandFact) (base string, placed bool) {
+// folder the walk cannot place (bases is then one ""). A relative folder was
+// joined to the call's folder whatever cd came before, so cd ~/.config &&
+// grep -r KEY gh read nothing (substrate-1 GAP-0925).
+//
+// A cd that may fail (cd P; grep -r KEY .) leaves the search in more than
+// one folder. When every one of them is a static folder, a grep search
+// (each) walks each, as the shell runs it in one of them; only an unresolved
+// folder is the file-unknown read. GAP-0925 read every such call as unplaced,
+// so an ordinary `cd /proj/docs; grep -rn TODO .` joined the chain's unknown
+// tier, and a later upload or scp alerted where 1.0.10 allowed (DET111 bar
+// p2hookc). rg (each false) keeps the unplaced reading: its globs match from
+// one working folder (rgWorkingFolder).
+func (r *credentialPathResolver) searchWorkFolders(command CommandFact, each bool) (bases []string, placed bool) {
+	unplaced := []string{""}
 	if command.Dialect != DialectPOSIX {
-		return r.cwd, !windowsWorkFolders(r.commands)[command.ID].moved()
+		return []string{r.cwd}, !windowsWorkFolders(r.commands)[command.ID].moved()
 	}
 	folders := command.workFolders
 	if !folders.moved() {
-		return r.cwd, r.outerCommandsStay(command)
+		return []string{r.cwd}, r.outerCommandsStay(command)
 	}
-	if len(folders) != 1 {
-		return "", false
+	if len(folders) == 1 {
+		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folders[0])
+		return []string{filepath.FromSlash(logical)}, ok
 	}
-	logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folders[0])
-	return filepath.FromSlash(logical), ok
+	if !each {
+		return unplaced, false
+	}
+	for _, folder := range folders {
+		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folder)
+		if !ok || logical != "" && !simplePathAbs(logical) {
+			return unplaced, false
+		}
+		if logical == "" {
+			// The hook folder when the hook gives none (its folder is not
+			// there): read as a search that does not move is, no folder and
+			// no walk, while the folder the cd reaches is still walked.
+			continue
+		}
+		if base := filepath.FromSlash(logical); !slices.Contains(bases, base) {
+			bases = append(bases, base)
+		}
+	}
+	return bases, true
+}
+
+// searchFolderWord is the folder a recursive search's operand names: its
+// static value, or the home folder an unquoted ~/ word names when the call
+// does not rebind HOME (ArgumentFact.homeTilde). The trusted home rewrite
+// places ~ in a lone command only, so in a list (a cd, a function call
+// before the search) the folder was never walked: `f(){ test -d .git &&
+// return; cd /; }; f && rg -g '/.env' KEY ~/proj` read proj/.env and
+// started no chain (substrate-1:GAP-0689, live TST-6432).
+func (r *credentialPathResolver) searchFolderWord(argument ArgumentFact) string {
+	if !argument.Expands {
+		return argument.Value
+	}
+	if r.home == "" {
+		return ""
+	}
+	return argument.homeTilde
 }
 
 // searchFolder resolves the credentials files under the folder a recursive
@@ -1611,6 +1660,8 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
+	} else if dir == "~" && r.home != "" {
+		dir = r.home
 	}
 	if !filepath.IsAbs(dir) {
 		if !placed {
@@ -1626,7 +1677,7 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	}
 	// The folder as rg names its paths: the shell expands ~/.
 	shown := folder
-	if strings.HasPrefix(shown, "~/") && r.home != "" {
+	if (shown == "~" || strings.HasPrefix(shown, "~/")) && r.home != "" {
 		shown = r.home + shown[1:]
 	}
 	key := credentialWalkKey{id: id, dir: filepath.Clean(dir), shown: shown}

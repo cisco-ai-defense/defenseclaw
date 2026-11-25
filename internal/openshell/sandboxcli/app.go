@@ -179,6 +179,10 @@ type App struct {
 	// decides dockerDesktopRefusal. It is also the doctor's probe
 	// (defaultDoctor): one probe for both (rel-1-0-10:GAP-1746).
 	DockerVMLandlock func(ctx context.Context) (abi int, kernel string, err error)
+	// doctorLandlock is the probe the last report's Landlock row asked
+	// (defaultDoctor: DockerVMLandlock, asked at most once per report),
+	// which the doctor's last line reads again (doctorRunRefusal).
+	doctorLandlock func(ctx context.Context) (abi int, kernel string, err error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// LifecycleDir is the OpenShell configuration directory whose gateway
@@ -224,6 +228,13 @@ type App struct {
 	// daemon, whose socket would start it: an account the organization does
 	// not allow sandboxes is refused with nothing started (GAP-0534).
 	ManagedAccountPolicy func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error)
+	// ManagedOrganizationOff asks the managed gateway whether the
+	// organization turned sandboxes off (openshell.enabled false), without
+	// the account's sandbox daemon (nil, or false, when this is no managed
+	// computer or the gateway does not answer). A run reads it before it
+	// refuses an account its profile denies, so the organization's switch
+	// is the reason given first, as it is in status and doctor.
+	ManagedOrganizationOff func(ctx context.Context) bool
 	// ManagedAccountHome is the home path the managed gateway exec shim
 	// resolves for this account, including directory accounts.
 	ManagedAccountHome func() (string, error)
@@ -666,9 +677,9 @@ func apiError(err error) error {
 				// is the organization's service, never a gateway command
 				// (GAP-0451).
 				if detail != "" {
-					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix)
+					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix())
 				}
-				return errors.New("your sandbox service does not answer; " + managedServiceFix)
+				return errors.New("your sandbox service does not answer; " + managedServiceFix())
 			}
 			if detail != "" {
 				return fmt.Errorf("the DefenseClaw daemon did not answer or could not be verified (%s); run `defenseclaw sandbox doctor`, and if it is stopped, start it with `defenseclaw-gateway start`", detail)

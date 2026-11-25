@@ -231,6 +231,20 @@ type agentHookResponse struct {
 	// ctx-injection is local to evaluate*). Never serialized on the
 	// hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// CompanionRedactionEnabled is the per-inspection directive for a distinct
+	// canonical prompt/response companion emitted for this hook. Present keeps
+	// an absent cloud directive distinct from hooks with no override.
+	CompanionRedactionEnabled *bool `json:"-"`
+	CompanionRedactionPresent bool  `json:"-"`
+	// ReasonRedactionEnabled scopes SourceReason when it came from a distinct
+	// companion inspection rather than the hook event content.
+	ReasonRedactionEnabled *bool `json:"-"`
+	ReasonRedactionPresent bool  `json:"-"`
+	// InspectedContent carries exact AI Defense input only for hooks without a
+	// companion canonical content event. It is emitted through the generated
+	// telemetry contract and is never serialized to connector clients.
+	InspectedContent        string `json:"-"`
+	InspectedContentPresent bool   `json:"-"`
 	// SourceReason is retained only for canonical v8 routing. Reason remains
 	// the connector-safe response projection and is never reused as source.
 	SourceReason string `json:"-"`
@@ -263,6 +277,26 @@ func hookSourceReason(resp agentHookResponse) string {
 		return resp.SourceReason
 	}
 	return resp.Reason
+}
+
+func hookSourceReasonForSink(ctx context.Context, resp agentHookResponse) string {
+	reason := hookSourceReason(resp)
+	if !resp.ReasonRedactionPresent {
+		return reason
+	}
+	return redaction.ReasonForSink(reason, hookReasonSinkPolicy(ctx, resp))
+}
+
+func hookReasonSinkPolicy(ctx context.Context, resp agentHookResponse) redaction.SinkPolicy {
+	if resp.ReasonRedactionPresent {
+		if !ManagedEnterpriseActive() {
+			return redaction.SinkPolicyDefault
+		}
+		// A present nil reason directive belongs to the reason inspection and
+		// fails closed. It must not inherit an event context stamped raw.
+		return managedSinkPolicy(resp.ReasonRedactionEnabled)
+	}
+	return sinkPolicyFor(ctx, resp.RedactionEnabled)
 }
 
 // agentHookDisconnectGrace bounds how long an accepted hook keeps working
@@ -1218,8 +1252,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// from this event's evaluation is now on ctx, so emit the deferred
 		// LLM event here — before finalize so the prompt/tool/response event
 		// still precedes the hook_decision event, preserving the OSS event
-		// ordering. Fails closed to redact when the AID lane returned no
-		// directive (resp.RedactionEnabled == nil).
+		// ordering. A distinct companion uses its own inspection directive;
+		// an absent directive fails closed instead of inheriting this event's.
 		if deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
 			telemetryCtx := ctx
 			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
@@ -1227,6 +1261,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
 				telemetryPersistenceCtx = telemetryCtx
 			}
+			telemetryCtx = withRedactionDecision(telemetryCtx, hookLLMEventRedactionDirective(resp))
 			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
@@ -1444,6 +1479,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeHookAnswer(w, body)
 		}
 	}
+}
+
+func hookLLMEventRedactionDirective(resp agentHookResponse) *bool {
+	if resp.CompanionRedactionPresent {
+		return resp.CompanionRedactionEnabled
+	}
+	return resp.RedactionEnabled
 }
 
 // hookAnswerBody is the wire body of the hook answer resp, ready to write.
@@ -1683,7 +1725,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
-		Reason:       hookSourceReason(resp),
+		Reason:       hookSourceReasonForSink(ctx, resp),
 		WouldBlock:   resp.WouldBlock,
 		ElapsedMs:    elapsed.Milliseconds(),
 		BodyBytes:    int64(len(rawBody)),
@@ -2064,10 +2106,10 @@ func (a *APIServer) dispatchFinalizedAgentHookNotification(
 		resp.Action,
 		resp.RawAction,
 		resp.Severity,
-		hookSourceReason(resp),
+		hookSourceReasonForSink(ctx, resp),
 		resp.WouldBlock,
 		hookEvaluationContext{EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs},
-		sinkPolicyFor(ctx, resp.RedactionEnabled),
+		hookReasonSinkPolicy(ctx, resp),
 	)
 }
 
@@ -2349,7 +2391,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		RawAction:           resp.RawAction,
 		Severity:            resp.Severity,
 		Mode:                resp.Mode,
-		Reason:              hookSourceReason(resp),
+		Reason:              hookSourceReasonForSink(ctx, resp),
 		WouldBlock:          resp.WouldBlock,
 		ElapsedMs:           elapsed.Milliseconds(),
 		BodyBytes:           int64(len(rawBody)),
@@ -2819,10 +2861,10 @@ func (a *APIServer) hookFailedCheckResponse(
 				connectorName, req.HookEventName, recovered)
 			out = resp
 			out.HookOutput = failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, plain, resp.AdditionalContext)
-			out = lifecycleOutput(out)
+			out = withCopilotBlockedPrompt(req, lifecycleOutput(out))
 		}
 	}()
-	return lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
+	return withCopilotBlockedPrompt(req, lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)))
 }
 
 // failedCheckNativeAction is the closed answer of a failed check (and of a
@@ -2851,7 +2893,23 @@ func failedCheckNativeAction(ctx context.Context, profile connector.HookProfile,
 	if everyNativeBlock && action == "allow" && nativeOnlyBlockEvent(connectorName, req.HookEventName) {
 		return "block", false
 	}
+	if action == "allow" && copilotBlockedPromptRewrite(req, "action", "block") {
+		// The gateway's replacement is the block of a Copilot CLI prompt
+		// (GAP-1730), so a closed failed check replaces it too
+		// (withCopilotBlockedPrompt, GAP-1753).
+		return "block", false
+	}
 	return action, wouldBlock
+}
+
+// withCopilotBlockedPrompt gives a blocked Copilot CLI prompt of a failed
+// check the generic replacement, the hook output that carries the block
+// (GAP-1753). Any other answer is returned unchanged.
+func withCopilotBlockedPrompt(req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if resp.Action == "block" && copilotBlockedPromptRewrite(req, "action", "block") {
+		resp.HookOutput = copilotBlockedPromptOutput(req, "action", "block", nil, resp.HookOutput)
+	}
+	return resp
 }
 
 // nativeOnlyBlockEvent names the events whose native hook can block although
@@ -3943,8 +4001,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// profile an action-mode block replaces userPromptTransformed before the
 	// model sees it (GAP-1730). Record that completed replacement as the
 	// effective block; observe mode and every non-rewrite path keep their
-	// mapped outcome.
-	if copilotBlockedPromptRewrite(req, mode, rawAction) {
+	// mapped outcome. The mode is the enforced one, as for every other event
+	// (GAP-1753).
+	if copilotBlockedPromptRewrite(req, effectiveMode, rawAction) {
 		action, wouldBlock = "block", false
 		aiDefenseEnforced = verdict.aiDefenseBlock
 	}
@@ -3970,7 +4029,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
-	resp.HookOutput = copilotBlockedPromptOutput(req, mode, rawAction, findings, resp.HookOutput)
+	resp.HookOutput = copilotBlockedPromptOutput(req, effectiveMode, rawAction, findings, resp.HookOutput)
 	// Secure Client keeps the block message as the reason of the hook
 	// records (issue #1092).
 	if !a.managedAIDOnly() {

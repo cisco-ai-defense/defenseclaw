@@ -24,8 +24,9 @@ import (
 )
 
 // B5.4 S3: the sidecar's per-scan timeout is substrate.skills.scan.timeout,
-// and gateway.skillScanner.enabled: false turns the gateway's scan off in
-// config.yaml (no sidecar, so the fail mode decides; managed refuses).
+// and gateway.skillScanner.enabled: false (the default, GAP-1103) turns the
+// gateway's scan off in config.yaml (no sidecar, so the fail mode decides;
+// managed refuses).
 func TestChartSkillScanKeys(t *testing.T) {
 	helm := helmBinary(t)
 	for _, tc := range []struct {
@@ -33,8 +34,9 @@ func TestChartSkillScanKeys(t *testing.T) {
 		wantTimeout string
 		wantOff     bool
 	}{
-		{nil, "--timeout=20s", false},
-		{[]string{"--set", "config.substrate.skills.scan.timeout=45s"}, "--timeout=45s", false},
+		{nil, "", true},
+		{[]string{"--set", "gateway.skillScanner.enabled=true"}, "--timeout=20s", false},
+		{[]string{"--set", "gateway.skillScanner.enabled=true", "--set", "config.substrate.skills.scan.timeout=45s"}, "--timeout=45s", false},
 		{[]string{"--set", "gateway.skillScanner.enabled=false"}, "", true},
 	} {
 		out := renderChart(t, helm, "default", tc.extra...)

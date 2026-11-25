@@ -452,3 +452,38 @@ func TestManagedStatusSaysTheRequestLimitRefusedThePolicyRead(t *testing.T) {
 		t.Fatalf("unreachable managed status = %+v, %v", st, err)
 	}
 }
+
+// rel-1-0-10:GAP-1779: a daemon that started while the organization had
+// sandboxes off (the account's daemon ran before ensure turned
+// openshell on) kept "sandboxes are turned off by your organization" in
+// sandbox doctor and sandbox run until it restarted. Status and a create
+// read the managed settings again once they are stale, so the enable
+// reaches a running daemon within sandboxDaemonSettingsTTL.
+func TestGAP1779ARunningDaemonSeesSandboxesTurnedOn(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	on := false
+	f.relay.settings = func() (sandboxrelay.DaemonSettings, error) {
+		s := f.d.currentSettings()
+		s.Enabled, s.Available, s.Unavailable = on, on, ""
+		if !on {
+			s.Unavailable = sandboxUnavailableOff
+		}
+		return s, nil
+	}
+	f.d.settingsMu.Lock()
+	f.d.settings.Enabled, f.d.settings.Available, f.d.settings.Unavailable = false, false, sandboxUnavailableOff
+	f.d.settingsMu.Unlock()
+	f.d.reloadConfig()
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	st, err := client.Status(context.Background())
+	if err != nil || st.Enabled || st.Managed == nil || !strings.Contains(st.Managed.Unavailable, "turned off by your organization") {
+		t.Fatalf("sandboxes off: %+v, %v", st, err)
+	}
+	on = true
+	f.d.settingsAt.Store(time.Now().Add(-sandboxDaemonSettingsTTL - time.Second).UnixNano())
+	st, err = client.Status(context.Background())
+	if err != nil || !st.Enabled || st.Managed == nil || st.Managed.Unavailable != "" {
+		t.Fatalf("after the organization turned sandboxes on, the running daemon still says: %+v, %v", st, err)
+	}
+}

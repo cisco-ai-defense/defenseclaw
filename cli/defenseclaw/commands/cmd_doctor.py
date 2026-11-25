@@ -9752,6 +9752,86 @@ def _codex_effective_config_path(cfg) -> str:
     return os.path.join(codex_home(), "config.toml")
 
 
+def _codex_app_server_processes() -> list[tuple[int, float]]:
+    """(PID, start time in epoch seconds) of each running `codex app-server` this account can see, or [].
+
+    Windows lists codex.exe through CIM, where a standard account sees the
+    command line of its own processes only; elsewhere `ps -u <uid>`. Any
+    failure is [] (the doctor row is advisory, GAP-1938).
+    """
+    import re
+    import subprocess
+    import time
+
+    pattern = re.compile(r"(^|[\\/\s])codex(\.js|\.exe)?\"?\s(.*\s)?app-server(\s|$)", re.IGNORECASE)
+    found: list[tuple[int, float]] = []
+    try:
+        if os.name == "nt":
+            powershell = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+            )
+            script = (
+                "Get-CimInstance Win32_Process -Filter \"Name='codex.exe'\" | "
+                "Where-Object { $_.CommandLine } | ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId, "
+                "([DateTimeOffset]$_.CreationDate).ToUnixTimeSeconds(), $_.CommandLine }"
+            )
+            done = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=20, check=False, stdin=subprocess.DEVNULL,
+            )
+            for line in done.stdout.splitlines():
+                pid, started, command = (line.split("|", 2) + ["", ""])[:3]
+                if pid.strip().isdigit() and started.strip().isdigit() and pattern.search(command):
+                    found.append((int(pid), float(started)))
+            return found
+        done = subprocess.run(
+            ["ps", "-u", str(os.getuid()), "-o", "pid=,lstart=,args="],
+            capture_output=True, text=True, timeout=10, check=False, stdin=subprocess.DEVNULL,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        for line in done.stdout.splitlines():
+            parts = line.split(None, 6)
+            if len(parts) < 7 or not parts[0].isdigit() or not pattern.search(parts[6]):
+                continue
+            started = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+            found.append((int(parts[0]), started))
+    except (OSError, ValueError, subprocess.SubprocessError, OverflowError):
+        return []
+    return found
+
+
+def _check_codex_app_server_age(cfg, r: _DoctorResult) -> None:
+    """Name a codex app-server older than DefenseClaw's Codex token (GAP-1938).
+
+    The daemon outlives its sessions and keeps the credentials it started
+    with, so after a reinstall Codex can answer 401 until it restarts.
+    Advisory only: doctor never stops the process.
+    """
+    token = os.path.join(cfg.data_dir, "hooks", ".hook-codex.token")
+    try:
+        written = os.stat(token).st_mtime
+    except OSError:
+        return
+    stale = sorted((pid, started) for pid, started in _codex_app_server_processes() if started < written - 1)
+    if not stale:
+        return
+
+    def _utc(value: float) -> str:
+        return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+    names = ", ".join(f"PID {pid} (started {_utc(started)})" for pid, started in stale)
+    pids = ", ".join(str(pid) for pid, _ in stale)
+    stop = f"Stop-Process -Id {pids}" if os.name == "nt" else f"kill {' '.join(str(pid) for pid, _ in stale)}"
+    _emit(
+        "warn",
+        "Codex app-server",
+        f"codex app-server {names} started before DefenseClaw last wrote its Codex token ({_utc(written)}); "
+        "it keeps the credentials it started with, so Codex can answer 401 until it restarts",
+        r=r,
+        remediation=f"run 'codex app-server daemon restart', or stop it ({stop}); DefenseClaw does not stop it for you",
+    )
+
+
 def _check_codex_hooks(
     cfg,
     r: _DoctorResult,
@@ -12948,6 +13028,7 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_claudecode_hooks(cfg, r)
     elif connector == "codex":
         _check_codex_hooks(cfg, r)
+        _check_codex_app_server_age(cfg, r)
     elif connector == "devin":
         _check_devin_hooks(cfg, r)
     elif connector == "hermes":

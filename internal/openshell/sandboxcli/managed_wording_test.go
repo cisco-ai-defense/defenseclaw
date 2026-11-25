@@ -42,7 +42,7 @@ func TestManagedSandboxMessagesShowNoInternalText(t *testing.T) {
 		"the connection failed before it answered",
 	} {
 		err := apiError(&sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: cause})
-		want := "your sandbox service does not answer (" + cause + "); " + managedServiceFix
+		want := "your sandbox service does not answer (" + cause + "); " + managedServiceFix()
 		if err.Error() != want {
 			t.Fatalf("daemon down: %q, want %q", err.Error(), want)
 		}

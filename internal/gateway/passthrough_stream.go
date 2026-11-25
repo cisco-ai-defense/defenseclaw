@@ -370,7 +370,7 @@ func (s *passthroughStream) run() {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.String(), label, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.CheckText(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -400,6 +400,30 @@ func (s *passthroughStream) run() {
 		secretOpen, secretKey = false, false
 		return boundHit(c, why)
 	}
+	// maskParkedReasoning preserves an unresolved reasoning run without
+	// holding unrelated answer events behind it (GAP-2170). The existing
+	// lane-aware mask validator refuses an event it cannot rewrite safely.
+	maskParkedReasoning := func() bool {
+		// Anthropic and Bedrock sign thinking blocks. A masked byte with the
+		// original signature breaks the next tool turn. Only OpenAI reasoning
+		// is unsigned, so signed providers keep the original queued hold.
+		if s.provider != "openai" || relN == 0 {
+			return false
+		}
+		runs := accumulated.ParkedReasoningRuns()
+		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
+		if !ok {
+			return false
+		}
+		for i, ev := range masked {
+			queueBytes += len(ev) - len(queue[i])
+			queue[i] = ev
+		}
+		for _, run := range runs {
+			maskedRuns[run.lane] = [2]int{run.start, run.start + len(run.text)}
+		}
+		return true
+	}
 	// secretWait reports that nothing may be sent now: the text ends inside
 	// an open secret (rel-1-0-10:GAP-0429, stream_secret_hold.go). ok is
 	// false when a bound on it blocked.
@@ -409,6 +433,10 @@ func (s *passthroughStream) run() {
 		}
 		o := accumulated.OpenSecret()
 		secretOpen, secretKey = o.open, o.pem
+		if o.reasoningOnly && maskParkedReasoning() {
+			secretOpen = false
+			return false, true
+		}
 		switch {
 		case !o.open:
 			return false, true
@@ -454,7 +482,16 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		runs := accumulated.OpenRuns()
-		masked, ok := s.maskHeld(queue, relN, runs, maskedRuns)
+		// Bedrock reasoning can be signed and must reach the client unchanged.
+		// Other Bedrock lanes still use the masked quiet release of GAP-1307.
+		if s.provider == "bedrock" {
+			for _, run := range runs {
+				if run.key.field == responseFieldReasoning {
+					return true
+				}
+			}
+		}
+		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
 		if !ok {
 			return true // it cannot be masked: everything stays held
 		}
@@ -534,8 +571,9 @@ func (s *passthroughStream) run() {
 			}
 		}
 		if accumulated.Len() > lastScanLen {
-			initVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
-				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+			checkContent := accumulated.CheckText()
+			initVerdict := p.inspector.InspectMidStream(ctx, "completion", checkContent,
+				[]ChatMessage{{Role: "assistant", Content: checkContent}}, label, mode)
 			p.resolveConfirm(ctx, r, initVerdict, "completion", label, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
@@ -1003,8 +1041,9 @@ read:
 
 		postCtx, postCancel := p.postCallContext(ctx)
 		t0 := time.Now()
-		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
+		checkContent := accumulated.CheckText()
+		respMessages := []ChatMessage{{Role: "assistant", Content: checkContent}}
+		verdict := p.inspector.Inspect(postCtx, "completion", checkContent, respMessages, label, mode)
 		postCancel()
 		p.resolveConfirm(ctx, r, verdict, "completion", label, mode)
 		elapsed := time.Since(t0)

@@ -928,6 +928,18 @@ func dispatchTrustedActionOnce(
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
+	// The same reading judges a write of a shell startup profile spelled
+	// relative to that directory (echo x >> .bashrc in the home, a function
+	// that may return before its cd): only its shell-profile finding counts
+	// (substrate-1:GAP-1090).
+	if twin, ok := protectedHomeShellProfileTwinRequest(request); ok {
+		defer func() {
+			twinFindings := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return trustedActionFindingKey(f.RuleID) != trustedActionFindingKey(shellProfileWriteRule)
+			})
+			findings = withTwinProvenBlocks(findings, twinFindings)
+		}()
+	}
 	// A file writer or a shell run through any static prefix wrapper
 	// (nohup, nice, setsid, stdbuf, ionice, sudo, ...; or after a word that
 	// may expand to nothing) writes what the plain call does (GAP-2512,
@@ -2224,6 +2236,14 @@ func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedA
 // tamper.detector_state_write finding of a proven mutation of the active
 // state: the one finding observe mode still blocks on where the pack blocks
 // it (provenActiveStateMutation).
+// stateCheckUnansweredTitle and stateCheckUnansweredTag name a state-write
+// refusal whose only cause is a local read that did not answer in time
+// (hookpaths.StateCheckUnanswered).
+const (
+	stateCheckUnansweredTitle = "DefenseClaw could not check this write target in time (a local folder read did not answer); retry the command"
+	stateCheckUnansweredTag   = "state-check-unanswered"
+)
+
 func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
 	// This protection belongs to the gateway. A selected pack may omit or
@@ -2264,6 +2284,14 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 	finding.Severity = severity
 	finding.Title = canonical.Title
 	finding.Tags = canonical.Tags
+	if hookpaths.StateCheckUnanswered() {
+		// The target was refused because a local read it needed did not
+		// answer in time, not because it is known to be state: say so, so
+		// the user retries, and tag the row so these refusals can be
+		// counted apart (rel-1-0-10:GAP-1805).
+		finding.Title = stateCheckUnansweredTitle
+		finding.Tags = append(slices.Clone(canonical.Tags), stateCheckUnansweredTag)
+	}
 	finding.enforcement = findingEnforcementDetectionOnly
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed
@@ -4597,6 +4625,51 @@ func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedAc
 	return twin, true
 }
 
+// shellProfileWriteRule is the rule of a write of a shell startup profile.
+const shellProfileWriteRule = "persistence.shell_profile_write"
+
+// shellProfileNames are the file names matchesShellProfileCandidate reads
+// as a shell startup profile, in lower case.
+var shellProfileNames = []string{".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc", "config.fish", "profile.ps1"}
+
+// protectedHomeShellProfileTwinRequest returns the call of a managed hook
+// peer placed in the directory the hook client ran it in
+// (protectedHomeClientDirectory), when its text names a shell startup
+// profile. Without a cwd of its own the gateway read `echo x >> .bashrc`
+// and `echo x >> ./.bashrc` from the home as writes of no known file, and
+// the function rows of GAP-0690, 0693, 0694 and 0711 the same, so a managed
+// peer was allowed what a per-user gateway alerts (default) or blocks
+// (strict) as persistence.shell_profile_write (substrate-1:GAP-1090, live
+// on dc-ent-rhel). The placed reading is the per-user one; the caller keeps
+// only its shell-profile finding.
+//
+// The per-user reading includes the cap floor (withCapFloor): a function
+// whose body runs a command the split cannot read (`f(){ $y; }`, `"$@"`,
+// `$r ~`, `eval "$c"`) puts the call at the unknown tier, and the floor
+// judges the piece `echo x >> .bashrc` alone in the folder, where it is the
+// profile write. The twin is built after the call registered its own floor,
+// in no folder, so a twin of the hook call itself gets a floor of its own in
+// the client directory (substrate-1:GAP-1091). A piece twin's profile twin
+// keeps the call's floor: its pieces are already the call's.
+func protectedHomeShellProfileTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
+	if !slices.ContainsFunc(shellProfileNames, func(name string) bool { return strings.Contains(text, name) }) {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.conflictSource = nil
+	twin.Input.CWD = cwd
+	if request.capFloorDepth == 0 {
+		twin.capFloor, twin.capFloorSeen = nil, false
+	}
+	return twin, true
+}
+
 // hasGitHookMutationCandidate avoids a second parse for text mentions and
 // inactive hook names. A CWD changes path placement, not the parsed access
 // or the command's mutation role.
@@ -5347,7 +5420,16 @@ func fileToolWriteThroughLinkToState(facts actionfacts.Facts, request trustedAct
 			}
 		}
 		if physical == "" && filepath.IsAbs(candidate.Resolved) && !request.SkipLocalFilesystemResolution {
-			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			var resolved bool
+			physical, resolved = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			if !resolved {
+				// A target whose own local read did not answer is not
+				// proved free of the state, as in linkedActiveStateWrite
+				// (rel-1-0-10:GAP-1804, GAP-1805).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 		}
 		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(candidate.Resolved) {
 			continue

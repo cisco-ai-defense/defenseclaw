@@ -21,6 +21,20 @@ assets under `schemas/telemetry/runtime/` are generated outputs. Edit the v8
 registry/domain YAML, run `make telemetry-generate`, review the generated diff,
 and verify it with `make telemetry-check`. Do not hand-edit those outputs.
 
+Connector hook decisions carry canonical `gen_ai.input.messages` only when
+`guardrail.include_hook_event_content` is `true` in `config.yaml` (off by
+default; in managed mode the administrator's config sets it), that normalized
+content was submitted to the Cisco AI Defense hook lane, and no prompt/tool
+companion event represents it. With the key off the content is still inspected
+and the verdict is the same; only the telemetry copy is left out. Local rules and the optional judge
+do not establish this submission provenance. The generated content helper
+bounds the field, and destination projection applies the same request-scoped
+managed-enterprise redaction decision as the verdict. When the cloud returns no
+redaction directive, embedded bearer credentials are removed from the retained
+telemetry copy before persistence; explicit cloud directives remain
+authoritative. Unsubmitted lifecycle
+payloads and raw connector envelopes are never promoted into this field.
+
 The exhaustive generated configuration-field reference is
 [`schemas/config/v8/reference/observability.md`](../schemas/config/v8/reference/observability.md).
 It is a schema artifact, not a second operator guide.

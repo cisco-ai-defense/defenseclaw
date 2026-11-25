@@ -43,7 +43,15 @@ def routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     launches: list[tuple[str, list[str], bytes]] = []
 
     def launch(
-        path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None, wait: bool = False
+        path: str,
+        args: list[str],
+        workdir: str,
+        *,
+        rerun: str,
+        newer: str | None = None,
+        wait: bool = False,
+        detach: bool = False,
+        packs: object = None,
     ) -> int:
         assert os.path.dirname(path) == workdir
         launches.append((path, args, Path(path).read_bytes()))

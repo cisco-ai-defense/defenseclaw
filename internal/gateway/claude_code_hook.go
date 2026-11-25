@@ -18,10 +18,12 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -120,16 +123,80 @@ type claudeCodeHookResponse struct {
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
-	RedactionEnabled     *bool  `json:"-"`
-	SourceReason         string `json:"-"`
-	SuppressNotification bool   `json:"-"`
-	aiDefenseEnforced    bool
+	RedactionEnabled *bool `json:"-"`
+	// CompanionRedactionEnabled is the cloud directive for a distinct canonical
+	// companion event (currently a SubagentStart task prompt). Present keeps a
+	// nil directive distinct from no companion override, so managed projection
+	// can fail closed for that prompt without inheriting the event directive.
+	CompanionRedactionEnabled *bool `json:"-"`
+	CompanionRedactionPresent bool  `json:"-"`
+	// ReasonRedactionEnabled scopes SourceReason when a merged companion
+	// inspection supplied it. The hook event content keeps its own directive.
+	ReasonRedactionEnabled *bool `json:"-"`
+	ReasonRedactionPresent bool  `json:"-"`
+	// InspectedContent is the exact event content sent to AI Defense when the
+	// hook has no companion canonical prompt/tool event. It stays in-process so
+	// the hook_decision emitter can publish the generated, centrally-redacted
+	// gen_ai.input.messages field without changing the connector response.
+	InspectedContent        string `json:"-"`
+	InspectedContentPresent bool   `json:"-"`
+	SourceReason            string `json:"-"`
+	SuppressNotification    bool   `json:"-"`
+	aiDefenseEnforced       bool
 	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
 	// (Cisco AI Defense, LLM judge) took part in the verdict. The
 	// sandbox-unblock lift (liftUnblockedDestinations) refuses to lift
 	// a response flagged this way, since destination rules alone did
 	// not decide the verdict. Never serialized on the wire.
 	laneVerdict bool
+}
+
+var inspectedAuthorizationCredential = regexp.MustCompile(`(?i)((?:\bauthorization["']?[ \t]*[:=][ \t]*["']?)?\b(?:bearer|basic)(?:[ \t]+|\\(?:u0020|u0009|t)))([A-Za-z0-9._~+/=-]+)`)
+
+// redactInspectedAuthorizationCredentials removes Basic and Bearer values from the telemetry
+// copy of submitted event content when AI Defense supplied no redaction
+// directive. The submitted payload itself is unchanged; an explicit cloud
+// directive remains authoritative at the downstream projection boundary.
+func redactInspectedAuthorizationCredentials(content string) string {
+	return inspectedAuthorizationCredential.ReplaceAllStringFunc(content, func(match string) string {
+		parts := inspectedAuthorizationCredential.FindStringSubmatchIndex(match)
+		if len(parts) < 6 {
+			return match
+		}
+		prefix, credential := match[:parts[4]], match[parts[4]:parts[5]]
+		lowerPrefix := strings.ToLower(prefix)
+		// Explicit Authorization headers are credentials even when malformed,
+		// and Bearer values are opaque by definition. A bare Basic phrase is
+		// only a credential when it decodes to the RFC 7617 user:password form.
+		token := credential
+		if !strings.Contains(lowerPrefix, "authorization") && strings.Contains(lowerPrefix, "basic") {
+			// Sentence punctuation is not part of a bare Basic value. Accept the
+			// standard/raw and URL-safe encodings seen in connector text.
+			token = strings.TrimRight(credential, ".")
+			decoded, ok := decodeInspectedBasicCredential(token)
+			if !ok || !strings.Contains(string(decoded), ":") {
+				return match
+			}
+		}
+		return prefix + redaction.ForSinkEntity(token) + credential[len(token):] + match[parts[5]:]
+	})
+}
+
+func decodeInspectedBasicCredential(token string) ([]byte, bool) {
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		decoded, err := encoding.DecodeString(token)
+		if err == nil {
+			return decoded, true
+		}
+	}
+	return nil, false
+}
+
+func redactInspectedTelemetryCredentials(content string) string {
+	content = redactInspectedAuthorizationCredentials(content)
+	return observabilityredaction.RedactURLQueryCredentialsForCompatibility(content)
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -160,6 +227,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	cfg := a.decisionConfig(ctx)
 	ctx = withCascadeTrace(ctx, cfg, "claudecode")
 	var assetDecisions []runtimeAssetDecision
+	var inspectedContent string
+	var companionRedactionEnabled *bool
+	var companionRedactionPresent bool
+	var reasonRedactionEnabled *bool
+	var reasonRedactionPresent bool
+	var inspectedContentPresent bool
 	switch req.HookEventName {
 	case "SessionStart":
 		// The project's skill folders are admitted before the first prompt
@@ -306,7 +379,19 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// only and can never retract text already being displayed.
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Delta, Direction: "response", Connector: "claudecode"})
 	case "StopFailure":
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
+		// StopFailure's inspected error/error_details are distinct from the
+		// optional last_assistant_message emitted as a model.response companion.
+		// Retain the normalized submitted error content on hook_decision even when a
+		// model-response companion has the same text. Destinations may collect
+		// guardrail.evaluation without model.io and still need the inspected evidence.
+		inspectedContent = claudeCodeToolOutput(req)
+		if !a.managedAIDOnly() {
+			inspectedContent = withoutBlockMessageEcho(cfg, "claudecode", inspectedContent)
+		}
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
+			Tool: "message", Content: inspectedContent, Direction: "tool_result", Connector: "claudecode",
+			blockMessageEchoNormalized: !a.managedAIDOnly(),
+		})
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -314,7 +399,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
-			inspectReq := claudeCodeContentInspectRequest(claudeCodeEventContent(req), "prompt")
+			inspectedContent = claudeCodeEventContent(req)
+			inspectReq := claudeCodeContentInspectRequest(inspectedContent, "prompt")
 			// A FileChanged note on a state or settings file Claude Code keeps
 			// for itself is housekeeping: the path is the only text, the event
 			// cannot block, and the judge read it as sensitive file access
@@ -322,12 +408,58 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			inspectReq.skipJudge = req.HookEventName == "FileChanged" && claudeCodeOwnStateFile(req.FilePath)
 			verdict = a.inspectMessageContent(ctx, inspectReq)
 		}
-	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
+	case "SubagentStart":
+		// The task has a companion prompt event. Retain submitted event text
+		// only when it contains content distinct from that prompt. Without a
+		// reported task, the companion uses a synthetic lifecycle fallback,
+		// so any nonempty connector event text is distinct.
+		eventContent := claudeCodeEventContent(req)
+		canonicalPrompt := claudeCodeSubagentPrompt(req, "")
+		if strings.TrimSpace(eventContent) == "" {
+			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(canonicalPrompt, "prompt"))
+		} else {
+			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(eventContent, "prompt"))
+			if strings.TrimSpace(canonicalPrompt) != "" &&
+				strings.TrimSpace(canonicalPrompt) != strings.TrimSpace(eventContent) {
+				eventRedactionEnabled := verdict.RedactionEnabled
+				promptVerdict := a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(canonicalPrompt, "prompt"))
+				reasonFromPrompt := promptVerdict != nil &&
+					guardrailSeverityRank(promptVerdict.Severity) > guardrailSeverityRank(verdict.Severity)
+				if promptVerdict != nil {
+					companionRedactionEnabled = promptVerdict.RedactionEnabled
+				}
+				companionRedactionPresent = true
+				verdict = mergeCodexToolResultVerdicts(verdict, promptVerdict)
+				// The merged action covers both inspections, but the hook_decision
+				// content is eventContent. Keep its directive scoped to that text.
+				verdict.RedactionEnabled = eventRedactionEnabled
+				if reasonFromPrompt {
+					reasonRedactionEnabled = promptVerdict.RedactionEnabled
+					reasonRedactionPresent = true
+				}
+			}
+		}
+		if strings.TrimSpace(eventContent) != "" && strings.TrimSpace(eventContent) != strings.TrimSpace(canonicalPrompt) {
+			inspectedContent = eventContent
+		}
+	case "CwdChanged", "DirectoryAdded", "WorktreeRemove",
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
 		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
+		inspectedContent = claudeCodeEventContent(req)
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
-			claudeCodeEventContent(req), "prompt",
+			inspectedContent, "prompt",
 		))
+	}
+	if strings.TrimSpace(inspectedContent) != "" && verdict != nil && verdict.aiDefenseSubmitted &&
+		cfg != nil && cfg.Guardrail.IncludeHookEventContent {
+		inspectedContentPresent = true
+	} else {
+		// Do not retain or emit content handled only by local rules or the
+		// optional judge: the canonical field is evidence of AID submission.
+		// Submitted content is exported only with the opt-in
+		// guardrail.include_hook_event_content (off by default); the
+		// inspection above ran either way, so the verdict does not depend on it.
+		inspectedContent = ""
 	}
 
 	// Inject the cloud-controlled per-inspection redaction directive
@@ -382,6 +514,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// the generic hook path. Secure Client keeps the verdict reason (issue
 	// #1092).
 	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
+	if reasonRedactionPresent && ManagedEnterpriseActive() {
+		policy = managedSinkPolicy(reasonRedactionEnabled)
+	}
 	if !a.managedAIDOnly() {
 		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
 			evalCtx.RuleIDs, policy)
@@ -424,6 +559,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RuleNames = hookResponseRuleNames(resp.RuleIDs, evalCtx)
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.CompanionRedactionEnabled = companionRedactionEnabled
+	resp.CompanionRedactionPresent = companionRedactionPresent
+	resp.ReasonRedactionEnabled = reasonRedactionEnabled
+	resp.ReasonRedactionPresent = reasonRedactionPresent
+	resp.InspectedContent = inspectedContent
+	resp.InspectedContentPresent = inspectedContentPresent
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	resp.laneVerdict = verdict.laneVerdict
@@ -1082,6 +1223,16 @@ func claudeCodeEventContent(req claudeCodeHookRequest) string {
 		claudeCodePayloadString(req.Payload, "reason"),
 	}
 	return strings.Join(nonEmptyStrings(fields...), "\n")
+}
+
+// claudeCodeSubagentPrompt selects the same reported task for inspection and
+// the companion prompt event. The emitter supplies its lifecycle fallback
+// when Claude Code reports no task, prompt, or description.
+func claudeCodeSubagentPrompt(req claudeCodeHookRequest, fallback string) string {
+	if prompt := firstString(req.Payload, "task", "prompt", "description"); prompt != "" {
+		return prompt
+	}
+	return fallback
 }
 
 func nonEmptyStrings(values ...string) []string {

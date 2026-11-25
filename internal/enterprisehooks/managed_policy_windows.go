@@ -1798,6 +1798,10 @@ type windowsClaudeRecordedRenderKey struct {
 	contract       string
 	lock           bool
 	form           windowsClaudeRecordedForm
+	// delivery is the hook delivery the render reads
+	// (renderWindowsClaudeRecordedPolicyForm): a rendering made for one
+	// delivery mode never answers for the other (GAP-1761).
+	delivery bool
 }
 
 // windowsClaudeRecordedRenders keeps the recorded-form renderings of one
@@ -1828,6 +1832,7 @@ func (r *windowsClaudeRecordedRenders) render(
 		contract:       contract,
 		lock:           lock,
 		form:           resolved,
+		delivery:       secureClientHookDelivery() || resolved == windowsClaudeFormDirect,
 	}
 	if body, ok := r.bodies[key]; ok {
 		return body, nil

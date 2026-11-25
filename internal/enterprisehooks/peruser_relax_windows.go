@@ -149,10 +149,6 @@ func restoreWindowsRelaxedPerUserDirectories(target windowsGenericManagedTarget,
 	return errors.Join(failures...)
 }
 
-// windowsSetupRelaxedDirectorySDDL is the owner-private DACL a connector
-// setup needs on a guardian-hardened directory (managed.WindowsSetupRelaxedDirectorySDDL).
-const windowsSetupRelaxedDirectorySDDL = managed.WindowsSetupRelaxedDirectorySDDL
-
 // relaxWindowsStandalonePerUserDirectory returns one guardian-hardened
 // directory to the owner-private setup shape and reports whether it changed
 // it. It sets the DACL of that directory only. SetNamedSecurityInfo also
@@ -213,7 +209,7 @@ func relaxWindowsStandalonePerUserDirectory(target windowsGenericManagedTarget, 
 		// owner-private shape; a user's own directories are never rewritten.
 		return false, nil
 	}
-	private, err := windows.SecurityDescriptorFromString(windowsSetupRelaxedDirectorySDDL)
+	private, err := windows.SecurityDescriptorFromString(managed.WindowsSetupRelaxedDirectorySDDL)
 	if err != nil {
 		return false, err
 	}

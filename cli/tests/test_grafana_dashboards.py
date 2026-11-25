@@ -4183,6 +4183,25 @@ def test_tokenomics_dashboard_prometheus_queries_use_only_the_three_instruments(
     assert seen == set(_TOKENOMICS_METRICS)
 
 
+def test_tokenomics_interval_panels_count_the_first_sample_of_a_new_series() -> None:
+    """GAP-2030: increase() over a counter counts nothing for the first sample
+    of a series, so a model or connector used once vanished from every
+    per-interval panel and those panels totalled less than the stat panel. A
+    series with no value one interval earlier contributes its first value."""
+    checked = 0
+    for title, expression in _tokenomics_targets("prometheus"):
+        if "$__rate_interval" not in expression:
+            continue
+        calls = re.findall(
+            r"increase\((defenseclaw_[A-Za-z_]+_total(?:\{[^}]*\})?)\[\$__rate_interval\]\)", expression
+        )
+        assert calls and len(calls) == expression.count("increase("), title
+        for selector in calls:
+            assert f"{selector} unless {selector} offset $__interval" in expression, title
+        checked += 1
+    assert checked >= 10
+
+
 def test_tokenomics_dashboard_log_panels_read_registered_model_usage_fields() -> None:
     registry = _genai_registry()
     registered = {

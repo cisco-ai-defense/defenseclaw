@@ -1863,7 +1863,7 @@ spec:
       # service-account token (the pod mounts none by default and this
       # container lists only its two folders), no port.
       - name: skill-scanner
-        image: ghcr.io/cisco-ai-defense/defenseclaw-scanner:1.0.11
+        image: registry.example.com/defenseclaw-scanner@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
         imagePullPolicy: IfNotPresent
         args:
         - substrate

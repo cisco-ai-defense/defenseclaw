@@ -141,7 +141,10 @@ type SubstrateSelfServiceSecretsConfig struct {
 	// Namespace holds the self-service values; never the release or
 	// Substrate namespace (the chart refuses it).
 	Namespace string `mapstructure:"namespace" yaml:"namespace,omitempty"`
-	// Provider is the credential provider name in the generated sources.
+	// Provider is the provider name in the generated sources
+	// (ate-secret://k8s.io/<provider>/...), default "default": the
+	// Kubernetes credential provider resolves only local Secrets, under the
+	// name default (GAP-1076).
 	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
 	// MaxPerPerson bounds one person's bindings (1-200, default 20).
 	MaxPerPerson int `mapstructure:"max_per_person" yaml:"max_per_person,omitempty"`
@@ -209,10 +212,15 @@ func (s SubstrateSelfServiceSecretsConfig) EffectiveNamespace() string {
 	return s.Namespace
 }
 
-// EffectiveProvider is the credential provider of self-service sources.
+// EffectiveProvider is the provider name of self-service sources. The
+// default is the one name the Kubernetes credential provider answers:
+// "default", the local cluster. The deployment name it had before
+// (k8s-credential-provider) was refused at every egress fetch with "path
+// must begin with default (only local Secrets are supported)", so a bound
+// person secret was never injected (GAP-1076).
 func (s SubstrateSelfServiceSecretsConfig) EffectiveProvider() string {
 	if s.Provider == "" {
-		return "k8s-credential-provider"
+		return "default"
 	}
 	return s.Provider
 }

@@ -59,6 +59,21 @@ func TestChartDefaultImagesHaveABuildSource(t *testing.T) {
 			}
 		}
 	}
+	// The skill scanner sidecar is off by default until its image is
+	// published (GAP-1103), so no case renders it from the chart's registry;
+	// the default values with it turned on do, and that image needs a build
+	// source too.
+	for _, image := range renderedImages(decodeObjects(t, renderChart(t, helm, "default", "--set", "gateway.skillScanner.enabled=true"))) {
+		name, ok := strings.CutPrefix(image, chartImageRegistry)
+		if !ok {
+			continue
+		}
+		name, _, _ = strings.Cut(name, "@")
+		name, _, _ = strings.Cut(name, ":")
+		if !slices.Contains(names[name], "default+skillScanner") {
+			names[name] = append(names[name], "default+skillScanner")
+		}
+	}
 	if len(names["defenseclaw-gateway"]) == 0 || len(names["defenseclaw-scanner"]) == 0 {
 		t.Fatalf("the renders name %v; want at least defenseclaw-gateway and defenseclaw-scanner", names)
 	}

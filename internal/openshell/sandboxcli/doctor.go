@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -109,9 +110,14 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 	}
 	// Off Linux the Docker VM's kernel is checked in a local image: the
 	// base image, else an overlay image built on it. The doctor's Landlock
-	// row and sandbox run read the same probe (rel-1-0-10:GAP-1746).
+	// row and sandbox run read the same probe (rel-1-0-10:GAP-1746). It
+	// starts a container: one report asks it once, and the doctor's last
+	// line reads that answer (doctorRunRefusal), not a second probe that
+	// also counts against the Python and TUI doctor's 90 s
+	// (rel-1-0-10:GAP-1758).
 	d.ProbeImages = a.harnessImageTags()
-	d.DockerVMLandlockABI = a.DockerVMLandlock
+	a.doctorLandlock = landlockOnce(a.DockerVMLandlock)
+	d.DockerVMLandlockABI = a.doctorLandlock
 	return d
 }
 
@@ -177,6 +183,11 @@ func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver)
 	}
 	rep := a.HostDoctor(ctx, d)
 	rep.Managed = rep.Managed || managed
+	if st != nil && st.status != nil && st.offKind != sandboxapi.ManagedOffNone {
+		// The one reason of `sandbox status` and `sandbox run`: the verdict
+		// below names it for every kind, whichever rows are skipped.
+		rep.ManagedOffReason = st.status.OffMessage()
+	}
 	// The host checks set it; the Docker access row below asks it again.
 	dockerGroup := d.DockerGroup
 	if managed && st != nil && st.managed != nil {
@@ -239,30 +250,35 @@ func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver)
 		}
 		runDriver, _ := openshell.LookupDriver(string(rep.Driver))
 		images := a.imagesCheck(ctx, image.MicroVMTarget(runDriver))
-		if st.managed != nil && st.managed.Unavailable != "" && images.Status == openshell.StatusWarn {
+		if st.managed != nil && (st.managed.Unavailable != "" || st.offKind.Closed()) && images.Status == openshell.StatusWarn {
 			// Nothing builds while sandboxes can't run for the account (no
-			// docker or kvm access): the Sandbox runtime row names why and
-			// whom to ask, and a build now would only fail (GAP-0460).
+			// docker or kvm access, or closed by the organization, the
+			// profile or a setting): the Sandbox runtime row names why and
+			// whom to ask, and a build now would only fail (GAP-0460). A
+			// closed account is not told a run builds them.
 			images.Status, images.Fix = openshell.StatusSkip, nil
-			images.Detail += "; they are built once sandboxes are available for your account (see Sandbox runtime)"
+			if st.offKind.Closed() {
+				images.Detail = "not needed: sandboxes are off for your account (see Sandbox runtime)"
+			} else {
+				images.Detail += "; they are built once sandboxes are available for your account (see Sandbox runtime)"
+			}
 		}
 		rep.Checks = append(rep.Checks, images, a.wrappersCheck(ctx, managed))
 		switch {
 		case st.managed != nil:
 			// A user on a managed computer reads the organization's policy
 			// from the daemon, never from a configuration they cannot read.
-			rep.Checks = append(rep.Checks, a.managedPolicyCheck(ctx, st.managed), managedRuntimeCheck(st.managed))
-			if c := a.withAdminVMDriver(managedDriverCheck(st.managed), st.managed); c != nil {
-				c = a.withRenderedVMDriver(c, st.managed, d.Rendered)
+			rep.Checks = append(rep.Checks, a.managedPolicyCheck(ctx, st.managed, st.offKind), managedRuntimeCheck(st.managed, st.offKind))
+			if c := a.managedDriverRow(st.managed, st.offKind, d.Rendered); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if c := otherGatewaysCheck(st.managed); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if a.GOOS == "darwin" {
-				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.elsewhere))
+				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.offKind))
 			}
-			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
+			if c := managedDockerGroupCheck(a.GOOS, st.managed, st.offKind, dockerGroup); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 		case managed:
@@ -359,10 +375,10 @@ type statusProbe struct {
 	daemonUID *int
 	// managed is the managed part of the daemon's status (managed computers).
 	managed *sandboxapi.ManagedStatus
-	// elsewhere: another account holds this computer's sandbox ports
-	// (sandboxapi.Status.GatewayElsewhere).
-	elsewhere bool
-	check     openshell.Check
+	// offKind is why sandboxes are off for the caller, by the one decision
+	// of sandboxapi.Status.ManagedOff (ManagedOffNone when they are not).
+	offKind sandboxapi.ManagedOffKind
+	check   openshell.Check
 }
 
 // doctorSnapshot is confined to one read-only doctor run. Its error is
@@ -818,19 +834,24 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			p.ingressListening = st.IngressAddr != ""
 			p.egressListening = st.EgressAddr != ""
 			p.listenersProven = st.ListenersProven
-			p.elsewhere = st.GatewayElsewhere != ""
+			p.offKind = st.ManagedOff()
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {
 		case serr != nil && managed:
 			c.Status, c.Detail = openshell.StatusFail, "your sandbox service does not answer: "+managedDaemonError(serr)
-			c.Fix = &openshell.Fix{Summary: managedServiceFix}
+			c.Fix = &openshell.Fix{Summary: managedServiceFix()}
 		case serr != nil:
 			c.Status, c.Detail = openshell.StatusFail, apiError(serr).Error()
 			c.Fix = &openshell.Fix{Summary: "start the daemon", Command: "defenseclaw-gateway start"}
 		case !st.Enabled && st.Managed != nil:
 			// Nothing the user can turn on or hand over: the organization
 			// manages it, and another account is only ever "another account".
+			c.Status, c.Detail = openshell.StatusSkip, "running; "+managedOffState(st)
+		case st.Managed != nil && !st.Available && (st.ManagedOff() == sandboxapi.ManagedOffProfile || st.ManagedOff() == sandboxapi.ManagedOffOrganization):
+			// The organization's switch or the profile closes sandboxes for
+			// the account: no sandbox runs for it, whatever the gateway
+			// does, and it is not another account's fault.
 			c.Status, c.Detail = openshell.StatusSkip, "running; "+managedOffState(st)
 		case !st.Enabled && st.GatewayElsewhere != "":
 			// The Gateway service row names the one cause and the way on;
@@ -839,7 +860,8 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		case !st.Enabled:
 			c.Status, c.Detail = openshell.StatusWarn, "openshell.enabled is false: sandboxes are off"
 			c.Fix = &openshell.Fix{Summary: "turn sandboxes on", Command: CommandName + " setup"}
-		case st.Managed != nil && st.PortConflict != nil:
+		case st.Managed != nil && st.PortConflict != nil && st.ManagedOff() != sandboxapi.ManagedOffUnavailable:
+			// An install reason (the case below) outranks the port.
 			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusSkip, "running; sandbox port is occupied (see Sandbox "+st.PortConflict.Name+" port)"
 		case !st.Available && st.Managed != nil && st.Managed.Unavailable == "" && st.Running == 0 && st.GatewayElsewhere == "":
@@ -866,16 +888,18 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
-			switch {
-			case st.Managed != nil && st.GatewayElsewhere != "":
+			switch st.ManagedOff() {
+			case sandboxapi.ManagedOffUnavailable:
+				// The Sandbox runtime row names the one cause, with the
+				// organization's contact: counted once. It comes before
+				// another account's gateway, which changes nothing while the
+				// install itself cannot run sandboxes.
+				c.Status, c.Detail = openshell.StatusSkip, "running; sandboxes are unavailable (see Sandbox runtime)"
+			case sandboxapi.ManagedOffElsewhere:
 				// Another account's sandboxes hold the one gateway port: no
 				// fault of this account's, and it clears (GAP-0461).
 				c.Status, c.Detail = openshell.StatusWarn, "running; OpenShell is "+managedAccountBusyText
 				c.Fix = &openshell.Fix{Summary: "try again when that account has no sandbox running; " + busyContact(st.Managed.RequestAccess)}
-			case st.Managed != nil && st.Managed.Unavailable != "":
-				// The Sandbox runtime row names the one cause, with the
-				// organization's contact: counted once.
-				c.Status, c.Detail = openshell.StatusSkip, "running; sandboxes are unavailable (see Sandbox runtime)"
 			}
 		case st.DockerGroupMissing && managed:
 			// The account's user services started before the group was
@@ -894,7 +918,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 	} else {
 		c.Status, c.Detail = openshell.StatusFail, err.Error()
 		if managed {
-			c.Fix = &openshell.Fix{Summary: managedServiceFix}
+			c.Fix = &openshell.Fix{Summary: managedServiceFix()}
 		}
 	}
 	p.check = c
@@ -919,8 +943,24 @@ func dockerGroupMissingRow(managed bool) (openshell.CheckStatus, string, *opensh
 // managedServiceFix is the way on when a managed computer's sandbox service
 // does not answer: the organization installs it, and every sandbox command
 // starts it.
-const managedServiceFix = "your organization installs this service and every sandbox command starts it: if it still does not answer, " +
-	sandboxapi.RequestAccessFallback + " with this output"
+//
+// Only the launcher (`defenseclaw`, the managed symlink to
+// defenseclaw-gateway) starts the service: the same sandbox command run as
+// defenseclaw-gateway, by its path, does not, and it said every sandbox
+// command starts it (rel-1-0-10:GAP-1937).
+func managedServiceFix() string {
+	if LauncherStartsService {
+		return "your organization installs this service and every sandbox command starts it: if it still does not answer, " +
+			sandboxapi.RequestAccessFallback + " with this output"
+	}
+	return "your organization installs this service, and only the `defenseclaw sandbox` commands start it: " +
+		"run this as `defenseclaw sandbox …`; if it still does not answer, " + sandboxapi.RequestAccessFallback + " with this output"
+}
+
+// LauncherStartsService is set by the managed launcher, whose sandbox
+// commands start the account's sandbox service (internal/cli
+// launcherSandboxPreRun); managedServiceFix says so only then.
+var LauncherStartsService bool
 
 // managedDaemonError is why a managed computer's sandbox service did not
 // answer, without the HTTP request the client made (`Get "http://…": `).
@@ -1333,9 +1373,10 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 	refusal := a.doctorRunRefusal(ctx, rep)
 	if o.Output == OutputJSON {
 		_, off := sandboxesOff(rep)
-		// One exit contract: a failed check exits 1 in either format, so a
-		// script that checks the status alone is not told a host that
-		// cannot run sandboxes is fine (GAP-0308).
+		// One exit contract: a failed check exits 1 in either format, and so
+		// do sandboxes that are off for the account on a managed computer, so
+		// a script that checks the status alone is not told a host that
+		// cannot run sandboxes is fine (GAP-0308, GAP-2036).
 		if err := writeJSON(a.IO.Out, struct {
 			OK bool `json:"ok"`
 			// Ready is OK with sandboxes turned on (sandboxesOff), on a
@@ -1351,16 +1392,23 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// OpenShellInstallVersion is the release setup installs.
 			OpenShellInstallVersion string `json:"openshell_install_version"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep.OK() && !off && refusal == nil, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable(), openshell.InstallerVersion, rep}); err != nil {
+		}{doctorOK(rep), rep.OK() && !off && refusal == nil, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable(), openshell.InstallerVersion, rep}); err != nil {
 			return err
 		}
 	} else {
 		a.printDoctor(rep, refusal)
 	}
-	if !rep.OK() {
+	if !doctorOK(rep) {
 		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("sandbox doctor found problems")}}
 	}
 	return nil
+}
+
+// doctorOK is the doctor's exit contract: no check failed, and sandboxes are
+// not off for the account by a managed reason (sandboxapi.Status.ManagedOff),
+// which a run refuses whichever rows were skipped as not needed (GAP-2036).
+func doctorOK(rep *openshell.DoctorReport) bool {
+	return rep.OK() && rep.ManagedOffReason == ""
 }
 
 // waitReconnect waits, at most 30 s, while the daemon runs with sandboxes
@@ -1393,7 +1441,26 @@ func (a *App) doctorRunRefusal(ctx context.Context, rep *openshell.DoctorReport)
 	if rep.Driver != openshell.DriverDocker {
 		return nil
 	}
-	return a.dockerDesktopRefusal(ctx, openshell.Driver{Name: rep.Driver}, nil)
+	probe := a.doctorLandlock
+	if probe == nil {
+		probe = a.DockerVMLandlock
+	}
+	return a.dockerDesktopRefusal(ctx, openshell.Driver{Name: rep.Driver}, nil, probe)
+}
+
+// landlockOnce is probe asked at most once: later calls get the first
+// answer.
+func landlockOnce(probe func(context.Context) (int, string, error)) func(context.Context) (int, string, error) {
+	var (
+		once   sync.Once
+		abi    int
+		kernel string
+		err    error
+	)
+	return func(ctx context.Context) (int, string, error) {
+		once.Do(func() { abi, kernel, err = probe(ctx) })
+		return abi, kernel, err
+	}
 }
 
 // printDoctor prints the checks and the verdict; refusal is what sandbox
@@ -1429,15 +1496,21 @@ func (a *App) printDoctor(rep *openshell.DoctorReport, refusal error) {
 	why, off := sandboxesOff(rep)
 	failed := failedChecks(rep)
 	setupChanging := rep.Get(CheckIDManagedRuntime)
-	if off && (failed == 0 || failed == 1 && setupChanging != nil && setupChanging.Status == openshell.StatusFail && setupChanging.Detail == sandboxrelay.UnavailableSetupChanging) {
+	switch {
+	case off && failed == 1 && setupChanging != nil && setupChanging.Status == openshell.StatusFail && setupChanging.Detail == sandboxrelay.UnavailableSetupChanging:
 		a.warn("not ready for sandboxes yet: " + why)
-	} else if failed > 0 {
+	case rep.ManagedOffReason != "":
+		// The reason sandbox run refuses with, whatever the rows say.
+		a.bad("not ready for sandboxes: " + rep.ManagedOffReason)
+	case off && failed == 0:
+		a.warn("not ready for sandboxes yet: " + why)
+	case failed > 0:
 		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
-	} else if refusal != nil {
+	case refusal != nil:
 		// The run's words, the reason and its way on (the Landlock row's
 		// fix is the doctor's own).
 		a.warn("not ready for sandboxes yet: sandbox run refuses on this machine: " + refusal.Error())
-	} else {
+	default:
 		a.ok("ready for sandboxes")
 	}
 }
@@ -1453,11 +1526,15 @@ func failedChecks(rep *openshell.DoctorReport) int {
 	return n
 }
 
-// sandboxesOff reports a daemon whose sandboxes are turned off or a managed
-// setup change that has not finished: a run refuses in either state.
+// sandboxesOff reports a daemon whose sandboxes are turned off, a managed
+// setup change that has not finished, or sandboxes off for the account by a
+// managed reason (DoctorReport.ManagedOffReason): a run refuses in each state.
 func sandboxesOff(rep *openshell.DoctorReport) (string, bool) {
 	if c := rep.Get(CheckIDManagedRuntime); c != nil && c.Status == openshell.StatusFail && c.Detail == sandboxrelay.UnavailableSetupChanging {
 		return c.Detail, true
+	}
+	if rep.ManagedOffReason != "" {
+		return rep.ManagedOffReason, true
 	}
 	c := rep.Get(CheckIDDaemon)
 	if c == nil || c.Status != openshell.StatusWarn {

@@ -216,6 +216,30 @@ func TestHookAIDInspect_PrependsToolName(t *testing.T) {
 	}
 }
 
+func TestInspectMessageContent_CleanAIDAllowPreservesRedactionDirective(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"is_safe":true,"action":"Allow","rules":[],"processed_rules":[],"is_redaction_enabled":false}`))
+	}))
+	defer srv.Close()
+
+	a := &APIServer{
+		scannerCfg: &config.Config{},
+		ciscoInspector: &CiscoInspectClient{
+			apiKey:   t.Name(),
+			endpoint: srv.URL,
+			client:   srv.Client(),
+		},
+	}
+
+	verdict := a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+		Connector: "claudecode",
+		Content:   "ordinary lifecycle message",
+		Direction: "outbound",
+	})
+	assertBoolPtrEqual(t, "RedactionEnabled", verdict.RedactionEnabled, boolPtr(false))
+}
+
 // TestMergeWithAIDVerdict_StrictestWins covers action escalation,
 // severity escalation, and findings concatenation in the merge
 // helper used by the hook-lane callers.

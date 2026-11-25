@@ -2097,7 +2097,9 @@ const hookScriptMaxBytes = 1 << 20
 // launcher fails, whatever the mode in 0.8.10 and for a rendered open after
 // it; its closed form is the template's. Copilot's (copilot-hook.ps1, 1.0.0
 // on) printed nothing, so Copilot ran the tool; its closed form prints
-// Copilot's native denial for a tool boundary (copilotAdapterClosedFailure).
+// Copilot's native denial for a tool boundary and the prompt's replacement
+// (copilotAdapterClosedFailure); a closed form of 1.0.0 to 1.0.11, which left
+// a prompt unchanged, gets the replacement too (GAP-2137).
 // Each match is one line, so an adapter written with CRLF line ends is
 // closed too.
 var bakedAdapterFailModeOpens = strings.NewReplacer(
@@ -2107,6 +2109,7 @@ var bakedAdapterFailModeOpens = strings.NewReplacer(
 	"$exitCode = 0\r\n", "$exitCode = 2\r\n",
 	"$exitCode = 0\n", "$exitCode = 2\n",
 	copilotAdapterOpenFailure, copilotAdapterClosedFailure,
+	copilotAdapterClosedFailureToolsOnly, copilotAdapterClosedFailure,
 	copilotAdapterReleasedRead+"\r\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\r\n"+copilotAdapterReleasedWrite,
 	copilotAdapterReleasedRead+"\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\n"+copilotAdapterReleasedWrite,
 )
@@ -2130,10 +2133,21 @@ const (
 	copilotAdapterOpenFailure = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)`
 	// copilotAdapterClosedFailure is the catch block for a closed mode:
 	// Copilot ignores a failed hook process but honors its native denial,
-	// so a tool boundary gets one (the native hook's failNativeDecision).
-	copilotAdapterClosedFailure = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); ` +
+	// so a tool boundary gets one (the native hook's failNativeDecision),
+	// and a Copilot CLI prompt gets DefenseClaw's notice in its place, as the
+	// native hook answers a closed failure (copilotFailedPromptReplacement,
+	// GAP-2137).
+	copilotAdapterClosedFailure = copilotAdapterClosedFailureLead +
+		` elseif ($Event -ceq 'userPromptTransformed') { [Console]::Out.Write('{"modifiedTransformedPrompt":"DefenseClaw blocked the current user message. ` +
+		`Do not answer it or call tools for it. Reply only: DefenseClaw blocked this prompt: its DefenseClaw hook failed closed."}') } }`
+	// copilotAdapterClosedFailureToolsOnly is the closed catch block of
+	// 1.0.0 to 1.0.11, which answered only a tool boundary; the refresh
+	// rewrites it to copilotAdapterClosedFailure. It is not a substring of
+	// that form, so a refreshed adapter is not changed again.
+	copilotAdapterClosedFailureToolsOnly = copilotAdapterClosedFailureLead + ` }`
+	copilotAdapterClosedFailureLead      = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); ` +
 		`if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } ` +
-		`elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }`
+		`elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') }`
 )
 
 // closeBakedHookFailMode rewrites the open a hook script or adapter bakes as

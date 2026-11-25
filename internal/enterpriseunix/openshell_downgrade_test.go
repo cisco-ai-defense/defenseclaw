@@ -174,3 +174,28 @@ func TestAllowDowngradeWithPrerequisiteWarns(t *testing.T) {
 		t.Errorf("allow_downgrade with prerequisite warning = %q", w)
 	}
 }
+
+// rel-1-0-10:GAP-1799: a setup pin lowered below a release the host
+// applied in setup mode is refused (GAP-1781), but only when the last
+// applied install was setup. Setup 0.1.9, then install: prerequisite,
+// then setup 0.1.6 applied with no refusal and no warning, and the
+// account whose gateway 0.1.9 migrated then saw doctor say unavailable.
+// A prerequisite step in between does not forget the setup release the
+// host applied.
+func TestGAP1799SetupPinLoweredAfterAPrerequisiteStepIsRefused(t *testing.T) {
+	setup := func(version string) map[string]any {
+		return map[string]any{"install": "setup", "driver": "docker", "version": version}
+	}
+	h := newOSHost(t, "linux")
+	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setup(openshell.InstallerVersion))))
+	h.installTarballFiles(t, h.alice, openshell.InstallerVersion)
+	gap1781AccountDB(t, h, h.alice)
+	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker"})))
+
+	r := h.ensure(sandboxConfig(t, "linux", true, setup(openshell.SupportedMin)))
+	all := fmt.Sprint(r.Errors, r.Warnings)
+	if r.OK || !strings.Contains(all, h.alice.Name+" (OpenShell "+openshell.InstallerVersion+")") ||
+		!strings.Contains(all, "Set enterprise.openshell.version to "+openshell.InstallerVersion+" or newer") {
+		t.Fatalf("setup %s -> prerequisite -> setup %s is not refused for %s: %+v", openshell.InstallerVersion, openshell.SupportedMin, h.alice.Name, r)
+	}
+}

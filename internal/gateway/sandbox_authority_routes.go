@@ -596,7 +596,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if floor.Allowed != nil && !*floor.Allowed {
-		refuse(sandboxrelay.ReasonNotAllowed, "Your organization doesn't allow sandboxes for your account.", access)
+		refuse(sandboxrelay.ReasonNotAllowed, sandboxapi.AccountNotAllowedMessage, access)
 		return
 	}
 	if !sandboxHarnessAllowed(floor, req.Harness) {

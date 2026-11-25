@@ -14,7 +14,7 @@ func TestClaudeProjectSkillsSkipMacOSProtectedProject(t *testing.T) {
 	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = oldOS, oldFDA })
 	discoveryGOOS = "darwin"
 	macOSFullDiskAccess = func() bool { return false }
-	home := t.TempDir()
+	home := realTempDir(t)
 	project := filepath.Join(home, "Documents", "project")
 	link := filepath.Join(home, "work", "linked-project")
 	if err := os.MkdirAll(filepath.Join(project, ".claude", "skills", "private"), 0o700); err != nil {

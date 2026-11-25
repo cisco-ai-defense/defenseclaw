@@ -13,6 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	oteltrace "go.opentelemetry.io/otel/trace"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 )
 
 func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvider(t *testing.T) {
@@ -170,6 +171,82 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	assertHookV8MetricPoint(t, dispatch, map[string]string{
 		"defenseclaw.connector.source": "codex",
 	}, 1)
+}
+
+func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
+	trueValue, falseValue := true, false
+	for _, test := range []struct {
+		name      string
+		directive *bool
+		want      string
+	}{
+		{
+			name: "managed true redacts embedded credentials", directive: &trueValue,
+			want: "notification Authorization: Bearer <redacted len=6 sha=8f61ad5c> continues",
+		},
+		{
+			name: "explicit false preserves raw content", directive: &falseValue,
+			want: "notification Authorization: Bearer def456 continues",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+			req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "Notification"}
+			resp := agentHookResponse{
+				Action: "allow", RawAction: "allow", Severity: "HIGH", Mode: "observe",
+				InspectedContent: "notification Authorization: Bearer def456 continues", InspectedContentPresent: true,
+				RedactionEnabled: test.directive,
+			}
+
+			api.emitHookDecisionObservabilityV8(t.Context(), req, resp, HookAuditEnvelope{Result: "ok"}, false)
+			if got := capturedHookDecisionInputContent(t, capture); got != test.want {
+				t.Fatalf("inspected content = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func capturedHookDecisionInputContent(t *testing.T, capture *hookModelV8OTLPCapture) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var records []*logspb.LogRecord
+	for time.Now().Before(deadline) {
+		records = hookModelV8CapturedLogs(capture.logSnapshot())
+		if len(records) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(records) != 1 {
+		t.Fatalf("generated hook decision logs=%d want=1", len(records))
+	}
+	var wire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(records[0].Body.GetStringValue()), &wire); err != nil {
+		t.Fatalf("decode generated hook decision body: %v", err)
+	}
+	messages, ok := wire.Body["gen_ai.input.messages"].([]interface{})
+	if !ok || len(messages) != 1 {
+		t.Fatalf("gen_ai.input.messages=%v, want one message", wire.Body["gen_ai.input.messages"])
+	}
+	message, ok := messages[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("message=%T, want object", messages[0])
+	}
+	parts, ok := message["parts"].([]interface{})
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts=%v, want one part", message["parts"])
+	}
+	part, ok := parts[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("part=%T, want object", parts[0])
+	}
+	content, ok := part["content"].(string)
+	if !ok {
+		t.Fatalf("part content=%T, want string", part["content"])
+	}
+	return content
 }
 
 func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {

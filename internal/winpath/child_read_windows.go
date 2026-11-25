@@ -89,6 +89,23 @@ func ReadChildLink(parent *os.File, name string) (string, error) {
 	return normalizedReadLinkTarget(link), nil
 }
 
+// StatChildNoFollow reads one child's attributes and size relative to the
+// held parent, opened for attribute access only: no share conflict with a
+// writer holding it, and no read access to its content needed. A link, and a
+// device, is refused as OpenChildNoFollow refuses them.
+func StatChildNoFollow(parent *os.File, name string) (attributes uint32, size int64, err error) {
+	file, err := openReadChild(parent, name, belowCheck)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer file.Close()
+	info, err := handleInformation(windows.Handle(file.Fd()))
+	if err != nil {
+		return 0, 0, &os.PathError{Op: "stat", Path: file.Name(), Err: err}
+	}
+	return info.FileAttributes, int64(info.FileSizeHigh)<<32 | int64(info.FileSizeLow), nil
+}
+
 func openReadChild(parent *os.File, name string, kind BelowKind) (*os.File, error) {
 	if err := validateReadChildName(name); err != nil {
 		return nil, err

@@ -158,6 +158,11 @@ type secretLane struct {
 	pemLine  int  // start of the first line of the open block not yet read
 	// tokenFrom: a token run that starts before it was given up at a bound.
 	tokenFrom int
+	// parked: the lane's block ended inside an open run, at reply text
+	// offset parkedAt; the run stays held (rel-1-0-10:GAP-2162).
+	parked    bool
+	parkedAt  int
+	parkLimit int
 }
 
 // pem advances the private-key state over t and reports an open BEGIN line
@@ -251,6 +256,11 @@ func (s *secretLane) giveUp(t string) {
 	s.pemOpen, s.pemFrom = false, len(t)
 	s.tokenFrom = len(t)
 }
+
+// endRun ends the token or digit run open at the end of t: the lane has
+// ended (rel-1-0-10:GAP-2154), so the run is whole. A run that starts in
+// text added later is held as before.
+func (s *secretLane) endRun(t string) { s.tokenFrom = len(t) }
 
 // pemLineEnd finds the end of the line that starts at start: a line feed,
 // or the two characters backslash n of JSON-escaped text (tool arguments);
@@ -360,19 +370,46 @@ type openSecret struct {
 	open    bool // a lane ends inside a secret whose match needs more text
 	pem     bool // one of them is a private-key block or BEGIN line: the end of the stream does not end it
 	overCap bool // an open private-key block passed streamSecretMaxPEM
+	// reasoningOnly: all open runs are parked reasoning tokens, which can
+	// be masked in their own wire events while answer events stream.
+	reasoningOnly bool
 }
 
-// OpenSecret advances the open-secret state of every lane over the text
-// added since the last call.
+// OpenSecret advances every lane and same-choice check boundary over text
+// added since the last call. The boundary state holds partial answer bytes
+// behind a split secret until the existing matcher reads them whole.
 func (r *responseText) OpenSecret() openSecret {
 	var o openSecret
+	var reasoningOpen, otherOpen bool
 	for i, l := range r.lanes {
 		t := l.String()
 		pemOpen, over := r.secret[i].pem(t)
 		o.pem = o.pem || pemOpen
 		o.overCap = o.overCap || over
-		o.open = o.open || pemOpen || r.secret[i].token(t)
+		tokenOpen := r.secret[i].token(t)
+		if tokenOpen && r.secret[i].parked {
+			if lane, ok := r.laneForIndex(i); ok && lane.field == responseFieldReasoning {
+				reasoningOpen = true
+			} else {
+				otherOpen = true
+			}
+		} else if tokenOpen || pemOpen {
+			otherOpen = true
+		}
 	}
+	for i := range r.boundaries {
+		b := &r.boundaries[i]
+		line := r.boundaryLine(b)
+		if b.final {
+			b.secret.endRun(line)
+			continue
+		}
+		if b.secret.token(line) {
+			otherOpen = true
+		}
+	}
+	o.open = reasoningOpen || otherOpen
+	o.reasoningOnly = reasoningOpen && !otherOpen && !o.pem
 	return o
 }
 
@@ -380,6 +417,10 @@ func (r *responseText) OpenSecret() openSecret {
 func (r *responseText) ReleaseOpenSecret() {
 	for i, l := range r.lanes {
 		r.secret[i].giveUp(l.String())
+	}
+	for i := range r.boundaries {
+		b := &r.boundaries[i]
+		b.secret.giveUp(r.boundaryLine(b))
 	}
 }
 

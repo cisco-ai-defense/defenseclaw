@@ -33,13 +33,19 @@ var atomicTransformV2OwnerHealBeforeFileOpen func()
 // It runs only when the account itself cannot open the file, the process may
 // repair managed objects (elevated installer or LocalSystem guardian), the
 // effective user is an ordinary account, the folder is owned by that account
-// and carries exactly that guardian setup DACL, and the file, a single-link
-// regular file reached without reparse points, is owned by LocalSystem,
-// Administrators or TrustedInstaller and has only the two ACEs it inherited
-// from that folder (GAP-1672). A file the account moved in from elsewhere
-// keeps its own DACL (a SYSTEM-only file keeps its protected one), and the
-// account cannot re-propagate inheritance onto a file it has no WRITE_DAC
-// on, so only a file a privileged writer created in the folder qualifies.
+// and carries exactly that guardian setup DACL (alone or with the gateway
+// service read grant the hook enumerator adds to every agent folder it
+// inventories, GAP-1827), and the file, a single-link regular file reached
+// without reparse points, is owned by LocalSystem, Administrators or
+// TrustedInstaller and has only the ACEs it inherited from that folder
+// (GAP-1672). The file DACL is the provenance: a file the account moved in
+// from elsewhere keeps its own DACL (a SYSTEM-only file keeps its protected
+// one), and the account cannot re-propagate inheritance onto a file it has
+// no WRITE_DAC on, so only a file a privileged writer created in a folder of
+// that shape qualifies. The folder check is not provenance (the account owns
+// the folder and can set it to that shape); it is kept so that a folder whose
+// current DACL is not the guardian shape, or carries a grant other than the
+// gateway read grant, is never healed in (GAP-1759, GAP-1827).
 // It then makes the
 // account the owner and adds an explicit full-control entry for it, keeping
 // every other entry and the file's inheritance state; the transaction's own
@@ -91,7 +97,12 @@ func healAtomicTransformV2ConfigLeftToAdmin(path string) error {
 			// Not the account's own folder: never hand a file in it over.
 			return nil
 		}
-		if relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(dirSecurity); err != nil || !relaxed {
+		gateway, err := atomicTransformV2HealGatewaySID()
+		if err != nil {
+			return err
+		}
+		relaxed, serviceRead, err := managed.IsWindowsSetupRelaxedAgentDirectoryDACL(dirSecurity, gateway)
+		if err != nil || !relaxed {
 			// Not the guardian setup shape: the denial has another cause.
 			return nil
 		}
@@ -113,7 +124,7 @@ func healAtomicTransformV2ConfigLeftToAdmin(path string) error {
 		if err != nil || owner == nil || !managed.IsWindowsTrustedAdminOwner(owner) {
 			return nil
 		}
-		if made, err := managed.IsWindowsSetupRelaxedChildFileDACL(security); err != nil || !made {
+		if made, err := managed.IsWindowsSetupRelaxedAgentChildFileDACL(security, gateway, serviceRead); err != nil || !made {
 			// Not a file a privileged writer created in this folder (moved
 			// in, or given its own DACL): never hand it over.
 			return nil
@@ -166,6 +177,12 @@ func healAtomicTransformV2ConfigLeftToAdmin(path string) error {
 			map[string]string{"sid": user.String()})
 	}
 	return nil
+}
+
+// atomicTransformV2HealGatewaySID is the service SID of the gateway, whose
+// enumerator read grant a relaxed agent folder may carry (GAP-1827).
+func atomicTransformV2HealGatewaySID() (*windows.SID, error) {
+	return windows.StringToSid(managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc))
 }
 
 // atomicTransformV2HealFolderIsExpected reports whether the held folder

@@ -515,6 +515,9 @@ func (s *bedrockEventStreamText) messagePieces(msg eventstream.Message) []respon
 		if json.Unmarshal(msg.Payload, &st) == nil {
 			s.toolStop(st.Index)
 		}
+		typed = []responsePiece{laneEndPiece(0)} // GAP-2154, GAP-2162: parked
+	case "messageStop":
+		typed = []responsePiece{messageEndPiece(0)}
 	}
 	// Every event goes through the walker, whatever its type.
 	return withWalkerPieces(typed, s.eventSegments(msg.Payload))

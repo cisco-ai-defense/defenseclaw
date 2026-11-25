@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -148,7 +149,7 @@ func TestWindowsManagedRuntimeResolveWaitsOutGuardianSetupRelax(t *testing.T) {
 			fixture := newWindowsRelaxResolveFixture(t)
 			relaxed := tc.pick(fixture)
 			for _, path := range relaxed {
-				setWindowsRelaxTestDACL(t, path, windowsSetupRelaxedDirectorySDDL)
+				setWindowsRelaxTestDACL(t, path, managed.WindowsSetupRelaxedDirectorySDDL)
 			}
 			hardened := make(chan error, 1)
 			go func() {

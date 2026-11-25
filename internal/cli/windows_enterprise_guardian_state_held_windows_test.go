@@ -138,6 +138,7 @@ func TestWindowsEnterpriseGuardianStateFilesAreTheCriticalAdministratorOnlyFiles
 		filepath.Join(layout.GuardianAuthDir, "protected_targets.json"),
 		filepath.Join(layout.GuardianAuthDir, "activation.json"),
 		filepath.Join(layout.GuardianAuthDir, "user-cleanup.json"),
+		filepath.Join(layout.GuardianAuthDir, "enrolled-accounts.json"),
 		filepath.Join(layout.DataDir, "hook_guardian_state.json"),
 	}
 	others := []string{

@@ -18,7 +18,9 @@ func docsAndChartFile(t *testing.T, rel ...string) string {
 	if err != nil {
 		t.Skipf("the repository tree is not part of this test bundle: %v", err)
 	}
-	return string(raw)
+	// GAP-1088: a Windows checkout may hold the files with CRLF line ends,
+	// and the line patterns here end in $.
+	return strings.ReplaceAll(string(raw), "\r\n", "\n")
 }
 
 // GAP-0298: reference.mdx tells a user which Deployment to restart after a

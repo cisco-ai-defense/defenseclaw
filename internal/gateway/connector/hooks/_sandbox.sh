@@ -62,7 +62,10 @@ for _dc_sandbox_var in $_dc_sandbox_vars; do
     _DC_EXIT_INTENDED|_DC_HOOK_FAIL_MODE|_DC_CODEX_EVENT|_DC_CODEX_CONTRACT|_DC_CODEX_BLOCK_REASON) export -n "$_dc_sandbox_var" ;;
     # Unsetting BASH_XTRACEFD closes the descriptor it names: an exported
     # BASH_XTRACEFD=1 closed stdout, the block answer was lost and the Codex
-    # hook ended with exit 0 and nothing printed, an allow (GAP-1769).
+    # hook ended with exit 0 and nothing printed, an allow (GAP-1769). Kept
+    # set, it is safe only because the hooks run as #!/bin/bash -p, which
+    # ignores an inherited SHELLOPTS, so the workload cannot turn xtrace on
+    # and have it write to that descriptor (GAP-1782).
     BASH_XTRACEFD) export -n BASH_XTRACEFD ;;
     # bash's own variables keep their meaning only while set: unsetting an
     # exported RANDOM made the next $RANDOM fail under set -u and the hook

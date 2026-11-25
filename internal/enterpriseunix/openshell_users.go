@@ -35,6 +35,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -996,6 +997,10 @@ func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 		return
 	}
 	state.Applied = cur
+	if cur != nil && cur.Enabled && cur.Install == config.EnterpriseOpenShellInstallSetup {
+		// planOpenShell refused or warned for these already.
+		state.SetupRan = nil
+	}
 	l.settlePending(ctx, state, cur)
 	l.reconcileMacOSAgents(ctx, state)
 	l.flushAccountChanges()
@@ -1147,7 +1152,7 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			state.Pending[key] = entry
 			continue
 		}
-		if err := l.performAccountChange(ctx, ops, account, entry, status, cur); err != nil {
+		if err := l.performAccountChange(ctx, ops, account, entry, status, cur, state); err != nil {
 			entry.Hold = err.Error()
 			entry.Reason = entry.reasonBase() + " (" + err.Error() + ")"
 			state.Pending[key] = entry
@@ -1263,7 +1268,7 @@ func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a Sand
 // the daemon again: one the socket or the launcher started since runs the
 // installed DefenseClaw, which the drain held back. st is the account's
 // status the change went on.
-func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps, a SandboxAccount, entry pending, st SandboxStatus, cur *openshellApplied) error {
+func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps, a SandboxAccount, entry pending, st SandboxStatus, cur *openshellApplied, state *openshellState) error {
 	active := st.Active
 	switch entry.Kind {
 	case "launchd":
@@ -1332,10 +1337,11 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			from = &openshellApplied{}
 		}
 		if cur != nil && l.env.removesInstalledOpenShell(from, cur) {
-			removed, kept, err := l.env.removeTarballInstall(a)
+			removed, kept, version, err := l.env.removeTarballInstall(a)
 			if err != nil {
 				return err
 			}
+			l.recordSetupRan(state, a, from, version)
 			if len(removed) > 0 {
 				l.openshellChange(a.Name, "removed the OpenShell that DefenseClaw installed for %s (%d files); %s", accountSlot, len(removed), entry.reasonBase())
 			}
@@ -1555,6 +1561,34 @@ func removeTreeAt(dirFD int, name string, uid, depth int) (bool, error) {
 	return true, nil
 }
 
+// recordSetupRan keeps, in state.SetupRan, the setup-mode release account a
+// ran (version, its install record's) once a switch out of setup mode
+// removed that record, capped at the setup pin root applied (from), when
+// its gateway database stays (rel-1-0-10:GAP-1799).
+func (l *lifecycle) recordSetupRan(state *openshellState, a SandboxAccount, from *openshellApplied, version string) {
+	if state == nil || from == nil || from.Install != config.EnterpriseOpenShellInstallSetup || from.Version == "" || version == "" {
+		return
+	}
+	ran, err := openshell.ParseVersion(version)
+	if err != nil {
+		return
+	}
+	ceiling, err := openshell.ParseVersion(from.Version)
+	if err != nil {
+		return
+	}
+	if ran.Compare(ceiling) > 0 {
+		version = from.Version
+	}
+	if there, err := l.env.regularBelowHome(a, filepath.ToSlash(gatewayDBRel)); err == nil && !there {
+		return
+	}
+	if state.SetupRan == nil {
+		state.SetupRan = map[string]string{}
+	}
+	state.SetupRan[strconv.Itoa(a.UID)] = version
+}
+
 // accountAbovePin is an account whose install record names an OpenShell
 // release newer than the setup pin, with its gateway database there.
 // Recorded is the release that record names. Ran is Recorded capped at the
@@ -1581,7 +1615,11 @@ var gatewayDBRel = filepath.Join(".local", "state", openshell.GatewayDBRel)
 // not listed. A database that cannot be looked at counts as there.
 // applied is the setup pin this host last applied ("" when none): each
 // account's Ran is capped at it (accountAbovePin).
-func (e *Env) accountsAboveSetupPin(ctx context.Context, pin, applied string) []accountAbovePin {
+//
+// ran is the root record of what accounts ran before a switch out of setup
+// mode removed their install record (openshellState.SetupRan), read for an
+// account with no record of its own: already capped, so it refuses.
+func (e *Env) accountsAboveSetupPin(ctx context.Context, pin, applied string, ran map[string]string) []accountAbovePin {
 	want, err := openshell.ParseVersion(pin)
 	if err != nil {
 		return nil
@@ -1591,7 +1629,17 @@ func (e *Env) accountsAboveSetupPin(ctx context.Context, pin, applied string) []
 	var out []accountAbovePin
 	for _, a := range e.sandboxOps().Accounts(ctx) {
 		data, ok, err := e.readBelowHome(a, filepath.ToSlash(filepath.Join(installStateRel, openshell.TarballManifestName)), 1<<20)
-		if err != nil || !ok {
+		if err == nil && !ok {
+			if v := ran[strconv.Itoa(a.UID)]; v != "" {
+				if r, perr := openshell.ParseVersion(v); perr == nil && r.Compare(want) > 0 {
+					if there, derr := e.regularBelowHome(a, filepath.ToSlash(gatewayDBRel)); derr != nil || there {
+						out = append(out, accountAbovePin{Name: a.Name, Recorded: v, Ran: v})
+					}
+				}
+			}
+			continue
+		}
+		if err != nil {
 			continue
 		}
 		var manifest openshell.InstalledRelease
@@ -1755,16 +1803,18 @@ func (e *Env) readBelowHome(a SandboxAccount, rel string, limit int64) (data []b
 // removeTarballInstall removes the OpenShell that the tarball install placed
 // in the account's home: the files its manifest lists that are still what was
 // installed. A file the account changed stays (kept).
-func (e *Env) removeTarballInstall(a SandboxAccount) (removed, kept []string, err error) {
+// version is the release the removed record named.
+func (e *Env) removeTarballInstall(a SandboxAccount) (removed, kept []string, version string, err error) {
 	manifestRel := filepath.ToSlash(filepath.Join(installStateRel, openshell.TarballManifestName))
 	data, ok, err := e.readBelowHome(a, manifestRel, 1<<20)
 	if err != nil || !ok {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	var manifest openshell.InstalledRelease
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, nil, fmt.Errorf("the OpenShell install record of %s is unreadable: %w", a.Name, err)
+		return nil, nil, "", fmt.Errorf("the OpenShell install record of %s is unreadable: %w", a.Name, err)
 	}
+	version = manifest.Version
 	listed := map[string]string{}
 	for _, file := range manifest.Files {
 		rel, relErr := filepath.Rel(filepath.Clean(a.Home), file.Path)
@@ -1780,7 +1830,7 @@ func (e *Env) removeTarballInstall(a SandboxAccount) (removed, kept []string, er
 		got, present, derr := e.digestBelowHome(a, rel)
 		switch {
 		case derr != nil:
-			return removed, kept, derr
+			return removed, kept, version, derr
 		case !present:
 			continue
 		case got != want:
@@ -1788,16 +1838,16 @@ func (e *Env) removeTarballInstall(a SandboxAccount) (removed, kept []string, er
 			continue
 		}
 		if _, err := e.removeBelowHome(a, rel); err != nil {
-			return removed, kept, err
+			return removed, kept, version, err
 		}
 		removed = append(removed, filepath.Join(a.Home, rel))
 	}
 	if len(kept) == 0 {
 		if _, err := e.removeBelowHome(a, manifestRel); err != nil {
-			return removed, kept, err
+			return removed, kept, version, err
 		}
 	}
-	return removed, kept, nil
+	return removed, kept, version, nil
 }
 
 // digestBelowHome is the SHA-256 of a regular file below the home.
@@ -2172,7 +2222,7 @@ func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 			removedAny = true
 		}
 	}
-	removedFiles, kept, err := env.removeTarballInstall(a)
+	removedFiles, kept, _, err := env.removeTarballInstall(a)
 	switch {
 	case err != nil:
 		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not remove the OpenShell DefenseClaw installed for %s: %v; delete ~/.local/bin/openshell* by hand", a.Name, err))

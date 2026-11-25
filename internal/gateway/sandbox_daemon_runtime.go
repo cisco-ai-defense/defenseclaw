@@ -2017,9 +2017,11 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 		Driver:           s.Enterprise.Driver,
 		OpenShellVersion: s.Enterprise.Version,
 		GatewayPort:      s.Enterprise.GatewayPort,
-		PendingRestart:   d.pendingRestart.Load(),
-		DriverFallback:   s.Enterprise.DriverFallback,
-		NextDriver:       s.SelectedDriver,
+		// What the lifecycle found installed, not the requirement above.
+		InstalledOpenShellVersion: sandboxInstalledOpenShellVersion(),
+		PendingRestart:            d.pendingRestart.Load(),
+		DriverFallback:            s.Enterprise.DriverFallback,
+		NextDriver:                s.SelectedDriver,
 	}
 	if d.openShell != nil {
 		out.OtherGateways = d.openShell.OtherGateways(ctx, s)
@@ -2035,7 +2037,7 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 	}
 	switch {
 	case !s.Enabled:
-		out.Unavailable = "sandboxes are turned off by your organization"
+		out.Unavailable = sandboxapi.OrganizationOffReason
 	case !s.Available:
 		out.Unavailable = s.Unavailable
 	default:
@@ -2060,6 +2062,7 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 	seen := make(map[string]bool, len(harnesses))
 	out.Allowed = true
 	viewSet := false
+	answered, refused := 0, 0
 	for _, name := range harnesses {
 		connector := d.managedConnector(name)
 		if seen[connector] {
@@ -2073,6 +2076,14 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 				out.PolicyUnread, out.PolicyLimited = managedPolicyUnread(err)
 			}
 			continue
+		}
+		if !me.Provisional {
+			// A provisional view is no verdict: `sandbox run` leaves it to
+			// the daemon as well (refuseForbiddenAccount).
+			answered++
+			if !me.Allowed {
+				refused++
+			}
 		}
 		allowed := managedExplainAllowsHarness(me, connector) && managedPostureFatal(me) == nil
 		if !allowed {
@@ -2090,6 +2101,7 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 			out.RequestAccess = me.RequestAccess
 		}
 	}
+	out.AccountDenied = answered > 0 && refused == answered
 	return out
 }
 
@@ -2498,7 +2510,7 @@ func unconfirmedSandbox(sb sandboxapi.Sandbox) bool {
 // settings do not allow: sandboxes off, or unavailable on this computer.
 func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 	if !s.Enabled {
-		return sandboxapi.Errorf(sandboxapi.CodeDisabled, "sandboxes are turned off by your organization")
+		return sandboxapi.Errorf(sandboxapi.CodeDisabled, "%s", sandboxapi.OrganizationOffReason)
 	}
 	if !s.Available {
 		if s.Unavailable == sandboxrelay.UnavailableSetupChanging {
@@ -2601,7 +2613,7 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 			Message: "Your organization doesn't allow this agent in a sandbox.", Detail: sandboxrelay.ReasonNotAllowed}
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
-		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
+		Message: sandboxapi.AccountNotAllowedMessage, Detail: sandboxrelay.ReasonNotAllowed}
 }
 
 // readyPolicyView is whether the managed gateway's policy view of one agent

@@ -30,7 +30,7 @@ import (
 func TestGAP1781RuntimeRowNamesMigratedDatabase(t *testing.T) {
 	reason := openshell.GatewayDBNewerText("0.1.9", "0.1.6")
 	row := managedRuntimeCheck(&sandboxapi.ManagedStatus{InstallMode: "setup", OpenShellVersion: "0.1.6",
-		Unavailable: reason, Recovery: openshell.GatewayDBRecovery("0.1.9"), RequestAccess: "it-help@example.com"})
+		Unavailable: reason, Recovery: openshell.GatewayDBRecovery("0.1.9"), RequestAccess: "it-help@example.com"}, sandboxapi.ManagedOffUnavailable)
 	if row.Status != openshell.StatusFail || row.Detail != reason {
 		t.Fatalf("row = %+v", row)
 	}
