@@ -175,6 +175,11 @@ type trustedActionRequest struct {
 	sessionID string
 	// aliasPending commits cross-call link state only after the hook verdict.
 	aliasPending *effectAliasPending
+	// aliasTwin marks a reading inside a call's dispatch (a twin, a
+	// simple-command pass, a here-string or state twin): the call's own
+	// reading records its alias change (aliasPending), a twin records none
+	// (GAP-2204).
+	aliasTwin bool
 	// ManagedInstall is set for a call judged by a managed enterprise install:
 	// content the rules could not prove is judged as the strict tier judges it,
 	// because a managed device fails closed.
@@ -405,6 +410,15 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// hookCall is the hook call of the dispatch that judges the request
+	// (dispatchTrustedActionOnce), set for the readings it runs on its own
+	// goroutine while the call is open: a nested dispatch and the private-key
+	// reader use it without finding it again (hookpaths.JoinHookCall; each
+	// find off Windows is a traceback of the goroutine's stack). The zero
+	// Call finds it as before. It is no part of what the request asks
+	// (trustedDispatchMemoKeyOf), and a request handed to another goroutine
+	// drops it (scheduleEffectShadow).
+	hookCall hookpaths.Call
 	// inlineTierNested marks a request derived from one already dispatched:
 	// only the outermost call applies the inline hand-off tier
 	// (withInlineHandoffTier).
@@ -497,11 +511,27 @@ func (t trustedActionTelemetry) empty() bool {
 		t.ParserUncertaintyShadowFindingCount == 0
 }
 
+// withoutHookCall is request with no hook call (trustedActionRequest.hookCall):
+// for a reading on another goroutine, which finds its own.
+func (request trustedActionRequest) withoutHookCall() trustedActionRequest {
+	request.hookCall = hookpaths.Call{}
+	return request
+}
+
 // dispatchTrustedActionOnce judges request; dispatchTrustedAction is it
 // through the hook call's memo (trustedDispatchMemo).
-func dispatchTrustedActionOnce(
+func dispatchTrustedActionOnce(parent context.Context, request trustedActionRequest) []RuleFinding {
+	return dispatchTrustedActionOnceIn(parent, request, hookpaths.Call{})
+}
+
+// dispatchTrustedActionOnceIn is dispatchTrustedActionOnce on a goroutine
+// that found its open hook call a moment before (found, the zero Call: not
+// found), which the dispatch joins without finding it again
+// (hookpaths.JoinHookCall).
+func dispatchTrustedActionOnceIn(
 	parent context.Context,
 	request trustedActionRequest,
+	found hookpaths.Call,
 ) (findings []RuleFinding) {
 	request = windowsStatementsOnePerLine(request)
 	if request.Input.ActiveShell == "" {
@@ -550,8 +580,14 @@ func dispatchTrustedActionOnce(
 	// nested in the handler's own call, or in a twin of this dispatch, it
 	// begins nothing more, rel-1-0-10:GAP-0766). The call is found once here
 	// and read below from what is kept (hookpaths.Call).
-	call, endCall := hookpaths.BeginHookCall()
+	call, endCall := hookpaths.JoinHookCall(found)
 	defer endCall()
+	// The readings below, on this goroutine while the call is open, use the
+	// call found here (trustedActionRequest.hookCall). It is dropped before
+	// the call ends: the readings deferred above run after the end, and find
+	// the call (or none) as they did.
+	request.hookCall = call
+	defer func() { request.hookCall = hookpaths.Call{} }()
 	// Every cap a pattern expansion of the call hit is the call's one
 	// TRUNCATED reading (the one bound rule): a walk that stopped at its
 	// bound with no protected match before it is at least the unknown tier,
@@ -621,6 +657,14 @@ func dispatchTrustedActionOnce(
 			scheduleEffectShadow(request, mode, effectsRulesTierFor(), request.recordEffectShadow)
 		}
 		request.recordEffectShadow = nil
+		// The call's own effects reading (effectRequest) holds the call's
+		// pending alias change; the twins and passes below record none. They
+		// are spellings of this call, not calls the agent ran, and the
+		// recorder turned the dispatch memo off for each of them
+		// (trustedDispatchMemo.dispatch): a session's sudo tee F <<< WORD ran
+		// every repeat again, the cost the memo removed (GAP-2204,
+		// rel-1-0-10:GAP-1472).
+		request.aliasPending, request.aliasTwin = nil, true
 		// Secret flow tracking (S7). It keeps a bounded per-session state and
 		// alerts (default) or blocks (strict/managed) when a labeled secret
 		// reaches an external sink. Shadow records the hit and never changes the

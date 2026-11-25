@@ -189,7 +189,7 @@ type hookCall struct {
 	scripts     map[scriptReadKey]string
 	scriptBytes int
 	// keyReads are the answers of the private-key reader, by its reading
-	// (ActionPrivateKeyReadBounded).
+	// (ActionPrivateKeyReadBoundedIn).
 	keyReads map[keyReadKey]keyReadAnswer
 	// stateIdentities are the identity indexes of the active state trees
 	// this call walked whose folders had not settled (activeStateIdentities):
@@ -298,6 +298,39 @@ func BeginHookCall() (Call, func()) {
 
 // CurrentHookCall is the Call the calling goroutine runs (the zero Call: none).
 func CurrentHookCall() Call { return Call{currentHookCall()} }
+
+// JoinHookCall is BeginHookCall for a goroutine that found its open call a
+// moment before (found, from BeginHookCall or CurrentHookCall in a frame
+// that is still running, so the call is still open). Off Windows that call
+// is the one BeginHookCall would find, with nothing to end, and is returned
+// without a second traceback of the goroutine's stack (goroutineID): each
+// costs a walk of every frame, and a gateway decision found its call about
+// 110 times, 8% of its time (DET111-LANEON-PERF, GAP-2197). A zero found,
+// and every call on Windows (foundCallServes), begins as BeginHookCall does.
+func JoinHookCall(found Call) (Call, func()) {
+	if found.call != nil && foundCallServes {
+		return found, func() {}
+	}
+	return BeginHookCall()
+}
+
+// FoundHookCall is CurrentHookCall for a goroutine that found its open call
+// a moment before (found, as for JoinHookCall): off Windows that call, else
+// the call found again.
+func FoundHookCall(found Call) Call {
+	if found.call != nil && foundCallServes {
+		return found
+	}
+	return CurrentHookCall()
+}
+
+// joinHookCall is JoinHookCall on the package's own call type.
+func joinHookCall(found Call) (*hookCall, func()) {
+	if found.call != nil && foundCallServes {
+		return found.call, func() {}
+	}
+	return beginHookCall()
+}
 
 // State is the CallState of the call (the zero CallState: none).
 func (c Call) State() CallState {

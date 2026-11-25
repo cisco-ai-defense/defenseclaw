@@ -160,8 +160,10 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 	key, refs := trustedDispatchMemoKeyOf(request)
 	// The goroutine's hook call is found once: the dispatch below runs in it
 	// (or begins and ends its own when none is open), so before and after
-	// read the same call (hookpaths.Call).
-	call := hookpaths.CurrentHookCall()
+	// read the same call (hookpaths.Call). A request of a dispatch on this
+	// goroutine carries the call that dispatch found (hookCall), which is
+	// not found again; the dispatch below joins it.
+	call := hookpaths.FoundHookCall(request.hookCall)
 	before := trustedDispatchStateOf(call, request)
 	if hit := memo.lookup(ctx, bucket, key, refs, before); hit != nil {
 		if request.budget != nil {
@@ -181,7 +183,7 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 		run.unprovenTarget = &outs.unprovenTarget
 	}
 	trustedDispatchRun(request)
-	findings := dispatchTrustedActionOnce(ctx, run)
+	findings := dispatchTrustedActionOnceIn(ctx, run, call)
 	outs.unprovenSet = outs.unprovenTarget != unprovenWrite{}
 	outs.replay(request)
 	after := trustedDispatchStateOf(call, request)
@@ -244,6 +246,9 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo, key.Tiers = nil, nil, nil, nil
 	key.overBudgetOmission, key.unresolvedTarget, key.resolvedTarget, key.nonWriteMention = nil, nil, nil, nil
 	key.unprovenTarget, key.unknownMention = nil, nil
+	// The hook call is the goroutine's, the same for every request of the
+	// call; it is how a run finds it, not what it judges.
+	key.hookCall = hookpaths.Call{}
 	return key, refs
 }
 

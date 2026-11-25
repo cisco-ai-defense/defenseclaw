@@ -226,7 +226,10 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	for i := range results {
 		results[i].FetchedScriptRule = fetchRule
 	}
-	if len(result.Unknowns) == 0 && mode == effectRulesOn {
+	// A twin of a call records no alias: a twin judged as its own outermost
+	// dispatch (stateTwinMutates) would otherwise remember its spelling's
+	// links at once, before the call's verdict (GAP-2204).
+	if len(result.Unknowns) == 0 && mode == effectRulesOn && !request.aliasTwin {
 		if request.aliasPending != nil {
 			request.aliasPending.set(request, result, facts, opts.Flavor)
 		} else {
@@ -430,6 +433,9 @@ func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, ti
 	if record == nil || effectShadowLiveOff {
 		return
 	}
+	// The shadow runs on another goroutine, which runs no hook call of the
+	// dispatch's (trustedActionRequest.hookCall).
+	request = request.withoutHookCall()
 	goEffectShadow(func() { record(effectShadowRun(request, mode, tier)[0]) })
 }
 
