@@ -6,6 +6,8 @@ package hookpaths
 import (
 	"slices"
 	"sync"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // TargetMemo keeps the file system answers of one hook evaluation: the
@@ -77,6 +79,51 @@ type TargetMemo struct {
 	// memo's own answers.
 	unread          *TargetMemo
 	unreadDecisions map[unreadDecisionKey]string
+	// parsed are the trees parsedShell handed out, by command.
+	parsed map[string]memoParse
+}
+
+// memoParse is one parseShell answer kept by a memo.
+type memoParse struct {
+	file *syntax.File
+	ok   bool
+}
+
+// maxMemoParses and maxMemoParseBytes bound the trees a memo keeps: a few
+// commands of the hook payload's size.
+const (
+	maxMemoParses     = 8
+	maxMemoParseBytes = 64 << 10
+)
+
+// parsedShell is parseShell of command for a reader that only reads the
+// tree: the memo parses each command once and hands every such reader the
+// same tree. One decision read the same 8 KB command with the parser three
+// times for the sed backup reader (both readings) and the make proof, most
+// of a copy-mode by-name decision (FIX-F3PERF). Only readers that never
+// change a tree may use it: literalWriteOperandsWithParsedKnown renames the
+// shadowed builtins of its tree in place (knownShadow), so it and the
+// readers that hand it their tree parse their own.
+func (m *TargetMemo) parsedShell(command string) (*syntax.File, bool) {
+	if m == nil || len(command) > maxMemoParseBytes {
+		return parseShell(command)
+	}
+	m.mu.Lock()
+	kept, found := m.parsed[command]
+	m.mu.Unlock()
+	if found {
+		return kept.file, kept.ok
+	}
+	file, ok := parseShell(command)
+	m.mu.Lock()
+	if m.parsed == nil {
+		m.parsed = make(map[string]memoParse)
+	}
+	if len(m.parsed) < maxMemoParses {
+		m.parsed[command] = memoParse{file: file, ok: ok}
+	}
+	m.mu.Unlock()
+	return file, ok
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not

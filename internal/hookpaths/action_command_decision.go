@@ -200,7 +200,7 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 			return "protected-target"
 		}
 	}
-	if actionPureMake(command, home) {
+	if actionPureMake(command, home, memo) {
 		if actionMakeProtectedRecipe(command, cwd, home) {
 			return "protected-target"
 		}
