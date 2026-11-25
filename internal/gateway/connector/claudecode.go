@@ -31,7 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // ClaudeCodeConnector is the hook-only security surface for Claude
@@ -1329,7 +1329,11 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 			expectedCommand = defenseclawHookBinary()
 		}
 		args, ok := claudeCodeNativeExecArguments(handler)
-		if !ok || !pathidentity.Same(command, expectedCommand) {
+		// The installed hook binary by its own name or an 8.3 alias of it,
+		// never a junction, symbolic link or hard link elsewhere: the same
+		// rule machine-policy verify, status and the guardian apply
+		// (winpath.SameNamedFile, GAP-2175).
+		if !ok || !winpath.SameNamedFile(command, expectedCommand) {
 			return false
 		}
 		expectedArgs := []string{"hook", "--connector", "claudecode"}

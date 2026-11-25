@@ -137,19 +137,16 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 // claudeHandlerIsOwned reports whether a decoded handler uses the current
 // managed form. Earlier forms need a policy refresh before they count.
 func claudeHandlerIsOwned(opts Options, raw any) bool {
-	command := stringField(raw, "command")
 	if opts.goos() == "windows" {
 		// Windows managed Setup registers the launcher through the guarded
 		// cmd.exe form; that is the current managed form on that host.
 		if fields := claudeHandlerFields(raw); fields != nil {
 			if launcher, _, guarded := connector.ClaudeCodeManagedGuardLauncher(fields); guarded {
-				return strings.EqualFold(launcher, opts.HookBinary)
+				return sameHookBinary(opts.goos(), launcher, opts.HookBinary)
 			}
 		}
-		if !strings.EqualFold(command, opts.HookBinary) {
-			return false
-		}
-	} else if command != opts.HookBinary {
+	}
+	if !sameHookBinary(opts.goos(), stringField(raw, "command"), opts.HookBinary) {
 		return false
 	}
 	var args []any
