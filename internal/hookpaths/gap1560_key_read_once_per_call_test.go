@@ -58,9 +58,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		if first {
 			t.Fatalf("%q: a key read before the link exists", command)
 		}
-		if err := os.Symlink(key, link); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, key, link)
 		t.Cleanup(func() { _ = os.Remove(link) })
 		if again, _ := read(); again != first {
 			t.Errorf("%q: the repeat in the call read %v, want the first answer %v (read once per call)", command, again, first)
@@ -80,9 +78,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		if got, _ := read(); got {
 			t.Fatalf("%q: a key read with no link", command)
 		}
-		if err := os.Symlink(key, link); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, key, link)
 		call := currentHookCall()
 		call.bodyUnread = true
 		if got, _ := read(); !got {
@@ -145,9 +141,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 			t.Fatal(err)
 		}
 		if linked {
-			if err := os.Symlink(key, filepath.Join(share, "a", "k")); err != nil {
-				t.Fatal(err)
-			}
+			testSymlink(t, key, filepath.Join(share, "a", "k"))
 		}
 		return share, "head -n1 " + share + "/*/*"
 	}
@@ -173,9 +167,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		if kept(call, shareCommand, "", home, actionfacts.DialectPOSIX) {
 			t.Errorf("%q: the call kept the answer of a first read that changed its state", shareCommand)
 		}
-		if err := os.Symlink(key, filepath.Join(share, "a", "k")); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, key, filepath.Join(share, "a", "k"))
 		if got, _ := ActionPrivateKeyReadBounded(shareCommand, "", home, actionfacts.DialectPOSIX); !got {
 			t.Errorf("%q: the repeat after a first read that changed the call's state gave its answer; want a fresh read that finds the link", shareCommand)
 		}
@@ -237,9 +229,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		if call.cutMark() == mark {
 			t.Fatal("the stat below the share counted no budget cut")
 		}
-		if err := os.Symlink(key, link); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, key, link)
 		t.Cleanup(func() { _ = os.Remove(link) })
 		if got, _ := read(); !got {
 			t.Errorf("%q: the repeat after a budget cut in the call gave the first answer; want a fresh read that finds the link", command)
@@ -248,9 +238,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 
 	t.Run("each field of a reading keeps its own answer", func(t *testing.T) {
 		_ = os.Remove(link)
-		if err := os.Symlink(key, link); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, key, link)
 		t.Cleanup(func() { _ = os.Remove(link) })
 		end := HookCall()
 		defer end()
@@ -282,9 +270,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 
 	t.Run("a call keeps at most maxCallKeyReads answers", func(t *testing.T) {
 		_ = os.Remove(link)
-		if err := os.Symlink(key, link); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, key, link)
 		t.Cleanup(func() { _ = os.Remove(link) })
 		absolute := "head -n1 " + dir + "/*/*"
 		folder := func(i int) string { return fmt.Sprintf("/fx1560/%d", i) }
