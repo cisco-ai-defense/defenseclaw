@@ -131,6 +131,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		if windowsHost {
 			value = actionMSYSDrivePath(value)
+			if placed, ok := actionCmdHomeVariablePath(value, home); ok {
+				value = placed
+			}
 		}
 		if spelledWindows {
 			return actionSpelledWindowsTarget(value, tilde, base, home, stateOnly)

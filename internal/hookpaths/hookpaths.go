@@ -606,8 +606,8 @@ func awkTwinTouchesNoLink(twin actionfacts.AwkTwin, cwd, home string) bool {
 // reaches for a plain shell command (the one an awk program starts too): a concrete write to a protected file, a
 // call with a word the shell expands that a per-user gateway resolves, a loop
 // copy destination that is protected, or a no-dereference touch that is not
-// safe.
-func clientProtectedDecision(command, cwd, home string) bool {
+// safe. dialect is the hook's shell dialect (hookShellDialect).
+func clientProtectedDecision(command, cwd, home string, dialect actionfacts.Dialect) bool {
 	var concrete actionConcreteOperands
 	decision := actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
 	if decision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
@@ -618,7 +618,7 @@ func clientProtectedDecision(command, cwd, home string) bool {
 		// word the shell expands carries the per-user decision, minus a value
 		// the call proves dead and writers the one resolver proves safe
 		// (rel-1-0-10 GAP-0415, GAP-0326, GAP-0327).
-		decision = ActionCommandDecision(command, cwd, home) != "" &&
+		decision = clientCommandDecision(command, cwd, home, dialect) != "" &&
 			!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
 			!actionClientProvedOverwrittenRedirect(command, cwd, home) &&
 			!writersAllProvenSafe(command, cwd, home, nil)
@@ -630,6 +630,25 @@ func clientProtectedDecision(command, cwd, home string) bool {
 		_, decision = noDereferenceTouchStatus(command, cwd, home)
 	}
 	return decision
+}
+
+// clientCommandDecision is the per-user decision of a shell command that the
+// hook client carries (ActionDecisionKey). It is the reading without a
+// dialect and, on a Windows home with a dialect hint, also the reading in the
+// hook's shell dialect: the one a per-user gateway judges the call with (a
+// Claude Code Bash call is Git Bash, DialectPOSIX). A hint only adds a
+// reading; a protected target either finds is the decision. Without the
+// hinted reading a Windows client sent no decision for a call the per-user
+// gateway blocks, so a managed gateway that cannot read the user's links had
+// no proof of it (rel-1-0-10:GAP-2178: 300 touch operands ending in a hard
+// link to the keys file). On a POSIX home the hint changes no reading, so the
+// command is read once.
+func clientCommandDecision(command, cwd, home string, dialect actionfacts.Dialect) string {
+	decision := ActionCommandDecision(command, cwd, home)
+	if decision != "" || dialect == "" || !actionWindowsHome(home) {
+		return decision
+	}
+	return ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, nil)
 }
 
 // mergeFacts is the facts of both maps; an entry of first stays.
@@ -2076,6 +2095,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	if toolArgs != nil {
+		shellDialect := hookShellDialect(connector, tool)
 		for _, command := range clientShellCommands(tool, toolArgs, args) {
 			if command != "" {
 				var concreteOperands actionConcreteOperands
@@ -2172,7 +2192,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					backupUnresolved = SedInPlaceBackupUnresolved(command, cwd, home)
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
+					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, shellDialect)
 				}
 				// The plain-call decision of this command, read once: the
 				// carry below and the past-the-limits check both ask it, and
@@ -2181,7 +2201,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				decidedFor, plainDecision := "", ""
 				commandDecision := func() string {
 					if decidedFor != command || decidedFor == "" {
-						decidedFor, plainDecision = command, ActionCommandDecision(command, cwd, home)
+						decidedFor, plainDecision = command, clientCommandDecision(command, cwd, home, shellDialect)
 					}
 					return plainDecision
 				}
@@ -2378,7 +2398,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					truncated = truncated || shellCaps.Any()
 					if isTwin && shellTwin != command {
 						addReading(shellTwin, true)
-						protectedDecision = protectedDecision || clientProtectedDecision(shellTwin, cwd, home)
+						protectedDecision = protectedDecision || clientProtectedDecision(shellTwin, cwd, home, shellDialect)
 						if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(shellTwin); isTwin && wrapped != shellTwin {
 							addReading(wrapped, false)
 						}
@@ -2409,7 +2429,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						// and reads these targets only from this map.
 						for _, body := range awkTwin.Bodies {
 							addReading(body, true)
-							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
+							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home, shellDialect)
 						}
 					}
 					// A program file the client cannot read is code the map does
