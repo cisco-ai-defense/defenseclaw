@@ -20,7 +20,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -33,16 +32,25 @@ import (
 // build would refuse is refused by the writer, so it never reaches
 // config.yaml and blocks the reloads after it.
 func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
-	// The installed layout links <data_dir>/policies to the built-in packs. A
-	// Limited Windows token cannot make the symbolic link, so on Windows the
-	// layout also runs through a junction, on every token (GAP-2158).
+	// <data_dir>/policies holds the built-in packs: linked to the repository
+	// packs, and, as an install seeds them, copied. A Limited Windows token
+	// cannot make the symbolic link; the copied layout runs on every token
+	// (GAP-2158). The gateway refuses a rule-pack folder reached through a
+	// junction, so a junction is no stand-in here.
 	t.Run("symbolic link", func(t *testing.T) {
 		checkConfigWriterRefusesAnUnloadableRuleReference(t, testenv.Symlink)
 	})
-	if runtime.GOOS == "windows" {
-		t.Run("junction", func(t *testing.T) {
-			checkConfigWriterRefusesAnUnloadableRuleReference(t, testenv.Junction)
-		})
+	t.Run("copied folder", func(t *testing.T) {
+		checkConfigWriterRefusesAnUnloadableRuleReference(t, copyRulePackTree)
+	})
+}
+
+// copyRulePackTree copies the built-in pack folder target to link, the
+// layout an install seeds.
+func copyRulePackTree(t testing.TB, target, link string) {
+	t.Helper()
+	if err := os.CopyFS(link, os.DirFS(target)); err != nil {
+		t.Fatalf("copy the rule packs: %v", err)
 	}
 }
 

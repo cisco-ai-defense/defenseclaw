@@ -19,7 +19,6 @@ package gateway
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -38,30 +37,27 @@ func TestOpenClawPathUnderAny(t *testing.T) {
 	}
 	link := filepath.Join(home, "skills", "escape")
 	// A Limited Windows token cannot make the symbolic link: that case skips
-	// there, and on Windows a junction out of the root is judged too
-	// (GAP-2158).
+	// there and every other case runs (GAP-2158). The junction out of the
+	// root is GAP-2182's own test.
 	escape := testenv.TrySymlink(t, other, link)
 	roots := []string{home}
-	cases := map[string]bool{
-		filepath.Join(home, "skills", "s1"): true,
-		home:                                true,
-		other:                               false,
-		link:                                false,
-		"relative/path":                     false,
-		filepath.Join(home, "missing"):      false,
-	}
-	junction := filepath.Join(home, "skills", "escape-junction")
-	if runtime.GOOS == "windows" {
-		testenv.Junction(t, other, junction)
-		cases[junction] = false
-	}
-	for p, want := range cases {
-		t.Run(p, func(t *testing.T) {
-			if p == link {
+	for _, tc := range []struct {
+		name, path string
+		want       bool
+	}{
+		{"skill folder", filepath.Join(home, "skills", "s1"), true},
+		{"home", home, true},
+		{"other folder", other, false},
+		{"link out of the root", link, false},
+		{"relative path", "relative/path", false},
+		{"missing", filepath.Join(home, "missing"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.path == link {
 				escape.Require(t)
 			}
-			if got := openClawPathUnderAny(p, roots); got != want {
-				t.Errorf("openClawPathUnderAny(%q) = %v, want %v", p, got, want)
+			if got := openClawPathUnderAny(tc.path, roots); got != tc.want {
+				t.Errorf("openClawPathUnderAny(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
 	}
