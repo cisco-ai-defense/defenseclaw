@@ -514,7 +514,7 @@ func det111TemplateSeeds(layout det111Layout) []det111Seed {
 				kinds = "w"
 			}
 			if sh.Kind != kinds {
-				if !(sh.Kind == "d" && tg.Kind == "w") {
+				if sh.Kind != "d" || tg.Kind != "w" {
 					continue
 				}
 			}

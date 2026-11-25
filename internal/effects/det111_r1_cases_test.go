@@ -282,7 +282,7 @@ func det111HasReason(e effects.Effect, code effects.ReasonCode) bool {
 
 func det111Covers(v, seed det111Facts) bool {
 	for p := range seed.progs {
-		if !v.progs[p] && !(det111Shells[p] && v.progs[det111AnyShell]) {
+		if !v.progs[p] && (!det111Shells[p] || !v.progs[det111AnyShell]) {
 			return false
 		}
 	}

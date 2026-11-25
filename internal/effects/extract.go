@@ -2043,7 +2043,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// powershell/pwsh launched from any dialect: decode -enc and unwrap its
 	// -Command / positional script as PowerShell (review N8 K4/K5).
-	if entry.PSLaunch && c.Host != nil && !(c.Host.Opaque && powerShellPositionalWD(inner[1:])) {
+	if entry.PSLaunch && c.Host != nil && (!c.Host.Opaque || !powerShellPositionalWD(inner[1:])) {
 		w.hostPayload(c, dialect, depth, cond, origin)
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
@@ -2885,8 +2885,11 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		// A native -xVALUE value comes before PowerShell's -Name:Value syntax:
 		// the colon after a drive letter belongs to the attached path.
-		fname, inlineVal, hasInline := name, "", false
-		inlineWord := Word{}
+		var (
+			fname, inlineVal string
+			hasInline        bool
+			inlineWord       Word
+		)
 		if flag, value, attached := splitAttachedNativeValue(name, p, dialect); attached {
 			fname, inlineWord, hasInline = flag, value, true
 			inlineVal = value.Value

@@ -37,14 +37,6 @@ func before(e extent) extent {
 
 func after(e extent) extent { return extent{e.End, e.End} }
 
-func lastCharacterOf(e extent) extent {
-	o := e.End - 1
-	if o < 0 {
-		o = 0
-	}
-	return extent{o, o}
-}
-
 func tokExt(t *Token) extent { return extent{t.Start, t.End} }
 
 // ParseError is one parser diagnostic (the message text is not reproduced).
@@ -56,15 +48,14 @@ type ParseError struct {
 
 // Parser is the PowerShell parser. Use Parse.
 type Parser struct {
-	tz              *tokenizer
-	src             []char
-	ungot           *Token
-	disableComma    bool
-	inConfiguration bool
-	errors          []ParseError
-	errorSeen       map[errorKey]struct{}
-	tokens          []*Token
-	depth           int
+	tz           *tokenizer
+	src          []char
+	ungot        *Token
+	disableComma bool
+	errors       []ParseError
+	errorSeen    map[errorKey]struct{}
+	tokens       []*Token
+	depth        int
 	// asciiSrc is the input text when it is pure ASCII (UTF-16 offsets equal byte offsets): textOf slices it.
 	asciiSrc string
 	ascii    bool
@@ -107,7 +98,6 @@ func (p *Parser) tooDeep() {
 }
 
 const verbatimArgument = "--%"
-const verbatimParameterName = "-%"
 
 // Result is the output of Parse: the AST root, the token stream and the errors.
 type Result struct {

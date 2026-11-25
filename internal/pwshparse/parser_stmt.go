@@ -513,20 +513,6 @@ func (p *Parser) switchStatementRule(labelToken, switchToken *Token) *Node {
 	return n
 }
 
-func (p *Parser) getWordOrExpression(keyword *Token) *Node {
-	nameToken := p.nextToken()
-	if nameToken.Kind == TkEndOfInput {
-		p.ungetToken(nameToken)
-		p.reportIncomplete(after(tokExt(keyword)), "RequiredNameOrExpressionMissing")
-		return nil
-	}
-	argument := p.getCommandArgument(argCommandArgument, nameToken)
-	if argument == nil {
-		p.reportError(after(tokExt(keyword)), "ParameterRequiresArgument")
-	}
-	return argument
-}
-
 func (p *Parser) foreachStatementRule(labelToken, forEachToken *Token) *Node {
 	startTok := forEachToken
 	if labelToken != nil {

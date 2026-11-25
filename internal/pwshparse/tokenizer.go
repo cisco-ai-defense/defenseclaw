@@ -93,11 +93,6 @@ func lookupOperator(s string) (TokenKind, bool) {
 	return k, ok
 }
 
-func isKeyword(s string) bool {
-	_, ok := lookupKeyword(s)
-	return ok
-}
-
 type tokenizerState struct {
 	nestedAdj  int
 	script     []char
@@ -343,25 +338,6 @@ func removeTokensDuringResync(list []*Token, start int) []*Token {
 		}
 	}
 	return list[:removeFrom]
-}
-
-func (t *tokenizer) replaceSavedTokens(first, last, nt *Token) {
-	startOffset := first.Start
-	endOffset := last.End
-	lastToReplace := -1
-	for i := len(t.tokenList) - 1; i >= 0; i-- {
-		if t.tokenList[i].End == endOffset {
-			lastToReplace = i
-			continue
-		}
-		if t.tokenList[i].Start == startOffset {
-			nl := append([]*Token{}, t.tokenList[:i]...)
-			nl = append(nl, nt)
-			nl = append(nl, t.tokenList[lastToReplace+1:]...)
-			t.tokenList = nl
-			break
-		}
-	}
 }
 
 func (t *tokenizer) reportError(start int, id string) {

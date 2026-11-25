@@ -85,7 +85,7 @@ func TestDET111KnownProtectedWriteIsThePlainSpelling(t *testing.T) {
 				}
 				for _, name := range names {
 					action, sev := hardP2Verdict(t, api, route, home, strings.ReplaceAll(writers[name], "{t}", member))
-					if action != wantAction || sev != wantSev && !(target == ".defenseclaw/config.yaml" && sev == "HIGH") {
+					if action != wantAction || sev != wantSev && (target != ".defenseclaw/config.yaml" || sev != "HIGH") {
 						t.Errorf("%s %s %s on %s: %s/%s, plain spelling %s/%s", tier.name, route, name, target, action, sev, wantAction, wantSev)
 					}
 				}

@@ -149,7 +149,6 @@ func (b *bitSet) length() int {
 	return len(b.bits)
 }
 
-func tokenKindTraits(k TokenKind) TokenFlags   { return staticTokenFlags[k] }
 func (k TokenKind) hasTrait(f TokenFlags) bool { return staticTokenFlags[k]&f != 0 }
 func (k TokenKind) binaryPrecedence() int {
 	return int(staticTokenFlags[k] & tfBinaryPrecedenceMask)

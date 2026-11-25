@@ -52,8 +52,6 @@ func (r det111Row) command() string {
 	return s
 }
 
-func (r det111Row) isShell() bool { return r.Tool == "Bash" || r.Tool == "PowerShell" }
-
 // det111Key makes a row key safe for the output format.
 var det111KeyBad = regexp.MustCompile(`[^A-Za-z0-9._/:+=@-]+`)
 

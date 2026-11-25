@@ -2088,7 +2088,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			return true
 		}
 	}
-	if complete && !(hidden && unseen) {
+	if complete && (!hidden || !unseen) {
 		globs.note(pattern, "0")
 		return false
 	}

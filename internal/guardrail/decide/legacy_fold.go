@@ -124,7 +124,7 @@ func NamesSet(ruleID string, p Proof) bool {
 // beside it stands (R-NOLOSS).
 func FoldsIntoLegacy(f Finding, call []Finding) bool {
 	p := f.Proof
-	if p.Source != SourceEffects || !(p.Certainty == CertKnown || p.Advisory()) {
+	if p.Source != SourceEffects || (p.Certainty != CertKnown && !p.Advisory()) {
 		return false
 	}
 	for _, g := range call {

@@ -238,8 +238,6 @@ func (p *Parser) pipelineRule(startExpression *Node, allowBackground bool) *Node
 	return n
 }
 
-var streamNamesAST = [...]string{"All", "Output", "Error", "Warning", "Verbose", "Debug", "Information"}
-
 // redirectionRule parses a redirection; the second result is the FromStream index.
 func (p *Parser) redirectionRule(rt *Token, redirections *[maxRedirections]*Node, ext *extent) (*Node, int) {
 	var result *Node
@@ -379,15 +377,16 @@ func (p *Parser) commandRule() *Node {
 		firstToken = token
 		endExtent = tokExt(token)
 		var ctx int
-		if token.Kind == TkDot {
+		switch token.Kind {
+		case TkDot:
 			dotSource = true
 			token = p.nextToken()
 			ctx = argCommandNameAfterInvocationOperat
-		} else if token.Kind == TkAmpersand {
+		case TkAmpersand:
 			ampersand = true
 			token = p.nextToken()
 			ctx = argCommandNameAfterInvocationOperat
-		} else {
+		default:
 			ctx = argCommandName
 		}
 		scanning := true

@@ -231,9 +231,10 @@ func stdoutToAgentStderr(redirs []Redir) bool {
 		}
 		switch r.Op {
 		case RedirWrite, RedirAppend, RedirClobber, RedirDup:
-			if fd == 1 {
+			switch fd {
+			case 1:
 				stdout = dest
-			} else if fd == 2 {
+			case 2:
 				stderr = dest
 			}
 		}

@@ -410,7 +410,7 @@ func det111RunRow(r det111Row, p gap0437Pack, handlers map[string]http.HandlerFu
 			emit(r, p.name, "hook-cc", v)
 		}
 	}
-	if routes["as-is"] && r.RawTool != "" && r.Conn != "" && !(r.RawTool == r.Tool && (r.Conn == "claudecode" || r.Conn == "codex")) {
+	if routes["as-is"] && r.RawTool != "" && r.Conn != "" && (r.RawTool != r.Tool || (r.Conn != "claudecode" && r.Conn != "codex")) {
 		if call, ok := det111AsIs(r, cwd); ok {
 			if h := handlers[call.conn]; h != nil {
 				emit(r, p.name, "as-is:"+call.conn+"/"+r.RawTool, det111Send(h, call, p.managed))

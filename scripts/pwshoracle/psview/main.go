@@ -169,7 +169,7 @@ func countNodes(rv reflect.Value, v *view, seen map[uintptr]bool) {
 		if !rv.IsNil() {
 			countNodes(rv.Elem(), v, seen)
 		}
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if rv.IsNil() || seen[rv.Pointer()] {
 			return
 		}

@@ -568,7 +568,7 @@ func psEncodedWithBlanks(c *psparse.Command) (string, bool) {
 			continue
 		}
 		n := strings.ToLower(p.Name)
-		if n != "e" && n != "ec" && !(len(n) >= 3 && strings.HasPrefix("encodedcommand", n)) {
+		if n != "e" && n != "ec" && (len(n) < 3 || !strings.HasPrefix("encodedcommand", n)) {
 			continue
 		}
 		var val psparse.Expr
@@ -618,7 +618,7 @@ func psExpandedCommand(c *psparse.Command, o Options) (text string, maybe, ok bo
 			continue
 		}
 		n := strings.ToLower(p.Name)
-		if n != "c" && !(len(n) >= 3 && strings.HasPrefix("command", n)) {
+		if n != "c" && (len(n) < 3 || !strings.HasPrefix("command", n)) {
 			continue
 		}
 		if p.HasColon || i+2 != len(els) {
@@ -648,10 +648,10 @@ func psExpandedCommand(c *psparse.Command, o Options) (text string, maybe, ok bo
 func psExpandSegs(segs []WordSeg, o Options) (string, bool) {
 	var b strings.Builder
 	for _, seg := range segs {
-		switch {
-		case seg.Var == "":
+		switch seg.Var {
+		case "":
 			b.WriteString(seg.Lit)
-		case seg.Var == psHomeVar:
+		case psHomeVar:
 			v, ok := o.Env[psHomeVar]
 			if !ok {
 				v = o.Home
