@@ -81,6 +81,8 @@ type UserScanOptions struct {
 	// service account cannot read a home on Linux or macOS, so the per-user
 	// scan is the only reader that can (GAP-0961).
 	IncludeUserEmail bool `json:"include_user_email,omitempty"`
+	// A negative option preserves the existing worker behavior when omitted.
+	DisableSkillContentHashes bool `json:"disable_skill_content_hashes,omitempty"`
 }
 
 // UserScanOptionsFromConfig keeps the privacy settings of ai_discovery and
@@ -98,6 +100,8 @@ func UserScanOptionsFromConfig(cfg *config.Config) UserScanOptions {
 		StoreRawLocalPaths:      ad.StoreRawLocalPaths,
 		IDEInventory:            ad.EffectiveIDEInventory(),
 		IncludeUserEmail:        ad.IncludeUserEmail,
+
+		DisableSkillContentHashes: !ad.EffectiveIncludeSkillContentHashes(),
 	}
 }
 
@@ -256,6 +260,8 @@ func scanUserHomeWithSystemBinaryDirs(ctx context.Context, home, account string,
 			HomeDirs:         []string{home},
 			IDEInventory:     opts.IDEInventory,
 			IncludeUserEmail: opts.IncludeUserEmail,
+
+			DisableSkillContentHashes: opts.DisableSkillContentHashes,
 		}),
 		catalog:            catalog,
 		userHomeScan:       true,
@@ -502,6 +508,10 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 		if sig.Component != nil {
 			fields = append(fields, sig.Component.Ecosystem, sig.Component.Name, sig.Component.Version, sig.Component.Framework)
 		}
+		if sig.Location != "" && ((!strings.HasPrefix(sig.Location, "~/") && !filepath.IsAbs(sig.Location)) ||
+			!userScanText(sig.Location, maxSkillLocation)) {
+			return errors.New("signal location must be a printable home-relative or absolute path")
+		}
 		if len(sig.Basenames) > maxUserScanField || len(sig.EvidenceTypes) > maxUserScanField || len(sig.PathHashes) > maxUserScanField {
 			return errors.New("signal lists are too long")
 		}
@@ -511,6 +521,11 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 			fields = append(fields, ev.Type, ev.Basename, ev.MatchKind, ev.Origin, ev.ValueHash)
 			if !userScanText(ev.RawPath, 4096) {
 				return errors.New("evidence paths must be printable")
+			}
+			if ev.Skill != nil {
+				if err := validateSkillFacts(*ev.Skill); err != nil {
+					return err
+				}
 			}
 		}
 		for _, value := range fields {
@@ -673,6 +688,9 @@ func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, 
 	for i, ev := range sig.Evidence {
 		ev.PathHash = namespace(ev.PathHash)
 		ev.WorkspaceHash = namespace(ev.WorkspaceHash)
+		if s.opts.DisableSkillContentHashes {
+			ev.Skill = nil // The spool may contain an observation made before the setting changed.
+		}
 		if !s.opts.StoreRawLocalPaths {
 			ev.RawPath = ""
 		}

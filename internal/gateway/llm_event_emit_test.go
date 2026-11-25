@@ -14,8 +14,30 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+type hookLLMSpanDirectiveRuntime struct {
+	sidecarRuntimeEmitter
+	lifecycleV8Runtime
+	directives []*bool
+}
+
+func (runtime *hookLLMSpanDirectiveRuntime) StartModelTrace(
+	ctx context.Context,
+	input observability.SpanModelChatInput,
+) (context.Context, *observabilityruntime.ModelTrace, error) {
+	directive := redactionDecisionFromContext(ctx)
+	if directive != nil {
+		value := *directive
+		directive = &value
+	}
+	runtime.directives = append(runtime.directives, directive)
+	return runtime.lifecycleV8Runtime.StartModelTrace(ctx, input)
+}
 
 func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	gatewaylog.SetProcessRunID("gateway-run-a")
@@ -833,7 +855,7 @@ func TestNormalizeHookReportedCostAccumulatesIncrementalPerCallCost(t *testing.T
 func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing.T) {
 	api := &APIServer{}
 	for i := 0; i < hookPromptCacheMaxEntries+10; i++ {
-		api.rememberHookLLMSpanPrompt(llmEventMeta{
+		api.rememberHookLLMSpanPrompt(t.Context(), llmEventMeta{
 			Source: "codex", SessionID: "session-" + strconv.Itoa(i), TurnID: "turn",
 			PromptID: "prompt-" + strconv.Itoa(i),
 		}, "prompt")
@@ -848,8 +870,8 @@ func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing
 	overlap := &APIServer{}
 	turn1 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "1", PromptID: "p1"}
 	turn2 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "2", PromptID: "p2"}
-	overlap.rememberHookLLMSpanPrompt(turn1, "first")
-	overlap.rememberHookLLMSpanPrompt(turn2, "second")
+	overlap.rememberHookLLMSpanPrompt(t.Context(), turn1, "first")
+	overlap.rememberHookLLMSpanPrompt(t.Context(), turn2, "second")
 	first, ok := overlap.takeHookLLMSpanPrompt(turn1, "response one")
 	if !ok || first.content != "first" {
 		t.Fatalf("first turn snapshot=%+v emit=%v", first, ok)
@@ -857,6 +879,20 @@ func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing
 	second, ok := overlap.takeHookLLMSpanPrompt(turn2, "response two")
 	if !ok || second.content != "second" {
 		t.Fatalf("second turn snapshot=%+v emit=%v", second, ok)
+	}
+}
+
+func TestHookLLMSpanPromptFallbackDoesNotConsumeDifferentKnownTurn(t *testing.T) {
+	api := &APIServer{}
+	turn2 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "2", PromptID: "p2"}
+	api.rememberHookLLMSpanPrompt(t.Context(), turn2, "second")
+
+	turn1 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "1", PromptID: "p1"}
+	if snapshot, ok := api.takeHookLLMSpanPrompt(turn1, "response one"); !ok || snapshot.content != "" {
+		t.Fatalf("different-turn fallback snapshot=%+v emit=%v, want empty snapshot", snapshot, ok)
+	}
+	if snapshot, ok := api.takeHookLLMSpanPrompt(turn2, "response two"); !ok || snapshot.content != "second" {
+		t.Fatalf("matching turn snapshot=%+v emit=%v, want retained prompt", snapshot, ok)
 	}
 }
 
@@ -869,8 +905,8 @@ func TestHookLLMSpanPromptCacheIsExecutionScoped(t *testing.T) {
 	executionB := executionA
 	executionB.ExecutionID = "execution-b"
 
-	api.rememberHookLLMSpanPrompt(executionA, "prompt from execution A")
-	api.rememberHookLLMSpanPrompt(executionB, "prompt from execution B")
+	api.rememberHookLLMSpanPrompt(t.Context(), executionA, "prompt from execution A")
+	api.rememberHookLLMSpanPrompt(t.Context(), executionB, "prompt from execution B")
 
 	first, ok := api.takeHookLLMSpanPrompt(executionA, "response from execution A")
 	if !ok || first.content != "prompt from execution A" {
@@ -880,6 +916,83 @@ func TestHookLLMSpanPromptCacheIsExecutionScoped(t *testing.T) {
 	if !ok || second.content != "prompt from execution B" {
 		t.Fatalf("execution B snapshot=%+v emit=%v", second, ok)
 	}
+}
+
+func TestStricterHookRedactionDirective(t *testing.T) {
+	trueValue, falseValue := true, false
+	for _, test := range []struct {
+		name          string
+		first, second *bool
+		want          *bool
+	}{
+		{name: "both raw", first: &falseValue, second: &falseValue, want: &falseValue},
+		{name: "prompt redact", first: &trueValue, second: &falseValue, want: &trueValue},
+		{name: "completion redact", first: &falseValue, second: &trueValue, want: &trueValue},
+		{name: "missing fails closed", first: nil, second: &falseValue, want: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := stricterHookRedactionDirective(test.first, test.second)
+			if got == nil || test.want == nil {
+				if got != nil || test.want != nil {
+					t.Fatalf("directive = %v, want %v", got, test.want)
+				}
+				return
+			}
+			if *got != *test.want {
+				t.Fatalf("directive = %t, want %t", *got, *test.want)
+			}
+		})
+	}
+}
+
+func TestEmitHookLLMSpanReturnsCompletionScopedDirective(t *testing.T) {
+	trueValue, falseValue := true, false
+	meta := llmEventMeta{
+		Source: "claudecode", Provider: "anthropic", Model: "claude-sonnet-4-5",
+		SessionID: "session", TurnID: "turn", PromptID: "prompt",
+	}
+
+	t.Run("cache miss preserves explicit completion directive", func(t *testing.T) {
+		api, _ := bindHookModelV8Runtime(t, []string{"traces"})
+		runtime := &hookLLMSpanDirectiveRuntime{
+			sidecarRuntimeEmitter: api.observabilityV8RuntimeEmitter(),
+			lifecycleV8Runtime:    api.observabilityV8LifecycleRuntime(),
+		}
+		api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+		completionCtx := withRedactionDecision(t.Context(), &falseValue)
+		returned := api.emitHookLLMSpan(completionCtx, meta, "response")
+		if len(runtime.directives) != 1 || runtime.directives[0] == nil || *runtime.directives[0] {
+			t.Fatalf("runtime directives = %v, want one explicit false", runtime.directives)
+		}
+		if got := redactionDecisionFromContext(returned); got == nil || *got {
+			t.Fatalf("returned directive = %v, want explicit false", got)
+		}
+		if span := oteltrace.SpanContextFromContext(returned); !span.IsValid() {
+			t.Fatalf("returned span correlation = %v, want valid", span)
+		}
+	})
+
+	t.Run("cached prompt does not replace standalone response directive", func(t *testing.T) {
+		api, _ := bindHookModelV8Runtime(t, []string{"traces"})
+		runtime := &hookLLMSpanDirectiveRuntime{
+			sidecarRuntimeEmitter: api.observabilityV8RuntimeEmitter(),
+			lifecycleV8Runtime:    api.observabilityV8LifecycleRuntime(),
+		}
+		api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+		promptCtx := withRedactionDecision(t.Context(), &trueValue)
+		api.rememberHookLLMSpanPrompt(promptCtx, meta, "prompt")
+		completionCtx := withRedactionDecision(t.Context(), &falseValue)
+		returned := api.emitHookLLMSpan(completionCtx, meta, "response")
+		if len(runtime.directives) != 1 || runtime.directives[0] == nil || !*runtime.directives[0] {
+			t.Fatalf("runtime directives = %v, want one explicit true", runtime.directives)
+		}
+		if got := redactionDecisionFromContext(returned); got == nil || *got {
+			t.Fatalf("returned directive = %v, want completion's explicit false", got)
+		}
+		if span := oteltrace.SpanContextFromContext(returned); !span.IsValid() {
+			t.Fatalf("returned span correlation = %v, want valid", span)
+		}
+	})
 }
 
 func TestHookLLMSpanUsageCacheIsExecutionScoped(t *testing.T) {

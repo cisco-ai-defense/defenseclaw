@@ -484,6 +484,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawAIDiscoverySource:     aiDiscoveryV8Optional(summary.Source),
 			DefenseClawAIComponentVendor:     aiDiscoveryV8OptionalText(signal.Vendor),
 			DefenseClawAIComponentProduct:    aiDiscoveryV8OptionalText(signal.Product),
+			DefenseClawAIComponentLocation:   aiDiscoveryV8OptionalText(signal.Location),
 			// A per-user scan's signal names the account it ran as, so the
 			// lifecycle records can be split by user like the observations.
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
@@ -553,6 +554,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAIDiscoverySource:             base.DefenseClawAIDiscoverySource,
 				DefenseClawAIComponentVendor:             base.DefenseClawAIComponentVendor,
 				DefenseClawAIComponentProduct:            base.DefenseClawAIComponentProduct,
+				DefenseClawAIComponentLocation:           base.DefenseClawAIComponentLocation,
 				UserID:                                   base.UserID,
 				DefenseClawUserIDKind:                    base.DefenseClawUserIDKind,
 				DefenseClawUserName:                      base.DefenseClawUserName,

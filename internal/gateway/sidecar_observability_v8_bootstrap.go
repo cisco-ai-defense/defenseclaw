@@ -189,6 +189,7 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 		_ = owner.closeWithTimeout()
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, err)
 	}
+	s.bindManifestReceipts(ctx, owner, cfg, compiled.Plan)
 	if s.logger != nil {
 		s.logger.SetRuntimeV8Emitter(owner)
 	}
@@ -247,6 +248,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 	if reloadErr != nil {
 		return result, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapReload, reloadErr)
 	}
+	s.bindManifestReceipts(ctx, owner, candidateConfig, compiled.Plan)
 	s.applyAIDiscoveryHistoryRetention(s.aiDiscoverySnapshot())
 	return result, nil
 }
@@ -405,7 +407,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	}
 	return &sidecarOwnedObservabilityV8Runtime{
 		runtime: runtime, redactionEngine: engine, dataDir: filepath.Clean(compiled.DataDir),
-		retainJudgeBodies: retainJudgeBodies,
+		retainJudgeBodies: retainJudgeBodies, destinationFactory: destinationFactory,
 	}, nil
 }
 
@@ -431,12 +433,13 @@ func newObservabilityV8RedactionEngine(cfg *config.Config, key redaction.Correla
 }
 
 type sidecarOwnedObservabilityV8Runtime struct {
-	runtime           *observabilityruntime.Runtime
-	redactionEngine   *redaction.Engine
-	dataDir           string
-	retainJudgeBodies bool
-	lifecycleMu       sync.RWMutex
-	closed            bool
+	runtime            *observabilityruntime.Runtime
+	destinationFactory *destinations.Factory
+	redactionEngine    *redaction.Engine
+	dataDir            string
+	retainJudgeBodies  bool
+	lifecycleMu        sync.RWMutex
+	closed             bool
 }
 
 // FingerprintRuntimeV8FindingContent keeps the correlation key inside the

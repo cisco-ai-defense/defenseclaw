@@ -18,8 +18,8 @@ and the active profile, or a [`guardrail.block_at`](#profile-posture) level,
 maps its severity to `block`.
 
 This page inventories the detectors currently shipped in the repository and
-explains which layer owns each decision. Benchmark scores for these layers are
-published in [Guardrail benchmarks](/docs/guardrail/benchmarks).
+explains which layer owns each decision. Scores for these layers are on the
+[Guardrail benchmarks](/docs/guardrail/benchmarks) page.
 
 The balanced/default enabled rule catalog contains 283 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, six selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
 
@@ -375,35 +375,23 @@ gate must accept it, and the active profile (or the connector's
 Profiles change the disposition of accepted findings; they do not make an
 incomplete proof complete.
 
-| Severity | Permissive | Balanced/default | Strict |
-| --- | --- | --- | --- |
-| CRITICAL | Block | Block | Block |
-| HIGH | Alert | Alert or confirm when HITL is enabled | Block |
-| MEDIUM | Allow | Alert | Block |
-| LOW | Allow | Allow | Alert |
+What each finding severity does depends on the pack's block and alert levels, which are listed in [Thresholds](/docs/policies/thresholds#rule-pack-default-posture). In short: every pack blocks CRITICAL. `default` alerts on MEDIUM and HIGH, `permissive` alerts on HIGH only, and `strict` also blocks HIGH and MEDIUM and alerts on LOW.
 
 Connector capability still controls whether `block` can become a
 native deny; unsupported surfaces retain the finding and audit action without
 claiming prevention. See [Defaults](/docs/policies/defaults) for the complete operator
-configuration.
-
-Strict accepts more interruption risk. Connector capability still controls whether `block` becomes a native deny; unsupported surfaces keep the finding and audit action without claiming prevention. Change the levels without switching packs with `defenseclaw guardrail block-at` and `alert-at` ([change block and alert levels](/docs/policies/thresholds), [thresholds](/docs/policies/thresholds)). Human approval applies only below the block level.
+configuration. Strict accepts more interruption risk. Change the levels without switching packs with `defenseclaw guardrail block-at` and `alert-at` ([Thresholds](/docs/policies/thresholds#set-the-levels)). [Human approval](/docs/guardrail/human-approval) applies only below the block level.
 
 ### Low-noise rollout
 
-Start with the balanced/default pack and measure **findings** separately from
-**blocked actions** on representative benign tool traffic. A finding is not
-necessarily an interruption: detection-only regex, unsupported or partial
-ActionFacts, and alert-only chains remain observable without gaining deny
-authority. Move to strict only when the additional alert and interruption risk
-fits the protected environment.
+Start with the `default` pack and watch which findings only alert and which block. A finding is not
+necessarily an interruption: detection-only regex, unsupported or partial ActionFacts, and alert-only
+chains stay observable without gaining deny authority. Move to `strict` when the extra alerts and
+interruptions suit the protected environment.
 
-When extending a pack, prefer the narrowest typed ActionFacts operation and a
-bounded CEL selector. Keep ambiguous or dynamic inputs detection-only, and add
-hard negatives for previews, help/version commands, loopback traffic, failed
-results, mismatched identities, and incomplete chains. Evaluate attack recall
-on attack-positive data and evaluate finding FPR plus benign block rate on
-separate benign or mixed data; an attack-only corpus cannot establish FPR.
+When you extend a pack, prefer the narrowest typed ActionFacts operation and a bounded CEL selector.
+Keep ambiguous or dynamic inputs detection-only, and add counter-examples for previews, help and
+version commands, loopback traffic, failed results, mismatched identities and incomplete chains.
 
 ## YARA MCP-description scanning
 
@@ -496,15 +484,17 @@ An agent's own tool (`Read`, `Edit`, `Grep`, `WebFetch`, ...) opens this walk on
 
 Shell calls use the same table for rules that need no CEL: `CMD-SECRET-REVEAL` (`--reveal`, `--show-secrets`), `CMD-SECRET-LOOKUP`, `CMD-GIT-SHOW-SECRET`, `CMD-PRIV-SETUID`, `CMD-PRIV-PATH-HIJACK`, `CMD-PERSIST-SYSTEM-SCHEDULE` and writes of a uid-0 line to `/etc/passwd`. They run in Go on the parsed ActionFacts, because the rule catalog's CEL cost budget is spent, and the pack keeps the rule's title, severity and tags.
 
-The whole lane (these effects and the table rules on shell and native file-tool calls) has one switch, `guardrail.cascade.lanes.nonshell` (`on`, the default, `shadow` or `off`, written exactly so, at the top level only; any other value or spelling is refused when the configuration loads). Only `on` is live: in `shadow` and in `off` the lane computes nothing and adds nothing, and the verdicts are those of rel/1.0.10.
+The whole lane (these effects and the table rules on shell and native file-tool calls) has one switch, `guardrail.cascade.lanes.nonshell` (`on`, the default, `shadow` or `off`, written exactly so, at the top level only; any other value or spelling is refused when the configuration loads). Only `on` is live: in `shadow` and in `off` the lane computes nothing and adds nothing, and the verdicts are those of release 1.0.10.
 
 ## Action-mode rule details
 
 ### Protected SSH keys
 
-In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. Two cases the scan cannot prove are unknown, not protected writes: the keys file named only as an operand of a program the scan has no model of (a script, an unfamiliar program, a variable program), or named by a statement that only reads it beside other work, and a write whose target the scan cannot resolve and whose command names no protected file or folder, makes no link and builds no name at run time. A per-user install alerts on them in the default and permissive packs; the strict pack and every managed install block them. A write the scan proves, or one whose command spells a protected name, blocks in every pack. In observe mode the write raises the CRITICAL would-block alert and runs.
+Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs. In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. Two cases the scan cannot prove are unknown, not protected writes: the keys file named only as an operand of a program the scan has no model of (a script, an unfamiliar program, a variable program), or named by a statement that only reads it beside other work, and a write whose target the scan cannot resolve and whose command names no protected file or folder, makes no link and builds no name at run time. A per-user install alerts on them in the default and permissive packs; the strict pack and every managed install block them. A write the scan proves, or one whose command spells a protected name, blocks in every pack. In observe mode the write raises the CRITICAL would-block alert and runs.
 
 A read of a private key under `~/.ssh` is blocked in action mode (`PATH-SSH-KEY`) whichever program prints it, not only `cat`. A key read also includes a stdin redirect (`xxd < ~/.ssh/id_ed25519`), a recursive read of the key directory (`grep -r`, `rg`, or `Get-ChildItem` piped into `Select-String`) and `python -c`, `node -e`, `perl -e` or `ruby -e` code that opens the key. A named file that is not a key (`grep -r Host ~/.ssh/config`), a `.pub` file and a listing are not key reads. Everyday key use never puts the key's content in front of the agent and is allowed by the default and strict packs: `ssh-keygen -y`, `ssh-add`, `ssh -i` and a signed `git commit -S`. Observe mode records the read as a would-block alert. On managed Linux with Tetragon, the kernel control `kernel.ssh_private_key_read` also refuses the open once the admin has acknowledged enforce ([Tetragon](/docs/enterprise/tetragon)).
+
+**Known limit for protected files.** The rule reads the text of the command. A write made by a program the command starts (a nested shell, a generated script, a build tool, a tool option that runs another command) is not visible in that text, so it is not caught when it goes through an already existing link to the protected file. Rely on the OpenShell sandbox and file permissions for containment.
 
 ### Instruction files
 
@@ -523,6 +513,45 @@ Email addresses are scored by how many there are. One address, such as a vendor'
 ### CodeGuard
 
 CodeGuard scans PowerShell (`.ps1`, `.psm1`), batch (`.bat`, `.cmd`), `.bash`, `.zsh`, `.mjs`, `.cjs`, `.jsx` and `.tsx` files as code, so a `.ps1` write with a path traversal is seen on the hook path. `CG-PATH-001` reads path operations. It does not fire on a relative `import`, `require` or `#include` of a sibling module or on an ellipsis in prose, and `..\temp`, `....//` and other traversal forms still fire.
+
+### Evaluation and operand limits
+
+**Evaluation limit.** DefenseClaw judges each command of a shell call on its own, up to 128 commands
+in one call (commands joined with `;`, `&&`, `||` or `|`, and the commands inside bodies). A call
+with more commands, or one that runs past a reading bound (nesting too deep to read, for example), raises rule `ACTION-COMPOUND-LIMIT` ("Shell command exceeds policy
+evaluation limit"), whatever its length, up to the 1 MiB hook payload cap. Such a call proves no
+target. With the `default` and `permissive` packs, per-user and managed, the call runs with a visible
+alert that names the rule, an audit record with `decision=alert`, and the LLM judge decides where it
+is configured. With the `strict` pack, managed strict included, action mode blocks it. A finding that
+proves a protected target in the same call (a DefenseClaw state write, a file the call names) decides
+on its own in every profile; a write the reader resolves into DefenseClaw's own state folder
+(`~/.defenseclaw`) is self-protection (`tamper.detector_state_write`, see [Modes](/docs/guardrail/packs-and-modes#modes)). A call that only mentions the folder name, next to
+a statement past the limit, proves no target and is judged like any other limit-only call. **Known limit:** with `default` and `permissive`, a statement past
+the limit can hide a write to a protected file in the same call; use `strict` where that
+matters. In observe mode the call raises the alert and runs. Split a long command into several
+calls, or put it in a script file and run the script.
+
+**Bodies that are not known before they run.** A shell body that exists only at run time, such as
+`bash -c "$BODY"`, is not an evaluation limit. The call raises an `ACTION-PARSE-FAILURE` alert in every
+pack, `strict` included, and runs: this finding never blocks. What the rest of the call names is still judged.
+Use application control where such calls must be stopped. A PowerShell call that is only partly read is
+judged separately, not under `ACTION-COMPOUND-LIMIT`: it gets its own alert in `default` and `permissive` and
+a block in `strict`.
+
+**Operand limit.** DefenseClaw also resolves at most 1024 operands and redirection targets of one shell call,
+counted over all its statements, with the file system. A command with more operands is unresolved. Every
+word is still matched as text, as the shell decodes it (quotes and backslashes removed): a protected file or
+link that the command names, directly or through a value DefenseClaw knows, or among the first 1024
+operands, is blocked in every profile, and so is a later name that is a link or a second name of a keys
+file. The other plain file names past the bound (a name with no protected part, no variable, glob or
+dot-dot, outside the system folders, that is no link) are not resolved further. The command gets the
+evaluation-limit finding `ACTION-COMPOUND-LIMIT` with the reason `bounded_truncated cap=items`: the `default` and
+`permissive` profiles allow it with that alert, and the `strict` profile (and managed strict) blocks it. Pass such a
+list through a file (`xargs -a list.txt`) or split it. Before 1.0.10 this alert was the MEDIUM finding
+`ACTION-OPERAND-BOUND`; a SIEM filter or audit query written for it should now match the rule id `ACTION-COMPOUND-LIMIT` with
+`bounded_truncated cap=items` in the finding title (`defenseclaw.finding.title`). The title is an evidence-class field:
+a destination with the `content` or `strict` redaction profile replaces or removes it, and there only the rule id and
+severity remain. The finding is CRITICAL; its action is the alert above, so a severity-based rule sees it at CRITICAL.
 
 ## Rule files
 
@@ -602,7 +631,7 @@ The bundled `default`, `strict`, and `permissive` `local-patterns.yaml` files ea
 ### Optional LLM judge
 
 The LLM judge is an *optional* second opinion, and it is off until you enable
-`guardrail.judge.enabled`. It runs four judges:
+`guardrail.judge.enabled`. This section covers the judge's pack files and categories; [LLM judge](/docs/guardrail/llm-judge) covers turning it on, what it reads and what it costs. It runs four judges:
 
 | Judge | Reads | Asks |
 | --- | --- | --- |
@@ -653,9 +682,8 @@ The Go-side tool-judge aggregation ignores `weak_signal`. A `needs_review`
 finding can alert but cannot block by itself. Blocking requires an actionable
 corroborated category or strong structural exfiltration/destruction evidence;
 ordinary authorized coding context therefore does not become a block merely
-because one ambiguous category fired. Read the
-[contextual judge benchmark](/docs/guardrail/benchmarks#llm-judge) for the production-path
-F1, false-positive, benign-block, latency, token, and cost results.
+because one ambiguous category fired. See the
+[judge section of the benchmarks page](/docs/guardrail/benchmarks#llm-judge) for how it scores.
 
 Judge configuration is split by detector under `judge/`. For example, the
 injection judge declares its categories and severity mapping in
@@ -692,34 +720,9 @@ guardrail:
 
 ### Suppressions
 
-Suppressions tune the LLM judge. Every rule pack carries three suppression
-lists in `suppressions.yaml`. They change only judge input and judge findings:
-a regex or CEL rule finding is never suppressed, and the request itself is
-never redacted.
+Suppressions tune the LLM judge. Every rule pack carries three suppression lists in `suppressions.yaml` (`pre_judge_strips`, `finding_suppressions` and `tool_suppressions`). They change only judge input and judge findings: a regex or CEL rule finding is never suppressed, and the request itself is never redacted. Strips do not protect secrets: a credential in a prompt is still caught by the `SEC-*` rules and still reaches the upstream model. To keep values out of logs and telemetry, see [Redaction](/docs/observability/redaction).
 
-| List | Where it runs | Use it for |
-| --- | --- | --- |
-| `pre_judge_strips` | Before a judge reads the content | Removing known-benign metadata, such as the sender labels `cli`, `system` or `bot` (`STRIP-SYSTEM-SENDER`), from the input of the judges listed in `applies_to` |
-| `finding_suppressions` | After the PII judge reports an entity | Dropping one entity when its finding ID (for example `JUDGE-PII-EMAIL`) and the entity text both match, with a required `reason` |
-| `tool_suppressions` | After the PII judge, for one tool | Dropping only the listed PII-judge finding IDs for tool names that match `tool_pattern` |
-
-```yaml title="policies/guardrail/default/suppressions.yaml (excerpt)"
-finding_suppressions:
-  - id: SUPP-EMAIL-CHATID
-    finding_pattern: JUDGE-PII-EMAIL
-    entity_pattern: '^19:[a-f0-9\-]+@unq\.gbl\.spaces$'
-    reason: "Teams chatId format, not email address"
-```
-
-Strips don't protect secrets: a credential in a prompt is still caught by the
-`SEC-*` rules and still reaches the upstream model. To keep values out of logs
-and telemetry, see [Redaction](/docs/observability/redaction).
-
-[Tune the LLM judge](/docs/policies/suppression-cookbook) shows how to add them.
-To add a finding suppression without copying a pack, put it in
-`guardrail.rules.suppressions` in `config.yaml` or run
-`defenseclaw guardrail suppress add`; see
-[Rules and custom packs](/docs/policies/rules#customise-a-pack-with-guardrailrules).
+The [suppression cookbook](/docs/policies/suppression-cookbook) explains each list and shows how to add an entry.
 
 ### Post-event correlator
 
@@ -779,7 +782,7 @@ The correlator is **post-event detection**, not an in-flight block of the reques
 
 #### Why alert-only, not block
 
-Promoting a later request in the session to *deny* based on an earlier pattern match has two honest costs:
+Promoting a later request in the session to *deny* based on an earlier pattern match has two costs:
 
 - It inverts the existing "each request is evaluated on its own" contract.
 - It can cause spurious blocks on legitimate parallel/retry traffic in the same session.
@@ -791,7 +794,7 @@ Ways to act on correlations without changing the gateway runtime:
 
 ### OPA/Rego
 
-OPA/Rego owns admission and the final guardrail policy-domain decision. It does not replace ActionFacts and CEL parsing; it maps accepted findings and deployment context to outcomes. `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input. Each package returns its own result:
+OPA/Rego owns admission and the policy-domain decision for rule findings. An optional Rego policy can also set the final guardrail action within limits you choose; see [Configure the cascade](/docs/guardrail/configure-cascade). It does not replace ActionFacts and CEL parsing; it maps accepted findings and deployment context to outcomes. `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input. Each package returns its own result:
 
 | Rego package | Primary outputs |
 | --- | --- |
@@ -825,7 +828,6 @@ Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in
 | YARA MCP-description signatures | `policies/yara/mcp-tools/description_injection.yara` |
 | Correlator patterns | `internal/guardrail/defaults/correlation-patterns.yaml` |
 | High-assurance packs | `policies/guardrail-use-cases/` |
-| Reproducible public scores | `benchmarks/` |
 
 Run the repository checks after changing a detector, using Go 1.26.4 (the CI toolchain). Run the gateway suite through the shard runner:
 

@@ -21,7 +21,7 @@ Three settings in `config.yaml` decide which rules the guardrail enforces. Use t
 | Add rules of your own or replace a bundled category | Add a custom pack, pinned by digest | `guardrail.custom_packs` and `guardrail.rule_pack` |
 | Turn a rule off, change its severity, add a suppression or switch on an opt-in protection pack | Customise the pack you already use | `guardrail.rules` |
 
-All of them work at four scopes (global, one connector, one guardrail profile, one connector inside a profile) and are applied by the running gateway without a restart. For the block and alert levels that go with a pack, see [Thresholds](/docs/policies/thresholds).
+All of them work at four scopes (global, one connector, one guardrail profile, one connector inside a profile) and are applied by the running gateway without a restart (the few keys that need one are listed under [Hot reload](/docs/policies/thresholds#hot-reload)). For the block and alert levels that go with a pack, see [Thresholds](/docs/policies/thresholds).
 
 ## Choose a rule pack
 
@@ -64,6 +64,8 @@ On a managed host the Python CLI is not installed. Validate with `/opt/defensecl
 ### What the digest covers
 
 The `digest:` line describes the loaded pack after compilation. The `files digest:` line is the pin in `guardrail.custom_packs.NAME.digest`: it hashes the pack files byte for byte. Comments, key order, line endings and a UTF-8 BOM change the files digest even when the loaded rules stay the same. The config format is `sha256:` followed by the 64 hex characters on the `files digest:` line. `defenseclaw config set guardrail.custom_packs.NAME` stores the pin as given and the write still applies, but it prints `is registered but will not load` with the `config set ... .digest` command when the pack is missing, invalid or does not match the pin. On a managed Windows host, Setup `/ensure` (and install, upgrade and repair) applies such an entry that no setting selects with the warning `custom_pack_will_not_load`, which names the key and the files digest; a config that selects it is refused.
+
+A `guardrail.custom_packs` entry is checked once, when the configuration is read, and every reader (the gateway, the hooks, `defenseclaw status` and `defenseclaw doctor`) uses that one result. An entry is a config error when its path is empty, is not a readable folder, or loads no valid pack, or when its `digest` is missing or does not match the pack's files digest (a pack with no files has no usable digest). A relative `path` is read against the folder that holds `config.yaml`, not the current directory, and `~` is not expanded. While an entry has a config error, a setting that selects it runs the built-in pack of that name (`default` for any other name), `status` and `doctor` name the error, and the hook's outage behaviour follows the strict tier, so it does not open. Fix the entry, then reload.
 
 ### Change a pinned pack
 
@@ -127,7 +129,7 @@ guardrail:
 | `suppressions` | Drops [LLM judge](/docs/policies/deterministic-detection) findings. Each entry has an `id` that is unique in the pack and the config, a `finding_pattern` (matched against the whole finding ID), an optional `entity_pattern` (matched against the reported text; left out, it matches every value) and a required `reason`. |
 | `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one. `name` is the tool name the agent reports. With `result_inspection: true`, a result that carries at least `min_entities_for_alert` distinct sensitive values (default 1) raises a `tool-result-pii-alert` alert on every connector. It shows in `defenseclaw alerts` and the Alerts panel with the severity of the findings, and goes to the webhooks that accept `guardrail` events. The values are counted from the rule matches, so an address that two rules match counts once and the LLM judge being on or off does not change the count; the row carries the count and never the matched text. `judge_result` also sends the result to the LLM judge, for OpenClaw and ZeptoClaw tool results. |
 
-Inside one layer, the order is protections, then `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Suppressions never silence a regex or CEL rule finding; they act on the judge only ([tune the LLM judge](/docs/policies/suppression-cookbook)). `defenseclaw guardrail suppress add` still saves the entry when `--finding` is exactly the ID of a rule in the active pack, and prints a warning that names the rule and the commands that change it.
+Inside one layer, the order is protections, then `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Suppressions never silence a regex or CEL rule finding; they act on the judge only ([suppression cookbook](/docs/policies/suppression-cookbook)). `defenseclaw guardrail suppress add` still saves the entry when `--finding` is exactly the ID of a rule in the active pack, and prints a warning that names the rule and the commands that change it.
 
 The writer and the gateway refuse a layer that names a rule ID the pack does not have, lists the same rule under both `enable` and `disable`, repeats a suppression ID, or names a protection pack that does not exist. The refusal is immediate: `defenseclaw config validate` and every writer check the composed result against the pack before saving, and a change that the running gateway rejects leaves the previous generation in force.
 
@@ -219,19 +221,6 @@ On a managed device the writers refuse and the pack and rules belong in the admi
 
 - [Thresholds](/docs/policies/thresholds): `block_at`, `alert_at` and the pack's posture default
 - [Validate rule packs](/docs/policies/rulepack-validation): the validator, exit codes and partial packs
-- [Tune the LLM judge](/docs/policies/suppression-cookbook): what the three suppression layers do
+- [Suppression cookbook](/docs/policies/suppression-cookbook): what the three suppression layers do
 - [Deterministic detection](/docs/policies/deterministic-detection): the shipped rules and the opt-in protection packs
 - [Reference: Configuration](/docs/reference/configuration): every key
-
-The defaults, thresholds, profiles, rules and detections that decide each verdict.
-
-<Cards>
-  <Card title="Policy defaults" href="/docs/policies/defaults" description="What a fresh install ships - three admission presets, three rule packs, block and alert levels, and the defaults init does not ask about." />
-  <Card title="Thresholds" href="/docs/policies/thresholds" description="Where block_at and alert_at can be set, which scope wins, what the rule pack supplies by default, and how they hot-apply." />
-  <Card title="Guardrail profiles" href="/docs/guardrail/user-and-group-policies" description="Profile keys, assignment matching, match reasons, how identity is verified, and worked scenarios for guardrail profiles." />
-  <Card title="Rules and custom packs" href="/docs/policies/rules" description="The rule-pack keys in config.yaml - rule_pack, custom_packs and guardrail.rules - their scopes, layering, digest pinning and failure behavior." />
-  <Card title="Detection" href="/docs/policies/deterministic-detection" description="Reference for how DefenseClaw detects - ActionFacts, CEL, regex, exact semantic rules, bounded chains, YARA, protection packs, the LLM judge, suppressions, the session correlator and OPA." />
-  <Card title="Rule recipes" href="/docs/policies/recipes" description="Catalog of the regex rules and suppressions of the bundled strict pack. Search, filter and copy the YAML." />
-  <Card title="Regex cookbook" href="/docs/policies/regex-cookbook" description="RE2 regex patterns for DefenseClaw guardrails, quoted from the shipped strict pack — secrets, prompt injection, exfiltration endpoints and enterprise data — with what makes each one precise." />
-  <Card title="CEL reference" href="/docs/policies/cel" description="The CEL engine, how to write CEL rules and the tool-call state they read." />
-</Cards>

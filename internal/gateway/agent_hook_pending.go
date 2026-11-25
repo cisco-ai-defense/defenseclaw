@@ -151,15 +151,17 @@ func (p *pendingHookOccurrence) request() agentHookRequest {
 }
 
 type pendingHookResponse struct {
-	Action           string
-	RawAction        string
-	Severity         string
-	Mode             string
-	WouldBlock       bool
-	EvaluationID     string
-	RuleIDs          []string
-	RuleNames        []string
-	RedactionEnabled *bool
+	Action                 string
+	RawAction              string
+	Severity               string
+	Mode                   string
+	WouldBlock             bool
+	EvaluationID           string
+	RuleIDs                []string
+	RuleNames              []string
+	RedactionEnabled       *bool
+	ReasonRedactionEnabled *bool
+	ReasonRedactionPresent bool
 	// Reason and SourceReason are the answer's own reasons, an empty one
 	// included, so every write of a verdict is the same as the live one.
 	Reason       string `json:",omitempty"`
@@ -171,8 +173,10 @@ func pendingResponse(resp agentHookResponse) pendingHookResponse {
 		Action: resp.Action, RawAction: resp.RawAction, Severity: resp.Severity,
 		Mode: resp.Mode, WouldBlock: resp.WouldBlock,
 		EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs, RuleNames: resp.RuleNames,
-		RedactionEnabled: resp.RedactionEnabled,
-		Reason:           resp.Reason, SourceReason: resp.SourceReason,
+		RedactionEnabled:       resp.RedactionEnabled,
+		ReasonRedactionEnabled: resp.ReasonRedactionEnabled,
+		ReasonRedactionPresent: resp.ReasonRedactionPresent,
+		Reason:                 resp.Reason, SourceReason: resp.SourceReason,
 	}
 }
 
@@ -182,6 +186,7 @@ func (p pendingHookResponse) response() agentHookResponse {
 		Mode: p.Mode, Reason: p.Reason, SourceReason: p.SourceReason,
 		WouldBlock: p.WouldBlock, EvaluationID: p.EvaluationID,
 		RuleIDs: p.RuleIDs, RuleNames: p.RuleNames, RedactionEnabled: p.RedactionEnabled,
+		ReasonRedactionEnabled: p.ReasonRedactionEnabled, ReasonRedactionPresent: p.ReasonRedactionPresent,
 	}
 }
 

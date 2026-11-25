@@ -435,8 +435,17 @@ func (s *ContinuousDiscoveryService) brokeredHomeSignals(home BrokeredHome) []AI
 			{sig.RulePaths, SignalRule, "rule"},
 			{sig.PluginPaths, SignalPlugin, "plugin"},
 		} {
+			// A folder a signature names twice (~/.agents/skills and the
+			// relative .agents/skills) is one skill folder, as in detectSkills.
+			seen := map[string]bool{}
 			for _, candidate := range surface.paths {
 				for _, rel := range s.brokeredCandidateRels(candidate) {
+					if surface.detector == "skill" {
+						if seen[rel] {
+							continue
+						}
+						seen[rel] = true
+					}
 					entry, ok := entries[rel]
 					// dirHasEntry: a file, or a folder with an entry.
 					if !ok || (entry.Dir && len(entry.Children) == 0 && !entry.ChildrenTruncated) {

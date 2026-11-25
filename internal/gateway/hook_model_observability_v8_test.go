@@ -326,7 +326,7 @@ func bindHookModelV8Runtime(t *testing.T, signals []string) (*APIServer, *hookMo
 func emitRichHookModelV8(t *testing.T, api *APIServer) {
 	t.Helper()
 	meta := richHookModelV8Meta()
-	api.rememberHookLLMSpanPrompt(meta, "private prompt marker")
+	api.rememberHookLLMSpanPrompt(t.Context(), meta, "private prompt marker")
 	ageHookModelV8Prompt(t, api, meta, 125*time.Millisecond)
 	api.rememberHookLLMSpanUsage(meta, hookTokenUsage{
 		Model: "gpt-5", PromptTokens: 321, CompletionTokens: 45,
@@ -458,7 +458,7 @@ func TestHookModelV8EmitsGeneratedAgentModelHierarchyAndAllLegacyMetrics(t *test
 func TestHookModelV8ResponseLogSharesGeneratedTrace(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs", "traces"})
 	meta := richHookModelV8Meta()
-	api.rememberHookLLMSpanPrompt(meta, "correlated prompt")
+	api.rememberHookLLMSpanPrompt(t.Context(), meta, "correlated prompt")
 	completionContext := api.emitHookLLMSpan(t.Context(), meta, "correlated response")
 	api.emitHookModelResponseLogV8(completionContext, meta, "correlated response", []string{"stop"})
 
@@ -593,7 +593,7 @@ func TestHookModelV8InvalidOptionalAgentIdentityCannotSuppressGenericMetrics(t *
 	meta.ParentAgentID = "parent id@example.com"
 	meta.LifecycleID = "lifecycle id@example.com"
 	meta.ExecutionID = "execution id@example.com"
-	api.rememberHookLLMSpanPrompt(meta, "prompt")
+	api.rememberHookLLMSpanPrompt(t.Context(), meta, "prompt")
 	ageHookModelV8Prompt(t, api, meta, 125*time.Millisecond)
 	api.rememberHookLLMSpanUsage(meta, hookTokenUsage{Model: meta.Model, PromptTokens: 3, CompletionTokens: 2})
 	api.emitHookLLMSpan(t.Context(), meta, "response")
@@ -730,7 +730,7 @@ func TestHookModelV8ContentFitsEncodedContractAndPreservesOriginalPromptFacts(t 
 	api := &APIServer{}
 	meta := richHookModelV8Meta()
 	original := strings.Repeat("\x00\\\"界", 9000)
-	api.rememberHookLLMSpanPrompt(meta, original)
+	api.rememberHookLLMSpanPrompt(t.Context(), meta, original)
 	snapshot, ok := api.takeHookLLMSpanPrompt(meta, "response")
 	if !ok {
 		t.Fatal("cached prompt was unavailable")
@@ -805,7 +805,7 @@ func TestHookModelV8AppliesDestinationRedactionAfterGeneratedConstruction(t *tes
 	}
 	meta := richHookModelV8Meta()
 	const secret = "private.person@example.com"
-	api.rememberHookLLMSpanPrompt(meta, "contact "+secret)
+	api.rememberHookLLMSpanPrompt(t.Context(), meta, "contact "+secret)
 	api.emitHookLLMSpan(t.Context(), meta, "response for "+secret)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {

@@ -203,6 +203,8 @@ refreshes local process state between full scans, but it does not republish the
 `ai_discovery` snapshot or the companion managed connector/MCP inventory to AI
 Defense.
 
+On macOS and Linux, a managed scan reports each install of an agent binary as its own signal: it looks in every scanned user's bin folders and the machine prefixes the hook enumerator searches. `defenseclaw.ai.component.location` says where: `~/.local/bin/claude` under a home, so no account name is sent, or the absolute path of a system location such as `/opt/homebrew/bin/codex`. A copy in the folder that holds the homes but outside the scanned ones, such as another account's, is reported without a location, and a per-user scan sends none.
+
 ### Claude Desktop and Cowork
 
 Cowork is the agent mode of Claude Desktop. For each user who has run Claude Desktop, a full scan adds one `desktop_app` signal with detector `claude_desktop` and a `claude_desktop` block. A machine with the app but no data folder (never started) only shows the plain application signal.
@@ -1162,6 +1164,40 @@ The model key hashes the complete model ID. Only the exported
 `defenseclaw.ai.model.id` is capped at 512 bytes, so two IDs that differ only
 past the cap keep different keys.
 
+### Managed skill inventory
+
+In `managed_enterprise`, the managed inventory carries every skill the agents load in the `endpoint_skill_inventory` collection (action `managed_skill_inventory`): one `ai_component.observed` record per skill and agent, with these fields under `defenseclaw.inventory.skill`:
+
+| Field | Meaning |
+| --- | --- |
+| `content_hash` | SHA-256 over every file of the skill folder, scripts and binaries included. The same skill has the same hash on every endpoint |
+| `content_status` | `ok`, or why the record has no hash: `symlink` (links are recorded by target and never followed), `too_large` or `unreadable` |
+| `state`, `first_seen`, `last_seen` | `new`, `changed`, `unchanged` or `removed` since the last publish, from state the endpoint keeps, and when the skill was first and last seen |
+| `scope` | `user`, `project`, `bundled` (shipped by the agent vendor), `managed` (an admin folder outside every home) or `plugin` |
+| `location` | The skill folder below the user's home, as `~/.claude/skills/pdf`. The account name and the absolute path stay on the endpoint; a project or managed skill sends none |
+| `agents` | Every agent that reads the folder. Each agent still gets its own record and component id, with the same hash. The record's `defenseclaw.ai.component.vendor` is that agent's vendor from the discovery catalog (Anthropic, OpenAI, Anysphere, GitHub, …) |
+| `publisher`, `publisher_source` | Who published the skill and how that is known: `declared` (the SKILL.md author), `plugin_manifest`, `vendor_bundled` or `unknown` |
+| `version` | The version the SKILL.md frontmatter declares (top level or under `metadata`), one line of at most 64 bytes. The description it declares goes in `defenseclaw.inventory.item.description`, folded to one line of at most 512 bytes. Both are the skill author's own claims and content fields, so the destination's redaction profile masks a secret in them |
+| `manifest_size` | Size of the SKILL.md in bytes, with its `manifest_hash` |
+| `plugin`, `plugin_version`, `plugin_enabled` | For a skill a Claude Code, Codex, Cursor or Copilot CLI plugin ships: the plugin (`name@marketplace`), its version and whether it is on. Cursor and Copilot CLI record no enabled state |
+| `manifest`, `manifest_hash`, `manifest_part`, `manifest_parts` | The SKILL.md text, its SHA-256 and the part numbers, with `ai_discovery.include_skill_manifests` on (below) |
+
+A scan reads at most 32 MiB and 1,000 files and folders per skill, and 256 MiB in all; a bigger skill is sent as `too_large`. `.git` and Finder or Explorer metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`) are left out, so they do not change the hash.
+
+The endpoint saves state when the collection passes local publish checks. A change rejected before queueing remains eligible on the next scan. If a queued change is lost in delivery, the next successful daily complete bundle can carry it. A complete scan that no longer finds a skill makes it eligible for a removal record.
+
+With `ai_discovery.include_skill_manifests: true` (off by default), a new or changed skill can also carry its `SKILL.md` text. Records for the same file share `manifest_hash`. The managed gateway can send the text when it can read the skill folder under its existing permissions. On standalone managed Linux and macOS, a skill found only by a per-user worker can report its hash and metadata. The worker's scan record does not store the document body.
+
+The destination's redaction profile masks secrets in the text before upload. A file over 256 KiB goes in ordered parts that end at a line and keep a PEM block whole. A scan sends at most one part per manifest and up to 2 MiB of text. A file that cannot be split within these limits or requires more than 128 parts sends only its hash. The endpoint tracks local submission separately from durable delivery confirmation.
+
+When this option is on, managed full scans can also query the optional, CMID-authenticated `POST /api/v1/inspect/defense_claw/skill-manifest-receipts` path on the **same AI Defense HTTPS origin** as event ingest. Allow this path through an outbound proxy if it filters by URL. The request carries one manifest hash and a fresh nonce; the response carries only scoped part indexes and SHA-256 digests, never the document. It uses the existing CMID credential and trust-aware transport and follows no redirects. This optional capability creates no new listener, worker or destination; turning `include_skill_manifests` off disables it. Older servers returning 404, 405 or 501 retain initial upload behavior and never cause completed bodies to replay.
+
+A part is acknowledged only when durable storage reports its exact **post-redaction** digest. Initial parts take priority; after a two-minute in-flight grace, a later full scan retries only already-submitted parts that a fresh authenticated snapshot still reports missing. Retries remain one part per manifest per scan within the existing aggregate text budget. Failed receipt requests back off from two minutes to a bounded 64 minutes and never manufacture missing-part evidence. Checks are limited to 16 fairly rotated hashes and ten seconds in one full scan, so a large inventory can require several cycles. Recovery runs on the full-scan cadence, not the process-only tick, and does not add a faster scan timer.
+
+Valid version 2 publish state keeps completed, unchanged documents quiet across daily bundles and routine restarts. A fresh scoped receipt explicitly showing storage loss can reopen only the missing parts after grace. A stored digest that differs from the current projection is a representation conflict; the endpoint preserves the stored part. When version 2 state has submission progress only, the endpoint uses one ownership-checked, bounded local preview through the same redaction policy to learn expected digests. The preview holds document bodies in memory. The existing transition from version 1 to version 2 re-baselines Inventory on the next complete scan. Recovery metadata stays in version 2 and tracks digests, timestamps and part indexes for up to 512 active manifests of up to 128 parts each.
+
+A managed scan also follows an agent folder a user moved with `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `COPILOT_HOME`. It reads the last literal assignment in `~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.bash_profile`, `~/.bashrc` or `~/.profile`, or on Windows the user's persistent environment (`HKU\<SID>\Environment`, read while the user is signed in), and uses the folder only when it is a real folder inside that user's home. A variable set in one terminal session only is not seen.
+
 ### Splunk: AI Discovery Inventory
 
 ![Splunk · AI Discovery Inventory dashboard](/images/splunk/ai-discovery-inventory.png)
@@ -1492,7 +1528,7 @@ root process into a general-purpose file reader.
 
 The gateway brokers through the helper only where it was de-privileged *and* a
 helper is therefore installed. It reads directly on an unmanaged workstation, where there is no helper to ask and
-the honest answer is to read what it can and report the shortfall. The choice
+it reads what it can and reports the shortfall. The choice
 is automatic; there is no setting for it.
 
 With the helper running, that same sandboxed Linux gateway reports

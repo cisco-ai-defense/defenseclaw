@@ -59,6 +59,25 @@ func TestAgentHookTrustedActionToolSelectsWindowsHostShellGrammar(t *testing.T) 
 	}
 }
 
+func TestHookSourceReasonForSinkPresentNilDirectiveFailsClosed(t *testing.T) {
+	previousManaged := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(previousManaged) })
+
+	raw := false
+	ctx := withRedactionDecision(t.Context(), &raw)
+	resp := agentHookResponse{
+		SourceReason:           "task for alice@example.com",
+		RedactionEnabled:       &raw,
+		ReasonRedactionPresent: true,
+		ReasonRedactionEnabled: nil,
+	}
+	projected := hookSourceReasonForSink(ctx, resp)
+	if strings.Contains(projected, "alice@example.com") || !strings.Contains(projected, "<redacted") {
+		t.Fatalf("present nil reason directive inherited raw event policy: %q", projected)
+	}
+}
+
 func TestMapHookAction_ObserveAndUnsupportedBlock(t *testing.T) {
 	hermes := connector.NewHermesConnector().HookCapabilities(connector.SetupOpts{})
 	action, wouldBlock := mapHookAction("block", "observe", "pre_tool_call", hermes)

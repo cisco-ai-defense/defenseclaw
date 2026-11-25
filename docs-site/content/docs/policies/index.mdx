@@ -19,30 +19,37 @@ A policy is what turns a finding into an action. DefenseClaw checks each prompt,
 
 <Flow
   direction="TB"
-  caption="One prompt, reply or tool call. A rule match is enough on its own; the judge is optional. Suppressions only remove judge findings. The block and alert levels, and human approval (HITL), pick the action. The session correlator is separate: it reads saved findings afterwards and never changes the request."
+  caption="One prompt, reply or tool call. A rule match is enough on its own; System One and the judge are optional. Suppressions only remove judge findings. The block and alert levels, and human approval, pick the action from the findings. The cascade can then raise it (an optional Rego policy can also lower it within limits you set). The session correlator is separate: it reads saved findings afterwards and never changes the request."
 >
   <Node id="event" kind="generic">{`Prompt, reply or tool call`}</Node>
   <Node id="rules" kind="policy">{`Rule pack\nCEL · regex · secrets · injection`}</Node>
+  <Node id="systemone" kind="policy">{`System One (optional)\nfast allow, unsure or block`}</Node>
   <Node id="judge" kind="policy">{`LLM judge (optional)\nsuppressions remove known noise`}</Node>
-  <Node id="levels" kind="policy">{`Block and alert levels\nHITL below the block level`}</Node>
+  <Node id="levels" kind="policy">{`Block and alert levels\nhuman approval below the block level`}</Node>
+  <Node id="cascade" kind="policy">{`Cascade\nunknown tier · Rego policy (optional) · CRITICAL floor`}</Node>
   <Node id="verdict" kind="generic">{`allow · alert · confirm · block`}</Node>
   <Edge from="event" to="rules" label="scanned" />
+  <Edge from="rules" to="systemone" label="if on" variant="dashed" />
   <Edge from="rules" to="judge" label="if the judge is on" variant="dashed" />
   <Edge from="rules" to="levels" label="findings" />
   <Edge from="judge" to="levels" label="adds findings" />
-  <Edge from="levels" to="verdict" label="returns" />
+  <Edge from="levels" to="cascade" label="action" />
+  <Edge from="systemone" to="cascade" label="adds" variant="dashed" />
+  <Edge from="cascade" to="verdict" label="returns" />
 </Flow>
 
-- **Rule pack.** A folder of YAML rules, judge prompts and suppressions. Three ship with DefenseClaw: `permissive`, `default` and `strict`. The pack also sets the default [block and alert levels](/docs/policies/thresholds). The balanced/default enabled catalog currently contains 283 local rules. Regexes compile during [rule-pack validation](/docs/policies/rulepack-validation); an invalid expression rejects the complete candidate.
+- **Rule pack.** A folder of YAML rules, judge prompts and suppressions. Three ship with DefenseClaw: `permissive`, `default` and `strict`. The pack also sets the default [block and alert levels](/docs/policies/thresholds). The `default` pack enables 283 local rules. Regexes compile during [rule-pack validation](/docs/policies/rulepack-validation); an invalid expression rejects the complete candidate.
 - **Structured tool calls.** For a shell command or file write, the gateway first extracts the commands, paths and network targets, and CEL rules match those facts. A regex match on its own is recorded as detection only and does not block. See [deterministic detection](/docs/policies/deterministic-detection).
-- **LLM judge.** Off until you turn it on. It reads prompts, replies and tool calls for subtle injection, personal data and exfiltration. See [set up an LLM key](/docs/get-started/unified-llm-key).
-- **Suppressions.** Three lists in the pack drop known noise from the judge. They never silence a regex or CEL rule. See [tune the LLM judge](/docs/policies/suppression-cookbook).
+- **System One.** An optional fast decision model that answers allow, unsure or block before the judge. See [the decision model](/docs/guardrail/decision-model).
+- **LLM judge.** Off until you turn it on. It reads prompts, replies and tool calls for subtle injection, personal data and exfiltration. See [LLM judge](/docs/guardrail/llm-judge) and [set up an LLM key](/docs/get-started/unified-llm-key).
+- **Suppressions.** Three lists in the pack drop known noise from the judge. They never silence a regex or CEL rule. See the [suppression cookbook](/docs/policies/suppression-cookbook).
+- **Cascade and Rego policy.** After the levels pick an action, the cascade can raise it: an input DefenseClaw could not read in full is judged at least at the unknown tier, and a proven CRITICAL finding never ends below the CRITICAL floor. An optional Rego policy can set the final action within limits you choose. See [Configure the cascade](/docs/guardrail/configure-cascade).
 - **Session correlator.** Watches saved findings in one session and records a `CORR-*` finding when untrusted input, sensitive access and external egress happen in order. It is detection after the fact, not a block.
 - **Admission.** Skills, MCP servers and plugins are decided separately, by scan severity and the allow and block lists. See [scanning](/docs/scanning).
 
 ## What it does not do
 
-- A level alone does not block in observe mode. Blocking needs action mode; see [the guardrail](/docs/guardrail). One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`) is blocked in every mode by the `strict` and `managed-strict` packs; the default and permissive packs, a managed install's default pack included, raise a HIGH alert and do not block it.
+- A level alone does not block in observe mode. Blocking needs action mode; see [Modes](/docs/guardrail/packs-and-modes#modes), which also covers the one rule that is the exception.
 - A custom CEL rule cannot grant itself blocking power. A block needs complete facts and a connector that can stop the call before it runs.
 - The correlator never stops the request that completes a pattern.
 
@@ -50,9 +57,20 @@ A policy is what turns a finding into an action. DefenseClaw checks each prompt,
 
 <Cards>
   <Card title="Change block and alert levels" href="/docs/policies/thresholds" description="Set block_at and alert_at globally, per agent or per profile." />
-  <Card title="Use a different rule pack" href="/docs/policies/rulepack-validation" description="Switch to strict or permissive." />
+  <Card title="Validate and switch a rule pack" href="/docs/policies/rulepack-validation" description="Check a pack, then switch to strict, permissive or your own." />
   <Card title="Write a custom rule" href="/docs/policies/cel" description="One CEL rule in your own pack." />
   <Card title="Build a policy in the browser" href="/docs/policies/creator" description="The policy creator." />
 </Cards>
 
-All guides: [How-to > Rules and policy](/docs/policies). Reference: [Guardrail and policy](/docs/policies/rules), [thresholds](/docs/policies/thresholds), [rules](/docs/policies/rules), [defaults](/docs/policies/defaults), [detection](/docs/policies/deterministic-detection), [CEL](/docs/policies/cel/engine).
+## Reference
+
+- [Defaults](/docs/policies/defaults): what a fresh install ships, the three admission presets and the three rule packs.
+- [Thresholds](/docs/policies/thresholds): where `block_at` and `alert_at` are set and which scope wins.
+- [Rules and custom packs](/docs/policies/rules): `rule_pack`, `custom_packs` and `guardrail.rules`.
+- [Admission and the block/allow list](/docs/policies/admission): skills, MCP servers and plugins.
+- [Deterministic detection](/docs/policies/deterministic-detection): how DefenseClaw detects, and the shipped rules.
+- [CEL](/docs/policies/cel): the CEL engine, how to write CEL rules and the tool-call state they read.
+- [Recipes](/docs/policies/recipes): the regex rules and suppressions of the bundled strict pack, to search and copy.
+- [Regex cookbook](/docs/policies/regex-cookbook): RE2 patterns quoted from the shipped strict pack, and what makes each one precise.
+- [Suppression cookbook](/docs/policies/suppression-cookbook): tune the LLM judge.
+- [Guardrail profiles](/docs/guardrail/user-and-group-policies): different levels per user, group or agent.

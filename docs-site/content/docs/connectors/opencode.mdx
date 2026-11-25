@@ -20,6 +20,8 @@ On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes prec
 
 OpenCode V2 2.2.5 was checked live in per-user and managed installs on Linux, macOS and native Windows. The version contract remains `>=2.0.0,<2.3.0`.
 
+**OpenCode 2.x needs DefenseClaw 1.0.6 or later.** DefenseClaw 1.0.5 and earlier cannot load their plugin into V2, so V2 runs unguarded under them while their `doctor` still passes. Upgrade DefenseClaw first ([Upgrade from DefenseClaw 1.0.5 or earlier](#upgrade-from-defenseclaw-105-or-earlier)).
+
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Contract `>=2.0.0,<2.3.0`, source-reviewed at 2.0.0 and 2.1.4; 2.2.5 checked live. |

@@ -54,7 +54,7 @@ A call the hook blocks itself is in the audit log too. The hook writes a `hook-f
 
 ### Audit completeness under Windows floods
 
-On per-user Windows, a sustained hook flood can outpace the local audit writer. The write-volume reduction and bounded 180 ms settled WAL hold in 1.0.7 reduce the wait, but they do not guarantee a record for every call. In three 18,000-call runs with 128 parallel callers, 7–10% of calls had no audit row and 604–1,101 denied calls had no delivered-block row. Failed hook-log appends and unreadable lines are counted. A gateway request that never arrived and left no completed local hook record cannot be reconstructed later. Use the agent's received decision for the individual call and treat aggregate audit counts as incomplete during a flood. See [Local history](/docs/observability#local-history).
+On per-user Windows, a sustained hook flood can outpace the local audit writer, so aggregate audit counts can be incomplete during a flood. Failed hook-log appends and unreadable lines are counted. A gateway request that never arrived and left no completed local hook record cannot be reconstructed later. Use the agent's received decision for the individual call and do not rely on aggregate audit counts during a flood. See [Local history](/docs/observability#local-history).
 
 `defenseclaw status` and `defenseclaw doctor` print what each kind of failure does after a connector's fail mode, for example `on-failure=(gateway down: allow with a warning; no answer: tool calls allow with a warning unless the call may reach a protected file, prompts and tool results allow with a warning when the gateway is frozen and block when a running gateway answers too late; hook or answer error: block; stop and session-end events: never blocked)`. *Gateway down* is a call no gateway took, *no answer* a verified gateway that gave no decision in time, and *hook or answer error* an answer the gateway gave, a missing token, another listener on the port, an install in progress or a failure of the hook itself. `defenseclaw status --json` has the same outcomes under each connector's `fail_mode.on_failure`. Secure Client and the proxy-backed connectors print none.
 
@@ -89,9 +89,9 @@ A call whose audit record cannot be written (a full disk, or an audit database t
 
 ### Audit writer holds under a sustained flood
 
-On a per-user Windows install, a sustained flood of about 10 hook calls a second in action mode makes the audit log grow faster than it can be copied into `audit.db`. To restart the log, the gateway holds the audit writer while SQLite flushes `audit.db` to disk, for up to about 1 second. Hook calls that arrive during the hold wait for it. In 30-minute floods at 10 calls a second, the 99th-percentile answer time went over 1 second in 4 of 30 minutes in a test that drove the gateway's hook handler directly, and in 9 to 13 of 31 minutes through an installed per-user hook; the second figure includes minutes in which the host itself stalled.
+On a per-user Windows install, a sustained flood of about 10 hook calls a second in action mode makes the audit log grow faster than it can be copied into `audit.db`. To restart the log, the gateway holds the audit writer while SQLite flushes `audit.db` to disk, for up to about 1 second. Hook calls that arrive during the hold wait for it, so under a sustained flood some answers take longer than 1 second.
 
-The hold stays under the hook's 3.5-second answer budget, so it does not block a call by itself. A host that stalls for longer (up to 12 seconds was seen on a busy shared Windows host) can still push calls past the budget, and those calls then follow the rules above. Removing this hold needs a change to how the audit records are written; until then it is a known limit.
+The hold stays under the hook's 3.5-second answer budget, so it does not block a call by itself. A host that stalls for longer can still push calls past the budget, and those calls then follow the rules above.
 
 ### A hook held past its time budget
 

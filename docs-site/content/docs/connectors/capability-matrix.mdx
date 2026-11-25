@@ -80,7 +80,7 @@ Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), A
 | Managed tier | The hooks are in a root-owned policy file that user and project settings cannot switch off. |
 | User tier | The agent can edit its hook file, or code it or a repository adds runs beside the hooks. DefenseClaw reports a sandbox whose hooks go silent while the harness is active. |
 | Supported | The image passes the hook check, and the harness runs in a sandbox: a blocked command stays blocked and the egress block list holds. |
-| Not available yet | The harness needs a vendor account before its first turn, so no mock model can drive it. `sandbox run` builds the image, then refuses it. |
+| Not available yet | The harness needs a vendor account before its first turn, so the hook check cannot run. `sandbox run` builds the image, then refuses it. |
 | Preview | A sign-in path that is available but may change. The connector's page says which sign-ins `sandbox run` shares. |
 
 `openshell.harnesses` (Claude Code and Codex when empty) decides which images `defenseclaw sandbox setup` and a bare `defenseclaw sandbox image build` build, and which `defenseclaw sandbox doctor` checks. `sandbox setup --harness` (repeatable) replaces that list, so name every harness you want. `sandbox image build <harness>` builds what you name without changing the list, and `sandbox run` builds a missing image on first use. Every sandbox hook fails closed.

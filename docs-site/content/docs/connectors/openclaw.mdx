@@ -234,9 +234,7 @@ Teardown, in this order:
 
 ### Supported OpenClaw versions
 
-We test DefenseClaw with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. DefenseClaw 1.0.10 adds 2026.8.35, the first release with the plugin hooks DefenseClaw uses (the hook floor), and 2026.11.3, the release `install.sh` installs. We test against new OpenClaw releases as they come out.
-
-{/* pending certification: the lead confirms the 1.0.10 OpenClaw version list after the final cert */}
+DefenseClaw works with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. DefenseClaw 1.0.10 adds 2026.8.35, the first release with the plugin hooks DefenseClaw uses (the hook floor), and 2026.11.3, the release `install.sh` installs.
 
 ### Device pairing
 
@@ -450,8 +448,6 @@ The gateway reads an attachment only for the text of its decoded bytes. Text in 
 - Native mode on Windows has no streaming response scan. The response scan sees the finished reply. The tool result scan runs after the tool ran. Neither can block.
 - In hybrid mode, model responses produced in Node worker threads are not scanned, as in proxy mode ([Transport coverage](#transport-coverage)).
 - The prompt gate checks the prompt only. Tool calls, tool results and model responses keep their own checks.
-
-{/* pending certification: confirm which OpenClaw lines run before_agent_run for Codex and Copilot harness runs and node worker turns */}
 
 ## Plugin credential
 

@@ -32,6 +32,26 @@ not a claim that all behavior is contained in one file.
   enforcement change.
 - Preserve correlation, redaction, audit, and generated-telemetry contracts;
   do not create an endpoint-local parallel schema.
+- When a hook inspects connector event content that has no canonical
+  prompt/tool companion event, project the normalized telemetry copy onto the
+  canonical hook decision only when the Cisco AI Defense hook lane submitted
+  it. For Claude Code `StopFailure`, normalize echoed block messages before
+  both submission and projection, and retain that evidence on the hook decision
+  even when an equal model-response companion exists because destinations may
+  collect either bucket independently. When the cloud returns no redaction
+  directive, remove embedded bearer credentials (including JSON-escaped
+  whitespace forms), explicit Basic authorization values, valid bare Basic
+  credentials, and credentials in the canonical signed-URL query-key set while
+  preserving ordinary text that begins with `Basic`. Preserve an explicit
+  absence when the event was handled only by local rules, the optional judge,
+  or local file/component scanning.
+- Scope each cloud redaction directive to the content inspected by that call.
+  If merged inspections choose a reason from a companion, project that reason
+  under the companion's directive. A combined prompt/response chat span must
+  use the stricter of the two directives so neither field inherits the other's
+  less protective decision. A response-only span and the standalone response
+  event keep the completion directive; the combined directive is scoped to a
+  chat span that actually contains a cached prompt.
 - Update the published API or connector page when externally observable
   behavior changes.
 - Run the relevant Go package tests plus the schema/telemetry parity gates

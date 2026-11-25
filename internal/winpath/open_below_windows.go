@@ -124,6 +124,13 @@ var belowQoS = windows.SECURITY_QUALITY_OF_SERVICE{
 // opened as a folder for attributes only; the last element with the access
 // its kind needs.
 func openBelowChild(parent windows.Handle, name string, last bool, kind BelowKind) (windows.Handle, error) {
+	return openBelowChildWithSharing(parent, name, last, kind,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+}
+
+// openBelowChildWithSharing keeps the no-reparse lookup identical for callers
+// that must also hold off content writers during a bounded read.
+func openBelowChildWithSharing(parent windows.Handle, name string, last bool, kind BelowKind, sharing uint32) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -159,7 +166,7 @@ func openBelowChild(parent windows.Handle, name string, last bool, kind BelowKin
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(&handle, access, &attributes, &status, nil, 0,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN, options, 0, 0)
+		sharing, windows.FILE_OPEN, options, 0, 0)
 	if err != nil {
 		return 0, err
 	}

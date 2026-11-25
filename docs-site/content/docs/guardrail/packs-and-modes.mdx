@@ -23,14 +23,16 @@ You can set both for every agent, or for one agent. Start with the `default` pac
 
 A finding has a severity: CRITICAL, HIGH, MEDIUM or LOW. The pack sets the lowest severity that blocks (`block_at`) and the lowest that alerts (`alert_at`).
 
-| Pack | Blocks at | Alerts at | Gateway not running (per-user install) | Pick it when |
-| --- | --- | --- | --- | --- |
-| `default` | CRITICAL | MEDIUM and up | The call runs, with a warning and a record. | You want the shipped baseline. |
-| `strict` | MEDIUM and up | LOW and up | The call is blocked. | A missed attack costs more than a stopped call. |
-| `permissive` | CRITICAL | HIGH and up | The call runs, with a warning and a record. | Agents must stay available and you read alerts. |
+| Pack | Gateway not running (per-user install) | Pick it when |
+| --- | --- | --- |
+| `default` | The call runs, with a warning and a record. | You want the shipped baseline. |
+| `strict` | The call is blocked. | A missed attack costs more than a stopped call. |
+| `permissive` | The call runs, with a warning and a record. | Agents must stay available and you read alerts. |
+
+The block and alert levels of each pack are listed in [Thresholds](/docs/policies/thresholds#rule-pack-default-posture).
 
 - A managed install keeps its administrator's fail mode, `closed` unless the administrator chose `open`. The pack never opens a managed hook. See [Fail modes](/docs/reference/fail-modes#per-user-installs).
-- A custom pack takes the `default` levels unless its `defenseclaw-pack.json` says `{"posture": "strict"}` or `{"posture": "permissive"}`. [Thresholds](/docs/policies/thresholds#rule-pack-default-posture) lists the order that decides.
+- A custom pack takes the `default` levels unless its `defenseclaw-pack.json` sets a posture; [Thresholds](/docs/policies/thresholds#rule-pack-default-posture) explains.
 - A level you set yourself (`guardrail block-at`, `alert-at`, a connector or a profile) wins over the pack's level.
 
 Change the pack:

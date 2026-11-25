@@ -52,7 +52,7 @@ What makes this work:
   Without them, the pattern would match any 20-character upper-case string.
 - **An exact length.** `{16}` after the prefix matches the real key length, and the `\b`
   word boundaries stop it matching inside a longer token.
-- **Honest confidence.** `confidence` records how often a match is a real key. The shipped
+- **Accurate confidence.** `confidence` records how often a match is a real key. The shipped
   `SEC-OPENAI-V2` rule (`sk-[a-zA-Z0-9]{40,}`) uses 0.85 because other vendors also use an
   `sk-` prefix.
 - **Useful tags.** Tags group findings when you triage them in dashboards.

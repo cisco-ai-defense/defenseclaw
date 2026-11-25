@@ -45,7 +45,7 @@ DefenseClaw provisions 21 Grafana dashboards into a **DefenseClaw** folder, or 2
 | Routing decisions | Decisions, routed share, fallbacks, refusals, sensitive narrowing, routing latency p95 | How much traffic does the router decide, and how often does it not route? |
 | Decisions over time | By result, by reason (route source), by listener, top routed categories, calls by routed model, calls by route decision | Which rule or classifier picked the route (`rules`, `systemone`, `force`, `default`), which listener (`route_only` or `guardrail`), and where did the calls go? |
 | Fallbacks, refusals and fail-closed | Fallbacks by cause (at decision time and per call), refusals by reason, sensitive requests kept local, sent to the original model, or refused | Why a request kept its original model, what a managed policy refused, and whether sensitive requests stayed local. |
-| Savings | Spent, the same calls on the requested model, saved (USD and share), saved per interval and by model, calls with no comparison | What routing saved, and for which calls there is no honest comparison. |
+| Savings | Spent, the same calls on the requested model, saved (USD and share), saved per interval and by model, calls with no comparison | What routing saved, and for which calls there is no comparison. |
 | Budgets | Used share per budget, limit and spend table, spend and limit over time, budget stops, subjects over the limit, fleet budget store state | How close each budget is, and what a budget stopped. |
 | Per user and per group | Spend per user (logs), users over their limit, group budgets | Who spent what in the range, and which pooled budgets are close. |
 | Managed fleet | Decisions, spend and savings by host | Which hosts route, fall back and save. |

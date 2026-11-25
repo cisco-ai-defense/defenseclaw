@@ -15,6 +15,10 @@ on:
         description: Send contributor notices (also requires the repository notification switch)
         type: boolean
         default: false
+      replay_pr:
+        description: 'Optional merged PR replay, e.g. codex:123 or claudecode:456 (no notices or checkpoint writes)'
+        type: string
+        default: ''
 permissions:
   contents: read
   actions: read
@@ -47,6 +51,7 @@ jobs:
           ref: main
           persist-credentials: false
       - name: Restore the last committed checkpoint from this main-only workflow
+        if: ${{ inputs.replay_pr == '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -99,8 +104,9 @@ jobs:
           output-env-credentials: false
           output-credentials: true
           unset-current-credentials: true
-      - name: Compare unseen merged PRs with current DefenseClaw main
+      - name: Compare merged PRs with current DefenseClaw main
         env:
+          CONNECTOR_DELTA_REPLAY_PR: ${{ inputs.replay_pr }}
           GH_TOKEN: ${{ github.token }}
           CONNECTOR_DELTA_AI_ENABLED: ${{ vars.CONNECTOR_DELTA_AI_ENABLED == 'true' }}
           CONNECTOR_DELTA_AI_PROVIDER: bedrock
@@ -110,10 +116,36 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ steps.bedrock.outputs.aws-access-key-id }}
           AWS_SECRET_ACCESS_KEY: ${{ steps.bedrock.outputs.aws-secret-access-key }}
           AWS_SESSION_TOKEN: ${{ steps.bedrock.outputs.aws-session-token }}
-        run: python3 scripts/connector_delta_monitor.py analyze --state monitor/checkpoint/state.json --output monitor --limit 100
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+          from scripts import connector_delta_monitor as monitor
+
+          replay = os.environ.get('CONNECTOR_DELTA_REPLAY_PR', '')
+          if not replay:
+              sys.exit(monitor.main(['analyze', '--state', 'monitor/checkpoint/state.json', '--output', 'monitor', '--limit', '100']))
+          match = re.fullmatch(r'(codex|claudecode):([1-9][0-9]{0,8})', replay)
+          if not match or os.environ.get('CONNECTOR_DELTA_AI_ENABLED') != 'true':
+              sys.exit('Replay requires connector:PR_NUMBER and CONNECTOR_DELTA_AI_ENABLED=true.')
+          output = Path('monitor/replay')
+          result = monitor.main(['analyze', '--pr', *match.groups(), '--output', str(output)])
+          if result:
+              sys.exit(result)
+          reports = monitor.load(output / 'private-report.json')
+          batches = [row['ai_review']['batches'] for row in reports if 'ai_review' in row]
+          attempted = sum(row['attempted'] for row in batches)
+          completed = sum(row['completed'] for row in batches)
+          print(json.dumps({'processed': len(reports), 'llm_batches_attempted': attempted, 'llm_batches_validated': completed}))
+          if not completed or completed != attempted:
+              sys.exit('Replay did not complete an LLM review; no end-to-end inference success claimed.')
+          PY
       - name: Prepare metadata-only notices and candidate checkpoint
         id: bundle
-        if: ${{ always() }}
+        if: ${{ always() && inputs.replay_pr == '' }}
         run: |
           if [ -s monitor/public/bundle.json ]; then echo 'ready=true' >> "$GITHUB_OUTPUT"; fi
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -125,7 +157,7 @@ jobs:
           if-no-files-found: error
   publish:
     needs: monitor
-    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && needs.monitor.outputs.ready == 'true' }}
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && inputs.replay_pr == '' && needs.monitor.outputs.ready == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

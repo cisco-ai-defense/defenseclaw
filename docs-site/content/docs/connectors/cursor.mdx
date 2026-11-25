@@ -150,7 +150,7 @@ On a managed standalone host, each entry runs the administrator's hook binary wi
 ## In an OpenShell sandbox
 
 <Callout type="warn" title="Cursor Agent cannot run in a sandbox yet">
-DefenseClaw builds the image, but it is **unverified**, so `defenseclaw sandbox run cursor` refuses it. Cursor Agent CLI needs a Cursor account (`CURSOR_API_KEY` or `cursor-agent login`) before any agent turn. Without one it stops at "Authentication required" and fires no hook, and it has no bring-your-own model endpoint. The image check uses a mock model, so it cannot pass.
+DefenseClaw builds the image, but it is **unverified**, so `defenseclaw sandbox run cursor` refuses it. Cursor Agent CLI needs a Cursor account (`CURSOR_API_KEY` or `cursor-agent login`) before any agent turn. Without one it stops at "Authentication required" and fires no hook, and it has no bring-your-own model endpoint. Without it the hook check cannot run.
 </Callout>
 
 `sandbox run cursor` builds the whole image (several GB) and only then refuses it. The image stays: `defenseclaw sandbox image list` shows HOOKS VERIFIED `no`, and `defenseclaw sandbox image prune` keeps it as the newest Cursor Agent image. Remove it with `docker image rm <tag>`; the next prune forgets its record.

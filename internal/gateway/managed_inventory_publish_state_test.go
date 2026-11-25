@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,17 @@ func managedPublishFullComponent() endpointInventoryComponent {
 		agentVersion:                "1.2.3",
 		agentProbeStatus:            "ok",
 		agentScannedAt:              "2026-09-15T10:00:00Z",
+		skillContentHash:            "sha256:" + strings.Repeat("a", 64),
+		skillContentStatus:          "ok",
+		skillFirstSeen:              "2026-11-11T09:00:00Z",
+		skillScope:                  "user",
+		skillLocation:               "~/.claude/skills/pdf",
+		skillAgents:                 []string{"claudecode"},
+		skillPublisher:              "Anthropic",
+		skillPublisherSource:        "plugin_manifest",
+		skillPlugin:                 "pr-review@official",
+		skillPluginVersion:          "1.0.1",
+		skillPluginEnabled:          &installed,
 	}
 }
 
@@ -221,6 +233,17 @@ func TestManagedInventoryDigestDetectsMeaningfulFields(t *testing.T) {
 		"agentBinaryBasename":         func(c *endpointInventoryComponent) { c.agentBinaryBasename = "codex" },
 		"agentBinaryPathHash":         func(c *endpointInventoryComponent) { c.agentBinaryPathHash = "bin-hash-2" },
 		"agentVersion":                func(c *endpointInventoryComponent) { c.agentVersion = "1.2.4" },
+		"skillContentHash":            func(c *endpointInventoryComponent) { c.skillContentHash = "sha256:" + strings.Repeat("b", 64) },
+		"skillContentStatus":          func(c *endpointInventoryComponent) { c.skillContentStatus = "too_large" },
+		"skillFirstSeen":              func(c *endpointInventoryComponent) { c.skillFirstSeen = "2026-11-11T10:00:00Z" },
+		"skillScope":                  func(c *endpointInventoryComponent) { c.skillScope = "bundled" },
+		"skillLocation":               func(c *endpointInventoryComponent) { c.skillLocation = "~/.agents/skills/pdf" },
+		"skillAgents":                 func(c *endpointInventoryComponent) { c.skillAgents = []string{"claudecode", "codex"} },
+		"skillPublisher":              func(c *endpointInventoryComponent) { c.skillPublisher = "Other" },
+		"skillPublisherSource":        func(c *endpointInventoryComponent) { c.skillPublisherSource = "declared" },
+		"skillPlugin":                 func(c *endpointInventoryComponent) { c.skillPlugin = "other@official" },
+		"skillPluginVersion":          func(c *endpointInventoryComponent) { c.skillPluginVersion = "1.0.2" },
+		"skillPluginEnabled":          func(c *endpointInventoryComponent) { c.skillPluginEnabled = nil },
 	}
 	for name, mutate := range componentCases {
 		t.Run("component/"+name, func(t *testing.T) {

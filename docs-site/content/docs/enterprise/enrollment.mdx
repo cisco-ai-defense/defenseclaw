@@ -126,7 +126,7 @@ On Linux and macOS a machine-policy agent (Claude Code, Codex, Cursor) needs no 
 
 The editor folders searched are `.vscode`, `.vscode-insiders`, `.vscode-server` (Linux and macOS), `.vscode-oss`, `.cursor`, Devin Desktop's pre-rename folder ([Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors)), `.kiro` and `.antigravity` under the home, each with `extensions`. On Windows the folder the user's persistent `VSCODE_EXTENSIONS` variable names is searched too. Other relocated folders and JetBrains plugins are not found by discovery, but the hook still names their calls by the surface. A host version (the editor's or the app's own version) never selects a hook contract.
 
-A version without a known contract is compatible by default, like an untested newer CLI; known-broken versions and floors still refuse it. `unverified_versions` decides what happens to a surface whose hook delivery DefenseClaw has not live-verified (today the CLIs and Cursor desktop are):
+A version newer than every tested range is compatible by default and follows the newest contract; known-broken versions and floors still refuse it. A surface whose engine version resolves no hook contract is not enrolled: it is reported as `surface_unverified`. `unverified_versions` decides what happens to a surface whose hook delivery DefenseClaw has not live-verified (today the CLIs and Cursor desktop are):
 
 | `unverified_versions` | Surface-only user | User with the CLI too |
 | --- | --- | --- |

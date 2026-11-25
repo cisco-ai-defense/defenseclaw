@@ -127,7 +127,7 @@ guardrail:
   hook_fail_mode: open
 ```
 
-Every layer still runs and records; nothing is blocked or asked. An agent that writes into DefenseClaw's own files is recorded with a HIGH finding (rule `tamper.detector_state_write`); only the `strict` and `managed-strict` packs block that write in observe mode.
+Every layer still runs and records; nothing is blocked or asked. The one rule that still blocks in observe mode is described under [Modes](/docs/guardrail/packs-and-modes#modes).
 
 ### Strict blocking on secrets only
 

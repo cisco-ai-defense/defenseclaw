@@ -716,13 +716,12 @@ Also try the failure paths your MDM must handle: a wrong pin, a config that othe
 users can write, two runs at once (expect `1618` or `75` from one), and a run with
 no user signed in.
 
-The project's CI installs every standalone package this way on each pull request:
-the `.deb` on Ubuntu 24.04, the `.rpm` in RHEL 9 and RHEL 8 containers that boot
-systemd, the macOS `.pkg`, and the unsigned Windows Setup. Each lane runs install,
-a second `ensure` that must change nothing, `verify`, `status`, the detection
-script and uninstall. The scripts it uses, `scripts/test-enterprise-unix-install.sh`,
+The standalone packages support this sequence on Ubuntu 24.04 (`.deb`), RHEL 9
+and RHEL 8 (`.rpm`), macOS (`.pkg`) and Windows (unsigned Setup): install, a
+second `ensure` that changes nothing, `verify`, `status`, the detection script
+and uninstall. To run the same sequence on a disposable host of your own, use
+`scripts/test-enterprise-unix-install.sh`,
 `scripts/test-enterprise-linux-container.sh`,
 `scripts/test-enterprise-windows-install.ps1` and
-`scripts/check_enterprise_lifecycle_result.py`, also work on a disposable host of
-your own; see
+`scripts/check_enterprise_lifecycle_result.py`; see
 [`docs/TESTING.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/TESTING.md#enterprise-install-lanes).

@@ -23,6 +23,28 @@ import (
 	"testing"
 )
 
+func TestCursorExpandsTheKnownCodexBundledContainer(t *testing.T) {
+	t.Setenv("CODEX_HOME", "")
+	home := t.TempDir()
+	root := filepath.Join(home, ".codex", "skills")
+	writeSkillFiles(t, root, map[string]string{".system/imagegen/SKILL.md": "Bundled image skill\n"})
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home}}
+	signal := svc.signalFromDirectoryChildren(AISignature{ID: "cursor"}, SignalSkill, "skill", root)
+	found := false
+	for _, ev := range signal.Evidence {
+		if ev.Type != "skill_entry" {
+			continue
+		}
+		if ev.Basename != "imagegen" || ev.Origin != "bundled" || !ev.Bundled || ev.Skill == nil || ev.Skill.Scope != SkillScopeBundled {
+			t.Fatalf("Cursor read lost bundled provenance: %+v", ev)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("Cursor did not discover the bundled child")
+	}
+}
+
 // TestSignalFromDirectoryChildrenExpandsBundledSkillContainer verifies
 // the walker's `.system`-handling contract for skill directories:
 //

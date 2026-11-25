@@ -808,7 +808,7 @@ attributes:
   normalization:
     id: bounded-v1
     overrides: {max_utf8_bytes: 256}
-    notes: Catalog or detector-produced vendor label
+    notes: Catalog or detector-produced vendor label. On a skill or plugin entry of the endpoint inventory, the vendor of the agent whose folder holds it; the skill's publisher is defenseclaw.inventory.skill.publisher
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.ai.component.product
   type: string
@@ -2156,7 +2156,7 @@ attributes:
   normalization:
     id: bounded-v1
     overrides: {max_utf8_bytes: 512}
-    notes: Free-form connector or plugin catalog description; control characters are rejected by the producer
+    notes: Free-form connector or plugin catalog description, or the description a skill's SKILL.md frontmatter declares (folded to one line); control characters are rejected by the producer
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.connector.source
   type: string
@@ -2427,6 +2427,279 @@ attributes:
     id: identity-v1
     notes: Exact configured disabled state
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.skill.content_hash
+  type: string
+  brief: Content hash of one discovered skill folder
+  examples: ['sha256:3f0c1e9a4b7d2c6e8f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 71
+      pattern: '^sha256:[0-9a-f]{64}$'
+    notes: SHA-256 over sorted lines "relative/path NUL kind NUL sha256(payload) LF". Directories contribute through their descendants only. A file contributes its full bytes, a link contributes its stored target without traversal, and other entries contribute an empty payload. Paths use forward slashes. .git directories and .DS_Store, Thumbs.db and desktop.ini files are excluded. The same skill gives the same hash on every device and platform. The hash is present when content_status is ok
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.content_status
+  type: string
+  brief: Whether the skill folder content hash could be computed
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [ok, symlink, too_large, unreadable]
+    notes: ok carries content_hash; symlink is a skill entry that is itself a link (never followed); too_large exceeded the file, byte, or depth limit; unreadable failed to list or read
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.state
+  type: string
+  brief: Change of one skill since the last inventory this endpoint published
+  examples: [changed]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [new, changed, unchanged, removed]
+    notes: Kept on the endpoint per skill id and updated only after a successful publish. changed means content_hash differs from the last published one; removed is sent once, with active false, after a complete scan no longer finds the skill
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.first_seen
+  type: string
+  brief: RFC3339 time this endpoint first observed the skill
+  examples: ['2026-11-11T09:30:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: UTC RFC3339 kept per skill id on the endpoint
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.last_seen
+  type: string
+  brief: RFC3339 time of the scan that last observed the skill
+  examples: ['2026-11-11T12:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: UTC RFC3339. This advances when a publish includes the observed skill, including in a daily complete bundle. Scans that cannot observe the skill can leave it unchanged. A removal retains the last observation
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.scope
+  type: string
+  brief: Where the skill is installed
+  examples: [user]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [user, project, bundled, managed, plugin]
+    notes: user is a skill in a user skill folder, project a skill in a repository skill folder, bundled a skill the agent vendor ships, managed a skill in an admin folder outside every home such as /etc/codex/skills, plugin a skill an installed agent plugin ships
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.location
+  type: string
+  brief: Home-relative location of one discovered skill folder
+  examples: [~/.agents/skills/pdf]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 512
+      pattern: '^~/[^\x00-\x1f\x7f]*$'
+    notes: The skill folder relative to the user's home, with forward slashes and a ~/ prefix. Present for user, bundled, and plugin skills when their folders are under a scanned home
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.agents
+  type: string[]
+  brief: Every coding agent that loads skills from this skill's folder
+  examples:
+  - [codex, cursor]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 1040, max_item_utf8_bytes: 64, max_items: 16}
+    notes: Sorted connector slugs, at most 16; a shared folder such as ~/.agents/skills lists every agent that reads it, and each agent still gets its own record keyed by its own component id
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.publisher
+  type: string
+  brief: Best-effort publisher of one discovered skill
+  examples: [OpenAI]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: The agent vendor for a bundled skill, else the author of the plugin that ships it, else the author its SKILL.md declares; publisher_source says which. Absent when unknown
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.publisher_source
+  type: string
+  brief: How the skill publisher was determined
+  examples: [declared]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [vendor_bundled, plugin_manifest, declared, unknown]
+    notes: vendor_bundled is a skill the agent ships in its own bundled folder; plugin_manifest is the author in the manifest of the installed plugin that ships the skill; declared is the skill's own unverified SKILL.md claim
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.plugin
+  type: string
+  brief: Installed agent plugin that ships the skill
+  examples: [pr-review-toolkit@claude-plugins-official]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: name@marketplace as the agent records it (Claude Code installed_plugins.json, Codex config.toml, Copilot CLI installed-plugins, Cursor plugins/cache, or name@local for Cursor plugins/local); absent for a skill no plugin ships
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.plugin_version
+  type: string
+  brief: Version of the installed plugin that ships the skill
+  examples: [1.0.1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The plugin manifest version, else the version the agent records or its install folder name
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.plugin_enabled
+  type: boolean
+  brief: Whether the agent has the plugin that ships the skill turned on
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: From Claude Code enabledPlugins or Codex config.toml; absent when the agent records no state
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest
+  type: string
+  brief: Text of the skill's SKILL.md, or one part of it
+  examples: ["---\nname: pdf\ndescription: Fill PDF forms\n---\nUse the form tool.\n"]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 262144}
+    notes: Sent when ai_discovery.include_skill_manifests is on and the managed gateway can read the file. Files over 256 KiB use ordered parts that end at a line and keep a PEM block whole, one part per publish. A file that cannot be split that way or needs more than 128 parts sends only manifest_hash. A durable receipt can prompt retransmission of missing parts after the grace interval, and complete receipts suppress retransmission of unchanged content. The text is subject to destination redaction
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_hash
+  type: string
+  brief: SHA-256 of the skill's SKILL.md file on the endpoint
+  examples: ['sha256:9f2c1e9a4b7d2c6e8f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 71
+      pattern: '^sha256:[0-9a-f]{64}$'
+    notes: Hash of the file bytes before destination redaction; the same file gives the same hash on every device, so records with the same value share one manifest. Absent when content_status is not ok or the folder has no SKILL.md
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_part
+  type: int64
+  brief: Which part of the SKILL.md text this record carries, from 1
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 128}
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_parts
+  type: int64
+  brief: How many parts the SKILL.md text is split into
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 128}
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.version
+  type: string
+  brief: Version the skill's SKILL.md declares
+  examples: [2.3.0]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: The skill's own unverified claim, top-level or under metadata in the frontmatter; one line of at most 64 bytes, control characters rejected by the producer. Content class so the destination's redaction profile sees it; the byte limit leaves room for a redaction marker
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_size
+  type: int64
+  brief: Size of the skill's SKILL.md file in bytes
+  examples: [4096]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 33554432}
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.connector.identifiers
   type: array
   brief: Ordered identifier-class section of one complete connector inventory snapshot
@@ -2525,6 +2798,21 @@ attributes:
     overrides: {max_utf8_bytes: 65536, max_item_utf8_bytes: 512, max_items: 512, max_depth: 2, max_properties: 448}
     notes: Sealed typed array aligned by index with the coding-agent identifier section; flattened limits cover 64 seven-property records
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.component.location
+  type: string
+  brief: Where one install of a discovered AI component is on the endpoint
+  examples: ['~/.local/bin/claude', /opt/homebrew/bin/codex]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 512
+    notes: Home-relative ("~/...") under a scanned user home, or the absolute path of a recognized system install location. Unclassified paths are omitted. Managed scans emit one signal per install
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.ai.component.identity_score
   type: double
   brief: Confidence that the discovered component is correctly identified
@@ -7411,6 +7699,8 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.component.product
     requirement_level: recommended
+  - ref: defenseclaw.ai.component.location
+    requirement_level: recommended
   - ref: defenseclaw.ai.component.identity_score
     requirement_level: recommended
   - ref: defenseclaw.ai.component.identity_band
@@ -9257,6 +9547,44 @@ groups:
   - body.endpoint.inventory
   attributes: []
   body_fields:
+  - ref: defenseclaw.inventory.skill.content_hash
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.content_status
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.state
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.first_seen
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.last_seen
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.scope
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.location
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.agents
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.publisher
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.publisher_source
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.plugin
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.plugin_version
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.plugin_enabled
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.manifest
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.manifest_hash
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.manifest_part
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.manifest_parts
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.version
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.manifest_size
+    requirement_level: optional
   - ref: defenseclaw.ai.model.provenance.publisher
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.country_code

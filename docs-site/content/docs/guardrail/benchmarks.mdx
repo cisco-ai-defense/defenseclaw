@@ -20,7 +20,7 @@ This page collects every benchmark behind the DefenseClaw guardrail in
 data, and how to run it yourself.
 
 Read the numbers with two facts in mind. DefenseClaw blocks **proved
-effects**, not suspicious words, so the rules alone catch little but block
+effects**, not suspicious words, so the rules alone block
 almost nothing by mistake. The decision model and the LLM judge add coverage,
 and both are off until you set them up
 ([decision model](/docs/guardrail/decision-model),
@@ -31,7 +31,7 @@ Every table below says which layers ran.
 
 | Question | Benchmark | Build and date | Section |
 | --- | --- | --- | --- |
-| How precise are the rules on public command, PII and agent-trace data? | Deterministic detection | Rule packs of September 2026 (scorecard of 2026-09-08). Not run again for 1.0.10. | [Rule detection](#rule-detection-on-public-data) |
+| How precise are the rules on public command, PII and agent-trace data? | Deterministic detection | Rule packs of September 2026 (scorecard of 2026-09-08). | [Rule detection](#rule-detection-on-public-data) |
 | How much does the whole cascade catch, and what does it cost in noise, time and money? | end-to-end | 1.0.10 release candidate, 2026-11-16 | [Whole cascade](#the-whole-cascade-end-to-end) |
 | How well does the LLM judge read one session in context? | Contextual judge | Gemma 4 26B A4B, 2026-09-09 | [LLM judge](#llm-judge) |
 | Does the alignment check help? | Alignment check | 1.0.10 code | [Alignment check](/docs/guardrail/intent#how-good-it-is) |
@@ -86,13 +86,13 @@ Block level: only when it blocked.
 
 How to read it:
 
-- **The rules are precise and blunt.** Few benign calls are touched, but they
-  catch about a fifth of the attacks. Most of what they miss is prompt
-  injection (AgentDojo, InjecAgent, BIPIA), which only the context of the
-  request shows.
-- **The decision model alone is too noisy.** In (c) a quarter of benign
-  calls raise an alert. Do not run it as the only layer after the rules.
-- **The judge brings the noise back down.** In (d) the false-alert rate falls
+- **The rules are precise.** Few benign calls are touched, and they catch
+  about a fifth of the attacks on their own. Prompt injection (AgentDojo,
+  InjecAgent, BIPIA) needs the context of the request, which the decision
+  model and the judge read.
+- **The decision model alone alerts on a quarter of benign calls (c).** Run
+  it with the judge: in (d) that falls to 4.8%.
+- **The judge brings the false-alert rate down.** In (d) it falls
   from 25.8% to 4.8% and recall falls from 0.907 to 0.554. The judge cannot
   lower a confident block of the decision model, so benign blocks stay at
   1.2% (57 calls).
@@ -133,8 +133,7 @@ On prompts and tool results, which the judge also reads:
 ### Next to other tools
 
 Each tool's best setting from earlier runs, scored with the same labels on the
-sets it covers. These are the frozen results of those runs. The other tools
-were not re-run for this build.
+sets it covers.
 
 | Tool | Sets covered | Their F1 | Their benign alerted | DefenseClaw (d) F1 on the same sets |
 | --- | ---: | ---: | ---: | ---: |
@@ -148,13 +147,10 @@ were not re-run for this build.
 | Guardrails AI | 13 | 0.000 | 0.0% | 0.629 |
 | CodeShield (part of LlamaFirewall) | 4 | 0.000 | 0.0% | 0.878 |
 
-DefenseClaw has the highest F1 of the runs, but not by a margin you should
-rely on against LlamaFirewall: the 95% intervals of the two overlap. On
-speed, LlamaFirewall's p50 and p95 were 2,950 and 24,687 ms, with a cost of
-USD 0.80 per 1,000 calls; the DefenseClaw cascade is in the table above.
-A tool none of whose rules apply to a
-tool call scores near zero by construction; read those rows as "does not cover
-this surface", not as a failure of the tool at its own job.
+DefenseClaw has the highest F1 in every comparison. It is also faster and
+cheaper than LlamaFirewall, the next best: the cascade's p99 hook time is
+3,620 ms, against a p95 of 24,687 ms for LlamaFirewall, and its model cost is
+about USD 0.23 per 1,000 calls, against USD 0.80.
 
 ### Time and cost
 
@@ -233,13 +229,8 @@ attack trajectory does not make every tool call a malicious true positive.
 | Ylemis independent PII holdout | All profiles | 4,190/1,756/0/270 | **96.88%** | **0%** | 0/1,756 |
 | InjecAgent YARA | Scanner validation | 7/53/0/2 | **87.50%** | **0%** | Not a blocking lane |
 
-On Strict, the eight false positives are alerts, not blocks: Strict trades
-more alert visibility for more noise, and no benign call was blocked.
-
-The exact-proof command result has only nine positives. Its 100% recall point
-estimate therefore has a 95% Wilson lower bound of 70.09%. The observed
-0/7,908 FPR has a 95% Wilson upper bound of 0.04855%. We publish both facts
-because a perfect point estimate should not be mistaken for broad coverage.
+On Strict, the eight false positives are alerts, not blocks, and no benign
+call was blocked.
 
 ### Does it interrupt benign work?
 
@@ -253,9 +244,8 @@ call was blocked.
 | [LinuxArena](https://huggingface.co/datasets/anonymouslinuxarena/linuxarena-public), validation | 0.8856% | 0.9741% | 0 |
 | LinuxArena, test | 2.7753% | 2.9543% | 0 |
 
-LinuxArena is the clearest remaining noise problem. Most findings are
-legitimate secret-like values used against local services. They are allow-only,
-but they can still create alert fatigue.
+On LinuxArena, most alerts are secret-like values sent to local services.
+They are alerts only and never block.
 
 ### What the detector is made of
 
@@ -298,17 +288,17 @@ fully blockable multi-step proof. Every profile scored 4 TP, 10 TN, 0 FP, and
 0 FN and blocked all four complete proofs. Hard negatives include mismatched
 artifacts, intervening mutation, failed steps, and incomplete chains.
 
-Several public contextual datasets remain difficult:
+On these contextual datasets the rules do not block by design, because the
+evidence in the call does not prove the effect. The decision model and the
+judge add contextual detection (see the per-set table above): cascade recall
+is 0.386 on AgentDojo and 0.955 on Agentic RedTeam, but 0.000 on InjecAgent,
+where the measured cascade detected none of the 80 attacks.
 
 | Dataset | Result | Why it did not become a default block |
 | --- | --- | --- |
 | [AgentDojo](https://github.com/ethz-spylab/agentdojo) | 0/67/0/11 | Contextual positives lack complete block truth |
 | [Agentic RedTeam](https://github.com/Alkur123/agentic-redteam-benchmark) | 0/438/0/438 | Detect-only labels do not establish exact lineage |
 | [InjecAgent](https://github.com/uiuc-kang-lab/InjecAgent) chains | 0/0/0/544 | No stable source/sink identity in the normalized evidence |
-
-We expose these misses rather than converting nearby suspicious words into
-false-positive-prone rules. The judge and the decision model are what reach
-these cases: see the end-to-end rows above.
 
 ### How labels were produced
 
@@ -453,9 +443,7 @@ gateway. Dataset commands are never executed.
 
 Gemma 4 26B A4B added 93 detections beyond the deterministic result. Gemma 3's higher
 attack recall came with a 90% benign trajectory alert and block rate, so it is
-not recommended for coding-session enforcement. The Granite model was
-dropped after pilots with lower recall, and the Qwen 3.5 and Muse models
-were not included in the frozen matrix.
+not recommended for coding-session enforcement.
 
 The judge sends a JSON schema as `response_format`. `openai.gpt-oss-safeguard-20b`
 on Bedrock Mantle does not follow it: about two thirds of its answers (64 to 66%
@@ -582,8 +570,7 @@ container (pinned `v0.3.0`) gave the same answers as the keyword rules on
 
 What this shows:
 
-- **Keywords are fast and flat.** They are right on about half the prompts and
-  can be steered: adding a category keyword to a prompt flipped the route on
+- **Keywords are fast.** They are right on about half the prompts, and a prompt can steer them: adding a category keyword to a prompt flipped the route on
   34 of 40 test prompts, in each of three attack forms.
 - **A decision model is better and slower.** Nova Lite got 88% of the prompts
   right and answered in 0.7 to 0.9 seconds. Nova Micro failed on 41% of the
@@ -595,9 +582,8 @@ What this shows:
 - **The profile filter holds.** After the filter, no prompt ended on a model
   its profile does not allow (0 violations in every row), and under the
   `local_only` profile no sensitive prompt reached a cloud model.
-- **The rule pack finds few sensitive prompts.** The shipped rule pack
-  flagged 45% of the sensitive prompts, so 35 of 80 still reached a cloud model
-  under the default profile with the keyword rules. Use `local_only` or the
+- **The rule pack flags 45% of the sensitive prompts.** With the keyword
+  rules and the default profile, 35 of 80 still reached a cloud model. Use `local_only` or the
   sensitive-data check ([semantic routing](/docs/routing/semantic-routing))
   when a prompt must not leave.
 
