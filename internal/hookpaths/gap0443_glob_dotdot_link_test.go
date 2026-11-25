@@ -35,7 +35,9 @@ func TestGAP0443GlobDotDotAfterLinkWalksPhysically(t *testing.T) {
 	out := filepath.Join(root, "out")
 	noDots := func() bool { return false }
 	// the pattern as the word spells it: filepath.Join would clean the '..'
-	pat := func(parts ...string) string { return strings.Join(append([]string{out}, parts...), string(filepath.Separator)) }
+	pat := func(parts ...string) string {
+		return strings.Join(append([]string{out}, parts...), string(filepath.Separator))
+	}
 	got, complete, unseen := actionExpandGlob(pat("u*", "..", "keydir", "authorized_keys"), out, false, true, noDots)
 	want := filepath.Join(root, "proj", "keydir", "authorized_keys")
 	if !complete || unseen || !slices.Equal(got, []string{want}) {
