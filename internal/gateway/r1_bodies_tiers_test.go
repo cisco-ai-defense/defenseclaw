@@ -50,7 +50,6 @@ var det111R1VerdictPending = map[string]string{
 	"GAP-1653/seed":  ".env read: .env is not a protected set (decision side)",
 	"GAP-1653/seed2": ".env read: .env is not a protected set (decision side)",
 	"GAP-1653/var":   ".env read through an alias of open: .env is not a protected set (decision side)",
-	"GAP-0893/var2":  "only the effects credential read reached it; an own-home effects read is shadow-only (decide.RowEffectRead, GAP-1825/1826, TRAIN-C reopens)",
 }
 
 // det111R1WindowsPending are the Windows host rows (managed cells) whose

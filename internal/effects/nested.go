@@ -456,6 +456,12 @@ func variableProgram(wd Word) bool {
 	return hasVar
 }
 
+// shellVariable is the inherited login-shell slot: it names an
+// interpreter even when the call does not provide its absolute path.
+func shellVariable(raw Word) bool {
+	return len(raw.Segs) == 1 && raw.Segs[0].Var == "SHELL"
+}
+
 // possibleShell lowers the body a variable program word may run as a shell:
 // its -c code, or the text it reads on standard input.
 func (w *walker) possibleShell(c *Cmd, raw Word, args []Word, dialect Dialect, depth int, origin Origin) {
@@ -467,12 +473,12 @@ func (w *walker) possibleShell(c *Cmd, raw Word, args []Word, dialect Dialect, d
 	case sc.hasC && sc.hasArg && sc.code.Static:
 		w.unwrapUncertain(sc.code.Value, dialect, depth, origin, sc.rest, true)
 	case sc.hasC && sc.hasArg:
-		w.possibleShellOpaque(origin)
+		w.possibleShellOpaque(origin, shellVariable(raw))
 	case sc.stdin:
 		if text, _, ok := w.stdinText(c); ok {
 			w.unwrapUncertain(text, dialect, depth, origin, nil, true)
 		} else if hasStdinSource(c) {
-			w.possibleShellOpaque(origin)
+			w.possibleShellOpaque(origin, shellVariable(raw))
 		}
 	}
 }
@@ -482,11 +488,14 @@ func (w *walker) possibleShell(c *Cmd, raw Word, args []Word, dialect Dialect, d
 // substitution): an opaque code exec, conditional and of unknown role -- the
 // reading a named shell gets for an unseen body, as a maybe (DET111 R1,
 // GAP-1554).
-func (w *walker) possibleShellOpaque(origin Origin) {
+func (w *walker) possibleShellOpaque(origin Origin, knownShellSlot bool) {
 	e := Effect{Kind: KindExec, Cond: true, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
 		TargetState: TargetStateUnknown, RoleState: RoleStateUnknown, Origin: origin}
 	e.addReason(ReasonOpaqueCode, ScopeTarget)
 	e.addReason(ReasonDynamicExpansion, ScopeRole)
+	if knownShellSlot && len(w.stageIn.fetches) == 1 {
+		e.Data = &Data{Kind: DataCode, Sources: []Source{{Kind: SourceEffect, Effect: w.stageIn.fetches[0]}}}
+	}
 	w.emit(e)
 }
 
@@ -538,6 +547,60 @@ func rawWordsFor(resolved []Word, raw []Word) []Word {
 		}
 	}
 	return out
+}
+
+// bindStdinScriptTail accounts for a shell reading its script from stdin: a
+// read or xargs on the first script line can consume the next literal line as
+// data. That line then supplies an operand or a variable, rather than running
+// as a command. The proof is bounded to a two-line script with one plain
+// absolute path and no competing stdin redirection.
+func bindStdinScriptTail(sub *Script, code string) {
+	if sub == nil || len(sub.Unknowns) != 0 || len(sub.Stmts) < 2 {
+		return
+	}
+	lines := strings.Split(strings.TrimSuffix(code, "\n"), "\n")
+	if len(lines) != 2 {
+		return
+	}
+	data := lines[1]
+	if !strings.HasPrefix(data, "/") || strings.ContainsAny(data, " \t\r\\'\"$`*?[]{}();&|<>") {
+		return
+	}
+	first := sub.Stmts[0]
+	last := sub.Stmts[len(sub.Stmts)-1]
+	if len(first.Cmds) != 1 || len(last.Cmds) != 1 || len(last.Cmds[0].Words) != 1 {
+		return
+	}
+	for _, stmt := range sub.Stmts[:len(sub.Stmts)-1] {
+		if stmt.Span[1] > len(lines[0]) || stmt.Background {
+			return
+		}
+	}
+	reader, tail := first.Cmds[0], last.Cmds[0]
+	if len(reader.Words) == 0 || len(reader.Redirs) != 0 || reader.PipeIn || reader.Pipeline || reader.Async ||
+		!reader.Words[0].Static || len(tail.Redirs) != 0 || !tail.Words[0].Static ||
+		tail.Words[0].Value != data || last.Span[0] < len(lines[0])+1 {
+		return
+	}
+	switch reader.Words[0].Value {
+	case "read":
+		args := reader.Words[1:]
+		if len(args) == 2 && args[0].Static && args[0].Value == "-r" {
+			args = args[1:]
+		}
+		if len(args) != 1 || !args[0].Static || !plainIdent(args[0].Value) {
+			return
+		}
+		reader.Redirs = append(reader.Redirs, Redir{Op: RedirHeredoc, Body: data + "\n"})
+	case "xargs":
+		if len(reader.Words) < 2 || !reader.Words[1].Static || strings.HasPrefix(reader.Words[1].Value, "-") {
+			return
+		}
+		reader.Words = append(reader.Words[1:], Word{Value: data, Static: true})
+	default:
+		return
+	}
+	sub.Stmts = sub.Stmts[:len(sub.Stmts)-1]
 }
 
 // bindRead applies `read [-r] NAME <<< WORD` (or a static here-document): NAME
@@ -650,9 +713,12 @@ func interpreterInvocation(args []Word) interpCall {
 }
 
 var (
-	pythonOpenArgRead     = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
-	pythonOpenSingleRead  = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
-	pythonOpenDoubleRead  = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenArgRead    = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenSingleRead = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenDoubleRead = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	// pythonPrintOpenRead is a read whose text the code prints at once:
+	// print(open(...).read()) or sys.stdout.write(open(...).read()).
+	pythonPrintOpenRead   = regexp.MustCompile(`\b(?:print|sys\s*\.\s*stdout\s*\.\s*write)\s*\(\s*open\s*\(\s*(?:sys\s*\.\s*argv\s*\[\s*[1-9][0-9]*\s*\]|'[^'\\\n]+'|"[^"\\\n]+")\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(\s*\)\s*\)`)
 	pythonOpenArgWrite    = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
 	pythonOpenSingleWrite = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
 	pythonOpenDoubleWrite = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
@@ -845,6 +911,19 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 	}
 	seen := map[string]bool{}
 	readArgs, readLiterals := pythonOpenReadSources(origin.Program, code, ic.args)
+	// The stage-level stdout proof applies to every read in this command.
+	// Keep it only when there is exactly one recognized read and that read
+	// is the direct argument of print/write, so unrelated reads stay private.
+	readCount := len(pythonOpenArgRead.FindAllStringIndex(code, maxCodeLiterals)) +
+		len(pythonOpenSingleRead.FindAllStringIndex(code, maxCodeLiterals)) +
+		len(pythonOpenDoubleRead.FindAllStringIndex(code, maxCodeLiterals))
+	if readCount == 1 && (len(readArgs) > 0 || len(readLiterals) > 0) && pythonPrintOpenRead.MatchString(code) {
+		// The code prints what it reads on the call's stdout, as cat does:
+		// the stage shows its reads unless it is piped on or redirected
+		// (commandStage), so python3 -c 'print(open(sys.argv[1]).read())'
+		// KEY is the read cat KEY is (rel-1-0-10:GAP-0893).
+		w.printsOut = true
+	}
 	writeArgs, writeLiterals := pythonOpenWriteTargets(origin.Program, code, ic.args)
 	deleteArgs, deleteLiterals := inlineDeleteTargets(origin.Program, code, ic.args)
 	emitRead := func(spelling string) {

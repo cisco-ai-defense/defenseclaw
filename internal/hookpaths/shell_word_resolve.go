@@ -288,6 +288,16 @@ func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts s
 		whole.uncertain = wordUncertainDynamic
 		return whole
 	}
+	if len(whole.candidates) == 0 && !opts.nullGlob && !opts.failGlob {
+		// The whole word matched nothing, so the program receives it as
+		// written and writes the value after the equals sign. Whether that
+		// value names a file is a question for the value's folder, not the
+		// whole word's (of=./key[9]: the folder of the whole word is "of=.",
+		// which is not there): dd of=./key[9] writes ./key[9]
+		// (rel-1-0-10:GAP-1289).
+		whole.candidates = resolverCandidates([]string{fields[0]}, cwd, true)
+		return whole
+	}
 	literalPath := OperandPath(literalWhole[0], cwd)
 	var values2 []string
 	for _, candidate := range whole.candidates {

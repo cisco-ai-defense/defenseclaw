@@ -529,6 +529,16 @@ func registrationEditsInPlace(call *syntax.CallExpr, home string) bool {
 // short letter outside GNU sed's, a long name or an ambiguous prefix of one,
 // sedLongOption), so the caller keeps reading every word.
 func sedScriptWords(args []string) (scripts []string, ok bool) {
+	return sedScriptWordsOf(args, true)
+}
+
+// sedScriptTexts is sedScriptWords without the -f / --file names: only the
+// script texts the command line holds.
+func sedScriptTexts(args []string) (scripts []string, ok bool) {
+	return sedScriptWordsOf(args, false)
+}
+
+func sedScriptWordsOf(args []string, fileNames bool) (scripts []string, ok bool) {
 	first, given := true, false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -554,7 +564,10 @@ func sedScriptWords(args []string) (scripts []string, ok bool) {
 				if !inline {
 					value = next()
 				}
-				scripts, given = append(scripts, value), true
+				if fileNames || sedLongOption(arg) == "expression" {
+					scripts = append(scripts, value)
+				}
+				given = true
 			case "line-length":
 				if !inline {
 					next()
@@ -579,7 +592,10 @@ func sedScriptWords(args []string) (scripts []string, ok bool) {
 					if value == "" {
 						value = next()
 					}
-					scripts, given = append(scripts, value), true
+					if fileNames || arg[j] == 'e' {
+						scripts = append(scripts, value)
+					}
+					given = true
 					break cluster
 				case 'i':
 					break cluster

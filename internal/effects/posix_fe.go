@@ -805,25 +805,42 @@ func paramSeg(p *syntax.ParamExp, quoted bool) (WordSeg, bool) {
 			return WordSeg{}, false
 		}
 	case p.Repl != nil && p.Exp == nil && p.Slice == nil:
-		orig, ok1 := staticWordText(p.Repl.Orig)
-		with, ok2 := staticWordText(p.Repl.With)
-		if !ok1 || !ok2 || orig == "" || strings.ContainsAny(orig, "*?[#%") {
-			return WordSeg{}, false
-		}
+		// A literal pattern, optionally anchored at the start (/#) or the
+		// end (/%) of the value, with backslash-escaped literal characters
+		// (${PWD/%\/proj/}). A glob character keeps the word dynamic
+		// (rel-1-0-10:GAP-1244).
 		kind := "/"
 		if p.Repl.All {
 			kind = "//"
 		}
+		raw, ok := rawLiteralText(p.Repl.Orig)
+		if ok && raw != "" && (raw[0] == '#' || raw[0] == '%') {
+			if p.Repl.All {
+				return WordSeg{}, false
+			}
+			kind, raw = "/"+raw[:1], raw[1:]
+		}
+		orig, ok1 := unescapeLiteralPattern(raw)
+		with, ok2 := staticWordText(p.Repl.With)
+		if !ok || !ok1 || !ok2 || strings.ContainsAny(orig, "*?[") || orig == "" && (kind == "/" || kind == "//") {
+			return WordSeg{}, false
+		}
 		seg.Op = &ParamOp{Kind: kind, Pat: orig, With: with}
 	case p.Slice != nil && p.Exp == nil && p.Repl == nil:
-		off, ok := arithLiteral(p.Slice.Offset)
-		if !ok || off < 0 {
+		// ${NAME:OFF} and ${NAME:OFF:LEN}: an empty offset is 0, and a
+		// negative offset or length counts from the end of the value
+		// (${PWD:0:-5}, ${PWD: -5}, rel-1-0-10:GAP-1244).
+		off, ok := 0, true
+		if p.Slice.Offset != nil {
+			off, ok = signedArithLiteral(p.Slice.Offset, true)
+		}
+		if !ok {
 			return WordSeg{}, false
 		}
 		seg.Op = &ParamOp{Kind: ":", Off: off}
 		if p.Slice.Length != nil {
-			n, ok := arithLiteral(p.Slice.Length)
-			if !ok || n < 0 {
+			n, ok := signedArithLiteral(p.Slice.Length, false)
+			if !ok {
 				return WordSeg{}, false
 			}
 			seg.Op.Len, seg.Op.HasLen = n, true
@@ -850,6 +867,65 @@ func staticWordText(w *syntax.Word) (string, bool) {
 		b.WriteString(lit.Value)
 	}
 	return b.String(), true
+}
+
+// rawLiteralText is the text of a word of literals only, backslashes kept.
+func rawLiteralText(w *syntax.Word) (string, bool) {
+	if w == nil {
+		return "", true
+	}
+	var b strings.Builder
+	for _, part := range w.Parts {
+		lit, ok := part.(*syntax.Lit)
+		if !ok || strings.ContainsAny(lit.Value, "$`") {
+			return "", false
+		}
+		b.WriteString(lit.Value)
+	}
+	return b.String(), true
+}
+
+// unescapeLiteralPattern drops the backslash before a character that is no
+// glob metacharacter (the character is literal). A backslash before a glob
+// character or at the end refuses the pattern.
+func unescapeLiteralPattern(s string) (string, bool) {
+	if !strings.Contains(s, `\`) {
+		return s, true
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+1 == len(s) || strings.IndexByte(`*?[]\`, s[i+1]) >= 0 {
+			return "", false
+		}
+		i++
+		b.WriteByte(s[i])
+	}
+	return b.String(), true
+}
+
+// signedArithLiteral is a decimal literal of an arithmetic slot, with an
+// optional leading minus (-5) or a parenthesized one ((-5)). An empty word
+// is 0 when empty is allowed (the omitted offset of ${NAME::LEN}).
+func signedArithLiteral(x syntax.ArithmExpr, empty bool) (int, bool) {
+	switch e := x.(type) {
+	case *syntax.ParenArithm:
+		return signedArithLiteral(e.X, false)
+	case *syntax.UnaryArithm:
+		if e.Op != syntax.Minus || e.Post {
+			return 0, false
+		}
+		n, ok := arithLiteral(e.X)
+		return -n, ok
+	case *syntax.Word:
+		if empty && len(e.Parts) == 0 {
+			return 0, true
+		}
+	}
+	return arithLiteral(x)
 }
 
 // arithLiteral is a non-negative decimal literal of an arithmetic slot.

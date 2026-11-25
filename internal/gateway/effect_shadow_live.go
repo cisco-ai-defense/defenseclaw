@@ -221,6 +221,10 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	if effectExtractCut(result) || hasAlt && effectExtractCut(altResult) {
 		return finish(effectShadowReasonCut, len(result.Effects))
 	}
+	fetchRule := effectFetchedScriptRule(result)
+	for i := range results {
+		results[i].FetchedScriptRule = fetchRule
+	}
 	if len(result.Unknowns) == 0 && mode == effectRulesOn {
 		if request.aliasPending != nil {
 			request.aliasPending.set(request, result, facts, opts.Flavor)

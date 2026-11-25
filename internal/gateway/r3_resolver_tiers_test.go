@@ -55,7 +55,6 @@ var r3VerdictPending = map[string]string{
 	"GAP-1677":  "alias/peer tilde targets remain Maybe until every row is resolver-known (S4-R3)",
 	"GAP-0443":  "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
 	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
-	"GAP-1244":  "the PWD pattern replacement form remains Maybe (S4-R3)",
 	"GAP-1678":  "cp destination file/directory ambiguity remains Maybe (S4-R3)",
 	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
 	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
@@ -156,11 +155,28 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		{gap: "GAP-1573 find -name [s]ettings.json", command: `find ~/.claude -name '[s]ettings.json' -delete`, want: "maybe"},
 		{gap: "GAP-1573c in-call link find root", command: `ln -s ~/.claude d && find d/ -name '*.json' -delete`, want: "maybe"},
 		// working folder
-		// GAP-1244: the effects lane reaches the unknown tier for a credential
-		// read; the plain spelling's PATH-SSH-KEY block is a legacy rule.
-		{gap: "GAP-1244 ${PWD%suffix}", command: `cat ${PWD%/proj}/.ssh/id_rsa`, want: "maybe"},
-		{gap: "GAP-1244 ${PWD/proj/}", command: `cat ${PWD/proj/}/.aws/credentials`, want: "maybe"},
+		// GAP-1244: a read through a PWD parameter operator (suffix or prefix
+		// removal, literal or anchored replacement, substring with a negative
+		// offset or length) is a known credential read and takes the cell of
+		// its plain spelling.
+		{gap: "GAP-1244 ${PWD%suffix}", command: `cat ${PWD%/proj}/.ssh/id_rsa`, want: "ctl:cat ~/.ssh/id_rsa"},
+		// (${PWD/proj/}/x spells a // in the path, which the resolver keeps
+		// non-canonical by review N4-4: that spelling stays at its 1.0.10 cell.)
+		{gap: "GAP-1244 ${PWD/proj/}", command: `cat ${PWD/proj/}.aws/credentials`, want: "ctl:cat ~/.aws/credentials"},
+		{gap: "GAP-1244 ${PWD%/*}", command: `cat ${PWD%/*}/.aws/credentials`, want: "ctl:cat ~/.aws/credentials"},
+		{gap: "GAP-1244 ${PWD/proj/.ssh}", command: `cat ${PWD/proj/.ssh}/id_rsa`, want: "ctl:cat ~/.ssh/id_rsa"},
+		{gap: "GAP-1244 ${PWD:0:-5}", command: `cat ${PWD:0:-5}/.ssh/id_rsa`, want: "ctl:cat ~/.ssh/id_rsa"},
+		{gap: "GAP-1244 ${PWD::-5}", command: `cat ${PWD::-5}/.ssh/id_rsa`, want: "ctl:cat ~/.ssh/id_rsa"},
+		{gap: "GAP-1244 anchored suffix", command: `cat "${PWD/%\/proj/}/.ssh/id_rsa"`, want: "ctl:cat ~/.ssh/id_rsa"},
+		{gap: "GAP-1244 fp: ${PWD:0:-5} project file", command: `cat ${PWD:0:-5}/proj/notes.txt`, want: "allow"},
 		{gap: "GAP-1037 lastpipe cd", command: `shopt -s lastpipe; echo x | cd ~/.ssh; cat id_rsa`, want: "ctl:cat ~/.ssh/id_rsa"},
+		// GAP-1748: a cd in a middle pipeline stage runs in a subshell, so
+		// the later read is of the project file; the plain spelling allows.
+		// The last-stage cd and a keys write after a cd keep their control.
+		{gap: "GAP-1748 fp: lastpipe, cd in a middle stage", command: `shopt -s lastpipe; cd ~/.ssh | cat; cat notes.txt`, want: "allow"},
+		{gap: "GAP-1748 fp: set -euo pipefail, cd in a middle stage", command: `set -euo pipefail; cd ~/.ssh | cat; ls`, want: "allow"},
+		{gap: "GAP-1748 lastpipe cd, then a keys write", command: `shopt -s lastpipe; echo x | cd ~/.ssh; echo k >> authorized_keys`, want: "ctl:echo k >> ~/.ssh/authorized_keys"},
+		{gap: "GAP-1748 set -e, cd, then a keys write", command: `set -e; cd ~/.ssh; echo k >> authorized_keys`, want: "ctl:echo k >> ~/.ssh/authorized_keys"},
 		{gap: "GAP-1043 pwd function", command: `pwd() { echo /tmp; }; cat $(pwd)/.ssh/id_rsa`, cwd: ".", want: "maybe"},
 		{gap: "GAP-1608 $(pwd)/../ glob", command: `cat $(pwd)/../.ssh/id_*`, want: "maybe"},
 		{gap: "GAP-1573c fp: in-call link to a project folder", command: `ln -s ~/proj/src d && find d/ -name '*.pyc' -delete`, want: "allow"},
