@@ -52,7 +52,6 @@ type r3TierRoute struct {
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
 	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-0443":  "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
 	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
 	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
 	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
@@ -154,7 +153,10 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		// dot-dot and links
 		{gap: "GAP-1648 find $HOME/.. -delete", command: `find $HOME/.. -type f -delete`, want: "maybe"},
 		{gap: "GAP-1020 x/../ glob", command: `cat proj/../.ss*/id_*`, cwd: ".", want: "maybe"},
-		{gap: "GAP-0443 .. after a wildcard", command: `echo k > u*/../keydir/authorized_keys`, want: "maybe"},
+		// GAP-0443: nothing in proj matches u*, so the shell keeps the word
+		// and the write fails; the gap's link tree is
+		// TestDET111R3GlobDotDotFiveTiers.
+		{gap: "GAP-0443 fp: .. after a wildcard that matches nothing", command: `echo k > u*/../keydir/authorized_keys`, want: "allow"},
 		{gap: "GAP-1573 find -name [s]ettings.json", command: `find ~/.claude -name '[s]ettings.json' -delete`, want: "maybe"},
 		{gap: "GAP-1573c in-call link find root", command: `ln -s ~/.claude d && find d/ -name '*.json' -delete`, want: "maybe"},
 		// working folder
@@ -238,6 +240,39 @@ func TestDET111R3AccountTildeFiveTiers(t *testing.T) {
 	})
 }
 
+// GAP-0443: '..' after a wildcard component that matches a link ascends
+// from the link's target, as the kernel walks it. The gap's tree: an
+// outside folder whose up is a link into proj/sub, and proj/keydir a link
+// to ~/.ssh, so u*/../keydir/authorized_keys from out is the account's keys
+// file (the literal up/../keydir spelling is GAP-0400).
+func TestDET111R3GlobDotDotFiveTiers(t *testing.T) {
+	useDefaultEffectsLane(t)
+	home, _ := r3TierHome(t)
+	for _, d := range []string{"out", "proj/sub"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, "proj", "sub"), filepath.Join(home, "out", "up")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(home, "proj", "keydir")); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(home, "out")
+	r3CheckPosixTierRows(t, home, []r3TierRow{
+		{gap: "GAP-0443 u*/.. through a link, relative", command: `echo k > u*/../keydir/authorized_keys`, cwd: "out",
+			want: "ctl:echo k > ~/.ssh/authorized_keys"},
+		{gap: "GAP-0443 u*/.. through a link, absolute", command: `echo k > ` + out + `/u*/../keydir/authorized_keys`, cwd: "out",
+			want: "ctl:echo k > ~/.ssh/authorized_keys"},
+		{gap: "GAP-0443 u*/.. through a link, append", command: `echo k >> u*/../keydir/authorized_keys`, cwd: "out",
+			want: "ctl:echo k >> ~/.ssh/authorized_keys"},
+		// the link's target folder holds only project files
+		{gap: "GAP-0443 fp: u*/.. to a project file", command: `echo k > u*/../notes.txt`, cwd: "out", want: "allow"},
+		{gap: "GAP-0443 fp: u*/.. to a new project file", command: `echo k > u*/../new.txt`, cwd: "out", want: "allow"},
+	})
+}
+
 // pinEffectAccounts makes the lane's passwd lookup read accounts.
 func pinEffectAccounts(t *testing.T, accounts map[string]string) {
 	t.Helper()
@@ -295,8 +330,12 @@ func r3CheckPosixTierRows(t *testing.T, home string, rows []r3TierRow) {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
 			for _, row := range rows {
 				cwd := filepath.Join(home, "proj")
-				if row.cwd == "." {
+				switch row.cwd {
+				case "":
+				case ".":
 					cwd = home
+				default:
+					cwd = filepath.Join(home, row.cwd)
 				}
 				useEffectsRulesMode(t, "off")
 				offAction, _ := route.decide(t, api, t.Context(), cwd, row.command)
