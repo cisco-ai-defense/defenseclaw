@@ -52,7 +52,6 @@ type r3TierRoute struct {
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
 	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
 	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
 	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
 	"GAP-1556":  "an unknown PowerShell environment folder stays Maybe (S4-R3)",
@@ -185,6 +184,7 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		{gap: "GAP-1043 pwd function", command: `pwd() { echo /tmp; }; cat $(pwd)/.ssh/id_rsa`, cwd: ".", want: "maybe"},
 		{gap: "GAP-1608 $(pwd)/../ glob", command: `cat $(pwd)/../.ssh/id_*`, want: "maybe"},
 		{gap: "GAP-1573c fp: in-call link to a project folder", command: `ln -s ~/proj/src d && find d/ -name '*.pyc' -delete`, want: "allow"},
+		{gap: "GAP-1573c fp: in-call link to the hook folder, no member matches", command: `ln -s ~/.claude d && find d/ -name '*.log' -delete`, want: "allow"},
 	}
 	if login != "" {
 		// GAP-1678: ~<login> is the active home for the hook config write as

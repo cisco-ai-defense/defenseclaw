@@ -5,7 +5,11 @@
 package effectrules
 
 import (
+	"errors"
+	"io/fs"
 	"os"
+	"path"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -32,9 +36,10 @@ type Env struct {
 	// AgentCreated reports whether an earlier call of this session wrote the
 	// target keyed by effects.Target.Key(). Nil means no session memory.
 	AgentCreated func(key string) bool
-	// DestStat reads a copy or move destination that may be a directory
-	// (settleDestFile); nil is os.Lstat on the write resolver's answer.
-	DestStat func(path string) (os.FileInfo, error)
+	// Lstat reads a path the resolver settles: a copy or move destination
+	// that may be a directory (settleDestFile), a find root and the hook
+	// config members below it (findDeletedMembers); nil is os.Lstat.
+	Lstat func(path string) (os.FileInfo, error)
 	// Truncated is the call's one bound record: a cap of the projection
 	// (maxIdentityStats) that cut the reading short hits it. Nil: the hit is
 	// only counted (IdentityCounts).
@@ -74,7 +79,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 	for i := range effs {
 		e := effs[i]
 		stepUps.promote(&e, flavor)
-		settleDestFile(&e, flavor, rsv, env.DestStat)
+		settleDestFile(&e, flavor, rsv, env.Lstat)
 		fact := &semanticpb.EffectFact{
 			Index:       int64(i + 1),
 			Kind:        string(e.Kind),
@@ -98,6 +103,19 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 			fact.Sources = projectSources(e.Data.Sources)
 		}
 		out = append(out, fact)
+		// A find delete reaching an existing hook config member is a Known
+		// delete of that member, beside the root's own delete.
+		for _, member := range findDeletedMembers(e, sets[SetAgentHookConfig], flavor, env.Lstat) {
+			if len(out) >= semantic.MaxEffects {
+				break
+			}
+			mt := effects.Target{Type: effects.TargetPath, Path: member, Link: e.Target.Link, Flavor: e.Target.Flavor}
+			out = append(out, &semanticpb.EffectFact{
+				Index: fact.Index, Kind: fact.Kind, TargetState: string(effects.TargetStateKnown), RoleState: fact.RoleState,
+				Cond: fact.Cond, Origin: fact.Origin,
+				Target: projectTarget(mt, effects.TargetStateKnown, e.Kind, sets, flavor, env.Home, rsv, env.AgentCreated, ids),
+			})
+		}
 	}
 	holdKnownOnNameMaybe(out)
 	return out
@@ -139,6 +157,66 @@ func settleDestFile(e *effects.Effect, flavor effects.Flavor, rsv resolver, stat
 	}
 	e.TargetState = effects.TargetStateKnown
 	e.Reasons = nil
+}
+
+// findDeletedMembers is the resolver's answer for find ROOT -name PATTERN
+// -delete (the extractor's Lexical ROOT/**/PATTERN on a Known subtree
+// delete): the agent hook config members that exist below the root as
+// regular files and whose name the pattern matches, which the call deletes
+// (rel-1-0-10:GAP-1573c: ln -s ~/.claude d && find d/ -name '*.json'
+// -delete takes the cell of the same delete of settings.json). The root is
+// the folder the call's own link names (Physical), spelled with a trailing
+// separator (find -P descends a link root only then) and absent before the
+// call (ln makes it, not a link inside an existing folder); or a real
+// folder, not a link. An opaque or catch-all selection (*), another set, a
+// glob root or the other flavor adds nothing.
+func findDeletedMembers(e effects.Effect, hook protectedSet, flavor effects.Flavor, lstat func(string) (os.FileInfo, error)) []string {
+	t := e.Target
+	if e.Kind != effects.KindDelete || !t.Subtree || e.TargetState != effects.TargetStateKnown ||
+		e.RoleState != effects.RoleStateKnown || len(e.Reasons) != 0 || t.Glob != "" || t.Path == "" ||
+		(flavor == effects.FlavorWindows) != (hostGOOS == "windows") {
+		return nil
+	}
+	sep := "/"
+	if flavor == effects.FlavorWindows {
+		sep = `\`
+	}
+	root := t.Path
+	if t.Physical != "" {
+		root = t.Physical
+	}
+	name, ok := strings.CutPrefix(t.Lexical, strings.TrimRight(root, `/\`)+sep+"**"+sep)
+	if !ok || name == "" || name == "*" || strings.ContainsAny(name, `/\`) || !CanonicalAbsolute(root, flavor) {
+		return nil
+	}
+	if lstat == nil {
+		lstat = os.Lstat
+	}
+	if t.Physical != "" {
+		if !strings.HasSuffix(t.Spelling, "/") && !strings.HasSuffix(t.Spelling, `\`) {
+			return nil
+		}
+		if _, err := lstat(t.Path); !errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+	}
+	if info, err := lstat(root); err != nil || !info.IsDir() {
+		return nil
+	}
+	var members []string
+	for _, m := range hook.files {
+		if canon(m, flavor) == canon(root, flavor) || !atOrUnder(canon(m, flavor), canon(root, flavor)) {
+			continue
+		}
+		base := m[strings.LastIndexAny(m, `/\`)+1:]
+		if matched, err := path.Match(name, base); err != nil || !matched {
+			continue
+		}
+		if info, err := lstat(m); err == nil && info.Mode().IsRegular() {
+			members = append(members, m)
+		}
+	}
+	return members
 }
 
 // holdKnownOnNameMaybe prevents one target/set from being both Known and

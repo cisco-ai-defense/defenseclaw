@@ -51,7 +51,7 @@ func TestDET111R3DestFileSettlesCopyTarget(t *testing.T) {
 			stat := func(p string) (os.FileInfo, error) { asked = append(asked, p); return tc.stat(p) }
 			opts := effects.Options{Flavor: effects.FlavorPOSIX, Home: home, CWD: home}
 			result := effects.Extract(effects.Call{Surface: effects.SurfaceShell, Command: "cp proj/notes.txt ~/.claude/settings.json"}, opts)
-			facts := Project(result, Env{Home: home, Flavor: effects.FlavorPOSIX, Resolve: tc.rsv, DestStat: stat})
+			facts := Project(result, Env{Home: home, Flavor: effects.FlavorPOSIX, Resolve: tc.rsv, Lstat: stat})
 			found := false
 			for _, f := range facts {
 				if f.GetKind() != string(effects.KindWrite) || f.GetTarget().GetPath() != dest {
@@ -86,7 +86,7 @@ func TestDET111R3DestFileSettlesCopyTarget(t *testing.T) {
 	result := effects.Extract(effects.Call{Surface: effects.SurfaceShell, Command: `Copy-Item notes.txt C:\Users\alice\.claude\settings.json`}, opts)
 	read := false
 	Project(result, Env{Home: `C:\Users\alice`, Flavor: effects.FlavorWindows, Resolve: walk,
-		DestStat: func(string) (os.FileInfo, error) { read = true; return destStatInfo{0o600}, nil }})
+		Lstat: func(string) (os.FileInfo, error) { read = true; return destStatInfo{0o600}, nil }})
 	if read && hostGOOS != "windows" {
 		t.Fatal("a Windows destination was read from the POSIX host file system")
 	}
