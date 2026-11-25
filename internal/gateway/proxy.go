@@ -3771,8 +3771,10 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}
 	// pastRun: the held bound behind an open token or digit run was passed;
 	// runFrom is the reply text offset of the run's first byte (GAP-1306);
-	// pastParked: only parked reasoning runs are open (GAP-2170), so the
-	// bound lets all go with no verdict, as rel does (no GAP-1767 cut).
+	// pastParked: only reasoning runs parked by the switch to the answer
+	// are open (GAP-2170), so the bound lets all go with no verdict, as rel
+	// does (no GAP-1767 cut; a block-end or tool-switch park keeps it,
+	// GAP-2218).
 	pastRun, pastParked, runFrom := false, false, -1
 	// secretHeld reports that nothing may be sent now: the text ends inside
 	// an open secret, or a bound on it blocked.
@@ -3796,7 +3798,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			// check has read it, with no verdict, and the run stays held
 			// (GAP-1306). When the chunks from the run's first byte are over
 			// the bound themselves, the bound decides the run (GAP-1767).
-			pastRun, pastParked, runFrom = true, o.reasoningOnly, accumulated.OpenRunFrom()
+			pastRun, pastParked, runFrom = true, o.answerParkedOnly, accumulated.OpenRunFrom()
 			return false
 		}
 		return true
@@ -6781,18 +6783,20 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			// checked, go out with no verdict, and the run stays held with
 			// the next frame (GAP-1306). When the frames from the run's
 			// first byte are over the bound themselves, the bound decides
-			// the run (TRUNCATED, GAP-1767), then all go out. When only parked reasoning runs are
-			// open (o.reasoningOnly, GAP-2170: a run parked until the message
-			// ends while the answer streams behind it), all go out as rel
-			// does, with no verdict: a benign answer over the bound after
-			// thinking that ends in a number is not cut.
+			// the run (TRUNCATED, GAP-1767), then all go out. When only reasoning runs parked
+			// by the switch to the answer are open (o.answerParkedOnly,
+			// GAP-2170: parked until the message ends while the answer
+			// streams behind it), all go out as rel does, with no verdict: a
+			// benign answer over the bound after thinking that ends in a
+			// number is not cut. A run parked at a block end or a tool switch
+			// keeps the verdict (GAP-2218).
 			k := heldBeforeRun(heldMarks, accumulated.OpenRunFrom())
 			rest := heldSize + next
 			for _, f := range heldFrames[:k] {
 				rest -= len(f)
 			}
 			if k == 0 || rest > streamSecretMaxHeld {
-				if o.reasoningOnly {
+				if o.answerParkedOnly {
 					return false, true
 				}
 				return false, secretBound(bounded.Bytes, streamRunHeldWhy)

@@ -426,6 +426,13 @@ type openSecret struct {
 	// reasoningOnly: all open runs are parked reasoning tokens, which can
 	// be masked in their own wire events while answer events stream.
 	reasoningOnly bool
+	// answerParkedOnly: reasoningOnly, and every one of those runs is parked
+	// by the switch from the reasoning to the answer until the message ends
+	// (streamReasoningAnswerParkMax, GAP-2170), not at a block end or a tool
+	// switch (streamRunParkMax). Only then does the held bound let all go
+	// with no verdict, as rel does; a run parked at a block end or a tool
+	// switch keeps the GAP-1767 TRUNCATED verdict (rel-1-0-10:GAP-2218).
+	answerParkedOnly bool
 }
 
 // OpenSecret advances every lane and same-choice check boundary over text
@@ -433,7 +440,7 @@ type openSecret struct {
 // behind a split secret until the existing matcher reads them whole.
 func (r *responseText) OpenSecret() openSecret {
 	var o openSecret
-	var reasoningOpen, otherOpen bool
+	var reasoningOpen, otherOpen, blockParked bool
 	for i, l := range r.lanes {
 		t := l.String()
 		pemOpen, over := r.secret[i].pem(t)
@@ -443,6 +450,7 @@ func (r *responseText) OpenSecret() openSecret {
 		if tokenOpen && r.secret[i].parked {
 			if lane, ok := r.laneForIndex(i); ok && lane.field == responseFieldReasoning {
 				reasoningOpen = true
+				blockParked = blockParked || r.secret[i].parkLimit != streamReasoningAnswerParkMax
 			} else {
 				otherOpen = true
 			}
@@ -463,6 +471,7 @@ func (r *responseText) OpenSecret() openSecret {
 	}
 	o.open = reasoningOpen || otherOpen
 	o.reasoningOnly = reasoningOpen && !otherOpen && !o.pem
+	o.answerParkedOnly = o.reasoningOnly && !blockParked
 	return o
 }
 
