@@ -143,8 +143,14 @@ type ToolInspectRequest struct {
 	// tool text of its own, only the name of a file the agent itself keeps
 	// (Claude Code FileChanged on ~/.claude.json, GAP-2623). The rule and AID
 	// lanes still scan it and the event is still recorded. Set only by a
-	// connector adapter, never from the public inspect wire.
+	// connector adapter, or with skipAID by the substrate MCP verdict for a
+	// reading the call's own reading already sends to the judge (a bounded
+	// projection, substrateMCPReading), never from the public inspect wire.
 	skipJudge bool
+	// skipAID keeps the Cisco AI Defense lane off such a reading: the rule
+	// lanes read it, AID reads the call once (RV-0841b F6). Never from the
+	// public inspect wire.
+	skipAID bool
 	// judgeContent is the part of a long message the judge is sent, when the
 	// rules read more than the judge takes (messageJudgeText). Set only by the
 	// message lane, never from the wire.
@@ -709,7 +715,9 @@ func (a *APIServer) hookAIDInspectToolWithSubmission(
 ) (*ScanVerdict, bool) {
 	// hookAIDInspect and hookAIDInspectToolCall return nil without a wired
 	// hook surface too; checking first skips parsing the arguments.
-	if !a.aidHookSurfaceWired(ctx) {
+	// skipAID: AID reads this call once on its own reading (RV-0841b F6),
+	// so this reading is never submitted.
+	if req.skipAID || !a.aidHookSurfaceWired(ctx) {
 		return nil, false
 	}
 	if reason := toolCallNotCarriedReason(req); reason != "" {
@@ -1231,12 +1239,15 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// (rel-1-0-10:GAP-0999), and it only adds findings.
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
-	if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok {
+	claims := substrateGuestClaimsFrom(ctx)
+	twins, twinsCut := substrateGuestCommandTwinRequests(action, claims)
+	for _, twin := range twins {
 		// A Substrate actor's shell call as it reads once the actor's file
 		// system has followed its links (cd -P a/b/ssh, eval "cat key-link",
-		// echo x > claude-dir/settings.json): every reading of the call,
-		// the hook config guard included, judges it too, and it only adds
-		// findings (substrate-1 GAP-0546, GAP-0547).
+		// echo x > claude-dir/settings.json, cd sub && echo x >> dc-link):
+		// every reading of the call, the hook config guard included, judges
+		// it too, and it only adds findings (substrate-1 GAP-0546, GAP-0547,
+		// GAP-0623).
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
 	if twin, ok := wrapperExactTwinRequest(action); ok {
@@ -1253,6 +1264,13 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		findings = withRaiseOnlyTwinFindings(findings, slices.DeleteFunc(trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient), func(f RuleFinding) bool {
 			return !wrappedProgramRule(f.RuleID)
 		}))
+	}
+	if claims != nil && (claims.cut || twinsCut) {
+		// Its kit claims were cut: a word or argument past the cut may
+		// write through a link the laptop follows and blocks, so the call
+		// gets the unknown tier of the pack, never a clean allow
+		// (substrate-1 GAP-0622).
+		findings = withUnknownFinding(findings, boundedTruncatedFinding(bounded.Of(bounded.Paths), action.EnforcementCapable))
 	}
 	return withEffectsFoldedIntoCall(findings)
 }
@@ -1304,6 +1322,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
+		if req.skipAID {
+			// AID reads this call on its own reading (skipAID).
+			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+		}
 		if reason := toolCallNotCarriedReason(req); reason != "" {
 			a.logAIDToolCallTextOnly(ctx, req.Connector, req.hookEvent, req.Tool, req.toolNameIsLabel, reason)
 			return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
@@ -1352,10 +1374,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		}
 		// Nor is a Substrate actor's shell call that writes one through a
 		// link (substrate-1 GAP-0547).
-		if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok && allowed &&
-			(cfg == nil || !cfg.SecureClientIntegration()) &&
-			(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
-			allowed = false
+		twins, _ := substrateGuestCommandTwinRequests(action, substrateGuestClaimsFrom(ctx))
+		for _, twin := range twins {
+			if allowed && (cfg == nil || !cfg.SecureClientIntegration()) &&
+				(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
+				allowed = false
+			}
 		}
 		// An allowed tool name does not authorize turning DefenseClaw off.
 		if len(defenseClawControlFindings(ctx, action, nil)) != 0 {

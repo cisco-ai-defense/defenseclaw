@@ -19,6 +19,8 @@ import (
 // sends a registry's _authToken there), so `npm install` from a bound
 // private registry authenticates through egress injection with nothing
 // typed. No other header, no host pattern, never a value.
+// B1 S7: the launcher also writes them at agent start, but a launcher older
+// than 1.0.11 does not, so the build keeps them (remove in 1.0.12, when launchers older than 1.0.11 are unsupported).
 func TestGAP0529RegistryPlaceholdersInTheKitsNpmrc(t *testing.T) {
 	secrets := []config.SubstrateSecret{
 		{Name: "npm-private", Source: "ate-secret://k8s.io/p/ns/npm/token",
@@ -61,5 +63,18 @@ func TestGAP0529RegistryPlaceholdersInTheKitsNpmrc(t *testing.T) {
 	}
 	if rc := string(file(plain, NPMGlobalConfig)); strings.Contains(rc, "_authToken") {
 		t.Errorf("npmrc without bound registries holds a token line:\n%s", rc)
+	}
+}
+
+// TestB1S7NPMCredential: the template build and the agent start refuse
+// the same npmrc lines.
+func TestB1S7NPMCredential(t *testing.T) {
+	for line, want := range map[string]string{
+		"//r.example/:_authToken=abc": "//r.example/:_authToken", "_auth = x": "_auth",
+		"//r.example/:_authToken=${NPM_TOKEN}": "", "registry=https://r.example/": "", "# _authToken=abc": "", "": "",
+	} {
+		if k, _ := NPMCredential(line); k != want {
+			t.Errorf("NPMCredential(%q) = %q, want %q", line, k, want)
+		}
 	}
 }

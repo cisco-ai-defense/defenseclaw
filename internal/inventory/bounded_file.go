@@ -20,7 +20,8 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var (
@@ -36,7 +37,7 @@ func readBoundedRegularFile(path string, limit int64) ([]byte, error) {
 	if limit <= 0 {
 		return nil, errors.New("bounded metadata limit must be positive")
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +94,7 @@ func readRegularFileTail(path string, limit int64) ([]byte, error) {
 	if limit <= 0 {
 		return nil, errors.New("bounded metadata limit must be positive")
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +127,7 @@ func readRegularFilePrefix(path string, limit int64) ([]byte, error) {
 	if limit <= 0 {
 		return nil, errors.New("bounded metadata prefix limit must be positive")
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	if err != nil {
 		return nil, err
 	}

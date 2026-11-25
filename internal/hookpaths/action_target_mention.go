@@ -27,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
@@ -92,7 +93,40 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	if !spelledWindows && !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}
-	file, parsed := parseShell(command)
+	// inSSHFolder answers actionFolderIsSSHFolder once per folder and hook
+	// call state: it resolved home's SSH folder and the word's folder
+	// again for every unknown word ($C), a fifth of a copy-mode by-name
+	// decision on an 8 KB loop of them (FIX-F3PERF). An answer read while
+	// the call's state changed is not kept.
+	var call *hookCall
+	looked := false
+	callState := func() CallState {
+		if !looked {
+			call, looked = currentHookCall(), true
+		}
+		if call == nil {
+			return CallState{}
+		}
+		return call.state()
+	}
+	type sshFolderKey struct {
+		cwd   string
+		state CallState
+	}
+	sshFolders := map[sshFolderKey]bool{}
+	inSSHFolder := func(folder string) bool {
+		key := sshFolderKey{cwd: folder, state: callState()}
+		if answer, found := sshFolders[key]; found {
+			return answer
+		}
+		answer := actionFolderIsSSHFolder(folder, home)
+		if callState() == key.state {
+			sshFolders[key] = answer
+		}
+		return answer
+	}
+	// The scan only reads the tree (TargetMemo.parsedShell).
+	file, parsed := globs.targetMemo().parsedShell(command)
 	if depth == 0 && parsed && (actionKnownReadOnlyShell(file, home) ||
 		!stateOnly && (actionSSHSetupAndReadsOnly(file, cwd, home) ||
 			strings.Contains(command, "pwd") && actionReadOnlyListingCompound(file, cwd, home))) {
@@ -358,7 +392,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				return false
 			}
-			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
+			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKeyIn(word, effectiveCWD, home, inSSHFolder)
 		}
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if found {
@@ -2125,7 +2159,9 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 				return false
 			}
 			for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
-				if actionGlobNameMatch(base, name) {
+				// ?ssh and * select no .ssh without dotglob, as in the
+				// walk (actionGlobSkipsDotName, substrate-1 GAP-1023).
+				if actionGlobNameMatch(base, name) && !actionGlobSkipsDotName(base, name, dots) {
 					return true
 				}
 			}
@@ -2229,6 +2265,13 @@ func actionDotglobSettingIn(folded string) bool {
 // costs a large heredoc body hundreds of milliseconds, and it can match only
 // where a glob character is followed by an opening parenthesis.
 func actionCommandMayDotglob(command string) bool {
+	return CommandMayDotglob(command)
+}
+
+// CommandMayDotglob is actionCommandMayDotglob, for the gateway's lexical
+// gate on the by-name reading (copyModeCallMayNameSSHFolder): a call that
+// may turn dotglob on lets any pattern select the SSH folder.
+func CommandMayDotglob(command string) bool {
 	if actionDotglobSettingIn(strings.ReplaceAll(textlower.Lower(command), "_", "")) {
 		return true
 	}
@@ -2257,9 +2300,24 @@ func UseSystemShellProfilesForTests(files []string, dropInDir string) (restore f
 
 // actionShellProfileMayDotglob reports a startup file of the user's or the
 // system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
-// dotglob, or a home this process cannot read.
+// dotglob. A missing home has no startup files; other stat errors are
+// conservative.
+//
+// A decision by name alone (fixturefs.Unread) reads no startup file: the
+// actor's files are not on this host, so it reads the actor's home as the
+// laptop reads a home whose files set no dotglob, and only the call's own
+// words (actionCommandMayDotglob) or the inherited options turn it on.
+// Taking the unread home as one that may set dotglob made ~/* and ~/?ssh
+// select .ssh: the actor blocked tar cz ~/* and cp -r ~/?ssh /tmp/x, which
+// the laptop, the parent and rel allow (substrate-1 GAP-1023).
 func actionShellProfileMayDotglob(home string) bool {
-	if _, err := pathStat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
+	if strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
+		return true
+	}
+	if fixturefs.Unreadable() {
+		return false
+	}
+	if _, err := pathStat(home); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return true
 	}
 	files := slices.Clone(systemShellProfiles)

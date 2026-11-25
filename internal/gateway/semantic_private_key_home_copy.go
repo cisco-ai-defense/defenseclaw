@@ -270,12 +270,17 @@ type homePlaceView = *homePlaceSet
 // homePlaceSet is the kit's private home places (substrateGuestClaims.homePlaces).
 type homePlaceSet struct {
 	places map[string]bool
+	// byName: a copy-mode actor whose places neither this gateway nor a kit
+	// can answer for; every place of the home outside its SSH folder is
+	// taken as the owner's (substrate-1 GAP-0922). Only the by-name reading
+	// of the actor's call, which adds the finding, reads such a view.
+	byName bool
 }
 
 // ownerOnly is hookpaths.HomePlaceOwnerOnly read through view.
 func (view *homePlaceSet) ownerOnly(place string) bool {
 	if view != nil {
-		return view.places[path.Clean(place)]
+		return view.byName || view.places[path.Clean(place)]
 	}
 	return hookpaths.HomePlaceOwnerOnly(place)
 }
@@ -284,7 +289,7 @@ func (view *homePlaceSet) ownerOnly(place string) bool {
 func (view *homePlaceSet) privateHome(place, home string) bool {
 	if view != nil {
 		place = path.Clean(place)
-		return pathWithin(place, home) && !pathWithin(place, home+"/.ssh") && view.places[place]
+		return pathWithin(place, home) && !pathWithin(place, home+"/.ssh") && (view.byName || view.places[place])
 	}
 	return hookpaths.PrivateHomePlace(place, home)
 }

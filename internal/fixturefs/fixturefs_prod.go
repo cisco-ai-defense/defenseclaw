@@ -18,8 +18,15 @@
 
 package fixturefs
 
-// Map returns the path to read for name: name itself in a product build.
-func Map(name string) string { observe(name); return name }
+// Map returns the path to read for name: name itself in a product build,
+// the empty name inside Unread.
+func Map(name string) string {
+	if Unreadable() {
+		return ""
+	}
+	observe(name)
+	return name
+}
 
 // Unmap turns a path read through Map back into the path the call named:
 // the identity in a product build.

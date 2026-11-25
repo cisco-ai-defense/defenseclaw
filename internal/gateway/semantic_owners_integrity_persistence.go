@@ -1561,10 +1561,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
 	evidence.unprovenTarget = &unprovenTarget
-	claimOnly := false
+	claimOnly, byNameOnly := false, false
 	if request.guestClaimHomePlaces != nil {
 		evidence.guestWriteClaimOnly = &claimOnly
 	}
+	evidence.guestByNameOnly = &byNameOnly
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1680,6 +1681,16 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if claimOnly && !replacesBlock && copyRequest.guestHomePlaces == nil &&
 				!trustedKeyWriteFindingWithoutClaim(request, input, facts, commandText) {
 				copyRequest.guestHomePlaces = request.guestClaimHomePlaces
+			}
+			// A write that only the by-name reading of a copy-mode actor's
+			// call in its guest folder found (no kit facts, substrate-1
+			// GAP-0922): this gateway cannot see who may reach the copy's
+			// destination in the actor, so an own SSH folder copy to a place
+			// of the home outside its SSH folder alerts as on the laptop
+			// (homePlaceSet.byName). It replaces no finding that blocks: the
+			// gateway allowed such a call before the by-name reading.
+			if byNameOnly && !replacesBlock && copyRequest.guestHomePlaces == nil {
+				copyRequest.guestHomePlaces = &homePlaceSet{byName: true}
 			}
 			ownFolderCopy := !unprovenOnly && !readsOnly && named.ID == rule.ID &&
 				trustedActionOwnSSHFolderCopy(copyRequest, input)

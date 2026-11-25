@@ -18,20 +18,28 @@ import (
 
 const createCanonicalTestAccount = `NT SERVICE\DefenseClawGateway`
 
-// requireCanonicalCreation fails the test unless err is nil. A non-elevated
-// test token cannot assign the Administrators owner, which the creator
-// reports (and cleans up) instead of leaving owner drift; that case skips.
-func requireCanonicalCreation(t *testing.T, path string, err error) {
+// requireCanonicalCreation reports whether the object was created, and fails
+// the test unless the creator kept its contract on this token. A standard
+// user's (Limited) token cannot assign the Administrators owner: the creation
+// must fail with ErrCanonicalOwnerUnavailable and leave nothing behind, never
+// owner drift. That case used to skip, and the object the refusal left behind
+// went unseen (GAP-2150). An elevated token can always assign the owner, so a
+// refusal there fails.
+func requireCanonicalCreation(t *testing.T, path string, err error) bool {
 	t.Helper()
 	if errors.Is(err, ErrCanonicalOwnerUnavailable) {
+		if windows.GetCurrentProcessToken().IsElevated() {
+			t.Fatalf("an elevated token must own %s as Administrators: %v", path, err)
+		}
 		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
 			t.Fatalf("a refused owner must not leave the object behind: %v", statErr)
 		}
-		t.Skipf("the test token cannot own the object as Administrators: %v", err)
+		return false
 	}
 	if err != nil {
 		t.Fatalf("create %s: %v", path, err)
 	}
+	return true
 }
 
 // parentWithInheritedEveryoneEntry makes a folder whose children inherit an
@@ -69,7 +77,9 @@ func TestCreateCanonicalDirectoryIsCanonicalFromCreation(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(parent, "hooks")
-			requireCanonicalCreation(t, path, CreateCanonicalDirectory(path, ObjectRuntimeDirectory, opts))
+			if !requireCanonicalCreation(t, path, CreateCanonicalDirectory(path, ObjectRuntimeDirectory, opts)) {
+				return
+			}
 			result, err := AssessCanonical(path, ObjectRuntimeDirectory, opts)
 			if err != nil {
 				t.Fatalf("AssessCanonical: %v", err)
@@ -130,7 +140,9 @@ func TestCreateCanonicalFileIsCanonicalFromCreation(t *testing.T) {
 	for _, kind := range []ObjectKind{ObjectConfigFile, ObjectRuntimeFile} {
 		t.Run(string(kind), func(t *testing.T) {
 			path := filepath.Join(parent, string(kind)+".lock")
-			requireCanonicalCreation(t, path, CreateCanonicalFile(path, kind, opts))
+			if !requireCanonicalCreation(t, path, CreateCanonicalFile(path, kind, opts)) {
+				return
+			}
 			result, err := AssessCanonical(path, kind, opts)
 			if err != nil {
 				t.Fatalf("AssessCanonical: %v", err)
@@ -161,13 +173,14 @@ func TestEnsureCanonicalLockFileScope(t *testing.T) {
 	}
 	pin(ProfileStandalone)
 	lock := filepath.Join(home, ".enterprise-enrollment.lock")
-	requireCanonicalCreation(t, lock, EnsureCanonicalLockFile(lock, ObjectRuntimeFile))
-	result, err := AssessCanonical(lock, ObjectRuntimeFile, CanonicalOptions{GatewayServiceAccount: createCanonicalTestAccount, Quiet: true})
-	if err != nil || result.Outcome != CanonicalOK {
-		t.Fatalf("the lock must be canonical, got %s %v: %v", result.Outcome, err, result.Drift)
-	}
-	if err := EnsureCanonicalLockFile(lock, ObjectRuntimeFile); err != nil {
-		t.Fatalf("an existing lock is left alone: %v", err)
+	if requireCanonicalCreation(t, lock, EnsureCanonicalLockFile(lock, ObjectRuntimeFile)) {
+		result, err := AssessCanonical(lock, ObjectRuntimeFile, CanonicalOptions{GatewayServiceAccount: createCanonicalTestAccount, Quiet: true})
+		if err != nil || result.Outcome != CanonicalOK {
+			t.Fatalf("the lock must be canonical, got %s %v: %v", result.Outcome, err, result.Drift)
+		}
+		if err := EnsureCanonicalLockFile(lock, ObjectRuntimeFile); err != nil {
+			t.Fatalf("an existing lock is left alone: %v", err)
+		}
 	}
 
 	pin(ProfileSecureClient)

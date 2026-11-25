@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // hookDataDirsNow are the data directories a gateway started with this
@@ -145,7 +146,7 @@ func hookConfigFolders(configFile string) []string {
 		}
 		name = filepath.Clean(target)
 	}
-	if real, err := filepath.EvalSymlinks(configFile); err == nil {
+	if real, err := winpath.EvalLinks(configFile); err == nil {
 		if real, err = filepath.Abs(real); err == nil {
 			add(filepath.Dir(real))
 		}

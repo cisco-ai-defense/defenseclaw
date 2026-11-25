@@ -178,6 +178,16 @@ type Input struct {
 	// large, not text, a gateway that cannot see the caller's files) is absent.
 	// ActionFacts never derives it from action input and never retains it.
 	ClientNativeFileContents map[string]string `json:"-"`
+	// CredentialWalkBudget is the wait for walk slots of the hook call the
+	// action belongs to, made by the gateway's dispatch (nil: each record
+	// of the call has a wait of its own). Every Facts value of an Input
+	// that carries it, and of the twins made from that Input, resolves its
+	// private record of credentials-file reads on it, so a call waits for
+	// walk slots once whatever number of records it has
+	// (substrate-1:GAP-1083). It carries no action material, and no
+	// reflection over Input or Facts reaches its state or the call's
+	// context (substrate-1:GAP-1110).
+	CredentialWalkBudget CredentialWalkBudget `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-

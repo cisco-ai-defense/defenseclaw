@@ -11,12 +11,13 @@
 package gateway
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 func mustLoadRulePack(t testing.TB, dir string) *guardrail.RulePack {
@@ -46,27 +47,32 @@ func writeRulePackFixtureFile(t testing.TB, root, relative, contents string) {
 	}
 }
 
+// installDefaultRulePackForDataDir writes the embedded default rule pack to
+// <dataDir>/policies/guardrail/default and returns that folder. It reads the
+// pack from the policies package's embedded files, not from the source tree:
+// a test executable built on another machine (the native Windows harness
+// builds on Linux) has no source tree at the path the build recorded.
 func installDefaultRulePackForDataDir(t testing.TB, dataDir string) string {
 	t.Helper()
-	source := filepath.Join(repoRootFromTestFile(t), "policies", "guardrail", "default")
+	files, err := policyassets.Files()
+	if err != nil {
+		t.Fatalf("list the embedded default rule pack: %v", err)
+	}
 	destination := filepath.Join(dataDir, "policies", "guardrail", "default")
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		t.Fatalf("create test rule-pack parent: %v", err)
 	}
-	if err := os.CopyFS(destination, os.DirFS(source)); err != nil {
-		t.Fatalf("copy default test rule pack: %v", err)
+	copied := 0
+	for _, file := range files {
+		relative, ok := strings.CutPrefix(file.Path, "guardrail/default/")
+		if !ok {
+			continue
+		}
+		writeRulePackFixtureFile(t, destination, relative, string(file.Data))
+		copied++
 	}
-	if err := filepath.WalkDir(destination, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		mode := os.FileMode(0o600)
-		if entry.IsDir() {
-			mode = 0o700
-		}
-		return os.Chmod(path, mode)
-	}); err != nil {
-		t.Fatalf("normalize copied rule-pack fixture permissions: %v", err)
+	if copied == 0 {
+		t.Fatal("the embedded default rule pack lists no files")
 	}
 	return destination
 }

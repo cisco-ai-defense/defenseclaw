@@ -203,6 +203,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 			ResolvedWriteTargets:          action.ResolvedWriteTargets,
 			ShellStartup:                  action.ShellStartup,
 			SandboxGuestCWD:               action.SandboxGuestCWD,
+			guestToolCWDUnresolved:        action.guestToolCWDUnresolved,
 			windowsDialectReadings:        action.windowsDialectReadings,
 		})
 	}
@@ -245,6 +246,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 				SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 				ResolvedWriteTargets:          action.ResolvedWriteTargets,
 				SandboxGuestCWD:               action.SandboxGuestCWD,
+				guestToolCWDUnresolved:        action.guestToolCWDUnresolved,
 				windowsDialectReadings:        action.windowsDialectReadings,
 			}))
 		}

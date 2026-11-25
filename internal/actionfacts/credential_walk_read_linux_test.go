@@ -17,7 +17,7 @@ type credentialWalkEntry struct {
 
 func credentialWalkEntriesOf(dir string, stopAfter int) []credentialWalkEntry {
 	var got []credentialWalkEntry
-	readCredentialWalkFolder(dir, func(name []byte, folder bool) bool {
+	readCredentialWalkFolder(dir, func(name []byte, folder, _ bool, _ int) bool {
 		got = append(got, credentialWalkEntry{string(name), folder})
 		return stopAfter <= 0 || len(got) < stopAfter
 	})
@@ -117,7 +117,7 @@ func TestGAP0709WalkFolderReadMatchesReadDir(t *testing.T) {
 	}
 	// The read allocates nothing per entry (the 8 MB walk of GAP-0709).
 	allocs := testing.AllocsPerRun(20, func() {
-		readCredentialWalkFolder(big, func([]byte, bool) bool { return true })
+		readCredentialWalkFolder(big, func([]byte, bool, bool, int) bool { return true })
 	})
 	if allocs > 8 {
 		t.Fatalf("reading a 704-entry folder allocates %.0f times, want at most 8", allocs)

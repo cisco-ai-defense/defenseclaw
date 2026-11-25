@@ -156,6 +156,33 @@ func mcpLocalHost(host string) bool {
 		ip.IsMulticast() || ip.IsUnspecified()
 }
 
+// mcpURLRefusedFromText reports a server URL the scanner refuses from its
+// text alone (scanner.MCPScanTargetRefusal), whose admission can only record
+// that refusal: admission does not decide it before the scan (an allow rule,
+// scan_on_install false, a block or rejection of the policy), so the scan is
+// what decides, and it never dials the URL (GAP-2045).
+func (w *InstallWatcher) mcpURLRefusedFromText(server config.MCPServerEntry, path string) bool {
+	rawURL := strings.TrimSpace(server.URL)
+	if rawURL == "" || scanner.MCPScanTargetRefusal(rawURL) == scanner.MCPTargetRefusalNone {
+		return false
+	}
+	snapshot := w.admissionPolicySnapshot()
+	if snapshot.Config == nil {
+		return false
+	}
+	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}
+	out := w.evaluateAdmissionSnapshot(context.Background(),
+		w.admissionInputFor(snapshot.Config, evt, string(InstallMCP), w.eventConnector(evt)), snapshot)
+	if out == nil {
+		return false
+	}
+	switch out.Verdict {
+	case "allowed", "blocked", "rejected":
+		return false
+	}
+	return true
+}
+
 // FailedMCPStatus is the status of a server whose completed admission scan
 // failed, with the cause its definition shows.
 func FailedMCPStatus(server config.MCPServerEntry) MCPAdmissionStatus {
@@ -561,7 +588,7 @@ func (w *InstallWatcher) mcpAdmissionStatus(q MCPAdmissionQuery, admitted **conf
 		if pendingPath == "" {
 			pendingPath = path
 		}
-		if refused == nil && server.LocalRefusal != "" && MCPLocalRefused(server) {
+		if refused == nil && (server.LocalRefusal != "" && MCPLocalRefused(server) || w.mcpURLRefusedFromText(server, path)) {
 			refused = &server
 		}
 	}
@@ -574,9 +601,13 @@ func (w *InstallWatcher) mcpAdmissionStatus(q MCPAdmissionQuery, admitted **conf
 		// is a refusal, so the admission that starts can only record it and
 		// there is nothing to wait for: the call that lists the server gets the
 		// cause and the next step the later calls get, not a retry message
-		// (GAP-0925). A definition the watcher read itself stays pending until
-		// its own admission. A revoked earlier definition the agent may still
-		// run is the more restrictive verdict and comes first (GAP-0920).
+		// (GAP-0925). A server URL the scanner refuses from its text (a
+		// loopback or private address, a loopback alias, the metadata host,
+		// inline credentials) is the same: its scan never runs, so the first
+		// call names the cause instead of "still scanning" (GAP-2045). A local
+		// definition the watcher read itself stays pending until its own
+		// admission. A revoked earlier definition the agent may still run is
+		// the more restrictive verdict and comes first (GAP-0920).
 		if revoked := w.mcpDepartedRevoked(q, servers, true); revoked.Failed {
 			return revoked.withListed(FailedMCPStatus(*refused))
 		}

@@ -3855,10 +3855,10 @@ func workspaceRootOutsideDataDir(root, dataDir string) bool {
 	}
 	rootAbs = filepath.Clean(rootAbs)
 	dataAbs = filepath.Clean(dataAbs)
-	if realRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
+	if realRoot, err := winpath.EvalLinks(rootAbs); err == nil {
 		rootAbs = filepath.Clean(realRoot)
 	}
-	if realData, err := filepath.EvalSymlinks(dataAbs); err == nil {
+	if realData, err := winpath.EvalLinks(dataAbs); err == nil {
 		dataAbs = filepath.Clean(realData)
 	}
 	rel, err := filepath.Rel(dataAbs, rootAbs)

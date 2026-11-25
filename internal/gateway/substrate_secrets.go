@@ -127,8 +127,6 @@ func (a *APIServer) substrateListSecrets(st *substrateState) http.HandlerFunc {
 		c, _ := substrateCallerFrom(r.Context())
 		profile, _, _ := st.cfg.substrateProfiles()(c.person, "", "", false)
 		mine := r.URL.Query().Get("mine") == "1"
-		entries := a.substrateSecretEntries(st, c, profile)
-		askStates := a.substrateBindingAsks(r.Context(), st, c)
 		var regs []registry.Registration
 		regsKnown := false
 		if st.cfg.Registrations != nil {
@@ -136,6 +134,20 @@ func (a *APIServer) substrateListSecrets(st *substrateState) http.HandlerFunc {
 			regs, err = st.cfg.Registrations.List(r.Context(), registry.Filter{OwnerID: ownerOf(c.person).ID()})
 			regsKnown = err == nil
 		}
+		// ?agent=NAME: only the usable secrets that reach the caller's agent
+		// NAME, for the registry files the launcher writes at its start
+		// (B1 2.6, S7).
+		actor, status, reason := substrateSecretsAgent(r.URL.Query().Get("agent"), regs, regsKnown)
+		if status != 0 {
+			writeSubstrateJSONError(w, status, reason)
+			return
+		}
+		if actor != nil {
+			profile = actor.Profile
+		}
+		entries := a.substrateSecretEntries(st, c, profile)
+		askStates := a.substrateBindingAsks(r.Context(), st, c)
+		catalog := secretbind.Catalog(st.secretTemplates())
 		now := time.Now()
 		uses := st.substrateHostUses(r.Context(), regs)
 		noSwap := st.noSwapHosts()
@@ -152,13 +164,58 @@ func (a *APIServer) substrateListSecrets(st *substrateState) http.HandlerFunc {
 			if mine && status != substrateSecretSet && e.binding == nil {
 				continue
 			}
+			if actor != nil && (e.uncovered || !substrateSecretUsable(status) || substrateSecretForActor(e, *actor) != "") {
+				continue
+			}
 			v := substrateSecretView(e, status, reason, regs, regsKnown)
+			addSubstrateSecretRegistry(v, e, catalog)
 			if u, agent, ok := substrateSecretLastUse(e, status, regs, uses, noSwap, now); ok {
 				addSubstrateSecretLastUse(v, u, agent)
 			}
 			out = append(out, v)
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"secrets": out})
+	}
+}
+
+// substrateSecretsAgent finds the caller's live agent named name among
+// regs (nil for no name). status is non-zero when it cannot be answered.
+func substrateSecretsAgent(name string, regs []registry.Registration, regsKnown bool) (*registry.Registration, int, string) {
+	if name == "" {
+		return nil, 0, ""
+	}
+	if !regsKnown {
+		return nil, http.StatusServiceUnavailable, "registrations_unavailable"
+	}
+	for i := range regs {
+		if regs[i].Name == name && !regs[i].Deleted {
+			return &regs[i], 0, ""
+		}
+	}
+	return nil, http.StatusNotFound, "secret_agent_not_found"
+}
+
+// addSubstrateSecretRegistry says which registry file of the agent's home
+// a secret feeds at start (B1 2.6): its template's registry (npm, pypi)
+// for a person's binding; npm for an administrator's entry injected in the
+// Authorization header, the header npm sends a registry token in (the rule
+// the template build used before 1.0.11, GAP-0529). The placeholder is the
+// entry's own one, never a value.
+func addSubstrateSecretRegistry(v map[string]any, e substrateSecretEntry, catalog []secretbind.Template) {
+	kind := ""
+	if e.binding != nil {
+		if t, ok := secretbind.Find(catalog, e.binding.Template); ok && (t.Registry == "npm" || t.Registry == "pypi") {
+			kind = t.Registry
+		}
+	} else if strings.EqualFold(strings.TrimSpace(e.sec.Inject.Header), "Authorization") {
+		kind = "npm"
+	}
+	if kind == "" {
+		return
+	}
+	v["registry"] = kind
+	if p := e.sec.Inject.Placeholder; p != "" {
+		v["placeholder"] = p
 	}
 }
 

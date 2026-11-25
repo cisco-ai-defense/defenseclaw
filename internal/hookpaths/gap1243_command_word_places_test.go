@@ -34,12 +34,8 @@ func TestGAP1243LocalCommandWordPlaces(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(key, filepath.Join(app, "key-link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("../.claude/settings.json", filepath.Join(app, "cfg-link")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, key, filepath.Join(app, "key-link"))
+	testSymlink(t, "../.claude/settings.json", filepath.Join(app, "cfg-link"))
 	physicalKey, err := filepath.EvalSymlinks(key)
 	if err != nil {
 		t.Fatal(err)
@@ -134,9 +130,7 @@ func TestGAP1243PrivateKeyReadBehindStaticWrappers(t *testing.T) {
 	if err := os.WriteFile(key, []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(key, filepath.Join(app, "key-link")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, key, filepath.Join(app, "key-link"))
 	for _, tc := range []struct {
 		command string
 		read    bool

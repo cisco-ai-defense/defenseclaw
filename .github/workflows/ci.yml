@@ -347,7 +347,13 @@ jobs:
         # TestFindRegexGlobAndLinkFollowKeepTheHookFileFiveTiers weighed 456 s, more than a shard holds, so it runs
         # as one test per connector; 129 shards plan 439 s, 1 s under the 440 s budget, and 132 plan at most 432 s:
         # the largest single test (TestGAP0805LauncherSpellingsManagedStrict), the floor.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131]
+        # 2026-11-25 (rel/1.0.11 push 44, rel-1-0-10:GAP-2202): on #1493 (712c31be08) shards 58, 66, 80 and 121 hit the
+        # 711 s -timeout. The substrate-1 tests of FOLD-2 were recorded at 50-125 s and took up to 517 s on the hosted
+        # race runners (TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrix), and the GAP-0009 hook-audit tests had no
+        # figure. Each GAP-0377 row set now runs as one test per pack (142-191 s) and go-linux.json records the 712c
+        # times of 61 tests that ran over 1.5x their figure (internal/gateway 59,831 s): 132 shards plan 453 s, 137
+        # plan 436.8 s, 3 s under the 440 s budget, and 140 plan at most 432.5 s, the floor.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -363,7 +369,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 132
+          GO_TEST_SHARDS: 140
         run: |
           set -euo pipefail
           plan=(python3 scripts/go_test_shards.py
@@ -876,9 +882,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 132 gateway + 5 audit + 32 remaining-package shards, plus the
+          # 140 gateway + 5 audit + 32 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 170
+          test "${#coverage_parts[@]}" -eq 178
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"

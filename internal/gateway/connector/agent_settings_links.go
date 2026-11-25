@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // userOwnedSettingsReadPath resolves links chosen by the account that runs
@@ -46,7 +48,7 @@ func userOwnedSettingsReadPath(path string) (string, error) {
 		if err := validateSettingsLinkOwnerFromInfo(current, info); err != nil {
 			return "", fmt.Errorf("another account owns settings link %s: %w", current, err)
 		}
-		target, err := filepath.EvalSymlinks(current)
+		target, err := winpath.EvalLinks(current)
 		if err != nil {
 			return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
 		}
@@ -58,7 +60,7 @@ func userOwnedSettingsReadPath(path string) (string, error) {
 	if !linked {
 		return path, nil
 	}
-	target, err := filepath.EvalSymlinks(abs)
+	target, err := winpath.EvalLinks(abs)
 	if errors.Is(err, os.ErrNotExist) {
 		return path, nil // a linked directory may hold no settings file yet
 	}

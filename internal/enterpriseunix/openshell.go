@@ -892,6 +892,12 @@ type pending struct {
 	From *openshellApplied `json:"from,omitempty"`
 	// Sandboxes is how many ran when the change was last tried.
 	Sandboxes int `json:"sandboxes"`
+	// Running is how many of those Sandboxes were running (ready), when the
+	// last try counted them: the others hold the change without running (a
+	// sandbox in OpenShell's error state, or one the earlier setup left,
+	// that OpenShell does not report stopped). nil for a record written
+	// before it was kept (GAP-2058).
+	Running *int `json:"running,omitempty"`
 	// Hold is the named blocker and next step from the last failed status or
 	// drain check. It is shown on status and verify while the change waits.
 	Hold string `json:"hold,omitempty"`

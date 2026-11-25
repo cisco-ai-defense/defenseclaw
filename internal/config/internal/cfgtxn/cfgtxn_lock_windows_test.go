@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -32,8 +34,8 @@ func TestOpenLockFileInStandaloneManagedTreeIsCanonical(t *testing.T) {
 	t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(etc, "config.yaml"))
 	lockPath := LockPath(filepath.Join(etc, "config.yaml"))
 	f, err := openLockFile(lockPath)
-	if errors.Is(err, managed.ErrCanonicalOwnerUnavailable) {
-		t.Skipf("the test token cannot own the lock as Administrators: %v", err)
+	if refusedOwnerLeftNothing(t, lockPath, err) {
+		return
 	}
 	if err != nil {
 		t.Fatalf("openLockFile: %v", err)
@@ -43,6 +45,25 @@ func TestOpenLockFileInStandaloneManagedTreeIsCanonical(t *testing.T) {
 	if err != nil || result.Outcome != managed.CanonicalOK {
 		t.Fatalf("the config lock must be canonical from creation, got %s %v: %v", result.Outcome, err, result.Drift)
 	}
+}
+
+// refusedOwnerLeftNothing reports a creation refused because the token cannot
+// assign the Administrators owner, after checking the refusal kept its
+// contract: only a standard user's (Limited) token is refused, and the lock
+// file is removed again. Those runs used to skip, and a lock file the refusal
+// left behind went unseen (GAP-2150).
+func refusedOwnerLeftNothing(t *testing.T, lockPath string, err error) bool {
+	t.Helper()
+	if !errors.Is(err, managed.ErrCanonicalOwnerUnavailable) {
+		return false
+	}
+	if windows.GetCurrentProcessToken().IsElevated() {
+		t.Fatalf("an elevated token must own the lock as Administrators: %v", err)
+	}
+	if _, statErr := os.Lstat(lockPath); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused owner must not leave the lock file behind: %v", statErr)
+	}
+	return true
 }
 
 // Benign twin: outside a managed deployment the lock is the ordinary file the
@@ -69,8 +90,8 @@ func TestOpenLockFileForDotEnvIsCanonicalRuntimeFile(t *testing.T) {
 	t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(home, "etc", "config.yaml"))
 	lockPath := LockPath(filepath.Join(home, ".env"))
 	f, err := openLockFile(lockPath)
-	if errors.Is(err, managed.ErrCanonicalOwnerUnavailable) {
-		t.Skipf("the test token cannot own the lock as Administrators: %v", err)
+	if refusedOwnerLeftNothing(t, lockPath, err) {
+		return
 	}
 	if err != nil {
 		t.Fatalf("openLockFile: %v", err)

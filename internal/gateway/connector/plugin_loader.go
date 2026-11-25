@@ -31,6 +31,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // PluginAuditEmitter is the callback contract the gateway wires up so
@@ -113,7 +115,7 @@ func LoadPlugins(dir string) ([]Connector, error) {
 		return nil, nil
 	}
 
-	realDir, err := filepath.EvalSymlinks(dir)
+	realDir, err := winpath.EvalLinks(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -273,11 +275,11 @@ func LoadPlugins(dir string) ([]Connector, error) {
 // validatePluginPath ensures the .so file resolves to a real path inside the
 // allowed root directory, blocking symlink escapes and path traversal.
 func validatePluginPath(soPath, allowedRoot string) error {
-	realPath, err := filepath.EvalSymlinks(soPath)
+	realPath, err := winpath.EvalLinks(soPath)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", soPath, err)
 	}
-	realRoot, err := filepath.EvalSymlinks(allowedRoot)
+	realRoot, err := winpath.EvalLinks(allowedRoot)
 	if err != nil {
 		return fmt.Errorf("resolve root %s: %w", allowedRoot, err)
 	}
@@ -341,7 +343,7 @@ func validatePluginRootChain(dirPath string) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	resolved, err := filepath.EvalSymlinks(dirPath)
+	resolved, err := winpath.EvalLinks(dirPath)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", dirPath, err)
 	}

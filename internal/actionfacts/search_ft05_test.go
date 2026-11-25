@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ func TestGAP1045RecursiveSearchOverManyFoldersStaysUnderTheCaps(t *testing.T) {
 	command := "sed -n p .env; grep -rn TODO " + strings.Join(folders, " ")
 	out := parsePOSIX(command, 1, 0)
 	classifyOutput(&out)
-	record := resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, dir, dir, out.commands, out.paths)
+	record := resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), defaultCredentialPathLimits, out.credentialWords, dir, dir, out.commands, out.paths)
 	if record == nil || record.caps.Has(bounded.Paths) {
 		t.Fatalf("grep -rn over %d existing folders hit the lookup cap: %+v", len(folders), record)
 	}
@@ -45,7 +46,7 @@ func TestGAP1045RecursiveSearchOverManyFoldersStaysUnderTheCaps(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "mod07", ".aws", "credentials"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	record = resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, dir, dir, out.commands, out.paths)
+	record = resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), defaultCredentialPathLimits, out.credentialWords, dir, dir, out.commands, out.paths)
 	// A Windows host records the probed file by its native path (Value): a
 	// POSIX read carries no Resolved spelling of a drive-letter path.
 	found := false

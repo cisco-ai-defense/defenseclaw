@@ -109,6 +109,8 @@ Every record belongs to one bucket. The catalog is closed at 14 names; you can c
 
 A guardrail evaluation records the inspection; zero or more `security.finding` records may follow. A scan records the operation; its findings go to `security.finding`. A lifecycle change also produces an `enforcement.action` only when a policy action is attempted. [OpenShell sandboxes](/docs/observability/sandbox-telemetry) write into the same buckets.
 
+A `telemetry.records.dropped` record (bucket `telemetry.ingest`) whose `defenseclaw.telemetry.rejection_reason_class` is `unsupported_identity` counts the records an agent's own OpenTelemetry exporter sent that DefenseClaw does not import. Claude Code, for example, also exports `tool_result`, `tool_decision` and `api_error` events and usage counters such as `claude_code.session.count`; DefenseClaw imports its `user_prompt` and `api_request` events and its token usage and operation duration metrics. These drops are expected, are written at INFO, and appear about once per exported batch. DefenseClaw's own records (hook decisions, sandbox lifecycle, findings) are written by the gateway and never pass through the OTLP receiver, so this count never includes them. Any other rejection reason on that record is a WARN.
+
 To stop collecting a bucket's signal, set `observability.buckets.<bucket>.collect.<signal>: false`. Collection runs before routing, so no destination route can bring those records back. The mandatory floor (below) is still written.
 
 ## Destination capabilities and fan-out

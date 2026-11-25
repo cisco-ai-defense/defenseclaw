@@ -113,7 +113,7 @@ Directory shows `unreported` for a Linux SSSD account whose domain is not a join
 
 The **Sandboxes** board (`defenseclaw-sandboxes`) shows [OpenShell sandbox](/docs/observability/sandbox-telemetry) activity. It has seven boxes:
 
-- **Environment** (`$environment`, the gateway's `deployment.environment.name`, set with `defenseclaw setup observability add --environment`) and **Host** (`$host`, the computer's `host.name`). Every panel follows both, so you can scope the board to one computer and show, for example, that a Windows computer has no sandboxes.
+- **Environment** (`$environment`, the gateway's `deployment.environment.name`, set with `defenseclaw setup observability add --environment`; a gateway with none set reports its platform, `linux`, `macos`, `windows` or `dgx-spark`, so the box lists those names too) and **Host** (`$host`, the computer's `host.name`). Every panel follows both, so you can scope the board to one computer and show, for example, that a Windows computer has no sandboxes.
 - **Connector** (`$connector`, the sandbox's harness connector) for the metric panels.
 - **Sandbox** (`$sandbox`, the sandbox name) for the log panels. Sandbox names are never metric labels, so the metric panels ignore it and say "(all names)" in their titles: **Active (all names)**, **Active sandboxes by connector (all names)** and **Egress by source and decision (metric, all names)**.
 - **OS** (`$os`), **Driver** (`$driver`, `docker` or `vm`) and **Profile** (`$profile`, a guardrail profile name as a regular expression, default `.*`) for the managed-fleet panels. Selecting a driver hides records that name none, such as host-run refusals.

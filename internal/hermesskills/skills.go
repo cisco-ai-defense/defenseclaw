@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const (
@@ -52,7 +53,7 @@ var ErrDirectoryLimit = errors.New("Hermes skill discovery directory limit excee
 
 // Seams for tests of a service account's denied profile folders.
 var (
-	evalSymlinks           = filepath.EvalSymlinks
+	evalSymlinks           = winpath.EvalLinks
 	readRegularFileBounded = safefile.ReadRegularFileBounded
 )
 
@@ -510,7 +511,7 @@ func canonicalPath(path string) bool {
 	if err != nil {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
+	resolved, err := winpath.EvalLinks(absolute)
 	return err == nil && samePath(absolute, resolved)
 }
 

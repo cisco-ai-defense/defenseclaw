@@ -582,6 +582,9 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 			return a, err
 		}
 	}
+	// Before the agent starts (attach or the task does that): the registry
+	// placeholders of the bindings in its policy (B1 2.6, S7).
+	substrateRegistryFiles(ctx, cmd, s, a)
 	return a, nil
 }
 

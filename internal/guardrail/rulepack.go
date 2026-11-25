@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 	"gopkg.in/yaml.v3"
 )
@@ -700,7 +701,7 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 	if !info.IsDir() {
 		return nil, rulePackErr(".", "not_directory", "rule-pack path is not a directory")
 	}
-	resolvedDir, err := filepath.EvalSymlinks(dir)
+	resolvedDir, err := winpath.EvalLinks(dir)
 	if err != nil {
 		return nil, rulePackDirectoryUnreadable(err)
 	}

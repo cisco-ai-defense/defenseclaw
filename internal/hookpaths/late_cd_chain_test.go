@@ -53,9 +53,7 @@ func TestGAP1188LateChainCallGradeReadsALeadingCD(t *testing.T) {
 		filepath.Join(root, "proj-link"):    project,
 		filepath.Join(sub, "deep-keyslink"): keys,
 	} {
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, link)
 	}
 	for _, tc := range []struct {
 		name, command string
@@ -200,9 +198,7 @@ func TestGAP1188LateEnteredDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(sub, filepath.Join(project, "linkdir")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, sub, filepath.Join(project, "linkdir"))
 	for _, tc := range []struct {
 		dir, want string
 	}{
