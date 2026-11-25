@@ -47,7 +47,7 @@ func hardP5Parity(t *testing.T, home string, cases map[string][]string, benign [
 				}
 				for _, v := range variants {
 					action, sev := hardP2Verdict(t, api, route, home, v)
-					if action != wantAction || hardP5SevRank(sev) < hardP5SevRank(wantSev) && !(strings.Contains(control, "/.defenseclaw/") && sev == "HIGH") {
+					if action != wantAction || hardP5SevRank(sev) < hardP5SevRank(wantSev) && (!strings.Contains(control, "/.defenseclaw/") || sev != "HIGH") {
 						t.Errorf("%s %s %q: %s/%s, plain spelling %q %s/%s", tier.name, route, v, action, sev, control, wantAction, wantSev)
 					}
 				}

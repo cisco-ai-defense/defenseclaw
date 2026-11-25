@@ -586,7 +586,7 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 	for i, line := range lines {
 		if inert[i] ||
 			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 &&
-				!(hasEnvelope && strings.ContainsAny(line, ";|&")) {
+				(!hasEnvelope || !strings.ContainsAny(line, ";|&")) {
 			continue
 		}
 		count := patchProgramWordCount(line)

@@ -67,9 +67,10 @@ func TestClassifyRestrictedListedCommands(t *testing.T) {
 					deployment = decide.Managed
 				}
 				decisionTier := decide.TierDefault
-				if tier.tier == bounded.TierPermissive {
+				switch tier.tier {
+				case bounded.TierPermissive:
 					decisionTier = decide.TierPermissive
-				} else if tier.tier == bounded.TierStrict {
+				case bounded.TierStrict:
 					decisionTier = decide.TierStrict
 				}
 				findings := []decide.Finding{{

@@ -31,15 +31,6 @@ type Node struct {
 
 func (n *Node) ext() extent { return extent{n.Start, n.End} }
 
-func (n *Node) is(types ...string) bool {
-	for _, t := range types {
-		if n.Type == t {
-			return true
-		}
-	}
-	return false
-}
-
 func newNode(typ string, e extent, kids ...*Node) *Node {
 	n := &Node{Type: typ, Start: e.Start, End: e.End}
 	if len(kids) > len(n.kidsBuf) {
@@ -102,12 +93,3 @@ func (n *Node) propv(k string) string {
 
 // Prop returns the scalar property k (see the dump property table), or "" when it is not set.
 func (n *Node) Prop(k string) string { return n.propv(k) }
-
-func appendKids(n *Node, kids []*Node) *Node {
-	for _, k := range kids {
-		if k != nil {
-			n.Kids = append(n.Kids, k)
-		}
-	}
-	return n
-}

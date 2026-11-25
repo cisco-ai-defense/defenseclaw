@@ -120,7 +120,7 @@ func sqlTextRole(text string) sqlRole {
 // sqlStatementRole reads one statement by its keywords.
 func sqlStatementRole(stmt string) sqlRole {
 	words := strings.FieldsFunc(strings.ToUpper(stmt), func(r rune) bool {
-		return !(r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_')
+		return (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_'
 	})
 	if len(words) == 0 {
 		return sqlReads
@@ -382,9 +382,7 @@ func readEdScript(s string) edReading {
 				return edReading{}
 			}
 		case 'w', 'W':
-			if strings.HasPrefix(rest, "q") {
-				rest = rest[1:]
-			}
+			rest = strings.TrimPrefix(rest, "q")
 			name := strings.TrimSpace(rest)
 			switch {
 			case name == "":

@@ -32,9 +32,6 @@ func isLetter(c char) bool { return unicode.IsLetter(rune(c)) }
 func isLetterOrDigit(c char) bool {
 	return unicode.IsLetter(rune(c)) || unicode.Is(unicode.Nd, rune(c))
 }
-func isDigitUnicode(c char) bool { return unicode.Is(unicode.Nd, rune(c)) }
-
-func isCurlyBracket(c char) bool { return c == '{' || c == '}' }
 
 func isWhitespace(c char) bool {
 	if c < 128 {
@@ -116,13 +113,4 @@ func forceStartNewTokenInAssemblyNameSpec(c char) bool {
 		return charTraitsTable[c]&ctForceStartNewAssemblyNameSpecToken != 0
 	}
 	return isWhitespace(c)
-}
-
-// lowerASCII lower-cases an ASCII letter (the reference uses ToLowerInvariant
-// on characters that are already known to be ASCII at its call sites).
-func lowerASCII(c char) char {
-	if c >= 'A' && c <= 'Z' {
-		return c + 32
-	}
-	return c
 }

@@ -495,7 +495,7 @@ func (r Wrapper) applies(rest []Word) bool {
 		if eq := strings.IndexByte(v, '='); eq > 0 {
 			v = v[:eq]
 		}
-		if !hasName(r.needs, v) && !(len(v) > 2 && v[0] == '-' && v[1] != '-' && hasName(r.needs, v[:2])) {
+		if !hasName(r.needs, v) && (len(v) <= 2 || v[0] != '-' || v[1] == '-' || !hasName(r.needs, v[:2])) {
 			return false
 		}
 	}

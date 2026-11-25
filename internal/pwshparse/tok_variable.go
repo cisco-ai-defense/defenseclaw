@@ -112,7 +112,7 @@ func (t *tokenizer) scanVariable(splatted, inStringExpandable bool) *Token {
 		return t.scanGenericTokenSB(sb)
 	}
 	sb.add(c)
-	if !(c == '$' || c == '?' || c == '^') {
+	if c != '$' && c != '?' && c != '^' {
 		scanning := true
 		for scanning {
 			c = t.getChar()

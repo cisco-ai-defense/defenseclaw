@@ -355,9 +355,7 @@ func (a *pwAdapter) scriptBlock(n *pwshparse.Node) *ScriptBlockExpr {
 func (a *pwAdapter) statements(kids []*pwshparse.Node) []Statement {
 	var out []Statement
 	for _, k := range kids {
-		if st := a.statement(k); st != nil {
-			out = append(out, st)
-		}
+		out = append(out, a.statement(k))
 	}
 	return out
 }
@@ -425,9 +423,7 @@ func (a *pwAdapter) fill(b *Block, n *pwshparse.Node) {
 			"MemberAst", "FunctionMemberAst", "PropertyMemberAst", "SwitchClauseAst":
 			a.fill(b, k)
 		default:
-			if st := a.statement(k); st != nil {
-				b.Conditions = append(b.Conditions, st)
-			}
+			b.Conditions = append(b.Conditions, a.statement(k))
 		}
 	}
 }
@@ -972,8 +968,8 @@ func (a *pwAdapter) expr(n *pwshparse.Node) Expr {
 	for _, k := range n.Kids {
 		if isExprNode(k) {
 			arr.Elements = append(arr.Elements, a.expr(k))
-		} else if st := a.statement(k); st != nil {
-			arr.Elements = append(arr.Elements, &Paren{span: a.sp(k), Inner: st})
+		} else {
+			arr.Elements = append(arr.Elements, &Paren{span: a.sp(k), Inner: a.statement(k)})
 		}
 	}
 	return arr

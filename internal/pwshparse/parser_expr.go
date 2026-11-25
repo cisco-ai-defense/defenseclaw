@@ -274,9 +274,10 @@ func (p *Parser) unaryExpressionRuleEx(endNumberOnTernaryOpChars bool) *Node {
 	if expr != nil {
 		token = p.peekToken()
 		op := TkUnknown
-		if token.Kind == TkPlusPlus {
+		switch token.Kind {
+		case TkPlusPlus:
 			op = TkPostfixPlusPlus
-		} else if token.Kind == TkMinusMinus {
+		case TkMinusMinus:
 			op = TkPostfixMinusMinus
 		}
 		if op != TkUnknown {
@@ -379,9 +380,10 @@ func (p *Parser) checkUsingVariable(t *Token, withMemberAccess bool) *Node {
 func (p *Parser) checkPostPrimaryExpressionOperators(token *Token, expr *Node) *Node {
 	for token != nil {
 		p.skipNewlines()
-		if token.Kind == TkDot || token.Kind == TkColonColon || token.Kind == TkQuestionDot {
+		switch token.Kind {
+		case TkDot, TkColonColon, TkQuestionDot:
 			expr = p.memberAccessRule(expr, token)
-		} else if token.Kind == TkLBracket || token.Kind == TkQuestionLBracket {
+		case TkLBracket, TkQuestionLBracket:
 			expr = p.elementAccessRule(expr, token)
 		}
 		token = p.nextMemberAccessToken(true)

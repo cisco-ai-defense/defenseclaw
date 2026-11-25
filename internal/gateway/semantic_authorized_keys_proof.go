@@ -1375,7 +1375,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) &&
-			!(absoluteRedirect && links.AbsoluteRedirectOutsideCDScopes(target, opaqueFacts)) {
+			(!absoluteRedirect || !links.AbsoluteRedirectOutsideCDScopes(target, opaqueFacts)) {
 			if info, err := laneLstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return unproven(hookpaths.UnprovenLinkUnread, target)
 			}

@@ -117,7 +117,6 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 				case "link", ReasonLinkExact, "other_home", "inode":
 					if match.GetState() == string(gradeKnown) {
 						fact.TargetState = string(effects.TargetStateKnown)
-						break
 					}
 				}
 				if fact.GetTargetState() == string(effects.TargetStateKnown) {

@@ -372,7 +372,7 @@ func parseSQLCLI(argv []string, engine string, multi bool) (exactSQLCLI, bool) {
 		key, value, consumesNext, flag, ok := exactSQLCLIOption(engine, argument)
 		if ok {
 			previous, duplicate := parsed.options[key]
-			if duplicate && key != "option" && !(multi && key == "query" && engine == "postgresql") {
+			if duplicate && key != "option" && (!multi || key != "query" || engine != "postgresql") {
 				return exactSQLCLI{}, false
 			}
 			if consumesNext {

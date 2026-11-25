@@ -37,8 +37,6 @@ func newTypeNameAsm(e extent, name, asm string) *typeName {
 	return t
 }
 
-func (t *typeName) extent() extent { return t.ext }
-
 func (t *typeName) assemblyName() string {
 	switch t.kind {
 	case 1:
@@ -142,23 +140,6 @@ func tx(t *Token) extent {
 		return emptyExtent
 	}
 	return extent{t.Start, t.End}
-}
-
-var exprTypes = map[string]bool{
-	"ErrorExpressionAst": true, "TernaryExpressionAst": true, "BinaryExpressionAst": true, "UnaryExpressionAst": true,
-	"AttributedExpressionAst": true, "ConvertExpressionAst": true, "MemberExpressionAst": true,
-	"InvokeMemberExpressionAst": true, "BaseCtorInvokeMemberExpressionAst": true, "TypeExpressionAst": true,
-	"VariableExpressionAst": true, "ConstantExpressionAst": true, "StringConstantExpressionAst": true,
-	"ExpandableStringExpressionAst": true, "ScriptBlockExpressionAst": true, "ArrayLiteralAst": true,
-	"HashtableAst": true, "ArrayExpressionAst": true, "ParenExpressionAst": true, "SubExpressionAst": true,
-	"UsingExpressionAst": true, "IndexExpressionAst": true,
-}
-
-func (n *Node) isExpr() bool { return n != nil && exprTypes[n.Type] }
-
-// isPipelineBase: PipelineBaseAst (PipelineAst, PipelineChainAst, AssignmentStatementAst, ErrorStatementAst).
-func (n *Node) isPipelineBase() bool {
-	return n != nil && (n.Type == "PipelineAst" || n.Type == "PipelineChainAst" || n.Type == "AssignmentStatementAst" || n.Type == "ErrorStatementAst")
 }
 
 func (n *Node) isStringConst() bool { return n != nil && n.Type == "StringConstantExpressionAst" }

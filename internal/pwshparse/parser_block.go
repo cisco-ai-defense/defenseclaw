@@ -364,7 +364,7 @@ func (p *Parser) finishTypeNameRule(tn *Token, unBracketedGenericArg, allowAssem
 
 func isNullOrWhiteSpace(s string) bool {
 	for _, r := range s {
-		if r != ' ' && r != '\t' && r != '\n' && r != '\r' && r != '\v' && r != '\f' && r != 0x85 && r != 0xa0 && !(r >= 0x2000 && r <= 0x200a) && r != 0x1680 && r != 0x2028 && r != 0x2029 && r != 0x202f && r != 0x205f && r != 0x3000 {
+		if r != ' ' && r != '\t' && r != '\n' && r != '\r' && r != '\v' && r != '\f' && r != 0x85 && r != 0xa0 && (r < 0x2000 || r > 0x200a) && r != 0x1680 && r != 0x2028 && r != 0x2029 && r != 0x202f && r != 0x205f && r != 0x3000 {
 			return false
 		}
 	}

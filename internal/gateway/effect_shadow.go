@@ -937,7 +937,7 @@ func effectLinkAliasUsed(result effects.Result, i int) bool {
 func effectProtectedSets(t *semanticpb.EffectTarget, kind string, through bool) (known, maybe []string, linkHeld bool) {
 	for _, m := range t.GetProtected() {
 		switch {
-		case (m.GetReason() == "link" || m.GetReason() == effectrules.ReasonLinkExact) && !(through && m.GetState() == semantic.ProtectedKnown):
+		case (m.GetReason() == "link" || m.GetReason() == effectrules.ReasonLinkExact) && (!through || m.GetState() != semantic.ProtectedKnown):
 			linkHeld = true
 		case kind == string(effects.KindRead) && m.GetReason() == "unresolved":
 		case m.GetState() == semantic.ProtectedKnown:
@@ -1344,7 +1344,7 @@ func effectSendExternal(t effects.Target) bool {
 		return false
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
-		return !(a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsUnspecified())
+		return !a.IsLoopback() && !a.IsPrivate() && !a.IsLinkLocalUnicast() && !a.IsUnspecified()
 	}
 	return true
 }
