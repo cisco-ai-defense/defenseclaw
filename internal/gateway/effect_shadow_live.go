@@ -430,6 +430,9 @@ func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, ti
 	if record == nil || effectShadowLiveOff {
 		return
 	}
+	// The shadow runs on another goroutine, which runs no hook call of the
+	// dispatch's (trustedActionRequest.hookCall).
+	request = request.withoutHookCall()
 	goEffectShadow(func() { record(effectShadowRun(request, mode, tier)[0]) })
 }
 

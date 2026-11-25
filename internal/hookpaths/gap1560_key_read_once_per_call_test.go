@@ -49,7 +49,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 	// A call with no folder reads $(pwd)/ as /, so the head spells dir.
 	command := "head -n1 $(pwd)" + dir + "/*/*"
 	read := func() (bool, bounded.CapSet) {
-		return ActionPrivateKeyReadBounded(command, "", home, actionfacts.DialectPOSIX)
+		return ActionPrivateKeyReadBoundedIn(Call{}, command, "", home, actionfacts.DialectPOSIX)
 	}
 
 	t.Run("a repeat in the call is the first answer", func(t *testing.T) {
@@ -108,13 +108,13 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		defer end()
 		var firstCut, againCut bounded.CapSet
 		cut := globCutOf(func() {
-			_, firstCut = ActionPrivateKeyReadBounded(wideCommand, "", home, actionfacts.DialectPOSIX)
+			_, firstCut = ActionPrivateKeyReadBoundedIn(Call{}, wideCommand, "", home, actionfacts.DialectPOSIX)
 		})
 		if !firstCut.Has(bounded.Paths) || cut != firstCut {
 			t.Fatalf("%q: first read cut %v (call %v), want the path cap", wideCommand, firstCut, cut)
 		}
 		cut = globCutOf(func() {
-			_, againCut = ActionPrivateKeyReadBounded(wideCommand, "", home, actionfacts.DialectPOSIX)
+			_, againCut = ActionPrivateKeyReadBoundedIn(Call{}, wideCommand, "", home, actionfacts.DialectPOSIX)
 		})
 		if againCut != firstCut || cut != firstCut {
 			t.Errorf("%q: the repeat cut %v and added %v to the call, want %v as the first read", wideCommand, againCut, cut, firstCut)
@@ -164,7 +164,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		defer end()
 		call := currentHookCall()
 		before := call.spent()
-		if got, _ := ActionPrivateKeyReadBounded(shareCommand, "", home, actionfacts.DialectPOSIX); got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, shareCommand, "", home, actionfacts.DialectPOSIX); got {
 			t.Fatalf("%q: a key read with no link", shareCommand)
 		}
 		if call.spent() == before {
@@ -176,7 +176,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		if err := os.Symlink(key, filepath.Join(share, "a", "k")); err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := ActionPrivateKeyReadBounded(shareCommand, "", home, actionfacts.DialectPOSIX); !got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, shareCommand, "", home, actionfacts.DialectPOSIX); !got {
 			t.Errorf("%q: the repeat after a first read that changed the call's state gave its answer; want a fresh read that finds the link", shareCommand)
 		}
 	})
@@ -195,7 +195,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		// share is cut short at once, while the share would still answer.
 		call.waitLeft = 0
 		mark := call.cutMark()
-		if got, _ := ActionPrivateKeyReadBounded(shareCommand, "", home, actionfacts.DialectPOSIX); got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, shareCommand, "", home, actionfacts.DialectPOSIX); got {
 			t.Fatalf("%q: a key read below a share the budget cut off", shareCommand)
 		}
 		if call.cutMark() == mark {
@@ -206,7 +206,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		}
 		answer()
 		shareAnswered(t, share)
-		if got, _ := ActionPrivateKeyReadBounded(shareCommand, "", home, actionfacts.DialectPOSIX); !got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, shareCommand, "", home, actionfacts.DialectPOSIX); !got {
 			t.Errorf("%q: the repeat once the share answered gave the cut answer; want a fresh read that finds the link", shareCommand)
 		}
 	})
@@ -256,14 +256,14 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		defer end()
 		// cwd: $PWD/*/* below a folder with no key link, then below dir.
 		folder := "head -n1 $PWD/*/*"
-		if got, _ := ActionPrivateKeyReadBounded(folder, t.TempDir(), home, actionfacts.DialectPOSIX); got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, folder, t.TempDir(), home, actionfacts.DialectPOSIX); got {
 			t.Fatalf("%q in a folder with no link: a key read", folder)
 		}
-		if got, _ := ActionPrivateKeyReadBounded(folder, dir, home, actionfacts.DialectPOSIX); !got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, folder, dir, home, actionfacts.DialectPOSIX); !got {
 			t.Errorf("%q in %s: no key read; the answer of another folder was given", folder, dir)
 		}
 		// home: the same link, in a home with no key, then in the key's.
-		if got, _ := ActionPrivateKeyReadBounded(command, "", t.TempDir(), actionfacts.DialectPOSIX); got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, command, "", t.TempDir(), actionfacts.DialectPOSIX); got {
 			t.Fatalf("%q in a home with no key: a key read", command)
 		}
 		if got, _ := read(); !got {
@@ -272,10 +272,10 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		// dialect: POSIX reads the backslashes as escapes, PowerShell as
 		// separators of the key's path.
 		backslashed := "cat " + strings.ReplaceAll(key, "/", `\`) + " | head"
-		if got, _ := ActionPrivateKeyReadBounded(backslashed, "", home, actionfacts.DialectPOSIX); got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, backslashed, "", home, actionfacts.DialectPOSIX); got {
 			t.Fatalf("%q in POSIX: a key read", backslashed)
 		}
-		if got, _ := ActionPrivateKeyReadBounded(backslashed, "", home, actionfacts.DialectPowerShell); !got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, backslashed, "", home, actionfacts.DialectPowerShell); !got {
 			t.Errorf("%q in PowerShell: no key read; the POSIX answer was given", backslashed)
 		}
 	})
@@ -293,7 +293,7 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 		defer end()
 		call := currentHookCall()
 		for i := range readings {
-			if got, _ := ActionPrivateKeyReadBounded(absolute, folder(i), home, actionfacts.DialectPOSIX); !got {
+			if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, absolute, folder(i), home, actionfacts.DialectPOSIX); !got {
 				t.Fatalf("%q in %s (reading %d): no key read", absolute, folder(i), i+1)
 			}
 		}
@@ -301,10 +301,10 @@ func TestGAP1560PrivateKeyReadOncePerHookCall(t *testing.T) {
 			t.Errorf("after %d readings the call keeps %d answers, want %d", readings, len(call.keyReads), maxCallKeyReads)
 		}
 		_ = os.Remove(link)
-		if got, _ := ActionPrivateKeyReadBounded(absolute, folder(readings-1), home, actionfacts.DialectPOSIX); got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, absolute, folder(readings-1), home, actionfacts.DialectPOSIX); got {
 			t.Errorf("%q in %s: a reading past the cap gave its first answer; want a fresh read (the link is gone)", absolute, folder(readings-1))
 		}
-		if got, _ := ActionPrivateKeyReadBounded(absolute, folder(0), home, actionfacts.DialectPOSIX); !got {
+		if got, _ := ActionPrivateKeyReadBoundedIn(Call{}, absolute, folder(0), home, actionfacts.DialectPOSIX); !got {
 			t.Errorf("%q in %s: a kept reading was read again", absolute, folder(0))
 		}
 		if len(call.keyReads) != maxCallKeyReads {

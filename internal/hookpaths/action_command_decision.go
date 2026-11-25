@@ -507,7 +507,7 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 	return actionPosixPrivateKeyRead(command, cwd, home, dialect)
 }
 
-// ActionPrivateKeyReadBounded is ActionPrivateKeyReadWithDialect that also
+// ActionPrivateKeyReadBoundedIn is ActionPrivateKeyReadWithDialect that also
 // reports the caps its pattern expansions hit (actionBoundedGlob): a pattern
 // expanded on this host only up to its cap, with no key among the matches
 // read before it, is a truncated reading the caller judges at least at the
@@ -528,8 +528,12 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 // them and the repeat finds in that state. The file system is the same for
 // the whole decision, as for the call's other memories (callStat). The repeat
 // adds the caps the first read hit to the call, as a read would.
-func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
-	call, end := beginHookCall()
+//
+// found is the hook call the calling goroutine found a moment before (as for
+// JoinHookCall), which is not found again for each read; the zero Call finds
+// it.
+func ActionPrivateKeyReadBoundedIn(found Call, command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
+	call, end := joinHookCall(found)
 	defer end()
 	if call == nil {
 		return ActionPrivateKeyReadWithDialect(command, cwd, home, dialect), bounded.CapSet{}
@@ -551,7 +555,7 @@ func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.
 }
 
 // keyReadKey is one reading of the private-key reader
-// (ActionPrivateKeyReadBounded).
+// (ActionPrivateKeyReadBoundedIn).
 type keyReadKey struct {
 	command, cwd, home string
 	dialect            actionfacts.Dialect
@@ -1346,7 +1350,7 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 // actionGlobReadsPrivateKey reports a match of an absolute pattern, expanded
 // on this host (actionBoundedGlob), that reads an active private key. When
 // the expansion hit its cap and no match read before it is a key, the cap is
-// recorded on the hook call (ActionPrivateKeyReadBounded): the reading is
+// recorded on the hook call (ActionPrivateKeyReadBoundedIn): the reading is
 // truncated, not "reads no key".
 func actionGlobReadsPrivateKey(pattern string, dotglob bool, cwd, home string) bool {
 	matches, truncated := actionBoundedGlob(pattern, dotglob)

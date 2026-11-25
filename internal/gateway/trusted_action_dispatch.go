@@ -405,6 +405,15 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// hookCall is the hook call of the dispatch that judges the request
+	// (dispatchTrustedActionOnce), set for the readings it runs on its own
+	// goroutine while the call is open: a nested dispatch and the private-key
+	// reader use it without finding it again (hookpaths.JoinHookCall; each
+	// find off Windows is a traceback of the goroutine's stack). The zero
+	// Call finds it as before. It is no part of what the request asks
+	// (trustedDispatchMemoKeyOf), and a request handed to another goroutine
+	// drops it (scheduleEffectShadow).
+	hookCall hookpaths.Call
 	// inlineTierNested marks a request derived from one already dispatched:
 	// only the outermost call applies the inline hand-off tier
 	// (withInlineHandoffTier).
@@ -497,11 +506,27 @@ func (t trustedActionTelemetry) empty() bool {
 		t.ParserUncertaintyShadowFindingCount == 0
 }
 
+// withoutHookCall is request with no hook call (trustedActionRequest.hookCall):
+// for a reading on another goroutine, which finds its own.
+func (request trustedActionRequest) withoutHookCall() trustedActionRequest {
+	request.hookCall = hookpaths.Call{}
+	return request
+}
+
 // dispatchTrustedActionOnce judges request; dispatchTrustedAction is it
 // through the hook call's memo (trustedDispatchMemo).
-func dispatchTrustedActionOnce(
+func dispatchTrustedActionOnce(parent context.Context, request trustedActionRequest) []RuleFinding {
+	return dispatchTrustedActionOnceIn(parent, request, hookpaths.Call{})
+}
+
+// dispatchTrustedActionOnceIn is dispatchTrustedActionOnce on a goroutine
+// that found its open hook call a moment before (found, the zero Call: not
+// found), which the dispatch joins without finding it again
+// (hookpaths.JoinHookCall).
+func dispatchTrustedActionOnceIn(
 	parent context.Context,
 	request trustedActionRequest,
+	found hookpaths.Call,
 ) (findings []RuleFinding) {
 	request = windowsStatementsOnePerLine(request)
 	if request.Input.ActiveShell == "" {
@@ -550,8 +575,14 @@ func dispatchTrustedActionOnce(
 	// nested in the handler's own call, or in a twin of this dispatch, it
 	// begins nothing more, rel-1-0-10:GAP-0766). The call is found once here
 	// and read below from what is kept (hookpaths.Call).
-	call, endCall := hookpaths.BeginHookCall()
+	call, endCall := hookpaths.JoinHookCall(found)
 	defer endCall()
+	// The readings below, on this goroutine while the call is open, use the
+	// call found here (trustedActionRequest.hookCall). It is dropped before
+	// the call ends: the readings deferred above run after the end, and find
+	// the call (or none) as they did.
+	request.hookCall = call
+	defer func() { request.hookCall = hookpaths.Call{} }()
 	// Every cap a pattern expansion of the call hit is the call's one
 	// TRUNCATED reading (the one bound rule): a walk that stopped at its
 	// bound with no protected match before it is at least the unknown tier,

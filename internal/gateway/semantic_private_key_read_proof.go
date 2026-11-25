@@ -61,7 +61,7 @@ func appendTrustedPrivateKeyReaderFinding(
 		case strings.EqualFold(request.Input.Tool, "PowerShell"):
 			dialect = actionfacts.DialectPowerShell
 		}
-		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBounded(command, request.Input.CWD, request.Input.ActiveHome, dialect)
+		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBoundedIn(request.hookCall, command, request.Input.CWD, request.Input.ActiveHome, dialect)
 		proved = proved || hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
 		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) && !trustedActionCallOpensAccess(request) ||
 			trustedActionOwnSSHFolderCopy(request, request.Input)) {
