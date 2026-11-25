@@ -83,7 +83,10 @@ function New-Case([string]$Name) {
 }
 function Invoke-Case([string]$Name, [string]$Profile, $Intent, [bool]$Pending, [string]$CompleteThrows, [bool]$GetThrows) {
     $layout = New-Case $Name
-    if ($Pending) { Set-Content -LiteralPath $layout.PendingPath -Value '{}' }
+    if ($Pending) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $layout.PendingPath) | Out-Null
+        Set-Content -LiteralPath $layout.PendingPath -Value '{}'
+    }
     $out = & $module {
         param($layout, $Profile, $Intent, $CompleteThrows, $GetThrows)
         $script:DefenseClawEnterpriseProfile = $Profile
