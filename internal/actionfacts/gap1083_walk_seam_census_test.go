@@ -18,7 +18,8 @@ import (
 // ForTest name of the repo's other seams (RV-0674S F3).
 func TestGAP1083WalkSlotSeamIsCalledOnlyByTests(t *testing.T) {
 	const seam = "HoldCredentialPathWalkSlotsForTest"
-	const oldName = "HoldCredentialPathWalkSlots("
+	// Split, so this file does not name the old call itself.
+	oldName := "HoldCredentialPathWalk" + "Slots("
 	root := filepath.Join("..", "..")
 	defined := false
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
