@@ -28,12 +28,35 @@ func joinEffectFindings(findings, effect []RuleFinding) []RuleFinding {
 		return findings
 	}
 	for _, f := range effect {
+		if redundantFetchedScriptFinding(f, findings) {
+			continue
+		}
 		if d := decideFinding(f); decide.ShadowOnly(d) || foldsClassEffectIntoLegacy(f, findings) || decide.FoldsIntoLegacy(d, foldTargetsFor(f, findings)) {
 			continue
 		}
 		findings = append(findings, f)
 	}
 	return findings
+}
+
+// redundantFetchedScriptFinding keeps the one legacy fetch-to-shell alert
+// when it already enforces the same rule at least as strongly as the effects
+// proof. The added proof remains for spellings the legacy reader misses.
+func redundantFetchedScriptFinding(f RuleFinding, findings []RuleFinding) bool {
+	if f.proof.kind != findingProofEffect || !f.Proof.Advisory() ||
+		(f.RuleID != "CMD-PIPE-CURL" && f.RuleID != "CMD-PIPE-WGET") {
+		return false
+	}
+	for _, prior := range findings {
+		if !strings.EqualFold(prior.RuleID, f.RuleID) || prior.profile != f.profile ||
+			isEffectFinding(prior) || prior.floorRaiseOnly || findingEnforcementRank(prior) < 2 {
+			continue
+		}
+		if decide.ParseSeverity(prior.Severity) >= decide.ParseSeverity(f.Severity) {
+			return true
+		}
+	}
+	return false
 }
 
 // isEffectFinding uses the private gateway proof as well as the Decide

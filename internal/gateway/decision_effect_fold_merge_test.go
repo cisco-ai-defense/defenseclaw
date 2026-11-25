@@ -70,3 +70,36 @@ func TestEffectFindingNeverHoldsALegacyRuleAcrossReadings(t *testing.T) {
 	awsRead := effect(decide.SetAWSCredentials)
 	check("other class", withHostTwinFindings([]RuleFinding{awsRead}, []RuleFinding{copyAlert}), copyAlert, 1)
 }
+
+// TestFetchedScriptLegacyFindingFold keeps the plain 1.0.10 pipe cell
+// singular while leaving a new effects-only source-to-interpreter proof live.
+func TestFetchedScriptLegacyFindingFold(t *testing.T) {
+	effect := RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH",
+		Proof: advisoryProof, proof: newFindingProof(findingProofEffect, "CMD-PIPE-CURL", true)}
+	legacy := RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: advisoryProof}
+	tests := []struct {
+		name  string
+		prior RuleFinding
+		want  int
+	}{
+		{"same legacy cell", legacy, 1},
+		{"lower legacy cell", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "LOW", Proof: advisoryProof}, 2},
+		{"different rule", RuleFinding{RuleID: "CMD-PIPE-WGET", Severity: "HIGH", Proof: advisoryProof}, 2},
+		{"effects source", effect, 2},
+		{"floor reading", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: advisoryProof, floorRaiseOnly: true}, 2},
+		{"recorded legacy", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: recordProof}, 2},
+		{"unproven enforcing", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: enforcingProof}, 2},
+		{"another profile", RuleFinding{RuleID: "CMD-PIPE-CURL", Severity: "HIGH", Proof: advisoryProof, profile: "member-a"}, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := joinEffectFindings([]RuleFinding{tc.prior}, []RuleFinding{effect})
+			if len(got) != tc.want {
+				t.Fatalf("joined findings=%d, want %d", len(got), tc.want)
+			}
+		})
+	}
+	if got := joinEffectFindings(nil, []RuleFinding{effect}); len(got) != 1 {
+		t.Fatalf("effects-only proof lost: %v", got)
+	}
+}
