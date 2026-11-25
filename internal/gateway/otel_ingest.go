@@ -1047,7 +1047,7 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		}
 		spanMeta := meta
 		spanMeta.Source = "codex"
-		a.rememberHookLLMSpanPrompt(spanMeta, prompt)
+		a.rememberHookLLMSpanPrompt(ctx, spanMeta, prompt)
 	}
 	if response := codexNotifyResponse(payload); response != "" {
 		meta.ResponseID = stableLLMEventID("response", "codex", sessionID, turnID)

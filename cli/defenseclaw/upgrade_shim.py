@@ -138,6 +138,7 @@ NEWER_CONFIG_KEYS = (
     ("enterprise.openshell.allow_downgrade", (1, 0, 11)),
     ("ai_discovery.include_skill_content_hashes", (1, 0, 11)),
     ("ai_discovery.include_skill_manifests", (1, 0, 11)),
+    ("guardrail.include_hook_event_content", (1, 0, 11)),
     # Under substrate (1.0.10), so a downgrade to 1.0.10 kept it (GAP-2035).
     ("substrate.bundles.oci", (1, 0, 11)),
     # The same: 1.0.10 has substrate and refuses these (fold of the skill scan,
