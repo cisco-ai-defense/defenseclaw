@@ -566,8 +566,10 @@ func perlProvenWrites(code string) []string {
 	if !complete {
 		return nil
 	}
-	_ = perlCalls(tokens)
-	return nil
+	if strings.Contains(code, "use subs") || strings.Contains(code, "CORE::GLOBAL::") {
+		return nil
+	}
+	return perlResolveDirectWrites(tokens, perlCalls(tokens))
 }
 
 func perlQuoteLikeExcluded(previous string) bool {
