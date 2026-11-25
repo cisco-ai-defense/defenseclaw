@@ -40,7 +40,7 @@ func TestGatewayAuditStoreRedactsAWSNearKeysGAP0426(t *testing.T) {
 	meta := richHookModelV8Meta()
 	api.emitLLMPromptEventV8(t.Context(), meta, prompt, nil)
 	api.emitLLMResponseEventV8(t.Context(), meta, response, "", []string{"stop"})
-	api.rememberHookLLMSpanPrompt(meta, prompt)
+	api.rememberHookLLMSpanPrompt(t.Context(), meta, prompt)
 	api.emitHookLLMSpan(t.Context(), meta, response)
 	tool := richHookToolV8Meta()
 	arguments := `{"command":"cat .env"}`

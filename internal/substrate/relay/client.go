@@ -143,10 +143,6 @@ const detachCloseWait = 2 * time.Second
 // second left is renewed on SessionExpiredMessage.
 const RenewLead = 2 * time.Second
 
-// detachCloseWait bounds how long a detaching client waits for the relay to
-// answer its close frame before it drops the socket.
-const detachCloseWait = 2 * time.Second
-
 func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions) (AttachResult, error) {
 	d := o.Dialer
 	if d == nil {
