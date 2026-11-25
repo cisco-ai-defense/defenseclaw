@@ -32,7 +32,8 @@ func TestGAP2185RulePackRebaseRefusesAJunctionOutOfThePack(t *testing.T) {
 }
 
 // A junction in a rule pack to a folder inside the pack is followed, as a
-// symbolic link inside it is (rel-1-0-10:GAP-2185).
+// symbolic link inside it is: the copy holds the stray YAML file where the
+// link was, and not again at the folder the link names (rel-1-0-10:GAP-2185).
 func TestGAP2185RulePackRebaseFollowsAJunctionInsideThePack(t *testing.T) {
 	base := gap2185Base(t)
 	pack := filepath.Join(base, "pack")
@@ -46,8 +47,11 @@ func TestGAP2185RulePackRebaseFollowsAJunctionInsideThePack(t *testing.T) {
 	if len(linked) != 1 || !strings.HasPrefix(linked[0], "alias -> ") {
 		t.Errorf("linked = %q; want the alias junction", linked)
 	}
-	if _, ok := files["real/more.yaml"]; !ok {
-		t.Errorf("files = %v; want real/more.yaml", gap2185Keys(files))
+	if _, ok := files["alias/more.yaml"]; !ok {
+		t.Errorf("files = %v; want alias/more.yaml", gap2185Keys(files))
+	}
+	if _, ok := files["real/more.yaml"]; ok {
+		t.Errorf("files = %v; want real/more.yaml held only where the link was", gap2185Keys(files))
 	}
 }
 
