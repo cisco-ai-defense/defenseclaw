@@ -52,7 +52,6 @@ type r3TierRoute struct {
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
 	"GAP-0898": "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-1553": "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
 	"GAP-1556": "an unknown PowerShell environment folder stays Maybe (S4-R3)",
 }
 
@@ -393,8 +392,8 @@ func r3WindowsRoutes() []r3TierRoute {
 // Windows hook host rows, read on the PowerShell route of two connectors.
 func r3WindowsTierRows() []r3TierRow {
 	return []r3TierRow{
-		{gap: "GAP-1553 SSH~1 short name", command: `Add-Content SSH~1\authorized_keys x`, cwd: `C:\Users\alice`, want: "maybe", needsHome: true},
-		{gap: "GAP-1553 AUTHOR~1 short name", command: `cd .ssh; Add-Content AUTHOR~1 x`, cwd: `C:\Users\alice`, want: "maybe", needsHome: true},
+		// GAP-1553 (8.3 short names of .ssh and authorized_keys) needs a Windows
+		// file system to expand them: TestGAP1553ShortNameTiersNative.
 		{gap: "GAP-1191 dot-dot state write", command: `Set-Content -Path ..\.defenseclaw\config.yaml -Value x`, cwd: `C:\Users\alice\project`,
 			want: `ctl:Set-Content -Path C:\Users\alice\.defenseclaw\config.yaml -Value x`},
 		{gap: "GAP-1556 $env:X folder, keys", command: `Set-Location $env:X; Set-Content -Path authorized_keys -Value x`, cwd: `C:\Users\alice\project`, want: "maybe"},

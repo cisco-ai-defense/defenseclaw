@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // Env carries everything the projection needs that the pure extractor does
@@ -40,6 +41,10 @@ type Env struct {
 	// that may be a directory (settleDestFile), a find root and the hook
 	// config members below it (findDeletedMembers); nil is os.Lstat.
 	Lstat func(path string) (os.FileInfo, error)
+	// ShortPath expands the 8.3 short components of a Windows path
+	// (settleWindowsShortName); nil is the Windows host's file system
+	// (hookpaths.ExpandWindowsShortPath), none on another host.
+	ShortPath func(path string) (string, bool)
 	// Truncated is the call's one bound record: a cap of the projection
 	// (maxIdentityStats) that cut the reading short hits it. Nil: the hit is
 	// only counted (IdentityCounts).
@@ -80,6 +85,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 		e := effs[i]
 		stepUps.promote(&e, flavor)
 		settleDestFile(&e, flavor, rsv, env.Lstat)
+		settleWindowsShortName(&e, flavor, env.ShortPath)
 		fact := &semanticpb.EffectFact{
 			Index:       int64(i + 1),
 			Kind:        string(e.Kind),
@@ -217,6 +223,39 @@ func findDeletedMembers(e effects.Effect, hook protectedSet, flavor effects.Flav
 		}
 	}
 	return members
+}
+
+// settleWindowsShortName is the resolver's answer for a Windows path the
+// extractor refused only for an 8.3-looking component (non_canonical_path
+// with a Lexical candidate: SSH~1\authorized_keys from the home, AUTHOR~1
+// in .ssh): on a Windows host the file system expands the existing short
+// components, and the long path is the Known target the call opens
+// (rel-1-0-10:GAP-1553). A component that does not expand, any other reason,
+// and a path of the other flavor keep the reason, as before.
+func settleWindowsShortName(e *effects.Effect, flavor effects.Flavor, expand func(string) (string, bool)) {
+	if flavor != effects.FlavorWindows || e.TargetState == effects.TargetStateKnown || e.RoleState != effects.RoleStateKnown ||
+		e.Target.Type != effects.TargetPath || e.Target.Glob != "" || e.Target.Path != "" || len(e.Reasons) == 0 ||
+		!strings.Contains(e.Target.Lexical, "~") {
+		return
+	}
+	for _, r := range e.Reasons {
+		if r.Code != effects.ReasonNonCanonicalPath || r.Scope != effects.ScopeTarget {
+			return
+		}
+	}
+	if expand == nil {
+		if hostGOOS != "windows" {
+			return
+		}
+		expand = hookpaths.ExpandWindowsShortPath
+	}
+	long, ok := expand(e.Target.Lexical)
+	if !ok || strings.Contains(long, "~") || !CanonicalAbsolute(long, flavor) {
+		return
+	}
+	e.Target.Path = long
+	e.TargetState = effects.TargetStateKnown
+	e.Reasons = nil
 }
 
 // holdKnownOnNameMaybe prevents one target/set from being both Known and
