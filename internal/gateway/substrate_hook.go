@@ -206,10 +206,25 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 		}
+		reg, hasReg := substrateRegistrationFrom(r.Context())
+		var exposed map[string]string
+		if hasReg {
+			exposed = st.exposedValues(reg.Profile)
+		}
+		// GAP-1149: the event name is the actor's own text, and it reaches
+		// the decision row, the hook audit envelope and the masked-secret row
+		// as it is. An event name is a short identifier that holds no exposed
+		// actor_secrets value; anything else is refused before any row,
+		// log or header carries it.
+		if !substrateEventNameOK(env.Event, exposed) || !substrateEventHeadersOK(r.Header, exposed) {
+			st.logRefusal("hook envelope of %s refused: its event name is not an event name", route.connector)
+			writeSubstrateRefusal(w, http.StatusBadRequest, "envelope_event_invalid")
+			return
+		}
 		// GAP-0504: an exposed actor_secrets value never reaches the hook
 		// rows (tool results, typed prompts).
-		if reg, ok := substrateRegistrationFrom(r.Context()); ok {
-			if masked, names := substrateMaskExposed(env.Payload, st.exposedValues(reg.Profile)); len(names) > 0 {
+		if hasReg {
+			if masked, names := substrateMaskExposed(env.Payload, exposed); len(names) > 0 {
 				env.Payload = masked
 				st.logRefusal("hook payload of %s/%s carried the exposed value(s) %s (actor_secrets); replaced before evaluation and audit",
 					reg.Atespace, reg.Name, strings.Join(names, ", "))
@@ -355,4 +370,44 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		out["task_digest"] = reg.TaskDigest
 	}
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// substrateEventMaxLen bounds an event name: the longest a connector
+// declares is about 20 characters.
+const substrateEventMaxLen = 64
+
+// substrateEventHeaders are the request headers the hook handlers read an
+// event name from (agent_hook.go), which the actor sets.
+var substrateEventHeaders = []string{"X-DefenseClaw-Hook-Event", "X-DefenseClaw-Copilot-Event", "X-DefenseClaw-Antigravity-Event"}
+
+// substrateEventNameOK reports that event is "" or an event name: letters,
+// digits and _ . : - only, at most substrateEventMaxLen long, starting with a
+// letter, and holding none of the actor's exposed values (GAP-1149).
+func substrateEventNameOK(event string, exposed map[string]string) bool {
+	if event == "" {
+		return true
+	}
+	if len(event) > substrateEventMaxLen || !isASCIILetterByte(event[0]) {
+		return false
+	}
+	for i := 0; i < len(event); i++ {
+		c := event[i]
+		if !isASCIILetterByte(c) && (c < '0' || c > '9') && c != '_' && c != '.' && c != ':' && c != '-' {
+			return false
+		}
+	}
+	_, names := substrateMaskExposed([]byte(event), exposed)
+	return len(names) == 0
+}
+
+// substrateEventHeadersOK checks every event header of h (substrateEventNameOK).
+func substrateEventHeadersOK(h http.Header, exposed map[string]string) bool {
+	for _, name := range substrateEventHeaders {
+		for _, v := range h.Values(name) {
+			if !substrateEventNameOK(strings.TrimSpace(v), exposed) {
+				return false
+			}
+		}
+	}
+	return true
 }
