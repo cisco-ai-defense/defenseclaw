@@ -114,6 +114,9 @@ type usageResponseWriter struct {
 	body   []byte
 	over   bool
 	ended  bool
+	// endErr is how the forwarded call broke off, set by the stream code
+	// (setUsageEndErr); end(nil) ends the record with it (GAP-1112).
+	endErr error
 }
 
 func (u *usageResponseWriter) WriteHeader(status int) {
@@ -161,11 +164,70 @@ func (u *usageResponseWriter) end(err error) {
 		return
 	}
 	u.ended = true
+	if err == nil {
+		err = u.endErr
+	}
 	if !u.streaming && len(u.body) > 0 {
 		u.call.Body(u.body)
 	}
 	u.body = nil
 	u.call.End(err)
+}
+
+// usageWriterOf finds the usage writer under w (through Unwrap).
+func usageWriterOf(w http.ResponseWriter) *usageResponseWriter {
+	for i := 0; i < 8 && w != nil; i++ {
+		if uw, ok := w.(*usageResponseWriter); ok {
+			return uw
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil
+		}
+		w = u.Unwrap()
+	}
+	return nil
+}
+
+// setUsageEndErr tells the usage record of the call answering through w how
+// the call broke off, so the deferred end of the record carries it instead of
+// nil (GAP-1112). The rule: a streamed call that breaks off after the
+// upstream began answering ends with the error it saw. The upstream body
+// failing is upstream_error; the caller going away (its context done or a
+// write to it failing, modelusage.ErrClientGone) is cancelled. Either way a
+// call with no final output usage is of unknown cost, never the input-only
+// total (modelusage.chargeBudgets). The first error wins; a call that
+// completed passes none and stays known.
+func setUsageEndErr(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return
+	}
+	uw.mu.Lock()
+	if uw.endErr == nil && !uw.ended {
+		uw.endErr = err
+	}
+	uw.mu.Unlock()
+}
+
+// setUsageUpstreamStatus puts the status the upstream answered with on the
+// usage record before the proxy writes an error reply of its own, so that
+// reply is not taken for the upstream's status (a 2xx whose body then
+// failed is of unknown cost, not an http_502 failure).
+func setUsageUpstreamStatus(w http.ResponseWriter, status int, h http.Header) {
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return
+	}
+	uw.mu.Lock()
+	if !uw.header {
+		uw.header = true
+		uw.call.UpstreamHeader(status, h)
+	}
+	uw.mu.Unlock()
 }
 
 // beginUsage starts the usage record of one forwarded call and returns the
