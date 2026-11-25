@@ -228,10 +228,14 @@ func init() {
 
 // SummaryReader reports a program whose stdout carries only a count, a test
 // result or a digest of what it reads, whatever its options (Program.Summary:
-// wc, md5sum, sha256sum, cksum, b2sum, cmp), in the GNU and the BSD tables
+// wc, md5sum, sha256sum, cksum, b2sum), in the GNU and the BSD tables
 // alike. A reader that prints a summary only with an option (grep -c, diff
-// -q) is not one.
+// -q) is not one, nor is cmp: cmp -l, -b, --verbose and --print-bytes print
+// the bytes it compares (GAP-2212).
 func SummaryReader(program string) bool {
+	if program == "cmp" {
+		return false
+	}
 	gnu, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, false)
 	if !ok || !gnu.Summary {
 		return false

@@ -1232,7 +1232,8 @@ func knownCredentialReadProof(result effects.Result, f *semanticpb.EffectFact) (
 		effects.SummaryReader(f.GetOrigin().GetProgram()) {
 		// A digest or a count of another account's credential file whose
 		// output goes nowhere else (sha256sum, md5sum or cksum of a key file
-		// in another home) shows none of its bytes. 1.0.10 allows it in
+		// in another home; not cmp, whose options may print the bytes,
+		// GAP-2212) shows none of its bytes. 1.0.10 allows it in
 		// every tier, as its readers name no such read, and the effects
 		// reading makes no read proof for it either: the read row of another
 		// home's file made it a strict and managed-strict block, an FPR raise

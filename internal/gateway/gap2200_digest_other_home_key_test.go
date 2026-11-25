@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -46,6 +47,17 @@ func TestGAP2200DigestOfAnotherHomesKeyKeepsThe1010Cell(t *testing.T) {
 							t.Errorf("%s %s %q = %s %s, want the ordinary file's digest cell %s %s",
 								tier.name, route.connector, command, action, severity, wantAction, wantSeverity)
 						}
+					}
+				}
+			}
+			// cmp -l and -b print the bytes they compare: the key
+			// read keeps its raise there (GAP-2212).
+			for _, command := range []string{"cmp -l " + other + ".ssh/id_ed25519 /dev/zero", "cmp -b " + other + ".ssh/id_ed25519 /dev/zero"} {
+				for _, wrapper := range []string{"", "sudo "} {
+					ordinary, _ := route.decide(t, api, cwd, wrapper+strings.Replace(command, ".ssh/id_ed25519", "proj/notes.txt", 1))
+					action, severity := route.decide(t, api, cwd, wrapper+command)
+					if tier.tier == bounded.TierStrict && action == ordinary {
+						t.Errorf("%s %s %q = %s %s: the byte-printing compare of another home's key lost its raise", tier.name, route.connector, wrapper+command, action, severity)
 					}
 				}
 			}
