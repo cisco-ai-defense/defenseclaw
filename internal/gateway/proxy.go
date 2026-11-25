@@ -3770,12 +3770,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		return true
 	}
 	// pastRun: the held bound behind an open token or digit run was passed;
-	// runFrom is the reply text offset of the run's first byte (GAP-1306).
-	pastRun, runFrom := false, -1
+	// runFrom is the reply text offset of the run's first byte (GAP-1306);
+	// pastParked: only parked reasoning runs are open (GAP-2170), so the
+	// bound lets all go with no verdict, as rel does (no GAP-1767 cut).
+	pastRun, pastParked, runFrom := false, false, -1
 	// secretHeld reports that nothing may be sent now: the text ends inside
 	// an open secret, or a bound on it blocked.
 	secretHeld := func(held int) bool {
-		pastRun, runFrom = false, -1
+		pastRun, pastParked, runFrom = false, false, -1
 		if !holding {
 			return false
 		}
@@ -3794,7 +3796,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			// check has read it, with no verdict, and the run stays held
 			// (GAP-1306). When the chunks from the run's first byte are over
 			// the bound themselves, the bound decides the run (GAP-1767).
-			pastRun, runFrom = true, accumulated.OpenRunFrom()
+			pastRun, pastParked, runFrom = true, o.reasoningOnly, accumulated.OpenRunFrom()
 			return false
 		}
 		return true
@@ -3810,7 +3812,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if pastRun {
 			if k := hold.beforeRun(runFrom); runFrom >= 0 && len(hold.buf)-k <= streamSecretMaxHeld {
 				cut = k
-			} else if !secretBound(bounded.Bytes, streamRunHeldWhy) {
+			} else if !pastParked && !secretBound(bounded.Bytes, streamRunHeldWhy) {
 				return false
 			}
 		}
@@ -3839,7 +3841,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if pastRun {
 			if k := heldBeforeRun(initialMarks, runFrom); runFrom >= 0 && bufferedBytes(initialChunkBuf[k:]) <= streamSecretMaxHeld {
 				cut = k
-			} else if !secretBound(bounded.Bytes, streamRunHeldWhy) {
+			} else if !pastParked && !secretBound(bounded.Bytes, streamRunHeldWhy) {
 				return
 			}
 		}
@@ -6779,13 +6781,20 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			// checked, go out with no verdict, and the run stays held with
 			// the next frame (GAP-1306). When the frames from the run's
 			// first byte are over the bound themselves, the bound decides
-			// the run (TRUNCATED, GAP-1767), then all go out.
+			// the run (TRUNCATED, GAP-1767), then all go out. When only parked reasoning runs are
+			// open (o.reasoningOnly, GAP-2170: a run parked until the message
+			// ends while the answer streams behind it), all go out as rel
+			// does, with no verdict: a benign answer over the bound after
+			// thinking that ends in a number is not cut.
 			k := heldBeforeRun(heldMarks, accumulated.OpenRunFrom())
 			rest := heldSize + next
 			for _, f := range heldFrames[:k] {
 				rest -= len(f)
 			}
 			if k == 0 || rest > streamSecretMaxHeld {
+				if o.reasoningOnly {
+					return false, true
+				}
 				return false, secretBound(bounded.Bytes, streamRunHeldWhy)
 			}
 			sendHeld(k)

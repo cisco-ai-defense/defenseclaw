@@ -460,9 +460,16 @@ func (s *passthroughStream) run() {
 			// check has read them, with no verdict, and the run stays held
 			// (GAP-1306). When the events from the run's first byte are
 			// over the bound themselves, the bound decides the run
-			// (TRUNCATED, GAP-1767), then all go.
+			// (TRUNCATED, GAP-1767), then all go. When only parked reasoning runs are
+			// open (o.reasoningOnly, GAP-2170: a run parked until the message
+			// ends while the answer streams behind it), all go out as rel
+			// does, with no verdict: a benign answer over the bound after
+			// thinking that ends in a number is not cut.
 			if k := heldBeforeRun(queueText, accumulated.OpenRunFrom()); k > 0 && queueBytes-bufferedBytes(queue[:k]) <= streamSecretMaxHeld {
 				heldCut = k
+				return false, true
+			}
+			if o.reasoningOnly {
 				return false, true
 			}
 			return false, secretBound(bounded.Bytes, streamRunHeldWhy)
