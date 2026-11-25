@@ -179,8 +179,7 @@ func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, def
 	}
 	at := 0
 	var parseExpr func() (uint64, bool)
-	var parseTerm func() (uint64, bool)
-	parseTerm = func() (uint64, bool) {
+	parseTerm := func() (uint64, bool) {
 		if at >= len(expr) {
 			return 0, false
 		}
@@ -281,7 +280,7 @@ func perlSysopenWrites(tokens []perlToken, calls []perlCall, definitions []perlD
 		for next < len(definitions) && definitions[next].at < call.start {
 			def := definitions[next]
 			if previous, exists := defs[def.name]; exists &&
-				!(previous.block == 0 && def.block == 0 && !previous.runtime && !def.runtime) {
+				(previous.block != 0 || def.block != 0 || previous.runtime || def.runtime) {
 				def.known = false
 			}
 			defs[def.name] = def

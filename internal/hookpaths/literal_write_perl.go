@@ -244,7 +244,7 @@ func perlLexAt(code string, offset, recursion int) ([]perlToken, bool) {
 				return nil, false
 			}
 			quoteContext := operator && (len(out) == 0 || !perlQuoteLikeExcluded(out[len(out)-1].text)) &&
-				!(len(out) > 0 && out[len(out)-1].text == "{" && end < len(code) && code[end] == '}')
+				(len(out) == 0 || out[len(out)-1].text != "{" || end >= len(code) || code[end] != '}')
 			quoteWord := word == "q" || word == "qq" || word == "qw" || word == "qr" ||
 				word == "m" || word == "s" || word == "y" || word == "tr"
 			quoteAt := end
