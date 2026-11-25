@@ -37,11 +37,11 @@ dc_image() {
 }
 
 # dc_scanner_image: print the skill scanner sidecar image reference (repo:tag@digest) the chart should run
-# (gateway.skillScanner, on by default). E2E_SCANNER_IMAGE=repo:tag@sha256:... uses an image that is already in a
+# (gateway.skillScanner; the chart default is off, GAP-1103, so dc_install turns it on). E2E_SCANNER_IMAGE=repo:tag@sha256:... uses an image that is already in a
 # registry the cluster reads; empty builds one from this checkout like the release does
 # (scripts/release/substrate-images.sh): deploy/images/scanner/Dockerfile around this checkout's gateway,
 # defenseclaw-scanners and the scanner runtime of the managed Linux package (packaging/unix/build-scanner-runtime.sh,
-# which needs uv, npm and network). Without it the gateway pods never become Ready (GAP-1071).
+# which needs uv, npm and network), so the smoke test runs the sidecar and checks it is ready (GAP-1071).
 dc_scanner_image() {
   if [ -n "$E2E_SCANNER_IMAGE" ]; then echo "$E2E_SCANNER_IMAGE"; return 0; fi
   local arch ctx="$E2E_WORKDIR/scanner-ctx" ref="$E2E_REGISTRY/dc-e2e/defenseclaw-scanner:ci-$$" log="$E2E_ARTIFACTS/scanner-build.log"
@@ -109,6 +109,7 @@ bootstrap:
 gateway:
   hpa: {enabled: false}
   skillScanner:
+    enabled: true
     image:
       repository: $srepo
       tag: "$stag"
