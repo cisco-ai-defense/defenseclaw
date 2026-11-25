@@ -165,20 +165,13 @@ def hydrate_git_blobs(
     check_input = ("\n".join(object_ids) + "\n").encode("ascii")
     environment = dict(os.environ)
     environment["GIT_NO_LAZY_FETCH"] = "1"
-    # Newer Git aborts (exit 128) instead of printing "missing" when lazy fetch is
-    # disabled and a blob of the promisor clone is absent: treat that as "every
-    # selected blob may be missing". Fetching a present object by ID is a no-op.
-    try:
-        checked = run_checked(
-            ["git", f"--git-dir={git_dir}", "cat-file", "--batch-check"],
-            input=check_input,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=environment,
-        ).stdout.decode("ascii")
-        missing = [line.split(" ", 1)[0] for line in checked.splitlines() if line.endswith(" missing")]
-    except subprocess.CalledProcessError:
-        missing = object_ids
+    checked = run_checked(
+        ["git", f"--git-dir={git_dir}", "cat-file", "--batch-check"],
+        input=check_input,
+        stdout=subprocess.PIPE,
+        env=environment,
+    ).stdout.decode("ascii")
+    missing = [line.split(" ", 1)[0] for line in checked.splitlines() if line.endswith(" missing")]
     for offset in range(0, len(missing), 128):
         run_checked(
             [
@@ -282,9 +275,8 @@ def lfs_pointer(path: Path) -> tuple[str, int] | None:
 
 def resolve_huggingface_lfs(source_url: str, revision: str, root: Path, max_bytes: int) -> int:
     parsed = urllib.parse.urlsplit(source_url)
-    if parsed.netloc not in {"huggingface.co", "github.com"}:
+    if parsed.netloc != "huggingface.co":
         return 0
-    github_repo = parsed.path.strip("/").removesuffix(".git") if parsed.netloc == "github.com" else ""
     total = 0
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
         pointer = lfs_pointer(path)
@@ -296,11 +288,7 @@ def resolve_huggingface_lfs(source_url: str, revision: str, root: Path, max_byte
             raise ValueError(f"Git-LFS content exceeds --max-lfs-bytes ({max_bytes})")
         relative = path.relative_to(root).as_posix()
         quoted = urllib.parse.quote(relative, safe="/")
-        if github_repo:
-            # GitHub Git-LFS objects (for example the splunk/attack_data logs) are served from media.githubusercontent.com
-            url = f"https://media.githubusercontent.com/media/{github_repo}/{revision}/{quoted}"
-        else:
-            url = f"{source_url.rstrip('/')}/resolve/{revision}/{quoted}?download=true"
+        url = f"{source_url.rstrip('/')}/resolve/{revision}/{quoted}?download=true"
         request = urllib.request.Request(url, headers={"User-Agent": "DefenseClaw-benchmark/1"})
         temporary = path.with_name(path.name + ".download")
         digest = hashlib.sha256()
@@ -402,7 +390,7 @@ def prepare_git(dataset: dict[str, object], data_root: Path, max_git_bytes: int,
     if selected_bytes > max_git_bytes:
         raise ValueError(f"selected Git content exceeds --max-git-bytes ({max_git_bytes})")
 
-    with tempfile.TemporaryDirectory(prefix=f".{dataset_id.replace(chr(47), chr(95))}-", dir=sources_root) as temporary_name:
+    with tempfile.TemporaryDirectory(prefix=f".{dataset_id}-", dir=sources_root) as temporary_name:
         temporary = ensure_below(sources_root, Path(temporary_name))
         export_git_blobs(git_dir, temporary, entries)
         lfs_bytes = resolve_huggingface_lfs(source_url, revision, temporary, max_lfs_bytes)
@@ -421,7 +409,6 @@ def prepare_git(dataset: dict[str, object], data_root: Path, max_git_bytes: int,
             json.dumps(metadata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temporary, destination)
     print(f"{dataset_id}: prepared at {destination}")
 
