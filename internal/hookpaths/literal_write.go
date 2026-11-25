@@ -1170,6 +1170,9 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 			paths = append(paths, code[match[2]:match[3]])
 		}
 	}
+	if language == "perl" {
+		paths = append(paths, perlProvenWrites(code)...)
+	}
 	return paths
 }
 
