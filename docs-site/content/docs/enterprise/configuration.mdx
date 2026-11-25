@@ -55,6 +55,14 @@ Set these in every standalone config. On Linux and macOS the lifecycle fills in 
 
 Always set `enterprise.profile`. When it is unset, Windows and macOS resolve to the Secure Client profile and the `enterprise policy` commands refuse to run. The profile cannot change without a reinstall. For `policy_dir` and the rule-pack lookup rules, see [Custom rule packs](#custom-rule-packs).
 
+## AI Defense class policies
+
+Managed inspection automatically sends the authenticated connector class for Codex, Cursor, Claude Code, and GitHub Copilot to AI Defense. No additional setting is required. The gateway sends only the canonical class, never a client-selected connection ID.
+
+AI Defense uses an enabled policy attached to the matching class connection when one is configured. Otherwise, it uses the policy attached to the existing global/default connection. Missing, unsupported or conflicting authenticated connector context also retains the global policy route.
+
+The existing inspection controls continue to govern when remote inspection runs. OSS and API-key inspection do not send this managed class field.
+
 ## Choose the agents to protect
 
 List each agent under `guardrail.connectors`. The key is the connector name; an empty value (`{}`) enables it with the defaults, and only `enabled: false` turns a listed agent off. A config without this map protects nothing, and `verify` fails on it (`no_connectors_enabled`).

@@ -602,10 +602,18 @@ func TestCiscoInspectClient_ContentOnlyWireShapeUnchanged(t *testing.T) {
 
 	client := newCiscoInspectTestClient(t, srv.URL, "TEST_CISCO_CONTENT_ONLY_SHAPE")
 	client.client = srv.Client()
-	if v := client.Inspect(t.Context(), []ChatMessage{
+	if v := client.Inspect(withAuthenticatedInspectConnector(t.Context(), "copilot"), []ChatMessage{
 		{Role: "user", Content: "hello"},
 	}); v == nil {
 		t.Fatal("expected non-nil verdict on 200 response")
+	}
+
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(gotBody, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := wire["agent_class"]; present {
+		t.Fatal("API-key inspection must omit the managed agent class")
 	}
 
 	var payload struct {

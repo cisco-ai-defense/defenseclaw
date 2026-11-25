@@ -221,6 +221,36 @@ func (c *CiscoDefenseClawInspectClient) warnTokenUnavailable(err error) {
 		detail)
 }
 
+// managedInspectAgentClass derives the policy class only from connector context
+// established by gateway authentication or a typed hook adapter. An untrusted
+// connector assertion in a request body never selects a cloud connection.
+func managedInspectAgentClass(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	hookClass := authenticatedHookConnector(ctx)
+	inspectClass := authenticatedInspectConnector(ctx)
+	if hookClass != "" && inspectClass != "" && hookClass != inspectClass {
+		return ""
+	}
+	connector := hookClass
+	if connector == "" {
+		connector = inspectClass
+	}
+	switch connector {
+	case "codex":
+		return "DEFENSE_CLAW_AGENT_CLASS_CODEX"
+	case "cursor":
+		return "DEFENSE_CLAW_AGENT_CLASS_CURSOR"
+	case "claudecode":
+		return "DEFENSE_CLAW_AGENT_CLASS_CLAUDECODE"
+	case "copilot":
+		return "DEFENSE_CLAW_AGENT_CLASS_COPILOT"
+	default:
+		return ""
+	}
+}
+
 // Inspect sends messages to the DefenseClaw AID endpoint and returns a
 // normalized verdict. Returns nil on any error so the caller falls back
 // to local-only scanning — same fail-open contract as the API-key path.
@@ -306,6 +336,9 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// cisco_ai_defense.enabled_rules is set; otherwise it omits config
 	// too and the tenant's own rules apply.
 	payload := map[string]interface{}{"messages": chatMsgs}
+	if agentClass := managedInspectAgentClass(ctx); agentClass != "" {
+		payload["agent_class"] = agentClass
+	}
 	// Under the Secure Client integration the request names its end user,
 	// so AI Defense can attribute the inspection and choose that person's
 	// policy (secure_client_user.go). An AI Defense that rejects the fields
