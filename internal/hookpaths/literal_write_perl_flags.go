@@ -165,7 +165,14 @@ func perlFlagVisible(tokens []perlToken, call perlCall, spelling string, callFor
 	return name, v.loaded[module] || callForm && v.runtime[module]
 }
 
-func perlFlagExpression(tokens []perlToken, call perlCall, span [2]int) (uint64, bool) {
+func perlFlagExpression(tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef) (uint64, bool) {
+	return perlFlagExpressionDepth(tokens, call, span, defs, 0)
+}
+
+func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef, depth int) (uint64, bool) {
+	if depth > 1 {
+		return 0, false
+	}
 	expr := perlFlagTokens(tokens, span)
 	if len(expr) == 0 {
 		return 0, false
@@ -178,6 +185,22 @@ func perlFlagExpression(tokens []perlToken, call perlCall, span [2]int) (uint64,
 			return 0, false
 		}
 		tok := expr[at]
+		if tok.text == "$" {
+			if depth >= 1 {
+				return 0, false
+			}
+			name, next := perlScalarAt(expr, at)
+			if name == "" {
+				return 0, false
+			}
+			at = next
+			valueSpan, proven := perlS1ValueSpan(tokens, call, name)
+			if !proven {
+				return 0, false
+			}
+			source := perlCall{start: valueSpan[0], block: call.block}
+			return perlFlagExpressionDepth(tokens, source, valueSpan, defs, depth+1)
+		}
 		if tok.text == "(" {
 			at++
 			value, ok := parseExpr()
@@ -207,6 +230,11 @@ func perlFlagExpression(tokens []perlToken, call perlCall, span [2]int) (uint64,
 		if at+1 < len(expr) && expr[at].text == "(" && expr[at+1].text == ")" {
 			at += 2
 			callForm = true
+		}
+		if def, exists := defs[perlDefName(tok.text)]; exists && def.at < call.start {
+			if !def.runtime || callForm {
+				return def.value, def.known
+			}
 		}
 		name, visible := perlFlagVisible(tokens, call, tok.text, callForm)
 		if !visible {
@@ -241,10 +269,24 @@ func perlFlagExpression(tokens []perlToken, call perlCall, span [2]int) (uint64,
 	return value, ok && at == len(expr)
 }
 
-func perlSysopenWrites(tokens []perlToken, calls []perlCall) []string {
+func perlSysopenWrites(tokens []perlToken, calls []perlCall, definitions []perlDef, skip map[int]bool) []string {
 	var paths []string
+	defs := make(map[string]perlDef)
+	next := 0
 	const accmode = 3
 	for _, call := range calls {
+		if skip[call.start] {
+			continue
+		}
+		for next < len(definitions) && definitions[next].at < call.start {
+			def := definitions[next]
+			if previous, exists := defs[def.name]; exists &&
+				!(previous.block == 0 && def.block == 0 && !previous.runtime && !def.runtime) {
+				def.known = false
+			}
+			defs[def.name] = def
+			next++
+		}
 		if call.name != "sysopen" || call.argc < 3 || call.argc > 4 {
 			continue
 		}
@@ -252,7 +294,7 @@ func perlSysopenWrites(tokens []perlToken, calls []perlCall) []string {
 		if !fixed {
 			continue
 		}
-		flags, known := perlFlagExpression(tokens, call, call.args[2])
+		flags, known := perlFlagExpression(tokens, call, call.args[2], defs)
 		if !known {
 			continue
 		}

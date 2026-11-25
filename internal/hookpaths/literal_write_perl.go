@@ -541,6 +541,9 @@ func perlFixedPath(tokens []perlToken, start, end int) (string, bool) {
 			if !ok {
 				return "", false
 			}
+			if tok.text[0] == '"' && strings.ContainsAny(strings.ReplaceAll(value, "$ENV{HOME}", ""), "$@") {
+				return "", false
+			}
 			result.WriteString(value)
 		} else if tok.text != "." {
 			return "", false
@@ -553,8 +556,8 @@ func perlFixedPath(tokens []perlToken, start, end int) (string, bool) {
 	return result.String(), true
 }
 
-// Stage one wires the scanner into the Perl branch. The resolver does not
-// add operands until the write rules have their own coverage.
+// perlProvenWrites adds only paths supported by a complete Perl parse and a
+// positive write rule. An incomplete program contributes no new operands.
 func perlProvenWrites(code string) []string {
 	if !strings.ContainsAny(code, "'\"") ||
 		!strings.Contains(code, "open") && !strings.Contains(code, "unlink") &&
@@ -570,12 +573,11 @@ func perlProvenWrites(code string) []string {
 	if !complete {
 		return nil
 	}
-	if strings.Contains(code, "use subs") || strings.Contains(code, "CORE::GLOBAL::") {
-		return nil
-	}
 	calls := perlCalls(tokens)
-	paths := perlResolveDirectWrites(tokens, calls)
-	return append(paths, perlSysopenWrites(tokens, calls)...)
+	override := perlResolveOverrides(tokens, calls)
+	paths := perlResolveDirectWrites(tokens, calls, override.skip)
+	paths = append(paths, override.paths...)
+	return append(paths, perlSysopenWrites(tokens, calls, perlNamedDefinitions(tokens), override.skip)...)
 }
 
 func perlQuoteLikeExcluded(previous string) bool {

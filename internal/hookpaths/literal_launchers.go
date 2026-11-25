@@ -584,7 +584,17 @@ func literalInlineProgram(words []string) (code, language string, ok bool) {
 				j++
 				module = words[j]
 			}
-			if name, _, _ := strings.Cut(module, "="); name != "" && !strings.HasPrefix(name, "-") {
+			if name, value, hasValue := strings.Cut(module, "="); name != "" && !strings.HasPrefix(name, "-") {
+				if name == "constant" && hasValue {
+					constantName, constantValue, hasComma := strings.Cut(value, ",")
+					if hasComma && literalPerlConstantName(constantName) {
+						if !literalPerlDecimal(constantValue) {
+							constantValue = "undef"
+						}
+						uses.WriteString("use constant " + constantName + " => " + constantValue + ";\n")
+					}
+					continue
+				}
 				uses.WriteString("use " + name + ";\n")
 			}
 		}
@@ -1017,4 +1027,33 @@ func knownFindChangeOperands(words []string, cwd string) []string {
 		}
 	}
 	return operands
+}
+
+func literalPerlConstantName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' {
+			continue
+		}
+		if i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func literalPerlDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

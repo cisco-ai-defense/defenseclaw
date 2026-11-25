@@ -63,10 +63,45 @@ func perlScalarName(tokens []perlToken, arg [2]int) string {
 	return ""
 }
 
-// perlDirectScalarMode proves the small straight-line S1 case. It requires
-// one assignment in the same block and no intervening use or redeclaration.
-// The remaining S1/S2 forms are added in stage four.
-func perlDirectScalarMode(tokens []perlToken, call perlCall, name string) (string, bool) {
+// perlDirectScalarMode accepts a straight-line S1 assignment from the call's
+// block or an enclosing block, excluding sub and loop boundaries.
+func perlScalarAt(tokens []perlToken, at int) (string, int) {
+	if at >= len(tokens) || tokens[at].text != "$" {
+		return "", at
+	}
+	if at+1 < len(tokens) && tokens[at+1].kind == 'w' {
+		return tokens[at+1].text, at + 2
+	}
+	if at+3 < len(tokens) && tokens[at+1].text == "{" &&
+		tokens[at+2].kind == 'w' && tokens[at+3].text == "}" {
+		return tokens[at+2].text, at + 4
+	}
+	return "", at
+}
+
+func perlS1Enclosing(tokens []perlToken, assignment, callAt int) bool {
+	depth := 0
+	for i := assignment; i < callAt; i++ {
+		switch tokens[i].text {
+		case "{":
+			depth++
+			if i+1 < len(tokens) {
+				switch tokens[i+1].blockKind {
+				case "sub", "loop":
+					return false
+				}
+			}
+		case "}":
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func perlS1ValueSpan(tokens []perlToken, call perlCall, name string) ([2]int, bool) {
 	callAt := -1
 	for i := range tokens {
 		if tokens[i].start == call.start {
@@ -75,16 +110,16 @@ func perlDirectScalarMode(tokens []perlToken, call perlCall, name string) (strin
 		}
 	}
 	if callAt < 0 {
-		return "", false
+		return [2]int{}, false
 	}
-	assignment := -1
-	for i := 0; i+3 < callAt; i++ {
-		if tokens[i].text != "$" || tokens[i+1].text != name ||
-			tokens[i+2].text != "=" || tokens[i].block != call.block ||
-			tokens[i].modifierLoop {
+	assignment, valueStart := -1, -1
+	for i := 0; i < callAt; i++ {
+		scalar, next := perlScalarAt(tokens, i)
+		if scalar != name || next >= callAt || tokens[next].text != "=" ||
+			!perlS1Enclosing(tokens, i, callAt) || tokens[i].modifierLoop {
 			continue
 		}
-		if i > 0 && tokens[i-1].text == "\\" {
+		if i > 0 && tokens[i-1].text == string(rune(92)) {
 			continue
 		}
 		conditional := false
@@ -97,23 +132,20 @@ func perlDirectScalarMode(tokens []perlToken, call perlCall, name string) (strin
 		if conditional {
 			continue
 		}
-		assignment = i
+		assignment, valueStart = i, next+1
 	}
 	if assignment < 0 {
-		return "", false
+		return [2]int{}, false
 	}
-	for i := assignment + 2; i+1 < callAt; i++ {
-		if tokens[i].text == "$" && tokens[i+1].text == name {
-			return "", false
+	for i := valueStart; i < callAt; i++ {
+		scalar, _ := perlScalarAt(tokens, i)
+		if scalar == name {
+			return [2]int{}, false
 		}
 		if tokens[i].text == "eval" || tokens[i].text == "do" ||
 			tokens[i].text == "require" {
-			return "", false
+			return [2]int{}, false
 		}
-	}
-	valueStart := assignment + 3
-	if valueStart >= len(tokens) {
-		return "", false
 	}
 	valueEnd := valueStart
 	for valueEnd < callAt && tokens[valueEnd].text != ";" &&
@@ -121,12 +153,20 @@ func perlDirectScalarMode(tokens []perlToken, call perlCall, name string) (strin
 		valueEnd++
 	}
 	if valueEnd == valueStart {
-		return "", false
+		return [2]int{}, false
 	}
-	return perlFixedPath(tokens, tokens[valueStart].start, tokens[valueEnd-1].end)
+	return [2]int{tokens[valueStart].start, tokens[valueEnd-1].end}, true
 }
 
-func perlResolveDirectWrites(tokens []perlToken, calls []perlCall) []string {
+func perlDirectScalarMode(tokens []perlToken, call perlCall, name string) (string, bool) {
+	span, proven := perlS1ValueSpan(tokens, call, name)
+	if !proven {
+		return "", false
+	}
+	return perlFixedPath(tokens, span[0], span[1])
+}
+
+func perlResolveDirectWrites(tokens []perlToken, calls []perlCall, skip map[int]bool) []string {
 	var paths []string
 	add := func(value string) {
 		if value == "" {
@@ -146,6 +186,9 @@ func perlResolveDirectWrites(tokens []perlToken, calls []perlCall) []string {
 		return perlArgumentLiteral(tokens, call.args[index])
 	}
 	for _, call := range calls {
+		if skip[call.start] {
+			continue
+		}
 		switch call.name {
 		case "unlink":
 			for i := 0; i < call.argc; i++ {
@@ -200,8 +243,38 @@ func perlResolveDirectWrites(tokens []perlToken, calls []perlCall) []string {
 						add(path)
 					}
 				}
+				if path, proven := perlInterpolatedOpenPath(tokens, call); proven {
+					add(path)
+				}
 			}
 		}
 	}
 	return paths
+}
+
+func perlInterpolatedOpenPath(tokens []perlToken, call perlCall) (string, bool) {
+	if call.argc != 2 {
+		return "", false
+	}
+	expr := perlFlagTokens(tokens, call.args[1])
+	if len(expr) != 1 || expr[0].kind != 's' || len(expr[0].text) < 4 ||
+		expr[0].text[0] != '"' {
+		return "", false
+	}
+	inner := expr[0].text[1 : len(expr[0].text)-1]
+	if len(inner) < 3 || inner[0] != '$' {
+		return "", false
+	}
+	end := 1
+	for end < len(inner) && perlIdent(inner[end]) {
+		end++
+	}
+	if end == 1 || end == len(inner) || strings.ContainsAny(inner[end:], "$@\\") {
+		return "", false
+	}
+	mode, proven := perlDirectScalarMode(tokens, call, inner[1:end])
+	if !proven || !perlThreeArgWriteMode(mode) {
+		return "", false
+	}
+	return perlTwoArgWritePath(mode + inner[end:])
 }
