@@ -40,7 +40,7 @@ func TestGAP0674WalkSkipsFilesOfAFolderItCannotEnter(t *testing.T) {
 	if _, err := os.Stat(lockedFile); err == nil {
 		t.Skip("this user enters a folder of mode 0644 (root, or a filesystem without permissions)")
 	}
-	walk := credentialPathWalk(credentialWalkWaitUnbounded(), root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
+	walk := credentialPathWalk(credentialWalkBudgetUnbounded(), root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 	if slices.Contains(walk.found, lockedFile) {
 		t.Errorf("the walk found %s, a file of a folder no one can enter: %v", lockedFile, walk.found)
 	}

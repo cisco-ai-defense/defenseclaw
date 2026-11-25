@@ -14,10 +14,10 @@ import (
 // hookAnswerBudget): past it the client applies its fail mode.
 const gap1083HookAnswerBudget = 3500 * time.Millisecond
 
-// credentialWalkWaitUnbounded is a wait for walk slots with no limit that
+// credentialWalkBudgetUnbounded is a wait for walk slots with no limit that
 // matters, for the tests that call credentialPathWalk directly.
-func credentialWalkWaitUnbounded() *credentialWalkWait {
-	return &credentialWalkWait{left: time.Hour}
+func credentialWalkBudgetUnbounded() CredentialWalkBudget {
+	return newCredentialWalkBudget(nil, time.Hour)
 }
 
 // gap1083HoldWalkSlots takes every walk slot, as walks of a slow folder (a
@@ -116,6 +116,7 @@ func TestGAP1083WalkSlotWaitIsBounded(t *testing.T) {
 	}
 	gap1083HoldWalkSlots(t)
 	const each = 4
+	waitsBefore := credentialPathWalkSlotWaits.Load()
 	answers := make(chan struct {
 		command string
 		gap1083Answer
@@ -134,9 +135,6 @@ func TestGAP1083WalkSlotWaitIsBounded(t *testing.T) {
 	for got := range each * len(commands) {
 		select {
 		case a := <-answers:
-			if limit := credentialPathWalkSlotWait + 750*time.Millisecond; a.took > limit {
-				t.Errorf("%q answered in %v while slow walks held the slots, want at most %v", a.command, a.took, limit)
-			}
 			w := want[a.command]
 			if !reflect.DeepEqual(a.reads, w.reads) || !reflect.DeepEqual(a.caps, w.caps) {
 				t.Errorf("%q without a slot: record %+v caps %v, want the cut walk's %+v caps %v", a.command, a.reads, a.caps, w.reads, w.caps)
@@ -150,6 +148,12 @@ func TestGAP1083WalkSlotWaitIsBounded(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("%d of %d calls answered within the %v hook budget while slow walks held every walk slot", got, each*len(commands), gap1083HookAnswerBudget)
 		}
+	}
+	// Each call waited once, whatever number of folders it searches: the
+	// count of waits is what the bound of its time stood for, and load does
+	// not move it (RV-0674T F1).
+	if waits := credentialPathWalkSlotWaits.Load() - waitsBefore; waits != each*int64(len(commands)) {
+		t.Errorf("%d calls waited %d times for a walk slot while slow walks held every one, want one wait each", each*len(commands), waits)
 	}
 }
 
@@ -174,7 +178,7 @@ func TestGAP1083WalkSlotWaitEndsWithTheCall(t *testing.T) {
 	leaving, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	a = gap1083Resolve(leaving, command, root, home)
-	if a.took > credentialPathWalkSlotWait/2 || !reflect.DeepEqual(a.reads, want.reads) {
+	if a.took > 500*time.Millisecond || !reflect.DeepEqual(a.reads, want.reads) {
 		t.Errorf("a call whose context ended at 100 ms waited %v with record %+v, want about 100 ms and %+v", a.took, a.reads, want.reads)
 	}
 
@@ -188,9 +192,50 @@ func TestGAP1083WalkSlotWaitEndsWithTheCall(t *testing.T) {
 // TestGAP1083WalkSlotFreeTakenAtOnce: a free slot is taken without a wait,
 // and a resolve that has used its wait takes a free slot still.
 func TestGAP1083WalkSlotFreeTakenAtOnce(t *testing.T) {
-	spent := &credentialWalkWait{}
+	spent := newCredentialWalkBudget(nil, 0)
 	if !spent.take() {
 		t.Fatal("a free slot was not taken")
 	}
 	<-credentialPathWalkSlots
+}
+
+// TestGAP1083WalkSlotFreeTakenByACallThatIsDone: a call whose context is done
+// takes a free slot and walks, as it did before the slots had a wait; only a
+// wait for a taken slot ends with the call (RV-0674R F4).
+func TestGAP1083WalkSlotFreeTakenByACallThatIsDone(t *testing.T) {
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !NewCredentialWalkBudget(done).take() {
+		t.Fatal("a free slot was not taken by a call whose context is done")
+	}
+	<-credentialPathWalkSlots
+}
+
+// TestGAP1083RecordsOfOneCallShareTheWait: the records of one Input's
+// budget wait 1 s between them, not 1 s each, and the last one's walk is cut
+// at once (substrate-1:GAP-1083, RV-0674R F1).
+func TestGAP1083RecordsOfOneCallShareTheWait(t *testing.T) {
+	root, home := gap1083Tree(t)
+	gap1083HoldWalkSlots(t)
+	budget := NewCredentialWalkBudget(context.Background())
+	waitsBefore := credentialPathWalkSlotWaits.Load()
+	start := time.Now()
+	var tooks []time.Duration
+	for range 4 {
+		at := time.Now()
+		facts := Analyze(Input{Tool: "exec", Command: "grep -r KEY tree", CWD: root, ActiveHome: home, CredentialWalkBudget: budget})
+		if !slices.ContainsFunc(facts.CredentialPathReads(), func(f PathFact) bool { return f.Value == "" }) {
+			t.Errorf("record %d: the walk was not cut: %+v", len(tooks), facts.CredentialPathReads())
+		}
+		tooks = append(tooks, time.Since(at))
+	}
+	// One wait for the four records, not one each (RV-0674T F1: the count,
+	// not a bound of the time, which a loaded box moves). The hook's budget
+	// stays the absolute ceiling.
+	if waits := credentialPathWalkSlotWaits.Load() - waitsBefore; waits != 1 {
+		t.Errorf("four records of one call waited %d times for a walk slot (%v), want one wait", waits, tooks)
+	}
+	if total := time.Since(start); total > gap1083HookAnswerBudget {
+		t.Errorf("four records of one call took %v (%v) while slow walks held every slot, past the hook's %v", total, tooks, gap1083HookAnswerBudget)
+	}
 }

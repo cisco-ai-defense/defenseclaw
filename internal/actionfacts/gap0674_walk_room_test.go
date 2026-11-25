@@ -93,7 +93,7 @@ func resolveWithin(t *testing.T, limits credentialPathLimits, command, cwd, home
 	if l == nil {
 		return walkRoomRecord{nil_: true}
 	}
-	rec := resolveCredentialPathReadsWithin(context.Background(), limits, l.words, l.cwd, l.home, l.commands, l.paths)
+	rec := resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), limits, l.words, l.cwd, l.home, l.commands, l.paths)
 	if rec == nil {
 		return walkRoomRecord{nil_: true}
 	}

@@ -64,7 +64,7 @@ func TestGAP0674WalksRunAtMostSlotsAtOnce(t *testing.T) {
 	for range walkers {
 		wg.Go(func() {
 			for range 6 {
-				walk := credentialPathWalk(credentialWalkWaitUnbounded(), root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
+				walk := credentialPathWalk(credentialWalkBudgetUnbounded(), root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 				if len(walk.found) != 1 || walk.cut {
 					t.Errorf("walk found %v cut %v, want the one .env and no cut", walk.found, walk.cut)
 					return
