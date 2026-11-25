@@ -1057,3 +1057,16 @@ func literalPerlDecimal(value string) bool {
 	}
 	return true
 }
+
+// xargsPerlChild keeps the conservative xargs check when the Perl reader
+// proves only some writes in a child program. A proved path is not a proof
+// that every write in the program has a fixed destination.
+func xargsPerlChild(words []string) bool {
+	for _, word := range words {
+		base := programBase(word)
+		if base == "perl" || strings.HasSuffix(base, ".pl") {
+			return true
+		}
+	}
+	return false
+}
