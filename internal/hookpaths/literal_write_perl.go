@@ -10,6 +10,7 @@ type perlToken struct {
 	kind         byte
 	start, end   int
 	block        int
+	blockKind    string
 	modifierLoop bool
 }
 
@@ -329,6 +330,9 @@ func perlLexAt(code string, offset, recursion int) ([]perlToken, bool) {
 			default:
 				operator = false
 			}
+			if len(out) >= 2 && out[len(out)-2].text == "use" {
+				operator = true
+			}
 			statement = false
 			i = end
 			continue
@@ -569,7 +573,9 @@ func perlProvenWrites(code string) []string {
 	if strings.Contains(code, "use subs") || strings.Contains(code, "CORE::GLOBAL::") {
 		return nil
 	}
-	return perlResolveDirectWrites(tokens, perlCalls(tokens))
+	calls := perlCalls(tokens)
+	paths := perlResolveDirectWrites(tokens, calls)
+	return append(paths, perlSysopenWrites(tokens, calls)...)
 }
 
 func perlQuoteLikeExcluded(previous string) bool {
@@ -591,6 +597,7 @@ func perlBlockContexts(tokens []perlToken) ([]perlBlock, bool) {
 	stmtStart := 0
 	for i := range tokens {
 		tokens[i].block = stack[len(stack)-1]
+		tokens[i].blockKind = blocks[stack[len(stack)-1]].kind
 		switch tokens[i].text {
 		case "while", "until", "for", "foreach":
 			if i > stmtStart {
