@@ -368,6 +368,7 @@ type call struct {
 
 	mu        sync.Mutex
 	status    int
+	answered  bool
 	ttfb      time.Duration
 	hdrUsage  Usage
 	bodyUse   Usage
@@ -390,7 +391,10 @@ func (c *call) UpstreamHeader(status int, h http.Header) {
 	if c.track != 0 && c.requestID == "" {
 		c.requestID = providerRequestID(h)
 	}
-	if c.ttfb == 0 {
+	// The upstream answered: a flag, never ttfb > 0. Go's monotonic clock on
+	// Windows is coarse, so an answer within one clock tick has a ttfb of 0.
+	if !c.answered {
+		c.answered = true
 		c.ttfb = time.Since(c.start)
 	}
 	if c.f.APIFamily == FamilyInvoke {
@@ -462,7 +466,7 @@ func (c *call) settle(rec Record) bool {
 
 func (c *call) build(err error) Record {
 	end := time.Now()
-	rec := Record{Facts: c.f, Status: c.status, Outcome: "completed", TTFB: c.ttfb, Total: end.Sub(c.start), EndedAt: end}
+	rec := Record{Facts: c.f, Status: c.status, Outcome: "completed", TTFB: c.ttfb, Total: end.Sub(c.start), EndedAt: end, answered: c.answered}
 	switch {
 	case c.status >= 400:
 		// The upstream answered with a failure: it stays failed even when

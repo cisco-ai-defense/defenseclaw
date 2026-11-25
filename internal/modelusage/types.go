@@ -162,6 +162,10 @@ type Record struct {
 	// openingUsage is set when Usage is only the opening count of a stream
 	// that ended before its final usage: what the call cost is unknown.
 	openingUsage bool
+	// answered is set when the upstream answered the gateway's call (its
+	// status and headers reached the usage record), whatever TTFB the clock
+	// measured: on Windows an answer within one clock tick has a TTFB of 0.
+	answered bool
 }
 
 // DropSource is a sink that counts records it lost (cumulative, by kind).
