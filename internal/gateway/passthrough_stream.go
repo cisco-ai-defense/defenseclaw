@@ -133,7 +133,7 @@ func (s *passthroughStream) copyHeaders() {
 
 // copyRest forwards what is left of src without inspection (the fail mode
 // of an OSS install, after the alert).
-func (s *passthroughStream) copyRest(src io.Reader) {
+func (s *passthroughStream) copyRest(src io.Reader, tw *clientWriteErrWriter) {
 	flusher, _ := s.w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {
@@ -147,11 +147,7 @@ func (s *passthroughStream) copyRest(src io.Reader) {
 		if err != nil {
 			if err != io.EOF {
 				// A cut here is of unknown cost like any other (GAP-1112).
-				if tw, ok := s.w.(*clientWriteErrWriter); ok {
-					tw.endUsage(s.r.Context(), err)
-				} else {
-					setUsageEndErr(s.w, err)
-				}
+				tw.endUsage(s.r.Context(), err)
 			}
 			return
 		}
@@ -251,7 +247,7 @@ func (s *passthroughStream) run() {
 				return
 			}
 			s.copyHeaders()
-			s.copyRest(resp.Body)
+			s.copyRest(resp.Body, tw)
 			return
 		}
 		// Deferred first, so it runs after the reader goroutine has ended.
