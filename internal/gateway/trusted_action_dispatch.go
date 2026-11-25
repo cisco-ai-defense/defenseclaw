@@ -10706,8 +10706,8 @@ var wrappedProgramRules = map[string]bool{
 	"CMD-PRIV-SETUID": true, "CMD-CHMOD-WORLD": true,
 	"CMD-PIPE-CURL": true, "CMD-PIPE-WGET": true, "CMD-PIPE-BASE64": true,
 	"CMD-REVSHELL-BASH": true, "CMD-REVSHELL-NC": true, "CMD-REVSHELL-DEVTCP": true, "CMD-REVSHELL-PYTHON": true,
-	"TAMPER.DEFENSECLAW_CONTROL_DISABLE": true,
-	"PATH-AWS-CREDS":                     true, "PATH-GIT-CREDS": true, "PATH-NETRC": true, "PATH-NPMRC": true,
+	canonicalTrustedRuleID(defenseClawControlDisableRuleID): true,
+	"PATH-AWS-CREDS": true, "PATH-GIT-CREDS": true, "PATH-NETRC": true, "PATH-NPMRC": true,
 	"PATH-PYPIRC": true, "PATH-KUBE": true, "PATH-DOCKER": true, "PATH-SSH-KEY": true,
 }
 
