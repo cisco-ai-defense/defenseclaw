@@ -5741,11 +5741,13 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 	actionTool, trusted := agentHookNativeFileView(agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS), trusted)
 	cfg := proxyDecisionConfig(ctx)
 	proxyTier, proxyTiers := p.toolCallTierTable(ctx, cfg)
+	cwd, standIn := proxyToolCallCWD(toolCWD)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
 			Tool:            actionTool,
 			Args:            trusted,
-			CWD:             proxyToolCallCWD(toolCWD),
+			CWD:             cwd,
+			StandInCWD:      standIn,
 			ActiveHome:      hookActiveHome(ctx),
 			WindowsHookHost: windowsHookHost() && !p.toolCallSecureClient(ctx),
 		},
@@ -5798,12 +5800,15 @@ func proxyFreeformToolArgs(toolName, args string) json.RawMessage {
 // shell call got no command reading that needs a directory, so an awk
 // system() or a PowerShell Add-Content that writes ~/.ssh/authorized_keys
 // raised no finding on the proxy where every hook connector blocks it
-// (rel-1-0-10:GAP-0782).
-func proxyToolCallCWD(toolCWD string) string {
+// (rel-1-0-10:GAP-0782). standIn is the neutral folder when cwd is it: it is
+// no folder of the caller, so a wrapper's folder relative to the caller's is
+// not placed from it (actionfacts.Input.StandInCWD, rel-1-0-10:GAP-2188).
+func proxyToolCallCWD(toolCWD string) (cwd, standIn string) {
 	if cwd := inspectToolTrustedShellCWD(toolCWD); cwd != "" {
-		return cwd
+		return cwd, ""
 	}
-	return proxyNeutralCWD()
+	cwd = proxyNeutralCWD()
+	return cwd, cwd
 }
 
 // proxyNeutralCWD is an empty private directory of the gateway (os.MkdirTemp,
