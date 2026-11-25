@@ -1227,8 +1227,23 @@ func knownCredentialReadProof(result effects.Result, f *semanticpb.EffectFact) (
 	if set == "" {
 		return decide.Proof{}, false
 	}
+	flow := effectReadFlow(result, int(f.GetIndex())-1)
+	if target == decide.TargetOtherHomeCredential && flow == decide.FlowNone &&
+		effects.SummaryReader(f.GetOrigin().GetProgram()) {
+		// A digest or a count of another account's credential file whose
+		// output goes nowhere else (sha256sum, md5sum or cksum of a key file
+		// in another home) shows none of its bytes. 1.0.10 allows it in
+		// every tier, as its readers name no such read, and the effects
+		// reading makes no read proof for it either: the read row of another
+		// home's file made it a strict and managed-strict block, an FPR raise
+		// over 1.0.10 on the owner transcripts, which the exact wrapper twin
+		// then gave the sudo form too (GAP-2200). The own-home read of that
+		// shape is the shadow record of RowEffectRead; a read shown, sent or
+		// copied out keeps its row (GAP-0888, GAP-0898).
+		return decide.Proof{}, false
+	}
 	return decide.Proof{Kind: decide.KindRead, Target: target, Certainty: decide.CertKnown,
-		Set: set, Source: effectProofSource, Flow: effectReadFlow(result, int(f.GetIndex())-1)}, true
+		Set: set, Source: effectProofSource, Flow: flow}, true
 }
 
 // maxEffectFlowHops bounds the copies of copies a read's content is

@@ -226,6 +226,20 @@ func init() {
 	buildWindowsTable()
 }
 
+// SummaryReader reports a program whose stdout carries only a count, a test
+// result or a digest of what it reads, whatever its options (Program.Summary:
+// wc, md5sum, sha256sum, cksum, b2sum, cmp), in the GNU and the BSD tables
+// alike. A reader that prints a summary only with an option (grep -c, diff
+// -q) is not one.
+func SummaryReader(program string) bool {
+	gnu, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, false)
+	if !ok || !gnu.Summary {
+		return false
+	}
+	bsd, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, true)
+	return ok && bsd.Summary
+}
+
 func lookupProgram(name string, flavor Flavor, dialect Dialect, bsd bool) (Program, bool) {
 	// The command grammar, not the host, selects the table: a POSIX shell on
 	// Windows (Git Bash) uses the POSIX programs (review N17).
