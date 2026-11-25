@@ -2070,12 +2070,22 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	userView := !hidden && actionProcessOwnsHome(home)
 	candidates, complete, unseen, capped := actionExpandGlobWalk(pattern, literal, hidden, userView, dots, false, false)
 	for _, candidate := range candidates {
-		if protectedReachPath(candidate, protected, ssh) {
+		resolved, ok := ResolveWriteTarget(candidate)
+		if !ok {
+			// A match this process cannot resolve in a hidden view (a link
+			// from a folder it reads into the home it cannot: the managed
+			// gateway behind ProtectHome) names a file the walk did not
+			// see: the walk is unseen there, and the client's answer
+			// decides, else the pattern is unproved (rel-1-0-10:GAP-0444).
+			unseen = unseen || hidden
+			continue
+		}
+		if protectedReachResolved(resolved, protected, ssh) {
 			globs.note(pattern, "1")
 			return true
 		}
 	}
-	if complete {
+	if complete && !(hidden && unseen) {
 		globs.note(pattern, "0")
 		return false
 	}
