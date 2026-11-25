@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // In the separate-user layout the plugin credential may only scan paths of
@@ -34,21 +36,29 @@ func TestOpenClawPathUnderAny(t *testing.T) {
 		}
 	}
 	link := filepath.Join(home, "skills", "escape")
-	if err := os.Symlink(other, link); err != nil {
-		t.Fatal(err)
-	}
+	// A Limited Windows token cannot make the symbolic link: that case skips
+	// there and every other case runs (GAP-2158). The junction out of the
+	// root is GAP-2182's own test.
+	escape := testenv.TrySymlink(t, other, link)
 	roots := []string{home}
-	cases := map[string]bool{
-		filepath.Join(home, "skills", "s1"): true,
-		home:                                true,
-		other:                               false,
-		link:                                false,
-		"relative/path":                     false,
-		filepath.Join(home, "missing"):      false,
-	}
-	for p, want := range cases {
-		if got := openClawPathUnderAny(p, roots); got != want {
-			t.Errorf("openClawPathUnderAny(%q) = %v, want %v", p, got, want)
-		}
+	for _, tc := range []struct {
+		name, path string
+		want       bool
+	}{
+		{"skill folder", filepath.Join(home, "skills", "s1"), true},
+		{"home", home, true},
+		{"other folder", other, false},
+		{"link out of the root", link, false},
+		{"relative path", "relative/path", false},
+		{"missing", filepath.Join(home, "missing"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.path == link {
+				escape.Require(t)
+			}
+			if got := openClawPathUnderAny(tc.path, roots); got != tc.want {
+				t.Errorf("openClawPathUnderAny(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
 	}
 }

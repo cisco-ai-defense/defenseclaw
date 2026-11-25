@@ -33,8 +33,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"

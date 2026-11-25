@@ -157,6 +157,12 @@ func TestUnmanagedGatewayBrokersOnlyThroughATrustedRootSocket(t *testing.T) {
 			previousCheck, previousProbe, previousAwait, previousSleep
 	})
 	socket := "/run/defenseclaw-cowork-sensor/sensor-helper.sock"
+	if runtime.GOOS == "windows" {
+		// A rooted path without a volume is not absolute on Windows, so the
+		// gateway read directly before any check (GAP-2158). The socket
+		// checks are stubbed below; only the path must be absolute.
+		socket = `C:\run\defenseclaw-cowork-sensor\sensor-helper.sock`
+	}
 	t.Setenv(acquire.SocketEnvVar, socket)
 	cfg := &config.Config{DataDir: t.TempDir()}
 	// Every case here is a socket that exists or a folder that is not
