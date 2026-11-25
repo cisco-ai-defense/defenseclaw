@@ -99,6 +99,9 @@ type Output struct {
 	Target string
 	// Append is the >> form; > truncates the file when awk first opens it.
 	Append bool
+	// RecordInput proves that this is the sole action of an unguarded record
+	// program, and print (or printf "%s", $0) sends the input record.
+	RecordInput bool
 }
 
 // Redirect is the shell command that writes Target as the print redirect
@@ -110,6 +113,31 @@ func (o Output) Redirect() string {
 		operator = ">>"
 	}
 	return ": " + operator + " '" + strings.ReplaceAll(o.Target, "'", `'\''`) + "'"
+}
+
+// RedirectInput is the plain shell reading of an unguarded awk record
+// action that sends static input files to a literal network redirect.
+func (o Output) RedirectInput(inputs []string) string {
+	if len(inputs) == 0 {
+		return o.Redirect()
+	}
+	operator := ">"
+	if o.Append {
+		operator = ">>"
+	}
+	var b strings.Builder
+	b.WriteString("cat")
+	for _, input := range inputs {
+		b.WriteString(" '")
+		b.WriteString(strings.ReplaceAll(input, "'", `'\''`))
+		b.WriteByte(39)
+	}
+	b.WriteByte(' ')
+	b.WriteString(operator)
+	b.WriteString(" '")
+	b.WriteString(strings.ReplaceAll(o.Target, "'", `'\''`))
+	b.WriteByte(39)
+	return b.String()
 }
 
 // RunsCommand reports a program with a command channel, a directive that
@@ -606,11 +634,34 @@ func (p *Program) addPrintPipe(tokens []token, match []int, i int) {
 				end++
 			}
 			if value, _, ok := literalConcat(tokens, match, j+1, end); ok && value != "" {
-				p.Outputs = append(p.Outputs, Output{Target: value, Append: t.text == ">>"})
+				p.Outputs = append(p.Outputs, Output{Target: value, Append: t.text == ">>",
+					RecordInput: unguardedRecordOutput(tokens, i, j, end)})
 			}
 			return
 		}
 	}
+}
+
+// unguardedRecordOutput proves the only record action copies $0 to the
+// redirect. A BEGIN/END block, condition, function, or second statement does
+// not prove that the call sends an input file's contents.
+func unguardedRecordOutput(tokens []token, printAt, redirectAt, end int) bool {
+	if len(tokens) < 5 || tokens[0].text != "{" || tokens[0].kind != tokPunct ||
+		tokens[len(tokens)-1].text != "}" || tokens[len(tokens)-1].kind != tokPunct ||
+		printAt != 1 || end != len(tokens)-1 {
+		return false
+	}
+	args := tokens[printAt+1 : redirectAt]
+	if tokens[printAt].text == "print" {
+		return len(args) == 0 || len(args) == 2 &&
+			args[0].kind == tokPunct && args[0].text == "$" &&
+			args[1].kind == tokWord && args[1].text == "0"
+	}
+	return tokens[printAt].text == "printf" && len(args) == 4 &&
+		args[0].kind == tokString && args[0].text == "%s" &&
+		args[1].kind == tokPunct && args[1].text == "," &&
+		args[2].kind == tokPunct && args[2].text == "$" &&
+		args[3].kind == tokWord && args[3].text == "0"
 }
 
 func continuesLine(t token) bool {
