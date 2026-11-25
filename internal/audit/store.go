@@ -786,6 +786,7 @@ func retryBusyObserved(
 }
 
 func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
+	s.followWriteLockHold()
 	var res sql.Result
 	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var execErr error
