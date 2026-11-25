@@ -4331,20 +4331,9 @@ func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string
 // resolvedRootOf is the physical folder behind a watched root that is reached
 // through a link, when that folder is in the home of the account that owns
 // the root. False for a plain root, an unsafe link or another account's
-// folder. The Secure Client profile checks no owner and keeps the earlier
-// answer for a root reached through a Windows junction: not mapped
-// (rel-1-0-10:GAP-2185).
+// folder.
 func (w *InstallWatcher) resolvedRootOf(root string) (string, bool) {
-	var resolved string
-	var err error
-	if w.secureClientActive() {
-		if junctionOnRoute(root) {
-			return "", false
-		}
-		resolved, err = winpath.EvalLinks(root)
-	} else {
-		resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
-	}
+	resolved, err := skillrootsafe.Resolve(root, watcherEvalSymlinks)
 	if err != nil || sameWatcherPath(resolved, root) {
 		return "", false
 	}
@@ -4354,27 +4343,6 @@ func (w *InstallWatcher) resolvedRootOf(root string) (string, bool) {
 		return "", false
 	}
 	return resolved, true
-}
-
-// junctionOnRoute reports whether path or a folder above it is a Windows
-// junction or another reparse point that is not a symbolic link (Lstat
-// reports it as irregular). A path that cannot be inspected counts as one.
-func junctionOnRoute(path string) bool {
-	if runtime.GOOS != "windows" {
-		return false
-	}
-	for dir := filepath.Clean(path); ; dir = filepath.Dir(dir) {
-		info, err := os.Lstat(dir)
-		if err == nil && info.Mode()&os.ModeIrregular != 0 {
-			return true
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return true
-		}
-		if filepath.Dir(dir) == dir {
-			return false
-		}
-	}
 }
 
 // forgetMovedAsset drops the rescan baseline of an asset that admission

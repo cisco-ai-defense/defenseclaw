@@ -73,10 +73,9 @@ func TestGAP2185PolicyHoldFollowsJunctions(t *testing.T) {
 	}
 }
 
-// The Secure Client profile keeps the earlier answer for a root reached
-// through a junction: it is not mapped to the folder behind it, since that
-// profile checks no owner (rel-1-0-10:GAP-2185).
-func TestGAP2185SecureClientDoesNotMapARootThroughAJunction(t *testing.T) {
+// A watched root that is a junction, or below one, is not mapped to the folder
+// behind it (rel-1-0-10:GAP-2185).
+func TestGAP2185ResolvedRootOfDoesNotMapARootThroughAJunction(t *testing.T) {
 	base := gap2185Base(t)
 	outside := filepath.Join(base, "outside", "skills")
 	if err := os.MkdirAll(filepath.Join(outside, "inner"), 0o700); err != nil {
@@ -84,18 +83,12 @@ func TestGAP2185SecureClientDoesNotMapARootThroughAJunction(t *testing.T) {
 	}
 	junction := filepath.Join(base, "skills-junction")
 	gap2185Junction(t, junction, outside)
-	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
-	cfg.Enterprise.Profile = "secure_client"
-	for name, w := range map[string]*InstallWatcher{"secure client": {cfg: cfg}, "default": {cfg: &config.Config{}}} {
-		if name == "secure client" && !w.secureClientActive() {
-			t.Fatal("the test config does not select the Secure Client profile")
-		}
-		if got, ok := w.resolvedRootOf(junction); ok {
-			t.Errorf("%s: resolvedRootOf(junction root) = %q, true; want not mapped", name, got)
-		}
-		if got, ok := w.resolvedRootOf(filepath.Join(junction, "inner")); ok {
-			t.Errorf("%s: resolvedRootOf(root below a junction) = %q, true; want not mapped", name, got)
-		}
+	w := &InstallWatcher{cfg: &config.Config{}}
+	if got, ok := w.resolvedRootOf(junction); ok {
+		t.Errorf("resolvedRootOf(junction root) = %q, true; want not mapped", got)
+	}
+	if got, ok := w.resolvedRootOf(filepath.Join(junction, "inner")); ok {
+		t.Errorf("resolvedRootOf(root below a junction) = %q, true; want not mapped", got)
 	}
 }
 

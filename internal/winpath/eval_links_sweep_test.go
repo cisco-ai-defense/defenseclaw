@@ -63,13 +63,11 @@ const linuxOnly = "OpenShell and the kernel policy run only on Linux"
 // (rel-1-0-10:GAP-2182, rel-1-0-10:GAP-2185). Such files use winpath.EvalLinks.
 // The sweep covers the whole module, so a wrapper or a seam (a variable set to
 // filepath.EvalSymlinks) in any package is seen, and it sees the function
-// under any import name, a dot import included. It reads the sources, so it
+// under every import name a file gives path/filepath, a dot import included.
+// It reads the files of the plain Windows build and those built only with
+// the cmid tag, the Windows enterprise build. It reads the sources, so it
 // runs on every CI runner.
 func TestNoEvalSymlinksInWindowsBuiltFiles(t *testing.T) {
-	ctx := build.Default
-	ctx.GOOS = "windows"
-	ctx.GOARCH = "amd64"
-	ctx.CgoEnabled = false
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +97,7 @@ func TestNoEvalSymlinksInWindowsBuiltFiles(t *testing.T) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
-		if ok, err := ctx.MatchFile(filepath.Dir(path), name); err != nil || !ok {
+		if ok, err := builtForWindows(filepath.Dir(path), name); err != nil || !ok {
 			return err
 		}
 		files++
@@ -144,6 +142,30 @@ func TestNoEvalSymlinksInWindowsBuiltFiles(t *testing.T) {
 	}
 }
 
+// windowsBuildTags are the build tag sets of the builds that run on Windows:
+// the plain one and the enterprise one (-tags cmid).
+var windowsBuildTags = [][]string{nil, {"cmid"}}
+
+// builtForWindows reports whether Go builds the file for Windows in any of
+// windowsBuildTags.
+func builtForWindows(dir, name string) (bool, error) {
+	for _, tags := range windowsBuildTags {
+		ctx := build.Default
+		ctx.GOOS = "windows"
+		ctx.GOARCH = "amd64"
+		ctx.CgoEnabled = false
+		ctx.BuildTags = tags
+		ok, err := ctx.MatchFile(dir, name)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // evalSymlinksUses are the places in one file that name
 // filepath.EvalSymlinks, under the import name the file gives path/filepath
 // or through a dot import.
@@ -154,20 +176,20 @@ func evalSymlinksUses(t *testing.T, path string, src []byte) []token.Position {
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
-	local, dot := "", false
+	locals, dot := map[string]bool{}, false
 	for _, spec := range file.Imports {
 		if p, _ := strconv.Unquote(spec.Path.Value); p == "path/filepath" {
 			switch {
 			case spec.Name == nil:
-				local = "filepath"
+				locals["filepath"] = true
 			case spec.Name.Name == ".":
 				dot = true
 			default:
-				local = spec.Name.Name
+				locals[spec.Name.Name] = true
 			}
 		}
 	}
-	if local == "" && !dot {
+	if len(locals) == 0 && !dot {
 		return nil
 	}
 	// Names that only look like a use: the selected name of x.EvalSymlinks,
@@ -178,7 +200,7 @@ func evalSymlinksUses(t *testing.T, path string, src []byte) []token.Position {
 		switch n := n.(type) {
 		case *ast.SelectorExpr:
 			notUse[n.Sel] = true
-			if id, ok := n.X.(*ast.Ident); ok && local != "" && id.Name == local && n.Sel.Name == "EvalSymlinks" {
+			if id, ok := n.X.(*ast.Ident); ok && locals[id.Name] && n.Sel.Name == "EvalSymlinks" {
 				uses = append(uses, fset.Position(n.Pos()))
 			}
 		case *ast.FuncDecl:
@@ -211,6 +233,8 @@ func TestEvalSymlinksUsesFindsEverySpelling(t *testing.T) {
 		{"plain call", "package p\nimport \"path/filepath\"\nfunc f() { filepath.EvalSymlinks(\"a\") }\n", 1},
 		{"seam", "package p\nimport \"path/filepath\"\nvar eval = filepath.EvalSymlinks\n", 1},
 		{"renamed import", "package p\nimport fp \"path/filepath\"\nvar eval = fp.EvalSymlinks\nfunc f() { fp.EvalSymlinks(\"a\") }\n", 2},
+		{"two import names", "package p\nimport (\n\t\"path/filepath\"\n\tfp \"path/filepath\"\n)\nvar eval = filepath.EvalSymlinks\nfunc f() { fp.EvalSymlinks(\"a\") }\n", 2},
+		{"two import names, last one unused", "package p\nimport (\n\tfp \"path/filepath\"\n\t_ \"path/filepath\"\n)\nfunc f() { fp.EvalSymlinks(\"a\") }\n", 1},
 		{"dot import", "package p\nimport . \"path/filepath\"\nvar eval = EvalSymlinks\nfunc f() { EvalSymlinks(\"a\") }\n", 2},
 		{"method of that name", "package p\nimport \"path/filepath\"\ntype fsys struct{}\nfunc (fsys) EvalSymlinks(p string) (string, error) { return filepath.Clean(p), nil }\nfunc g(f fsys) { f.EvalSymlinks(\"a\") }\n", 0},
 		{"interface method, dot import", "package p\nimport . \"path/filepath\"\ntype FS interface{ EvalSymlinks(string) (string, error) }\nvar _ = Clean\n", 0},
@@ -223,5 +247,37 @@ func TestEvalSymlinksUsesFindsEverySpelling(t *testing.T) {
 				t.Fatalf("uses = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// The sweep reads a file built only with the cmid tag, and no file that no
+// Windows build reads.
+func TestBuiltForWindowsReadsTheEnterpriseBuild(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		file, src string
+		want      bool
+	}{
+		{"plain.go", "package p\n", true},
+		{"windows_only.go", "//go:build windows\n\npackage p\n", true},
+		{"cmid_only.go", "//go:build cmid\n\npackage p\n", true},
+		{"windows_cmid.go", "//go:build windows && cmid\n\npackage p\n", true},
+		{"no_cmid.go", "//go:build !cmid\n\npackage p\n", true},
+		{"linux_cmid.go", "//go:build linux && cmid\n\npackage p\n", false},
+		{"linux_only.go", "//go:build linux\n\npackage p\n", false},
+		{"never.go", "//go:build ignore\n\npackage p\n", false},
+		{"file_linux.go", "package p\n", false},
+	}
+	for _, tc := range cases {
+		if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := builtForWindows(dir, tc.file)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.file, err)
+		}
+		if got != tc.want {
+			t.Errorf("builtForWindows(%s) = %v, want %v", tc.file, got, tc.want)
+		}
 	}
 }
