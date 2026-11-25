@@ -99,6 +99,9 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			// written, as a Linux gateway, whose same-named system folders
 			// are no links, places it (rel-1-0-10:GAP-2203). A Windows host
 			// spells no POSIX folder, so its walk is left as it was.
+			if guestOtherProcessFolder(logical) {
+				return "", false
+			}
 			return filepath.Clean(logical), true
 		}
 		value, ok := ResolveWriteTarget(logical)
@@ -818,6 +821,36 @@ func directoryFactRequired(directory, home string, linuxGuest bool) bool {
 		if root != "" && (directory == root || strings.HasPrefix(directory, root+string(filepath.Separator))) {
 			return true
 		}
+	}
+	return false
+}
+
+// guestOtherProcessFolder reports a guest folder below /proc/<pid> (or its
+// task/<tid>) that is another process's private entry: the root, cwd and exe
+// links and anything below its fd, fdinfo, map_files and ns folders. An
+// unprivileged Linux gateway cannot read those (EACCES), so its walk leaves
+// the directory unknown and a later write fails closed; the guest walk on a
+// gateway host that is not Linux gives the same answer instead of placing
+// the folder as written (RV-2203 P2-1, rel-1-0-10:GAP-2203). /proc/<pid>
+// itself, its other entries, /proc/self and /proc/thread-self are placed as
+// written: a Linux gateway reads them.
+func guestOtherProcessFolder(directory string) bool {
+	rest, ok := strings.CutPrefix(directory, "/proc/")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	for len(parts) >= 2 && allDigits(parts[0]) {
+		switch parts[1] {
+		case "root", "cwd", "exe":
+			return true
+		case "fd", "fdinfo", "map_files", "ns":
+			return len(parts) > 2
+		case "task":
+			parts = parts[2:]
+			continue
+		}
+		return false
 	}
 	return false
 }

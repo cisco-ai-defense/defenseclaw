@@ -78,7 +78,9 @@ func gap2203PinnedActorAnswer(t *testing.T, name, laptop string, laptopRules []s
 // resolved the guest's /tmp, /var/tmp and /sandbox on the host and allowed
 // with an alert what a Linux gateway blocks (rel-1-0-10:GAP-2203). The actor
 // gets the Linux gateway's answer on every gateway OS; the laptop keeps its
-// own host's answer (CMD-EVAL alert for the eval rows).
+// own host's answer (CMD-EVAL alert for the eval rows). A guest folder
+// through another process's private /proc entries is unknown, as on a Linux
+// gateway (RV-2203 P2-1).
 func TestGAP2203SandboxGuestFoldersFollowTheLinuxLayout(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
@@ -87,29 +89,51 @@ func TestGAP2203SandboxGuestFoldersFollowTheLinuxLayout(t *testing.T) {
 	keys := []string{gap2203KeysRule}
 	evalKeys := []string{"CMD-EVAL", gap2203KeysRule}
 	evalOnly := []string{"CMD-EVAL"}
+	// strictAction, when set, is the answer in the strict pack. pid1 rows go
+	// through process 1's private /proc entries, which an unprivileged
+	// Linux gateway cannot read (RV-2203 P2-1); a Linux gateway that can
+	// read them answers otherwise, so they are skipped only there.
 	rows := []struct {
 		command, action string
 		rules           []string
+		strictAction    string
+		pid1            bool
 	}{
-		{"cd /tmp && eval 'x=f; echo m > $x'", "block", evalKeys},
-		{"cd /var/tmp && eval 'x=f; echo m > $x'", "block", evalKeys},
-		{"cd /home && eval 'x=f; echo m > $x'", "block", evalKeys},
-		{"cd " + sandboxauth.SandboxHome + "/app && eval 'x=notes.txt; echo m >> $x'", "block", evalKeys},
-		{"cd /etc && eval 'x=f; echo m > $x'", "alert", evalOnly},
-		{"cd /var && eval 'x=f; echo m > $x'", "alert", evalOnly},
-		{"cd /opt && eval 'x=f; echo m > $x'", "alert", evalOnly},
-		{"cd /private/tmp && eval 'x=f; echo m > $x'", "alert", evalOnly},
-		{`cd /tmp && eval "echo m > $F"`, "alert", evalOnly},
-		{"cd /etc && echo k >> ../sandbox/.ssh/" + kf, "block", keys},
-		{"cd /tmp && echo k >> ../sandbox/.ssh/" + kf, "block", keys},
-		{"cd /var/tmp && echo k >> ../../sandbox/.ssh/" + kf, "block", keys},
-		{"cd -P /tmp && echo k >> ../sandbox/.ssh/" + kf, "block", keys},
-		{"cd -P /etc && echo k >> ../sandbox/.ssh/" + kf, "block", keys},
-		{"cd /etc/../sandbox/.ssh && echo k >> " + kf, "block", keys},
-		{"cd /tmp && echo m > notes.txt", "allow", nil},
-		{"cd /etc && cat hosts > " + sandboxauth.SandboxHome + "/app/h.txt", "allow", nil},
-		{"cd " + sandboxauth.SandboxHome + " && echo m > app/notes.txt", "allow", nil},
+		{"cd /tmp && eval 'x=f; echo m > $x'", "block", evalKeys, "", false},
+		{"cd /var/tmp && eval 'x=f; echo m > $x'", "block", evalKeys, "", false},
+		{"cd /home && eval 'x=f; echo m > $x'", "block", evalKeys, "", false},
+		{"cd " + sandboxauth.SandboxHome + "/app && eval 'x=notes.txt; echo m >> $x'", "block", evalKeys, "", false},
+		{"cd /etc && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{"cd /var && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{"cd /opt && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{"cd /private/tmp && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{`cd /tmp && eval "echo m > $F"`, "alert", evalOnly, "", false},
+		{"cd /etc && echo k >> ../sandbox/.ssh/" + kf, "block", keys, "", false},
+		{"cd /tmp && echo k >> ../sandbox/.ssh/" + kf, "block", keys, "", false},
+		{"cd /var/tmp && echo k >> ../../sandbox/.ssh/" + kf, "block", keys, "", false},
+		{"cd -P /tmp && echo k >> ../sandbox/.ssh/" + kf, "block", keys, "", false},
+		{"cd -P /etc && echo k >> ../sandbox/.ssh/" + kf, "block", keys, "", false},
+		{"cd /etc/../sandbox/.ssh && echo k >> " + kf, "block", keys, "", false},
+		{"cd /tmp && echo m > notes.txt", "allow", nil, "", false},
+		{"cd /etc && cat hosts > " + sandboxauth.SandboxHome + "/app/h.txt", "allow", nil, "", false},
+		{"cd " + sandboxauth.SandboxHome + " && echo m > app/notes.txt", "allow", nil, "", false},
+		{"cd /proc/1/root && eval 'x=f; echo m > $x'", "block", evalKeys, "", true},
+		{"cd /proc/1/root/tmp && eval 'x=f; echo m > $x'", "block", evalKeys, "", true},
+		{"cd /proc/1/exe && eval 'x=f; echo m > $x'", "block", evalKeys, "", true},
+		{"cd /proc/1/fd/3 && eval 'x=f; echo m > $x'", "block", evalKeys, "", true},
+		{"cd /proc/1/task/1/root && eval 'x=f; echo m > $x'", "block", evalKeys, "", true},
+		{"cd /proc && cd 1/root && eval 'x=f; echo m > $x'", "block", evalKeys, "", true},
+		{"cd /proc/1/root && cd /tmp && eval 'x=f; echo m > $x'", "block", evalKeys, "", true},
+		{"cd /proc/1/cwd && eval 'x=f; echo m > $x'", "alert", evalKeys, "block", true},
+		{"cd /proc/1/root && echo m > notes.txt", "allow", nil, "", true},
+		{"cd /proc/1 && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{"cd /proc/1/fd && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{"cd /proc/1/task/1 && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{"cd /proc/thread-self/root && eval 'x=f; echo m > $x'", "alert", evalOnly, "", false},
+		{"cd /proc/self/cwd && eval 'x=f; echo m > $x'", "alert", evalKeys, "block", false},
 	}
+	_, pid1Err := os.Readlink("/proc/1/root")
+	pid1Readable := pid1Err == nil
 	for _, pack := range []string{"default", "strict"} {
 		t.Run(pack, func(t *testing.T) {
 			api, actor, _, _ := gap0545API(t, "claudecode", pack)
@@ -129,12 +153,19 @@ func TestGAP2203SandboxGuestFoldersFollowTheLinuxLayout(t *testing.T) {
 				return out.Action, slices.Compact(out.Rules)
 			}
 			for _, row := range rows {
+				if row.pid1 && pid1Readable {
+					continue
+				}
+				want := row.action
+				if pack == "strict" && row.strictAction != "" {
+					want = row.strictAction
+				}
 				body, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "gap2203",
 					"cwd": sandboxauth.SandboxHome + "/app", "tool_name": "Bash", "tool_input": map[string]any{"command": row.command},
 					"tool_use_id": "gap2203"})
 				action, rules := hook(gap0545Actor(actor, "claudecode", "PreToolUse", body, nil), body)
-				if action != row.action || !slices.Equal(rules, row.rules) {
-					t.Errorf("%q: actor %s %v, want the Linux gateway's %s %v on every gateway OS", row.command, action, rules, row.action, row.rules)
+				if action != want || !slices.Equal(rules, row.rules) {
+					t.Errorf("%q: actor %s %v, want the Linux gateway's %s %v on every gateway OS", row.command, action, rules, want, row.rules)
 				}
 			}
 		})
