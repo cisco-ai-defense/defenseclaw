@@ -82,7 +82,6 @@ func installPricedUsageEngine(t *testing.T) chan modelusage.Record {
 	e := modelusage.NewEngine(usageCaptureSink{ch: ch})
 	e.Apply(config.TokenomicsConfig{Enabled: true}, config.PricingConfig{Version: "t1", Models: []config.PriceEntryConfig{
 		{Provider: "anthropic", Model: "claude-haiku-4-5*", PriceRatesConfig: config.PriceRatesConfig{InputPerMTok: usd1112(1), OutputPerMTok: usd1112(5)}},
-		{Provider: "openai", Model: "gpt-5*", PriceRatesConfig: config.PriceRatesConfig{InputPerMTok: usd1112(1), OutputPerMTok: usd1112(5)}},
 	}})
 	e.SetSpendSink(routingAdminRuntime)
 	prev := processModelUsage.Load()
