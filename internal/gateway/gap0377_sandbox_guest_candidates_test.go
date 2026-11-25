@@ -253,25 +253,54 @@ func gap0377S7Rows() []gap0377Row {
 // never judges it weaker, and names every rule the laptop names; a benign
 // command gets the laptop's exact answer. Where the laptop's own reading
 // loses the cd the actor may name more (substrate-1 GAP-0367).
+//
+// Each row set runs as one top-level test per pack: a set took 500 s on a
+// hosted race runner in all three packs, more than a CI shard may plan
+// (test_linux_gateway_shard_timeouts_fit_the_job; PR #1493 CI at 712c31be08
+// timed out four gateway shards).
 func TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates(t *testing.T) {
-	gap0377Check(t, gap0377NearbyRows())
+	gap0377Check(t, gap0377NearbyRows(), "default")
+}
+
+func TestGAP0377SandboxGuestPlacementKeepsLaptopCandidatesPermissive(t *testing.T) {
+	gap0377Check(t, gap0377NearbyRows(), "permissive")
+}
+
+func TestGAP0377SandboxGuestPlacementKeepsLaptopCandidatesStrict(t *testing.T) {
+	gap0377Check(t, gap0377NearbyRows(), "strict")
 }
 
 // TestGAP0377SandboxGuestPlacementCountsStatements: the threshold rows of
 // substrate-1 GAP-0377 (see TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates).
 func TestGAP0377SandboxGuestPlacementCountsStatements(t *testing.T) {
-	gap0377Check(t, gap0377ThresholdRows())
+	gap0377Check(t, gap0377ThresholdRows(), "default")
+}
+
+func TestGAP0377SandboxGuestPlacementCountsStatementsPermissive(t *testing.T) {
+	gap0377Check(t, gap0377ThresholdRows(), "permissive")
+}
+
+func TestGAP0377SandboxGuestPlacementCountsStatementsStrict(t *testing.T) {
+	gap0377Check(t, gap0377ThresholdRows(), "strict")
 }
 
 // TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrix: S7's CD-CANDIDATE
 // matrix rows (see TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates).
 func TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrix(t *testing.T) {
-	gap0377Check(t, gap0377S7Rows())
+	gap0377Check(t, gap0377S7Rows(), "default")
 }
 
-// gap0377Check judges rows on the laptop and in a copy-mode actor in every
-// pack.
-func gap0377Check(t *testing.T, rows []gap0377Row) {
+func TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrixPermissive(t *testing.T) {
+	gap0377Check(t, gap0377S7Rows(), "permissive")
+}
+
+func TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrixStrict(t *testing.T) {
+	gap0377Check(t, gap0377S7Rows(), "strict")
+}
+
+// gap0377Check judges rows on the laptop and in a copy-mode actor in the
+// given packs, every pack when none is given.
+func gap0377Check(t *testing.T, rows []gap0377Row, packs ...string) {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
@@ -285,7 +314,10 @@ func gap0377Check(t *testing.T, rows []gap0377Row) {
 		}
 		return 1
 	}
-	for _, pack := range []string{"default", "permissive", "strict"} {
+	if len(packs) == 0 {
+		packs = []string{"default", "permissive", "strict"}
+	}
+	for _, pack := range packs {
 		t.Run(pack, func(t *testing.T) {
 			installToolCallCorpusProfileConnector(t, "claudecode", pack)
 			home := filepath.Join(t.TempDir(), "home", "alice")
