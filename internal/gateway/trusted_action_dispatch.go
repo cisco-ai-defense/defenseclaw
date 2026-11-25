@@ -1106,11 +1106,15 @@ func dispatchTrustedActionOnce(
 	// candidates, work or lookups) is TRUNCATED too: at least the unknown
 	// tier of the pack, and what it resolved before the cap still joins the
 	// chain (rel-1-0-10:GAP-1029).
-	if set := facts.CredentialPathReadCaps(); set.Any() {
+	if set := facts.CredentialPathReadCaps(parent); set.Any() {
 		defer func() {
 			findings = withBoundedTruncation(findings, set, request)
 		}()
 	}
+	// The record is whole only up to here: every later reader of it (the
+	// chain projection, the placement) sees the reads it can tell apart
+	// (substrate-1:GAP-0674).
+	thinCredentialPathReads(facts)
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
