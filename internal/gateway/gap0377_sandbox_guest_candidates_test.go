@@ -312,6 +312,13 @@ func gap0377Check(t *testing.T, rows []gap0377Row) {
 			for _, row := range rows {
 				la, lr := gap0304Verdict(t, api, context.Background(), home, strings.ReplaceAll(row.command, "{cwd}", home))
 				ca, cr := gap0304Verdict(t, api, actor, sandboxauth.SandboxHome, strings.ReplaceAll(row.command, "{cwd}", sandboxauth.SandboxHome))
+				// The actor is a Linux guest: its answer is the Linux one on
+				// every gateway OS, where a macOS laptop may add the keys
+				// rule through the host's own /etc or /tmp link
+				// (rel-1-0-10:GAP-2203).
+				if gap2203PinnedActorAnswer(t, row.name, la, lr, ca, cr) {
+					continue
+				}
 				if row.benign && row.stricter == "" {
 					if ca != la || !slices.Equal(cr, lr) {
 						t.Errorf("%s: benign: copy-mode actor %s %v, laptop %s %v", row.name, ca, cr, la, lr)

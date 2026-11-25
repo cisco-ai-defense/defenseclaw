@@ -260,7 +260,7 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 		writes = append(writes, bounded...)
 	}
 	var directoryParsed bool
-	directoryWrites, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, &directoryParsed, file)
+	directoryWrites, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, false, &directoryParsed, file)
 	if cache != nil && cache.ready {
 		cache.shellParsed = directoryParsed
 	}
