@@ -1187,6 +1187,21 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// (rel-1-0-10:GAP-0999), and it only adds findings.
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
+	if twin, ok := wrapperExactTwinRequest(action); ok {
+		// A program run through a chain of static prefix wrappers that hands
+		// it its argv unchanged (taskset 1 sudo env LD_PRELOAD=x curl URL,
+		// chrt -i 0 pkill -f defenseclaw) keeps the cell its plain call gets
+		// for the rules that judge the program by its own words
+		// (wrappedProgramRules; GAP-1461, GAP-1494; DET111 ruling
+		// 2026-11-24T21:35Z). The plain call is judged by every reading,
+		// after every reading of the wrapped call, and it only raises the
+		// call (withRaiseOnlyTwinFindings; DET111 ruling 2026-11-25T01:30Z).
+		// A wrapper read only with words that may expand, a shell STRING, a
+		// moved folder and the writer sink grammar keep the call readings.
+		findings = withRaiseOnlyTwinFindings(findings, slices.DeleteFunc(trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient), func(f RuleFinding) bool {
+			return !wrappedProgramRule(f.RuleID)
+		}))
+	}
 	return withEffectsFoldedIntoCall(findings)
 }
 

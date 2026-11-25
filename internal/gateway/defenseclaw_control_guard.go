@@ -56,6 +56,15 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 		return findings
 	}
 	controls := defenseClawControlReader(actionfacts.Analyze(request.Input), text)
+	// A program run through static prefix wrappers that hand it its argv
+	// unchanged (chrt -i 0 pkill -f defenseclaw, taskset 0x1 defenseclaw
+	// uninstall --all) is read as its plain call too (GAP-1494,
+	// actionfacts.WrapperUnwrapExactTwin).
+	if twin, ok := actionfacts.WrapperUnwrapExactTwin(text); ok {
+		input := request.Input
+		input.Command, input.Args, input.Argv = twin, nil, nil
+		controls = append(controls, defenseClawControlReader(actionfacts.Analyze(input), twin)...)
+	}
 	if len(controls) == 0 {
 		return findings
 	}

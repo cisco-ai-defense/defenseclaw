@@ -1791,6 +1791,9 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			legacyText: `{"command":"` + oversizedAttack + `"}`,
 		},
 		{
+			// The call is also judged as bash runs it, rm -rf / > f 2> f
+			// (bashAggregateRedirectTwinRequest, GAP-2151): the delete
+			// enforces as that one-step form's does.
 			name: "bash combined output redirect",
 			input: actionfacts.Input{
 				Tool:    "bash",
@@ -1799,6 +1802,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  dangerous + " &>/tmp/dc.log",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			// The here-string call is judged as its POSIX twin

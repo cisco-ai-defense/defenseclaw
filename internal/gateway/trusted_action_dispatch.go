@@ -1005,6 +1005,18 @@ func dispatchTrustedActionOnce(
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
 		}()
 	}
+	// A Bash or zsh all-output redirect (cmd &> f, cmd &>> f, cmd >& f)
+	// writes f, while the POSIX facts read "cmd &" and "> f" (or no
+	// command at all) and tie no write of f to the call: the call is also
+	// judged as the spelling the shell runs (> f 2> f), and the stricter of
+	// the two readings counts. echo k &>> ~/.bashrc gets the cell of
+	// echo k >> ~/.bashrc (GAP-2151), for every rule a write decides, as
+	// the state write already did (GAP-2143).
+	if twin, ok := bashAggregateRedirectTwinRequest(request); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	if shellUnread {
 		// A shell runs here-document or here-string text the reading cannot
 		// know (a body with a command substitution, a document handed on
@@ -2328,6 +2340,25 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 	twin := request
 	twin.Input = input
 	return provenStateMutationPath(actionfacts.Analyze(input), twin)
+}
+
+// bashAggregateRedirectTwinRequest returns the request for the Bash reading
+// of a POSIX call with an all-output redirect (actionfacts
+// BashAggregateRedirectsAsPOSIX): its redirects spelled > f 2> f. The
+// spelling has no such redirect left, so its own dispatch makes no twin.
+func bashAggregateRedirectTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	spelled, ok := actionfacts.BashAggregateRedirectsAsPOSIX(command)
+	if !ok || spelled == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, spelled), true
 }
 
 // cmdProgramWord finds a word that starts cmd.exe in an agent's shell
@@ -10644,6 +10675,95 @@ var wrappedStateMutationRules = map[string]bool{
 	"TAMPER.AGENT_HOOK_CONFIG_WRITE":   true,
 	"TAMPER.AGENT_HOOK_CONFIG_DISABLE": true,
 	"CMD-RM-RF":                        true,
+}
+
+// wrapperExactTwinRequest returns the request for the reading of a POSIX
+// Bash call by actionfacts.WrapperUnwrapExactTwin.
+func wrapperExactTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.WrapperUnwrapExactTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
+// wrappedProgramRules are the rules that judge a program by its own words,
+// which a static prefix wrapper hands it unchanged
+// (wrapperExactTwinRequest): the cloud metadata fetch, the setuid and
+// world-writable mode changes (GAP-1461), and the fetched or decoded script
+// run, the reverse shell, a credential file read and the DefenseClaw stop
+// and uninstall (GAP-1494). The writer sink rules (an upload of a file)
+// are not here: sudo curl stays outside their exact curl grammar.
+var wrappedProgramRules = map[string]bool{
+	"C2-METADATA-AWS": true, "C2-METADATA-AZURE": true, "C2-METADATA-GCP": true,
+	"C2-METADATA-HEX": true, "C2-METADATA-DECIMAL": true, "C2-METADATA-OCTAL": true,
+	"CMD-PRIV-SETUID": true, "CMD-CHMOD-WORLD": true,
+	"CMD-PIPE-CURL": true, "CMD-PIPE-WGET": true, "CMD-PIPE-BASE64": true,
+	"CMD-REVSHELL-BASH": true, "CMD-REVSHELL-NC": true, "CMD-REVSHELL-DEVTCP": true, "CMD-REVSHELL-PYTHON": true,
+	canonicalTrustedRuleID(defenseClawControlDisableRuleID): true,
+	"PATH-AWS-CREDS": true, "PATH-GIT-CREDS": true, "PATH-NETRC": true, "PATH-NPMRC": true,
+	"PATH-PYPIRC": true, "PATH-KUBE": true, "PATH-DOCKER": true, "PATH-SSH-KEY": true,
+}
+
+// withRaiseOnlyTwinFindings is findings with the findings of the plain
+// reading of a wrapped call (wrapperExactTwinRequest) that raise it: a rule
+// the call lacks is added, and an enforcing finding takes the place of the
+// calls finding of the same rule that may not enforce. The calls own
+// findings are never folded away or replaced by a weaker one: the wrapped
+// form keeps a cell above its plain spelling (taskset 1 cp
+// ~/.git-credentials /tmp/x keeps its effects-lane block, where the plain
+// cp alerts MEDIUM), as parity only raises the lower form (R-NOLOSS; DET111
+// ruling 2026-11-25T01:30Z).
+func withRaiseOnlyTwinFindings(findings, twin []RuleFinding) []RuleFinding {
+	for _, plain := range twin {
+		key := trustedActionFindingKey(plain.RuleID)
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return trustedActionFindingKey(finding.RuleID) == key
+		})
+		switch {
+		case index < 0:
+			if !foldsAStrongerEffectFinding(findings, plain) {
+				findings = append(findings, plain)
+			}
+		case plain.contributesToEnforcement() && !findings[index].contributesToEnforcement():
+			findings[index] = withFloorRaiseOnlyOf(plain, findings[index])
+		}
+	}
+	return findings
+}
+
+// foldsAStrongerEffectFinding reports that f, a 1.0.10 finding, would fold
+// an effects-lane finding of findings (decide.FoldsIntoLegacy, the fold the
+// call list gets last) that is stronger than f: by enforcement, or by
+// severity at the same enforcement.
+func foldsAStrongerEffectFinding(findings []RuleFinding, f RuleFinding) bool {
+	if isEffectFinding(f) {
+		return false
+	}
+	for _, effect := range findings {
+		if !isEffectFinding(effect) || len(withoutEffectsFoldedInto([]RuleFinding{effect}, []RuleFinding{f})) == 1 {
+			continue
+		}
+		switch enforces := effect.contributesToEnforcement(); {
+		case enforces && !f.contributesToEnforcement():
+			return true
+		case enforces == f.contributesToEnforcement() && guardrailSeverityRank(effect.Severity) > guardrailSeverityRank(f.Severity):
+			return true
+		}
+	}
+	return false
+}
+
+// wrappedProgramRule reports a rule of wrappedProgramRules.
+func wrappedProgramRule(ruleID string) bool {
+	return wrappedProgramRules[canonicalTrustedRuleID(ruleID)]
 }
 
 // wrappedStateMutationRule reports a rule of wrappedStateMutationRules.
