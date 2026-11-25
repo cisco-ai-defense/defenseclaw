@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,13 +138,15 @@ func pypiUploadHost(h string) bool { return h == "upload.pypi.org" || h == "test
 
 // RegistryProbe is what the agent's home and the image hold before the
 // start writes anything: the content of each file that exists (Links names
-// those that are symbolic links; they are never read or written), and the
+// those that are symbolic links; they are never read or written; TooLarge
+// those over registryFileCap, which are kept as they are), and the
 // hosts the image's global npmrc names with a token: the template build
 // writes them for launchers older than 1.0.11 (GAP-0529). BakedNPMTokens
 // maps each such host to its placeholder.
 type RegistryProbe struct {
 	Files          map[string]string
 	Links          []string
+	TooLarge       []string
 	BakedNPM       []string
 	BakedNPMTokens map[string]string
 	ReadError      error
@@ -218,6 +221,10 @@ func PlanRegistryFiles(entries []RegistryEntry, probe RegistryProbe) RegistryPla
 			plan.Notes = append(plan.Notes, fmt.Sprintf("~/%s in the agent is a link; DefenseClaw did not write registry placeholders through it", f))
 			continue
 		}
+		if slices.Contains(probe.TooLarge, f) {
+			plan.Notes = append(plan.Notes, fmt.Sprintf("~/%s in the agent is larger than %d KiB; DefenseClaw kept it as it is and added no registry placeholders to it", f, registryFileCap>>10))
+			continue
+		}
 		old, exists := probe.Files[f]
 		switch {
 		case !exists || strings.HasPrefix(old, registryMarker):
@@ -238,6 +245,10 @@ func PlanRegistryFiles(entries []RegistryEntry, probe RegistryProbe) RegistryPla
 			content = strings.TrimRight(old, "\n") + "\n" + registryAppendMarker + "\n" + strings.Join(add, "\n") + "\n"
 		default:
 			plan.Notes = append(plan.Notes, fmt.Sprintf("~/%s in the agent is the image's; DefenseClaw kept it and added no registry placeholder to it", f))
+			continue
+		}
+		if len(content) > registryWriteMax {
+			plan.Notes = append(plan.Notes, fmt.Sprintf("~/%s with the registry placeholders would be larger than %d KiB; DefenseClaw kept the agent's file as it is and added none", f, registryWriteMax>>10))
 			continue
 		}
 		plan.Write[f] = content
@@ -274,16 +285,29 @@ func npmrcCredential(data string, placeholders map[string]bool) (string, bool) {
 	return "", false
 }
 
+// registryFileCap is the largest registry file the start reads and
+// merges (96 KiB). A file of the agent's home over it is kept as it is,
+// with a Note, and never cut (GAP-0978: a 64 KiB read cut an image
+// ~/.npmrc and lost its tail settings).
+const registryFileCap = 96 << 10
+
+// registryWriteMax bounds a file the start writes. Its content travels in
+// one environment variable (DC_REG_*), and Linux refuses an exec whose
+// single environment string is over 128 KiB; a merge that would be larger
+// is not written (a Note says so), so no file is ever written in part.
+const registryWriteMax = 120 << 10
+
 // registryProbeScript prints each registry file of the agent's home and
 // the image's global npmrc, after a separator line with a fresh nonce
 // (DC_REG_SEP), so file content cannot forge a separator. A link is named,
-// never read. Each file is capped at 64 KiB.
-const registryProbeScript = `for f in .npmrc .config/pip/pip.conf .pypirc; do
+// never read. Each file is read up to one byte past registryFileCap, so a
+// larger one is seen as larger, not as its first part.
+var registryProbeScript = `for f in .npmrc .config/pip/pip.conf .pypirc; do
 p="$HOME/$f"
 if [ -L "$p" ]; then printf '\n%s L %s\n' "$DC_REG_SEP" "$f"
-elif [ -f "$p" ]; then printf '\n%s F %s\n' "$DC_REG_SEP" "$f"; head -c 65536 "$p"; fi
+elif [ -f "$p" ]; then printf '\n%s F %s\n' "$DC_REG_SEP" "$f"; head -c ` + strconv.Itoa(registryFileCap+1) + ` "$p"; fi
 done
-if [ -f ` + kit.NPMGlobalConfig + ` ]; then printf '\n%s G global\n' "$DC_REG_SEP"; head -c 65536 ` + kit.NPMGlobalConfig + `; fi
+if [ -f ` + kit.NPMGlobalConfig + ` ]; then printf '\n%s G global\n' "$DC_REG_SEP"; head -c ` + strconv.Itoa(registryFileCap) + ` ` + kit.NPMGlobalConfig + `; fi
 exit 0
 `
 
@@ -331,6 +355,10 @@ func ProbeRegistryFiles(ctx context.Context, ex osw.Execer, sandbox string) Regi
 		case "L":
 			p.Links = append(p.Links, name)
 		case "F":
+			if len(body) > registryFileCap {
+				p.TooLarge = append(p.TooLarge, name)
+				continue
+			}
 			p.Files[name] = body
 		case "G":
 			for _, line := range strings.Split(body, "\n") {
