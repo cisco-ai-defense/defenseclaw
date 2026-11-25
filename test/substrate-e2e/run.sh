@@ -41,6 +41,9 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 : "${E2E_KIND_CLUSTER:=kind}"
 : "${E2E_REGISTRY:=localhost:5001}"
 : "${E2E_POOL_REPLICAS:=2}"
+# Workers of the launcher atespace pool (lp). The launcher step creates one actor, so one worker; each worker asks
+# 250m CPU, and the CI kind node (4 CPU) has no room for a worker the step never uses (GAP-1103).
+: "${E2E_LAUNCH_POOL_REPLICAS:=1}"
 : "${E2E_PROXY_PORT:=18080}"
 : "${E2E_EGRESS_PROBE_URL:=https://example.com/}"
 : "${E2E_EGRESS_PROBE_HOST:=example.com}"
