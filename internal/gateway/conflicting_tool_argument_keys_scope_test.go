@@ -47,7 +47,14 @@ func TestConflictingToolArgumentKeysScope(t *testing.T) {
 		{"single key", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`)}, false, false, 0},
 		// An unknown extra key leaves every candidate partial: GAP-0686.
 		{"other unknown key", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","shell":"x"}`)}, false, false, 0},
-		{"case variant and unknown key (GAP-0686)", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"true","shell":"x"}`)}, false, false, 0},
+		// It takes no conservative finding, but each command is judged
+		// beside the call's own reading (substrate-1:GAP-1105).
+		{"case variant and unknown key (GAP-0686)", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"true","shell":"x"}`)}, true, false, 4},
+		// A tool whose arguments ActionFacts does not review reads one value
+		// of a field: each is judged beside it (substrate-1:GAP-1105).
+		{"mcp command alias", actionfacts.Input{Tool: "mcp__ops__run", Args: json.RawMessage(`{"command":"x","scripT":"ls"}`)}, true, false, 4},
+		{"mcp command in a wrapper", actionfacts.Input{Tool: "mcp__ops__run", Args: json.RawMessage(`{"command":"x","input":{"command":"ls"}}`)}, true, false, 2},
+		{"mcp command alias, same value", actionfacts.Input{Tool: "mcp__ops__run", Args: json.RawMessage(`{"command":"ls","cmd":"ls"}`)}, false, false, 0},
 		{"unreviewed tool", actionfacts.Input{Tool: "github.create_issue", Args: json.RawMessage(`{"title":"a","Title":"b"}`)}, false, false, 0},
 		{"explicit command", actionfacts.Input{Tool: "Bash", Command: "ls", Args: json.RawMessage(`{"command":"ls","Command":"true"}`)}, false, false, 0},
 	} {
