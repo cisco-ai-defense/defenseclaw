@@ -343,7 +343,7 @@ func projectDirs(workingDir string, homes []string, volumeRoot bool) ([]string, 
 // resolvedPath is path with symlinks resolved, or path itself when it
 // cannot be resolved.
 func resolvedPath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := winpath.EvalLinks(path); err == nil {
 		return filepath.Clean(resolved)
 	}
 	return filepath.Clean(path)

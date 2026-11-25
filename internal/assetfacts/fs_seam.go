@@ -18,9 +18,9 @@ package assetfacts
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // The reads of this package go through the fixturefs seam, which is the
@@ -36,6 +36,6 @@ func fsReadlink(name string) (string, error) {
 }
 
 func fsEvalSymlinks(name string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(fixturefs.Map(name))
+	resolved, err := winpath.EvalLinks(fixturefs.Map(name))
 	return fixturefs.Unmap(resolved), err
 }

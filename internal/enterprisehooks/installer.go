@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // installOwnedHooksPresent is the registration read-back used during Install.
@@ -1007,12 +1008,12 @@ func standaloneInHomeConfigLink(home, path string, uid int) (string, bool) {
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return "", false
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	if err != nil {
 		return "", false
 	}
 	cleanHome := filepath.Clean(home)
-	realHome, err := filepath.EvalSymlinks(cleanHome)
+	realHome, err := winpath.EvalLinks(cleanHome)
 	if err != nil {
 		return "", false
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // policyHoldWalkLimit bounds the ancestors compared for one path.
@@ -294,7 +295,7 @@ func holdPathTrail(path string) holdTrail {
 // unreadable, a loop or a link to nowhere.
 func resolveHoldPath(path string) (string, bool) {
 	path = filepath.Clean(path)
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	if err == nil {
 		return resolved, true
 	}

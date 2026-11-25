@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Devin plugins ship hooks that register in every local session, the Devin
@@ -141,7 +143,7 @@ func devinPluginRoot(entries []fs.DirEntry) bool {
 // linked follows a link in the store to the folder it names. A dangling
 // link loads nothing.
 func (w *devinPluginWalk) linked(path string) []Finding {
-	target, err := filepath.EvalSymlinks(path)
+	target, err := winpath.EvalLinks(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -184,7 +186,7 @@ func (w *devinPluginWalk) recorded(path string) []Finding {
 			// A recorded path that is gone, or names a file, holds no plugin.
 			continue
 		}
-		target, err := filepath.EvalSymlinks(value)
+		target, err := winpath.EvalLinks(value)
 		if err != nil {
 			findings = append(findings, s.unreadable(w.store.child(value, formatDevinPlugins), err))
 			continue

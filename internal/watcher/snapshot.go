@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // TargetSnapshot captures the hashed state of a skill/MCP directory
@@ -142,7 +143,7 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 	endpointSet := make(map[string]bool)
 	var allHashes []string
 
-	realRoot, _ := filepath.EvalSymlinks(root)
+	realRoot, _ := winpath.EvalLinks(root)
 	if realRoot == "" {
 		realRoot = root
 	}
@@ -183,7 +184,7 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 				return filepath.SkipDir
 			}
 			if path != root {
-				realDir, linkErr := filepath.EvalSymlinks(path)
+				realDir, linkErr := winpath.EvalLinks(path)
 				if linkErr == nil && !strings.HasPrefix(realDir, realRoot+string(filepath.Separator)) && realDir != realRoot {
 					return filepath.SkipDir
 				}
@@ -311,7 +312,7 @@ func linkResolution(link, target string) string {
 		}
 		pending = append(linkPathNames(next), pending...)
 	}
-	resolved, err := filepath.EvalSymlinks(link)
+	resolved, err := winpath.EvalLinks(link)
 	if err != nil {
 		out.WriteString("|resolve-error:" + err.Error())
 		return out.String()

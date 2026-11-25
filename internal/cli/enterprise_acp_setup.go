@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
 )
 
@@ -425,7 +426,7 @@ func resolveACPExecutable(value, label string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s executable was not found: %s", label, value)
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
+	resolved, err := winpath.EvalLinks(absolute)
 	if err != nil {
 		return "", fmt.Errorf("%s executable was not found: %s", label, value)
 	}

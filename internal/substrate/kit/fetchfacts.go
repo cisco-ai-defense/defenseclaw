@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Roles of the folder facts a registry fetcher (npx, pnpx, bunx, uvx,
@@ -170,7 +172,7 @@ func attachCommandPath(f *Facts, cmd string) {
 	if abs, err := filepath.Abs(p); err == nil {
 		p = abs
 	}
-	if r, err := filepath.EvalSymlinks(p); err == nil {
+	if r, err := winpath.EvalLinks(p); err == nil {
 		p = r
 	}
 	sum := sha256.Sum256([]byte(p))
