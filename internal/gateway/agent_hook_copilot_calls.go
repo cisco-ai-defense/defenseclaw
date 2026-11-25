@@ -57,6 +57,9 @@ func (a *APIServer) safeEvaluateHookCalls(
 	payload map[string]interface{},
 	runtime hookProfileRuntime,
 ) (agentHookResponse, bool, agentHookRequest) {
+	// One wait for walk slots for the whole request, whatever number of
+	// calls it carries (GAP-1083).
+	ctx = withHookWalkBudget(ctx)
 	if len(calls) < 2 {
 		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, rawBody, payload, runtime)
 		return resp, panicked, req

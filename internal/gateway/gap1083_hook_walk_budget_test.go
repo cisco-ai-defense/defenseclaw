@@ -154,7 +154,7 @@ func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 			for name, commands := range envelopes {
 				envFree[name], envFreeTook[name] = runEnvelope("free", name, commands)
 			}
-			release, ok := actionfacts.HoldCredentialPathWalkSlots()
+			release, ok := actionfacts.HoldCredentialPathWalkSlotsForTest()
 			if !ok {
 				t.Fatal("a walk slot stayed taken: another test still walks")
 			}

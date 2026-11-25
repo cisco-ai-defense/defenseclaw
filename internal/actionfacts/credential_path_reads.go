@@ -92,11 +92,13 @@ const (
 // the walk's result is the one it would have had: nothing is cut or skipped.
 var credentialPathWalkSlots = make(chan struct{}, max(2, runtime.GOMAXPROCS(0)/4))
 
-// HoldCredentialPathWalkSlots takes every walk slot, as walks of a slow folder
-// hold them, and returns the function that gives them back. It is the seam of
-// the gateway's hook-route test of the slot wait (substrate-1:GAP-1083); a
-// slot that stays taken for 10 s reports ok false.
-func HoldCredentialPathWalkSlots() (release func(), ok bool) {
+// HoldCredentialPathWalkSlotsForTest takes every walk slot, as walks of a slow
+// folder hold them, and returns the function that gives them back. It is the
+// seam of the gateway's hook-route test of the slot wait (substrate-1:GAP-1083);
+// a slot that stays taken for 10 s reports ok false. Only _test.go files call
+// it (TestGAP1083WalkSlotSeamIsCalledOnlyByTests): a production caller that
+// kept the slots would cut every walk to the unknown tier.
+func HoldCredentialPathWalkSlotsForTest() (release func(), ok bool) {
 	held := 0
 	release = func() {
 		for ; held > 0; held-- {

@@ -2658,6 +2658,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
 	defer hookpaths.HookCall()()
+	ctx = withHookWalkBudget(ctx)
 	baseCtx := ctx
 	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {

@@ -14,9 +14,9 @@ import (
 // hookAnswerBudget): past it the client applies its fail mode.
 const gap1083HookAnswerBudget = 3500 * time.Millisecond
 
-// CredentialWalkBudgetUnbounded is a wait for walk slots with no limit that
+// credentialWalkBudgetUnbounded is a wait for walk slots with no limit that
 // matters, for the tests that call credentialPathWalk directly.
-func CredentialWalkBudgetUnbounded() *CredentialWalkBudget {
+func credentialWalkBudgetUnbounded() *CredentialWalkBudget {
 	return &CredentialWalkBudget{left: time.Hour}
 }
 
