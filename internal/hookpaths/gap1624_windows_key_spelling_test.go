@@ -39,13 +39,55 @@ func TestGAP1624WindowsKeySpellingKeepsTheMention(t *testing.T) {
 		`echo marker >> "$out"; printf '%s' ` + key,
 		`echo marker >> "$out"; printf '%s' "` + key + `"`,
 	}
+	// The ordinary twins name a project file the same ways: no decision.
+	twins := []string{
+		`echo marker >> "$out"; printf '%s' ` + filepath.Join(cwd, "notes.txt"),
+	}
 	if runtime.GOOS == "windows" {
+		// %USERPROFILE% and %HOMEDRIVE%%HOMEPATH% are the home to every
+		// Windows tool that expands them, as the plain path is
+		// (actionCmdHomeVariablePath, rel-1-0-10:GAP-1628).
 		t.Setenv("USERPROFILE", home)
-		commands = append(commands, `echo marker >> "$out"; printf '%s' "%USERPROFILE%\.ssh\authorized_keys"`)
+		commands = append(commands,
+			`echo marker >> "$out"; printf '%s' "%USERPROFILE%\.ssh\authorized_keys"`,
+			`echo marker >> "$out"; printf '%s' '%userprofile%\.ssh\authorized_keys'`,
+			`echo marker >> "$out"; printf '%s' "%HOMEDRIVE%%HOMEPATH%\.ssh\authorized_keys"`)
+		twins = append(twins,
+			`echo marker >> "$out"; printf '%s' "%USERPROFILE%\project\notes.txt"`)
 	}
 	for _, command := range commands {
 		if got := ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got != "protected-target" {
 			t.Errorf("%q: decision %q, want protected-target (the key named as data next to an unbound output)", command, got)
+		}
+	}
+	for _, command := range twins {
+		if got := ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got != "" {
+			t.Errorf("%q: decision %q, want none (an ordinary file)", command, got)
+		}
+	}
+}
+
+// TestGAP1628CmdHomeVariablePath pins the placement on every host: only the
+// cmd spellings of the home at the start of the value, alone or before a
+// separator, are the home.
+func TestGAP1628CmdHomeVariablePath(t *testing.T) {
+	const home = `C:\Users\me`
+	for _, tc := range []struct {
+		value, want string
+		ok          bool
+	}{
+		{`%USERPROFILE%\.ssh\authorized_keys`, `C:\Users\me\.ssh\authorized_keys`, true},
+		{`%userprofile%/.ssh/authorized_keys`, `C:\Users\me/.ssh/authorized_keys`, true},
+		{`%HomeDrive%%HomePath%\.ssh`, `C:\Users\me\.ssh`, true},
+		{`%USERPROFILE%`, home, true},
+		{`%USERPROFILE%x\.ssh`, "", false},
+		{`%APPDATA%\.ssh\authorized_keys`, "", false},
+		{`x\%USERPROFILE%\.ssh`, "", false},
+		{`C:\Users\me\.ssh`, "", false},
+	} {
+		got, ok := actionCmdHomeVariablePath(tc.value, home)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("actionCmdHomeVariablePath(%q) = %q, %v; want %q, %v", tc.value, got, ok, tc.want, tc.ok)
 		}
 	}
 }
