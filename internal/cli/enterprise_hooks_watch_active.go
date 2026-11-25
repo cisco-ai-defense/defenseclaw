@@ -28,13 +28,6 @@ import (
 // account's work it is replayed right after the pass, and after the work it
 // cancels the pass as before.
 
-func (w *enterpriseHookWatchActiveWorkers) targetKey(home, user, connector string) string {
-	if key := w.targetKeys[enterpriseHookWatchTargetID(home, connector)]; key != "" {
-		return key
-	}
-	return enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: user, UserHome: home, Connector: connector})
-}
-
 func (w *enterpriseHookWatchActiveWorkers) start(keys []string) {
 	w.mu.Lock()
 	if w.active == nil {
