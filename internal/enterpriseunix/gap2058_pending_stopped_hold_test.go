@@ -6,6 +6,7 @@
 package enterpriseunix
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -33,8 +34,9 @@ func TestGAP2058PendingHeldByAStoppedSandboxSaysNoSandboxRuns(t *testing.T) {
 	}
 	state := h.env.loadOpenShellState()
 	entry, ok := state.Pending[fmt.Sprint(h.alice.UID)]
-	if !ok || entry.Sandboxes != 1 || entry.Running == nil || *entry.Running != 0 {
-		t.Fatalf("pending = %+v", state.Pending)
+	recorded, _ := json.Marshal(entry)
+	if !ok || entry.Sandboxes != 1 || !strings.Contains(string(recorded), `"running":0`) {
+		t.Fatalf("pending = %s, want the count of running sandboxes (0) kept", recorded)
 	}
 	warning := messagesOf(r.Warnings, codeSandboxPending)
 	if strings.Contains(warning, "1 sandbox runs") || !strings.Contains(warning, "no sandbox runs") ||
