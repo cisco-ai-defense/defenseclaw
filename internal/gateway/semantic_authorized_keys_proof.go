@@ -1935,9 +1935,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		directoryOperands, directoryUnknown := hookpaths.ShellDirectoryWriteOperands(
-			input.Command, input.CWD, input.ActiveHome, directoryFacts, false, cannotResolveLocally,
-		)
+		var directoryOperands []hookpaths.RedirectOccurrence
+		var directoryUnknown bool
+		if cannotResolveLocally && request.sandboxGuest {
+			// A sandbox guest's folders follow the Linux guest layout on
+			// every gateway OS, never this host's (rel-1-0-10:GAP-2203).
+			directoryOperands, directoryUnknown = hookpaths.GuestShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, directoryFacts,
+			)
+		} else {
+			directoryOperands, directoryUnknown = hookpaths.ShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, directoryFacts, false, cannotResolveLocally,
+			)
+		}
 		if directoryUnknown {
 			return unproven(hookpaths.UnprovenTargetUnresolved, "")
 		}

@@ -42,8 +42,21 @@ func TestGAP1731HKLMRawGateAndStatus(t *testing.T) {
 		t.Fatalf("no-HKLM status = (%v, %v, %q)", shadowed, merges, detail)
 	}
 	statusOpts := SetupOpts{ManagedEnterprise: true}
-	setHKLM(map[string]interface{}{"hooks": map[string]interface{}{}, "model": "x"})
+	ours := map[string]interface{}{"PreToolUse": []interface{}{map[string]interface{}{
+		"matcher": "*",
+		"hooks": []interface{}{map[string]interface{}{
+			"type":    "command",
+			"command": `"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe" claudecode`,
+		}},
+	}}}
+	setHKLM(map[string]interface{}{"hooks": ours, "model": "x"})
 	if shadowed, _, detail := ClaudeCodeOSAdminPolicyStatus(statusOpts); shadowed || !strings.Contains(detail, "own hooks") {
-		t.Fatalf("hooks-carrying status without an executable = (%v, %q), want deferred to the guardian rows", shadowed, detail)
+		t.Fatalf("status of a hooks table naming the DefenseClaw hook, without an executable = (%v, %q), want deferred to the guardian rows", shadowed, detail)
+	}
+	// A hooks table that names no DefenseClaw hook cannot be the matrix, so it
+	// is not deferred: status reports it as shadowing (GAP-1801 (a)).
+	setHKLM(map[string]interface{}{"hooks": map[string]interface{}{}, "model": "x"})
+	if shadowed, _, detail := ClaudeCodeOSAdminPolicyStatus(statusOpts); !shadowed || !strings.Contains(detail, "managedSourcesBehavior") {
+		t.Fatalf("status of a hooks table naming no DefenseClaw hook = (%v, %q), want shadowed with the merge fix", shadowed, detail)
 	}
 }

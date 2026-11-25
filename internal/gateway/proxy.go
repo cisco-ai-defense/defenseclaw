@@ -1769,6 +1769,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// --- Non-streaming: buffer response, inspect, then forward ---
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if readErr != nil {
+			// The upstream answered, then its body broke off: the usage
+			// record keeps the upstream status and ends as an upstream
+			// error, so the call is of unknown cost (GAP-1112).
+			if r.Context().Err() != nil {
+				setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, readErr))
+			} else {
+				setUsageEndErr(w, readErr)
+			}
+			setUsageUpstreamStatus(w, resp.StatusCode, resp.Header)
 			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 			return
 		}
@@ -4057,6 +4066,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	streamFailureLifecycle := ""
 	if streamFailed {
 		failureOutcome, technicalFailure, lifecycleOutcome := proxyV8FailureClassification(err)
+		setUsageEndErr(w, err)
 		streamFailureLifecycle = lifecycleOutcome
 		*traceResult = proxyV8TraceResult{
 			Outcome: failureOutcome, ErrorType: "upstream_error",
@@ -6146,6 +6156,9 @@ func (s *sseByteMeter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Unwrap lets the usage record find its writer under the meter.
+func (s *sseByteMeter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 func (s *sseByteMeter) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -6835,6 +6848,7 @@ scan:
 			cause = resp.Request.Context().Err()
 		}
 		failureOutcome, technicalFailure, lifecycleOutcome := proxyV8FailureClassification(cause)
+		setUsageEndErr(w, cause)
 		failedResult := proxyV8TraceResult{
 			Outcome: failureOutcome, ErrorType: "upstream_stream_read",
 			TechnicalFailure: technicalFailure, OutputText: accumulated.String(), ToolCalls: tcAcc.JSON(),

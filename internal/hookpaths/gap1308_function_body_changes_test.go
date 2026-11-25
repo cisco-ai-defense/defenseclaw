@@ -35,12 +35,8 @@ func TestGAP1308FunctionBodyWordsCountChangesBeforeTheCall(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(key, filepath.Join(app, "key-link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("../.claude/settings.json", filepath.Join(app, "cfg-link")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, key, filepath.Join(app, "key-link"))
+	testSymlink(t, "../.claude/settings.json", filepath.Join(app, "cfg-link"))
 	for _, tc := range []struct {
 		command string
 		follows bool

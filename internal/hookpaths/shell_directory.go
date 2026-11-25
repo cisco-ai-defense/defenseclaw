@@ -46,19 +46,30 @@ func (s *shellDirectoryState) merge(branch shellDirectoryState) {
 // bodies. A branch or subshell gets its own directory state. unknown reports a
 // write that may name authorized_keys after an unresolved directory change.
 func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[string]string, record, strict bool) (operands []RedirectOccurrence, unknown bool) {
-	return shellDirectoryWriteOperandsWithParse(command, cwd, home, directoryFacts, record, strict, nil)
+	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, record, strict, false, nil, nil)
 }
 
-// shellDirectoryWriteOperandsWithParse also reports whether the shared
-// shell parser accepted the command, so a client describing the same call
-// can reuse that result when the command has no output redirect.
-func shellDirectoryWriteOperandsWithParse(command, cwd, home string, directoryFacts map[string]string, record, strict bool, parsedOut *bool) (operands []RedirectOccurrence, unknown bool) {
-	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, record, strict, parsedOut, nil)
+// GuestShellDirectoryWriteOperands is the strict ShellDirectoryWriteOperands
+// of a call that runs in a Linux sandbox guest (a Substrate actor) whose
+// files this gateway cannot open. The walk places the guest's folders by the
+// Linux guest layout on every gateway OS: the guest's home, /home, /tmp and
+// /var/tmp need a directory fact, and no folder is resolved on a gateway host
+// that is not Linux (nor Windows, which spells no POSIX folder), whose own
+// /tmp, /etc and /var (links into /private on macOS) say nothing of the
+// guest's. A macOS gateway read the guest's
+// cd /tmp && eval '... > $x' as an ordinary write where a Linux gateway fails
+// it closed (rel-1-0-10:GAP-2203).
+func GuestShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[string]string) (operands []RedirectOccurrence, unknown bool) {
+	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, false, true, true, nil, nil)
 }
 
 // shellDirectoryWriteOperandsWithFile reuses a previously parsed command
-// while preserving the same directory and literal-writer walk.
-func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFacts map[string]string, record, strict bool, parsedOut *bool, file *syntax.File) (operands []RedirectOccurrence, unknown bool) {
+// while preserving the same directory and literal-writer walk. parsedOut
+// reports whether the shared shell parser accepted the command, so a client
+// describing the same call can reuse that result when the command has no
+// output redirect. linuxGuest places folders by the Linux guest layout
+// (GuestShellDirectoryWriteOperands).
+func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFacts map[string]string, record, strict, linuxGuest bool, parsedOut *bool, file *syntax.File) (operands []RedirectOccurrence, unknown bool) {
 	parsed := file != nil
 	if !parsed {
 		file, parsed = parseShell(command)
@@ -75,12 +86,20 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			if value, present := directoryFacts[key]; present {
 				return value, filepath.IsAbs(value)
 			}
-			if strict && directoryFactRequired(logical, home) {
+			if strict && directoryFactRequired(logical, home, linuxGuest) {
 				return "", false
 			}
 		}
-		if !record && strict && directoryFactRequired(logical, home) {
+		if !record && strict && directoryFactRequired(logical, home, linuxGuest) {
 			return "", false
+		}
+		if linuxGuest && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+			// The guest's folder, not this POSIX host's of the same name
+			// (on macOS /etc and /var are links into /private): placed as
+			// written, as a Linux gateway, whose same-named system folders
+			// are no links, places it (rel-1-0-10:GAP-2203). A Windows host
+			// spells no POSIX folder, so its walk is left as it was.
+			return filepath.Clean(logical), true
 		}
 		value, ok := ResolveWriteTarget(logical)
 		if record && directoryFacts != nil {
@@ -825,8 +844,11 @@ func shellEnvChdir(call *syntax.CallExpr, home string) (directory, inner string,
 	return directory, inner, tail, true
 }
 
-func directoryFactRequired(directory, home string) bool {
-	if runtime.GOOS != "linux" {
+// directoryFactRequired reports a folder a strict walk places only by a
+// directory fact: on a Linux gateway, and for a Linux sandbox guest on every
+// gateway (rel-1-0-10:GAP-2203), the home, /home, /tmp and /var/tmp.
+func directoryFactRequired(directory, home string, linuxGuest bool) bool {
+	if runtime.GOOS != "linux" && !linuxGuest {
 		return false
 	}
 	for _, root := range []string{home, "/home", "/tmp", "/var/tmp"} {

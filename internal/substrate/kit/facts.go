@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const (
@@ -504,7 +505,7 @@ func inspectPath(field, p, cwd string) PathFact {
 			break
 		}
 		if !filepath.IsAbs(target) {
-			if dir, err := filepath.EvalSymlinks(filepath.Dir(cur)); err == nil {
+			if dir, err := winpath.EvalLinks(filepath.Dir(cur)); err == nil {
 				target = filepath.Join(dir, target)
 			} else {
 				target = filepath.Join(filepath.Dir(cur), target)
@@ -514,7 +515,7 @@ func inspectPath(field, p, cwd string) PathFact {
 		pf.LinkChain = append(pf.LinkChain, target)
 		cur = target
 	}
-	if resolved, err := filepath.EvalSymlinks(walk); err == nil {
+	if resolved, err := winpath.EvalLinks(walk); err == nil {
 		pf.Resolved = resolved
 	}
 	info, err := os.Stat(walk)
@@ -690,7 +691,7 @@ func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
 				found := false
 				for _, c := range moduleCandidates(s.Args[i+1]) {
 					p := filepath.Join(cwd, filepath.FromSlash(c))
-					if resolved, err := filepath.EvalSymlinks(p); err == nil && within(resolved, cwd) {
+					if resolved, err := winpath.EvalLinks(p); err == nil && within(resolved, cwd) {
 						budget = attach(f, "mcp_server", p, resolved, budget)
 						found = true
 					}
@@ -708,7 +709,7 @@ func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
 					p = filepath.Join(cwd, p)
 				}
 				p = filepath.Clean(p)
-				resolved, err := filepath.EvalSymlinks(p)
+				resolved, err := winpath.EvalLinks(p)
 				if err != nil || !within(resolved, cwd) {
 					continue
 				}
@@ -743,14 +744,14 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		target = filepath.Join(cwd, target)
 	}
 	target = filepath.Clean(target)
-	resolvedTarget, terr := filepath.EvalSymlinks(target)
+	resolvedTarget, terr := winpath.EvalLinks(target)
 	match := false
 	for _, p := range mcpConfigPaths(connectorName, cwd) {
 		if p == target {
 			match = true
 			break
 		}
-		if rp, err := filepath.EvalSymlinks(p); terr == nil && err == nil && rp == resolvedTarget {
+		if rp, err := winpath.EvalLinks(p); terr == nil && err == nil && rp == resolvedTarget {
 			match = true
 			break
 		}

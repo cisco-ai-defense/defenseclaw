@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"sync"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,13 +34,14 @@ const (
 // and with the types os.File.ReadDir gives them (getdents64 order, "." and
 // ".." and entries with no inode left out, a symbolic link not a folder, an
 // unknown type read with lstat and an entry gone meanwhile skipped), until
-// each returns false. name is valid only during the call. It decodes the
+// each returns false; regular is a regular file the entry itself is (not a
+// link to one). name is valid only during the call. It decodes the
 // entries in a pooled buffer and opens the folder without the runtime
 // poller: no DirEntry per entry, which made a walk at the bound allocate
 // about 8 MB and slowed every hook call that walks (substrate-1:GAP-0709).
 // A folder that cannot be opened or read on ends the read, as an error of
-// ReadDir does.
-func readCredentialWalkFolder(dir string, each func(name []byte, folder bool) bool) {
+// ReadDir does. dirfd is the folder's descriptor, for credentialWalkSearchable.
+func readCredentialWalkFolder(dir string, each func(name []byte, folder, regular bool, dirfd int) bool) {
 	fd, err := credentialWalkOpen(dir)
 	if err != nil {
 		return
@@ -77,6 +79,7 @@ func readCredentialWalkFolder(dir string, each func(name []byte, folder bool) bo
 				continue
 			}
 			folder := entry[direntTypeAt] == unix.DT_DIR
+			regular := entry[direntTypeAt] == unix.DT_REG
 			if entry[direntTypeAt] == unix.DT_UNKNOWN {
 				var st unix.Stat_t
 				err := credentialWalkLstat(fd, string(name), &st)
@@ -87,13 +90,30 @@ func readCredentialWalkFolder(dir string, each func(name []byte, folder bool) bo
 					return
 				}
 				folder = st.Mode&unix.S_IFMT == unix.S_IFDIR
+				regular = st.Mode&unix.S_IFMT == unix.S_IFREG
 			}
-			if !each(name, folder) {
+			if !each(name, folder, regular, fd) {
 				return
 			}
 		}
 	}
 }
+
+// credentialWalkSearchable reports a folder, open as dirfd, whose files can
+// be looked up (its search permission): a relative check on the descriptor,
+// no lookup of a path (substrate-1:GAP-0674, RV-T6C P4-1).
+func credentialWalkSearchable(dirfd int) bool {
+	for {
+		_, _, errno := unix.Syscall(unix.SYS_FACCESSAT, uintptr(dirfd), uintptr(unsafe.Pointer(&credentialWalkDot[0])), unix.X_OK)
+		if errno != unix.EINTR {
+			return errno == 0
+		}
+	}
+}
+
+// credentialWalkDot is ".", NUL-terminated, for credentialWalkSearchable: a
+// check that converts no string.
+var credentialWalkDot = [2]byte{'.', 0}
 
 func credentialWalkOpen(dir string) (int, error) {
 	for {

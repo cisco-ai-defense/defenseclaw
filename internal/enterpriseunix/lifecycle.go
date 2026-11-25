@@ -4721,7 +4721,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 			l.ownInstallRestored = map[string]bool{}
 		}
 		l.ownInstallRestored[user] = true
-		r.Changes = append(r.Changes, fmt.Sprintf("put back the own per-user DefenseClaw files of user %s that the enrollment had changed (hook scripts and hook settings in ~/.defenseclaw/hooks, connector backups, hook contract lock, and the agent configs those backups name), byte for byte as they were before the managed deployment", user))
+		r.Changes = append(r.Changes, fmt.Sprintf("put back the own DefenseClaw setup of user %s as it was before the managed deployment: its hook scripts and hook settings (~/.defenseclaw/hooks), its connector backups and hook contract lock, and the agent settings those backups name (the hooks the agents ran before enrollment)", user))
 	}
 	for _, entry := range report.OwnInstallKeptChanged {
 		user, path, _ := strings.Cut(entry, ": ")

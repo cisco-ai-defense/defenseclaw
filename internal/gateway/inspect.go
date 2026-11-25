@@ -140,8 +140,14 @@ type ToolInspectRequest struct {
 	// tool text of its own, only the name of a file the agent itself keeps
 	// (Claude Code FileChanged on ~/.claude.json, GAP-2623). The rule and AID
 	// lanes still scan it and the event is still recorded. Set only by a
-	// connector adapter, never from the public inspect wire.
+	// connector adapter, or with skipAID by the substrate MCP verdict for a
+	// reading the call's own reading already sends to the judge (a bounded
+	// projection, substrateMCPReading), never from the public inspect wire.
 	skipJudge bool
+	// skipAID keeps the Cisco AI Defense lane off such a reading: the rule
+	// lanes read it, AID reads the call once (RV-0841b F6). Never from the
+	// public inspect wire.
+	skipAID bool
 	// judgeContent is the part of a long message the judge is sent, when the
 	// rules read more than the judge takes (messageJudgeText). Set only by the
 	// message lane, never from the wire.
@@ -698,7 +704,9 @@ func (a *APIServer) hookAIDInspectToolWithSubmission(
 ) (*ScanVerdict, bool) {
 	// hookAIDInspect and hookAIDInspectToolCall return nil without a wired
 	// hook surface too; checking first skips parsing the arguments.
-	if !a.aidHookSurfaceWired(ctx) {
+	// skipAID: AID reads this call once on its own reading (RV-0841b F6),
+	// so this reading is never submitted.
+	if req.skipAID || !a.aidHookSurfaceWired(ctx) {
 		return nil, false
 	}
 	if reason := toolCallNotCarriedReason(req); reason != "" {
@@ -1281,6 +1289,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
+		if req.skipAID {
+			// AID reads this call on its own reading (skipAID).
+			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+		}
 		if reason := toolCallNotCarriedReason(req); reason != "" {
 			a.logAIDToolCallTextOnly(ctx, req.Connector, req.hookEvent, req.Tool, req.toolNameIsLabel, reason)
 			return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))

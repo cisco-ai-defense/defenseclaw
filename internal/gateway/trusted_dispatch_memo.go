@@ -215,6 +215,7 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	}
 	key := request
 	key.budget, key.capFloor, key.generation, key.targetMemo = nil, nil, nil, nil
+	key.Input.CredentialWalkBudget = nil
 	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo = nil, nil, nil
 	key.overBudgetOmission, key.unresolvedTarget, key.resolvedTarget, key.nonWriteMention = nil, nil, nil, nil
 	key.unprovenTarget, key.unknownMention = nil, nil

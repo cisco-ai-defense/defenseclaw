@@ -348,6 +348,12 @@ type trustedActionRequest struct {
 	// guestToolCWDUnresolved marks a supplied workdir that the guest path
 	// resolver cannot place. It must not fall back to the guest home.
 	guestToolCWDUnresolved bool
+	// sandboxGuest marks a call of an authenticated sandbox request
+	// (isSandboxHookRequest), set once by dispatchTrustedActionOnce: it runs
+	// in a Linux guest, so a walk this gateway cannot make on the guest's
+	// files places its folders by the Linux guest layout, whatever OS the
+	// gateway runs on (rel-1-0-10:GAP-2203).
+	sandboxGuest bool
 	// guestKeyReadCommand is the shell command a Substrate actor's kit
 	// proved reads the actor's SSH private key in the actor's file system
 	// (substrateGuestClaims): the private-key read proof of a request that
@@ -529,7 +535,20 @@ func dispatchTrustedActionOnce(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	// One wait for walk slots per hook request: the hook route puts it on
+	// ctx (withHookWalkBudget), so the calls of a Copilot envelope, the
+	// members of an artifact and the readings of a shell command, each its
+	// own top-level dispatch, draw on one wait. A dispatch that comes with
+	// none makes its own for the call; the twins and simple-command passes
+	// below copy the request, so they share it (substrate-1:GAP-1083).
+	if request.Input.CredentialWalkBudget == nil {
+		request.Input.CredentialWalkBudget = hookWalkBudgetFrom(parent)
+	}
+	if request.Input.CredentialWalkBudget == nil {
+		request.Input.CredentialWalkBudget = actionfacts.NewCredentialWalkBudget(parent)
+	}
 	request = windowsStatementsOnePerLine(request)
+	request.sandboxGuest = request.sandboxGuest || isSandboxHookRequest(parent)
 	// A call judged as the twin of its data word leaves a detection-only
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
@@ -1121,11 +1140,15 @@ func dispatchTrustedActionOnce(
 	// candidates, work or lookups) is TRUNCATED too: at least the unknown
 	// tier of the pack, and what it resolved before the cap still joins the
 	// chain (rel-1-0-10:GAP-1029).
-	if set := facts.CredentialPathReadCaps(); set.Any() {
+	if set := facts.CredentialPathReadCaps(parent); set.Any() {
 		defer func() {
 			findings = withBoundedTruncation(findings, set, request)
 		}()
 	}
+	// The record is whole only up to here: every later reader of it (the
+	// chain projection, the placement) sees the reads it can tell apart
+	// (substrate-1:GAP-0674).
+	thinCredentialPathReads(facts)
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)

@@ -42,7 +42,7 @@ func TestUninstallPurgeKeptOwnInstallWarnings(t *testing.T) {
 	requireOK(t, done)
 	warnings := messagesOf(done.Warnings, codePerUserState)
 	changes := strings.Join(done.Changes, "\n")
-	if !strings.Contains(changes, "put back the own per-user DefenseClaw files of user restored") ||
+	if !strings.Contains(changes, "put back the own DefenseClaw setup of user restored") ||
 		strings.Contains(warnings, "kept the own DefenseClaw install of user restored") {
 		t.Fatalf("restored account report: changes=%q warnings=%q", changes, warnings)
 	}

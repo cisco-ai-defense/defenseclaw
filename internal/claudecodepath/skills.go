@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // discoveryDirLimit bounds passive nested-root discovery in attacker-controlled
@@ -95,7 +97,7 @@ func SkillDirs(root string) []string {
 		}
 		resolved := path
 		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, err = filepath.EvalSymlinks(path)
+			resolved, err = winpath.EvalLinks(path)
 			if err != nil {
 				continue
 			}

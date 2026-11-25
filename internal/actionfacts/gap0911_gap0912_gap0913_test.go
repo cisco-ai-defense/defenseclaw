@@ -6,6 +6,7 @@
 package actionfacts
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,7 +47,7 @@ func searchReads(t *testing.T, dir, home, command string) []string {
 	t.Helper()
 	out := parsePOSIX(command, 1, 0)
 	classifyOutput(&out)
-	rec := resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, dir, home, out.commands, out.paths)
+	rec := resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), defaultCredentialPathLimits, out.credentialWords, dir, home, out.commands, out.paths)
 	var got []string
 	if rec == nil {
 		return nil
@@ -153,8 +154,10 @@ func TestGAP0925SearchFolderAfterACd(t *testing.T) {
 		{"cd home && grep -r aws_secret_access_key .aws", ".aws/credentials"},
 		{"cd home/src && grep -r aws_secret_access_key ../.aws", ".aws/credentials"},
 		{"cd home/src && cd .. && grep -rl aws_secret_access_key .aws", ".aws/credentials"},
-		// A failed first cd leaves the second in another folder.
-		{"cd home/src; cd .. && grep -rl aws_secret_access_key .aws", "<unknown>"},
+		// A failed first cd leaves the second in another folder: both
+		// folders are static, so the search reads in each (the GAP-0925
+		// file-unknown read is now the exact read, DET111 bar p2hookc).
+		{"cd home/src; cd .. && grep -rl aws_secret_access_key .aws", ".aws/credentials"},
 		{`cd "$D" && grep -r oauth_token gh`, "<unknown>"},
 	} {
 		got := searchReads(t, dir, home, row.command)

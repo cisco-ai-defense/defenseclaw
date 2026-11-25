@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	toml "github.com/pelletier/go-toml/v2"
 )
 
@@ -1977,8 +1978,8 @@ func readMCPServersKiroAt(home, workspaceDir string) []MCPServerEntry {
 	paths := []struct{ path, scope, project string }{}
 	if workspace := strings.TrimSpace(workspaceDir); workspace != "" {
 		projectPath := filepath.Join(workspace, ".kiro", "settings", "mcp.json")
-		if projectReal, err := filepath.EvalSymlinks(projectPath); err == nil {
-			if userReal, err := filepath.EvalSymlinks(userPath); err == nil && projectReal == userReal {
+		if projectReal, err := winpath.EvalLinks(projectPath); err == nil {
+			if userReal, err := winpath.EvalLinks(userPath); err == nil && projectReal == userReal {
 				projectPath = ""
 			}
 		} else if filepath.Clean(projectPath) == filepath.Clean(userPath) {

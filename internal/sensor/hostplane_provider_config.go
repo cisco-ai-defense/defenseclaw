@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // providerConfig is a credential-adjacent provider configuration file a CLI
@@ -65,7 +66,7 @@ type providerConfigFacts struct {
 func defaultProviderConfigFacts() providerConfigFacts {
 	return providerConfigFacts{
 		home: procprobe.CachedOwnerHome, env: processStartEnv,
-		realPath: filepath.EvalSymlinks, owner: fileOwnerUID,
+		realPath: winpath.EvalLinks, owner: fileOwnerUID,
 	}
 }
 

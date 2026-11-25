@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A Windows UNC path (\\server\share\..., //server/share/...) names a file
@@ -896,7 +897,7 @@ func pathReadlink(name string) (string, error) {
 }
 
 func pathEvalSymlinks(name string) (string, error) {
-	resolved, _, err := readGated("evalsymlinks", name, filepath.EvalSymlinks, nil)
+	resolved, _, err := readGated("evalsymlinks", name, winpath.EvalLinks, nil)
 	return fixturefs.Unmap(resolved), err
 }
 
@@ -937,8 +938,10 @@ func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
 // Stat is os.Stat for a path a hook call names, read as pathStat reads it.
 func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
 
-// EvalSymlinks is filepath.EvalSymlinks bounded like the other readers: the
-// gateway reads a link chain of a path a hook call names through it.
+// EvalSymlinks is winpath.EvalLinks bounded like the other readers: the
+// gateway reads a link chain of a path a hook call names through it. On
+// Windows it follows a junction as it follows a symbolic link, which
+// filepath.EvalSymlinks does not (rel-1-0-9:GAP-0621, rel-1-0-10:GAP-2182).
 func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
 
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.

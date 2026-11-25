@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR104ExistingProtectedLinkWriters(t *testing.T) {
@@ -29,11 +30,13 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink")); err != nil {
-		t.Fatal(err)
+	// A Limited Windows token cannot make symbolic links: the rows through a
+	// link skip there (the elevated run keeps them), and the directory rows
+	// also run through a junction, which needs no privilege (GAP-2158).
+	alias := testenv.TrySymlink(t, protected, filepath.Join(cwd, "alias"))
+	dirlink := testenv.TrySymlink(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink"))
+	if runtime.GOOS == "windows" {
+		testenv.Junction(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirjunction"))
 	}
 	if err := os.WriteFile(filepath.Join(cwd, "payload"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -51,7 +54,7 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 		[]byte("[remote \"origin\"]\n\turl = ssh://example.invalid/repo.git\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct{ name, command string }{
+	rows := []struct{ name, command string }{
 		{"environment unset", `env -u X python3 -c 'open("alias","a").write("marker")'`},
 		{"builtin command", `command -p python3 -c 'open("alias","a").write("marker")'`},
 		{"priority wrapper", `nice -n 5 python3 -c 'open("alias","a").write("marker")'`},
@@ -73,8 +76,24 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 		{"here document", "python3 - <<'PY'\nopen(\"alias\",\"a\").write(\"marker\")\nPY"},
 		{"directory function", `cd dirlink && f() { echo marker >> authorized_keys; }; f`},
 		{"directory coprocess", `cd dirlink && coproc { echo marker >> authorized_keys; }; wait`},
-	} {
+	}
+	if runtime.GOOS == "windows" {
+		for _, row := range rows {
+			if strings.Contains(row.command, "dirlink") {
+				rows = append(rows, struct{ name, command string }{row.name + " through a junction",
+					strings.ReplaceAll(row.command, "dirlink", "dirjunction")})
+			}
+		}
+	}
+	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
+			switch {
+			case strings.Contains(tc.command, "dirjunction"):
+			case strings.Contains(tc.command, "dirlink"):
+				dirlink.Require(t)
+			default:
+				alias.Require(t)
+			}
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd, ActiveHome: home,
 				DialectHint: actionfacts.DialectPOSIX}
 			request := trustedActionRequest{Input: input}
@@ -83,6 +102,20 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ordinary commands", func(t *testing.T) {
+		alias.Require(t)
+		checkR104OrdinaryCommands(t, cwd, home)
+	})
+	t.Run("called definitions", func(t *testing.T) {
+		alias.Require(t)
+		checkR104CalledDefinitions(t, cwd, home)
+	})
+}
+
+// checkR104OrdinaryCommands: commands that write no protected target, next
+// to the alias link of TestR104ExistingProtectedLinkWriters.
+func checkR104OrdinaryCommands(t *testing.T, cwd, home string) {
+	t.Helper()
 	for _, command := range []string{
 		`python3 -c 'open("report.txt","a").write("marker")'`,
 		`for f in safe; do echo marker >> "$f"; done`,
@@ -96,6 +129,12 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 			t.Fatalf("ordinary command was treated as a protected write: %q", command)
 		}
 	}
+}
+
+// checkR104CalledDefinitions: a protected target in a definition the
+// command calls is proved.
+func checkR104CalledDefinitions(t *testing.T, cwd, home string) {
+	t.Helper()
 	for _, command := range []string{
 		`f() { echo marker >> alias; }; echo ok; f`,
 		`f() { echo marker >> ~/.ssh/authorized_keys; }; export -f f; bash -c f`,
@@ -121,9 +160,7 @@ func TestR104BoundedProtectedLinkWriter(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, filepath.Join(cwd, "alias"))
 	for _, command := range []string{
 		`printf -v f %s alias; echo marker >> "$f"`,
 		`printf -v f '%s%s' ali as; echo marker >> "$f"`,
