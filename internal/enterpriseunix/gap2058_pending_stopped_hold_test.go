@@ -40,13 +40,18 @@ func TestGAP2058PendingHeldByAStoppedSandboxSaysNoSandboxRuns(t *testing.T) {
 	}
 	warning := messagesOf(r.Warnings, codeSandboxPending)
 	if strings.Contains(warning, "1 sandbox runs") || !strings.Contains(warning, "no sandbox runs") ||
-		!strings.Contains(warning, "defenseclaw sandbox list") || !strings.Contains(warning, "defenseclaw sandbox delete NAME") {
+		!strings.Contains(warning, "defenseclaw sandbox list") || !strings.Contains(warning, "defenseclaw sandbox delete NAME") ||
+		// Live also counts a sandbox that is starting or stopping: the cause
+		// list names them and the delete step is conditional (GAP-2058 F1).
+		!strings.Contains(warning, "(starting, stopping, in its error state") ||
+		!strings.Contains(warning, "If it stays listed and is not starting or stopping") {
 		t.Fatalf("ensure warning for a change held by a stopped sandbox: %q", warning)
 	}
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		got := h.run(Options{Action: action})
 		st, _ := rowState(got, "sandbox pending alice")
-		if strings.Contains(st, "1 sandbox ran when") || !strings.Contains(st, "no sandbox ran") {
+		if strings.Contains(st, "1 sandbox ran when") || !strings.Contains(st, "no sandbox ran") ||
+			!strings.Contains(st, "(starting, stopping, in its error state") {
 			t.Errorf("%s pending row = %q", action, st)
 		}
 	}

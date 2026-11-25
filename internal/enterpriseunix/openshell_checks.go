@@ -338,11 +338,13 @@ func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 	}
 	// Held without a running sandbox: what holds it is one OpenShell does not
 	// report stopped. "1 sandbox runs" read wrong next to the user's Running
-	// 0 of 1 (GAP-2058).
+	// 0 of 1 (GAP-2058). Live also counts a sandbox that is starting or
+	// stopping, so the cause list keeps those and the delete step is only for
+	// one that stays listed.
 	stoppedHold := entry.Sandboxes > 0 && entry.Running != nil && *entry.Running == 0
 	if stoppedHold {
-		waiting = fmt.Sprintf("no sandbox runs, but %s that OpenShell does not report stopped (in its error state, or left by the earlier sandbox setup) %s it; "+
-			"`defenseclaw sandbox list` names it, and the user's `defenseclaw sandbox delete NAME` releases it after saving its work",
+		waiting = fmt.Sprintf("no sandbox runs, but %s that OpenShell does not report stopped (starting, stopping, in its error state, or left by the earlier sandbox setup) %s it; "+
+			"`defenseclaw sandbox list` names it. If it stays listed and is not starting or stopping, the user's `defenseclaw sandbox delete NAME` releases it after saving its work",
 			plural(entry.Sandboxes, "1 sandbox", fmt.Sprintf("%d sandboxes", entry.Sandboxes)), plural(entry.Sandboxes, "holds", "hold"))
 	}
 	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify {
@@ -352,7 +354,7 @@ func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 		// now's (GAP-0679).
 		switch {
 		case stoppedHold:
-			waiting = fmt.Sprintf("no sandbox ran when it was last tried, but %s that OpenShell did not report stopped held it",
+			waiting = fmt.Sprintf("no sandbox ran when it was last tried, but %s that OpenShell did not report stopped (starting, stopping, in its error state, or left by the earlier sandbox setup) held it",
 				plural(entry.Sandboxes, "1 sandbox", fmt.Sprintf("%d sandboxes", entry.Sandboxes)))
 		case entry.Sandboxes == 1:
 			waiting = "1 sandbox ran when it was last tried"
