@@ -6,6 +6,7 @@ package actionfacts
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -19,7 +20,18 @@ import (
 // walked only a static folder word, so the folder was never walked. The
 // controls read no credentials file: rg's own filters (a glob, hidden
 // files), a folder with none, and a call that may rebind HOME.
+//
+// C3's list does not move the shell, so rg's working folder (the root its
+// globs match from) is the hook's folder on every OS. C5 is C3 after a
+// cd /: on Linux and macOS rg then runs in "/", a known folder, and the
+// Go glob still selects no credentials file. On Windows a POSIX cd leaves
+// the hook's folder for one the hook cannot resolve (/ is the Git Bash
+// root; rgWorkingFolder knows a moved folder only from a POSIX hook
+// folder), so every glob of that rg is unsure and counts (count when
+// unsure, substrate-1:GAP-0684): the walk reads the folder's credentials
+// files there (substrate-1:GAP-1109).
 func TestGAP0689HomeFolderSearchAfterAMoverIsWalked(t *testing.T) {
+	unsureRoot := runtime.GOOS == "windows"
 	home := filepath.Join(t.TempDir(), "home")
 	proj := filepath.Join(home, "proj")
 	for name, text := range map[string]string{".env": "KEY=1\n", ".git/HEAD": "ref: x\n", "src/a.go": "package a\n", "deploy/id_ed25519": "k\n", "hid/.env": "KEY=1\n"} {
@@ -46,7 +58,8 @@ func TestGAP0689HomeFolderSearchAfterAMoverIsWalked(t *testing.T) {
 		{"C1 a folder with no credentials file", proj, "f(){ test -d .git && return; cd /; }; f && rg --hidden KEY ~/proj/src", false},
 		{"C2 rg skips hidden files", proj, "cd / && rg KEY ~/proj/hid", false},
 		{"I the same folder with --hidden", proj, "cd / && rg --hidden KEY ~/proj/hid", true},
-		{"C3 a glob that selects only Go files", proj, "cd / && rg -g '*.go' KEY ~/proj", false},
+		{"C3 a glob that selects only Go files", proj, "f(){ :; }; f && rg -g '*.go' KEY ~/proj", false},
+		{"C5 cd to the root, then a glob that selects only Go files", proj, "cd / && rg -g '*.go' KEY ~/proj", unsureRoot},
 		{"C4 the call may rebind HOME", proj, "HOME=/nonexistent; cd / && rg --hidden KEY ~/proj", false},
 	} {
 		t.Run(row.id, func(t *testing.T) {
