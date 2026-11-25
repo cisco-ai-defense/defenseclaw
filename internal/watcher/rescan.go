@@ -1125,12 +1125,22 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				}
 				return rescanScanned
 			}
-			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) {
+			copyBack := w.quarantinedCopyIsBack(ctx, evt)
+			if copyBack || w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
 				// The same under a root watched closely: its first scan
 				// enforces the verdict, whichever rescan found it (GAP-0905).
-				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
+				// The same for a skill or plugin the watcher quarantined
+				// whose folder is back with new content: a baseline scan
+				// recorded the clean result and left the watcher's block on
+				// the name (GAP-2040, GitHub #1428); admission lifts the
+				// block when it allows the new content and keeps it otherwise.
+				if copyBack {
+					fmt.Fprintf(os.Stderr, "[rescan] %s %s was quarantined and is back; running install admission\n", evt.Type, evt.Name)
+				} else {
+					fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
+				}
 				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
 				moved := w.movedByAdmission(evt)
