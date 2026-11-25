@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -269,7 +270,7 @@ func hookFailOpenLogDirs(dataDir string) []string {
 			continue
 		}
 		key := filepath.Clean(home)
-		if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		if resolved, err := winpath.EvalLinks(home); err == nil {
 			key = resolved
 		}
 		if seen[key] {

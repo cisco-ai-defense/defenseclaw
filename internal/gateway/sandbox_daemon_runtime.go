@@ -52,6 +52,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A standalone managed computer runs sandboxes in a per-user sandbox daemon,
@@ -2193,7 +2194,7 @@ func (d *SandboxDaemon) managedExplain(ctx context.Context, req sandboxapi.Expla
 		}
 	} else {
 		if req.Project != "" && filepath.IsAbs(req.Project) {
-			if real, err := filepath.EvalSymlinks(req.Project); err == nil {
+			if real, err := winpath.EvalLinks(req.Project); err == nil {
 				ereq.ProjectReal = real
 			}
 		}
@@ -3069,7 +3070,7 @@ func (c *managedSandboxController) Explain(ctx context.Context, req sandboxapi.E
 		// The project's own MCP servers, which only this process can read
 		// as the caller: the MCP row counts them (#1200).
 		project := req.Project
-		if real, err := filepath.EvalSymlinks(project); err == nil {
+		if real, err := winpath.EvalLinks(project); err == nil {
 			project = real
 		}
 		if spec, ok := harness.Get(connectorName); ok {
@@ -3133,7 +3134,7 @@ func (c *managedSandboxController) PolicyTest(ctx context.Context, req sandboxap
 	// resolution leaves out (GAP-0438).
 	treq := sandboxrelay.PolicyTestRequest{Connector: c.d.managedConnector(req.Harness), Checks: req.Checks}
 	if req.Project != "" && filepath.IsAbs(req.Project) {
-		if real, err := filepath.EvalSymlinks(req.Project); err == nil {
+		if real, err := winpath.EvalLinks(req.Project); err == nil {
 			treq.ProjectReal = real
 		}
 	}
@@ -3182,7 +3183,7 @@ func (d *SandboxDaemon) resolveRequest(req sandboxapi.CreateRequest, choice open
 	}
 	project := ""
 	if req.Project != "" {
-		real, err := filepath.EvalSymlinks(req.Project)
+		real, err := winpath.EvalLinks(req.Project)
 		if err != nil {
 			return sandboxrelay.ResolveRequest{}, sandboxapi.Errorf(sandboxapi.CodeInvalid, "project folder: %v", err)
 		}

@@ -76,13 +76,22 @@ func VerifyOpenedBelow(handle windows.Handle, root, path string) error {
 }
 
 func finalPathByHandle(handle windows.Handle) (string, error) {
-	buf := make([]uint16, windows.MAX_LONG_PATH)
-	n, err := windows.GetFinalPathNameByHandle(handle, &buf[0], uint32(len(buf)), 0)
-	if err != nil {
-		return "", err
+	size := uint32(windows.MAX_PATH)
+	for {
+		buf := make([]uint16, size)
+		n, err := windows.GetFinalPathNameByHandle(handle, &buf[0], size, 0)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case n == 0:
+			return "", errors.New("final path is empty")
+		case n < size:
+			return windows.UTF16ToString(buf[:n]), nil
+		case n > windows.MAX_LONG_PATH:
+			return "", errors.New("final path exceeds the Windows path limit")
+		}
+		// n is the size the path needs, its terminating NUL included.
+		size = n
 	}
-	if n == 0 || n >= uint32(len(buf)) {
-		return "", errors.New("final path exceeds the Windows path limit")
-	}
-	return windows.UTF16ToString(buf[:n]), nil
 }

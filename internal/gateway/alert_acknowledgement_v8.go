@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const alertAcknowledgementV8Path = "/api/v1/alerts/disposition"
@@ -404,7 +405,7 @@ func normalizeAlertAuditDatabasePath(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		resolved, resolveErr := filepath.EvalSymlinks(absolute)
+		resolved, resolveErr := winpath.EvalLinks(absolute)
 		if resolveErr == nil {
 			absolute = resolved
 		} else if !errors.Is(resolveErr, os.ErrNotExist) {

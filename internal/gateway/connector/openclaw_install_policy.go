@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // OpenClaw security.installPolicy (connectors.openclaw.install_policy):
@@ -106,7 +107,7 @@ func defaultOpenClawInstallPolicyExecutable() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if real, err := filepath.EvalSymlinks(exe); err == nil {
+	if real, err := winpath.EvalLinks(exe); err == nil {
 		exe = real
 	}
 	name := "defenseclaw-gateway"

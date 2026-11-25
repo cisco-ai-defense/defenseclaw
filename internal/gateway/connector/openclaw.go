@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // openClawExtensionFS holds the runtime files of the DefenseClaw OpenClaw
@@ -649,19 +650,32 @@ func openClawDirIsDefenseClawPlugin(dir string) bool {
 // This prevents symlink attacks where target is a symlink to an unrelated
 // directory (e.g. /etc).
 func safeRemoveAll(target, parent string) error {
-	if _, err := os.Lstat(target); os.IsNotExist(err) {
+	info, err := os.Lstat(target)
+	if os.IsNotExist(err) {
 		return nil
 	}
 
-	resolved, err := filepath.EvalSymlinks(target)
+	resolved, err := winpath.EvalLinks(target)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("resolve symlinks for %s: %w", target, err)
+		}
+		// A Windows junction whose folder is gone: the entry is there but
+		// names nothing. Judge the entry by the folder that holds it and
+		// remove the junction itself, never what it named, as rel/1.0.10
+		// did (review RV-2182 F1). A dangling symbolic link is left alone,
+		// as before, on every OS.
+		if info == nil || info.Mode()&os.ModeIrregular == 0 {
 			return nil
 		}
-		return fmt.Errorf("resolve symlinks for %s: %w", target, err)
+		dir, err := winpath.EvalLinks(filepath.Dir(target))
+		if err != nil {
+			return fmt.Errorf("resolve the folder of %s: %w", target, err)
+		}
+		resolved = filepath.Join(dir, filepath.Base(target))
 	}
 
-	resolvedParent, err := filepath.EvalSymlinks(parent)
+	resolvedParent, err := winpath.EvalLinks(parent)
 	if err != nil {
 		return fmt.Errorf("resolve parent %s: %w", parent, err)
 	}

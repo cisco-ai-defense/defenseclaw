@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 type claimedAssetFactsContextKey struct{}
@@ -729,7 +730,7 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	realHome := home
 	if managedCaller {
 		var err error
-		if realHome, err = filepath.EvalSymlinks(home); err != nil {
+		if realHome, err = winpath.EvalLinks(home); err != nil {
 			return
 		}
 	}
@@ -738,7 +739,7 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 			continue
 		}
 		if managedCaller {
-			real, err := filepath.EvalSymlinks(folder)
+			real, err := winpath.EvalLinks(folder)
 			if err != nil {
 				continue
 			}
@@ -814,11 +815,11 @@ func gatewayVerifiedProjectSkillRoot(home, folder string) bool {
 	if gatewaySkillPathCheck(folder) != nil {
 		return false
 	}
-	realHome, err := hookpaths.EvalLinks(home)
+	realHome, err := hookpaths.EvalSymlinks(home)
 	if err != nil {
 		return false
 	}
-	realFolder, err := hookpaths.EvalLinks(folder)
+	realFolder, err := hookpaths.EvalSymlinks(folder)
 	if err != nil || !insideHome(realHome, realFolder) {
 		return false
 	}
@@ -932,7 +933,7 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 		} else {
 			// A managed Unix caller's folder is registered resolved
 			// (GAP-1297), and the watcher records its skills under that path.
-			real, err := filepath.EvalSymlinks(dir)
+			real, err := winpath.EvalLinks(dir)
 			if err != nil || !a.projectSkills.registered(real) {
 				continue
 			}

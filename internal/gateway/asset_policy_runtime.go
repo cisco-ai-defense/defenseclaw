@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 type mcpRuntimeProbe struct {
@@ -1468,7 +1469,7 @@ func (a *APIServer) projectSkillSelectedRefusalDecision(
 // other unresolved component cannot prove a source is outside the root.
 func unavailableRootCanonicalPath(path string) (string, bool) {
 	for candidate := filepath.Clean(path); ; candidate = filepath.Dir(candidate) {
-		resolved, err := filepath.EvalSymlinks(candidate)
+		resolved, err := winpath.EvalLinks(candidate)
 		if err == nil {
 			suffix, err := filepath.Rel(candidate, path)
 			if err != nil {

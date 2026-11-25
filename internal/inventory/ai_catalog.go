@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 //go:embed ai_signatures.json
@@ -505,7 +506,7 @@ func signaturePinPath(path string, resolve bool) string {
 	if err != nil {
 		return path
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
+	if real, err := winpath.EvalLinks(abs); err == nil {
 		return real
 	}
 	return abs

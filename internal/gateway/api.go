@@ -65,6 +65,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
@@ -3780,7 +3781,7 @@ func isBundledSkillScanPath(path string) bool {
 	if enforce.IsBundledSkillPath(path) {
 		return true
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	return err == nil && enforce.IsBundledSkillPath(resolved)
 }
 
@@ -4008,7 +4009,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	// receive a tarball of readable host files. Constrain req.Target
 	// to a directory under one of the configured skill or plugin
 	// roots, after fully resolving symlinks on both sides.
-	resolvedTarget, err := filepath.EvalSymlinks(req.Target)
+	resolvedTarget, err := winpath.EvalLinks(req.Target)
 	if err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("target directory not found: %s", req.Target),
@@ -4035,7 +4036,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		if root == "" {
 			continue
 		}
-		rr, rerr := filepath.EvalSymlinks(root)
+		rr, rerr := winpath.EvalLinks(root)
 		if rerr != nil {
 			continue
 		}

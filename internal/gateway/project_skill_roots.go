@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // projectSkillRootsSettle is how long the watcher waits after a new project
@@ -231,12 +232,12 @@ func (p *projectSkillRoots) refusalForPath(path string) (root, reason string) {
 			return refusal.path, refusal.reason
 		}
 	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
+	resolvedPath, err := winpath.EvalLinks(path)
 	if err != nil {
 		return "", ""
 	}
 	for _, refusal := range refusals {
-		resolvedRoot, err := filepath.EvalSymlinks(refusal.path)
+		resolvedRoot, err := winpath.EvalLinks(refusal.path)
 		if err == nil && sameProjectRootOrDescendant(resolvedRoot, resolvedPath) {
 			return refusal.path, refusal.reason
 		}
