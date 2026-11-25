@@ -50,6 +50,11 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+import zipfile
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from defenseclaw.guardrail_profiles import ProfileRefreshResult
 
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
@@ -254,9 +259,13 @@ class ShimOutcomeUnknownError(ShimError):
     """The installer was started and ended, or is still running, with a result the shim cannot prove.
 
     The machine may have changed, so the failure must not say it did not.
+    ``installer_ended``: it ended with an exit code, so nothing is still
+    running and it restored the install it was replacing (the swapped rule
+    packs go back, as for any failed installer).
     """
 
     changed_nothing = False
+    installer_ended = False
 
 
 class ShimUsageError(ShimError):
@@ -531,16 +540,49 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
             if released and was_running:
                 _start_gateway_again("this release's")
             raise
+    packs = None
+    if _key(version) < _key(installed):
+        try:
+            packs = _use_target_rule_packs(repo, version, local_dir, workdir)
+        except BaseException:
+            # Ctrl-C while the older release's wheel downloads: the gateway
+            # _release_route_only stopped must not stay down (GAP-1081).
+            shutil.rmtree(workdir, ignore_errors=True)
+            if released and was_running:
+                _start_gateway_again("this release's")
+            raise
     # Only a downgrade to a release that keeps the newer hook helper waits
     # for its installer and drops the helper (rel-1-0-4:GAP-2503); one that
     # put the route-only settings back waits too: it stopped the gateway, so
     # the older installer saw none running and does not start one.
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
     rc = 1
+    outcome_unknown = False
     try:
         args = (["--yes"] if yes else []) + extra
-        rc = _run_installer(installer, args, workdir, newer=newer, rerun=rerun, wait=released)
+        # With swapped rule packs the shim waits too: it puts them back when
+        # the installer fails (an exec would leave no one to do it). On
+        # Windows it does not wait at all: the saved installer checks that no
+        # DefenseClaw program runs from the venv before it opens a log, and this
+        # shim is such a program, so it hands the packs to a watcher outside
+        # the venv and ends (GAP-1084).
+        rc = _run_installer(
+            installer,
+            args,
+            workdir,
+            newer=newer,
+            rerun=rerun,
+            wait=released or packs is not None,
+            detach=os.name == "nt" and _key(version) < _key(installed),
+            packs=packs,
+        )
+    except ShimOutcomeUnknownError as unknown:
+        # An installer that may still be running may have changed things: leave the packs.
+        outcome_unknown = not unknown.installer_ended
+        raise
     finally:
+        if packs is not None and rc != 0 and not outcome_unknown:
+            _put_back_rule_packs(packs, version)
         if released and was_running:
             # The installed gateway: the older one after a success, this
             # release's (which writes the route settings again) otherwise.
@@ -957,6 +999,165 @@ def _set_aside_newer_keys(version: str) -> None:
     )
 
 
+# Where a release wheel keeps the guardrail rule packs it ships.
+_WHEEL_RULE_PACKS = "defenseclaw/_data/policies/guardrail/"
+# A wheel is about 6 MB and its rule packs about 1 MB; these only stop a damaged archive.
+_RULE_PACKS_MAX_FILE = 8 * 1024 * 1024
+_RULE_PACKS_MAX_TOTAL = 64 * 1024 * 1024
+
+
+def _use_target_rule_packs(repo: str, version: str, local_dir: str | None, workdir: str) -> ProfileRefreshResult | None:
+    """Put DefenseClaw ``version``'s own rule packs in place of the unedited ones (GAP-1077).
+
+    The older release's migrate keeps every rule pack whose files it does not
+    know as the user's edit, and it does not know the ones this release
+    seeded, so a downgrade left them in force. That release cannot change, so
+    the packs are replaced here, before its installer runs; a pack the user
+    edited is not touched and the older release keeps it too. Best effort: a
+    pack that cannot be replaced is the old behaviour, never a failed downgrade.
+    Returns what was swapped, for ``_put_back_rule_packs`` when the installer fails.
+    """
+
+    swapped = None
+    try:
+        from defenseclaw.guardrail_profiles import ProfileRefreshResult
+
+        swapped = ProfileRefreshResult()
+        _restore_rule_packs(repo, version, local_dir, workdir, swapped)
+    except Exception as exc:  # noqa: BLE001 - the downgrade goes on; the installer reports what it kept
+        print(
+            f"  ! Could not put the rule packs of DefenseClaw {version} in place ({exc}); "
+            "the installer keeps the current ones"
+        )
+    except BaseException:
+        # Ctrl-C part way through the swap: the downgrade ends, so no older release's pack stays.
+        if swapped is not None:
+            _put_back_rule_packs(swapped, version)
+        raise
+    return swapped if swapped is not None and swapped.refreshed else None
+
+
+def _rule_pack_policy_dir() -> str:
+    from defenseclaw.migrations import _configured_policy_dir, _read_config_text
+
+    return _configured_policy_dir(_data_home(), _read_config_text(_active_config_path()) or "")
+
+
+def _rule_pack_undo_spec(swapped: ProfileRefreshResult | None) -> str | None:
+    """What the watcher needs to put the swapped packs back: the folder, the backup, each pack's digest after the swap.
+
+    ``None`` when nothing was swapped or the folder cannot be found.
+    """
+
+    if swapped is None or not swapped.refreshed or not swapped.backup_dir:
+        return None
+    try:
+        guardrail = os.path.join(_rule_pack_policy_dir(), "guardrail")
+    except Exception:  # noqa: BLE001 - no watcher job; the packs stay as the swap left them
+        return None
+    digests = {name: swapped.refreshed_digests[name] for name in swapped.refreshed if name in swapped.refreshed_digests}
+    if not digests:
+        return None
+    return json.dumps({"dir": guardrail, "backup": swapped.backup_dir, "packs": digests})
+
+
+def _put_back_rule_packs(swapped: ProfileRefreshResult, version: str) -> None:
+    """The downgrade did not happen: this release's rule packs go back in place of the target's (GAP-1081)."""
+
+    from defenseclaw.guardrail_profiles import undo_profile_refresh
+
+    try:
+        restored, problems = undo_profile_refresh(_rule_pack_policy_dir(), swapped)
+    except Exception as exc:  # noqa: BLE001 - say so; the copies stay in the backup folder
+        restored, problems = [], [str(exc)]
+    if restored:
+        print(f"  → The downgrade did not finish: rule packs {', '.join(restored)} are this release's again")
+    for problem in problems:
+        print(f"  ! Rule pack not put back: {problem}; the previous copies are in {swapped.backup_dir}")
+
+
+def _fetch_checksums(repo: str, version: str, local_dir: str | None, workdir: str) -> str:
+    """``workdir/checksums.txt`` of release ``version``, its signature verified as for an installer.
+
+    ``_fetch_installer`` writes it for every path that downloads an installer;
+    a Windows downgrade runs the saved installer instead (GAP-1081).
+    """
+
+    checksums = os.path.join(workdir, "checksums.txt")
+    if os.path.isfile(checksums):
+        return checksums
+    if local_dir:
+        try:
+            shutil.copyfile(os.path.join(local_dir, "checksums.txt"), checksums)
+        except OSError as exc:
+            raise ShimError(f"could not read checksums.txt from {local_dir}: {exc}") from None
+    else:
+        _download(f"{_source_url(repo)}/releases/download/{version}/checksums.txt", checksums)
+    _verify_release_signature(repo, version, local_dir, workdir, checksums)
+    return checksums
+
+
+def _restore_rule_packs(
+    repo: str, version: str, local_dir: str | None, workdir: str, result: ProfileRefreshResult | None = None
+) -> None:
+    from defenseclaw.guardrail_profiles import restore_unedited_profiles, unedited_profiles
+    from defenseclaw.migrations import _configured_policy_dir, _read_config_text
+
+    data = _data_home()
+    policy_dir = _configured_policy_dir(data, _read_config_text(_active_config_path()) or "")
+    if not unedited_profiles(policy_dir):
+        return
+    name = f"defenseclaw-{version}-py3-none-any.whl"
+    wheel = os.path.join(workdir, name)
+    checksums = _fetch_checksums(repo, version, local_dir, workdir)
+    if local_dir:
+        try:
+            shutil.copyfile(os.path.join(local_dir, name), wheel)
+        except OSError as exc:
+            raise ShimError(f"could not read {name} from {local_dir}: {exc}") from None
+    else:
+        _download(f"{_source_url(repo)}/releases/download/{version}/{name}", wheel)
+    with open(wheel, "rb") as stream:
+        actual = hashlib.sha256(stream.read()).hexdigest()
+    if actual != _expected_sha256(checksums, name):
+        raise ShimError(f"{name} does not match checksums.txt")
+    packs = os.path.join(workdir, "target-rule-packs")
+    _extract_rule_packs(wheel, packs)
+    result = restore_unedited_profiles(policy_dir, os.path.join(data, "backups"), packs, result)
+    for error in result.errors:
+        print(f"  ! Rule pack not replaced: {error}")
+    if result.refreshed:
+        print(
+            f"  → Rule packs {', '.join(result.refreshed)} are DefenseClaw {version}'s again "
+            f"(previous copies in {result.backup_dir})"
+        )
+    if result.kept_modified:
+        print(f"  → Kept your edited rule packs {', '.join(result.kept_modified)}")
+
+
+def _extract_rule_packs(wheel: str, destination: str) -> None:
+    """Unpack the rule packs of a release wheel into ``destination``; nothing else leaves the archive."""
+
+    total = 0
+    root = os.path.realpath(destination)
+    with zipfile.ZipFile(wheel) as archive:
+        for info in archive.infolist():
+            if info.is_dir() or not info.filename.startswith(_WHEEL_RULE_PACKS):
+                continue
+            relative = info.filename[len(_WHEEL_RULE_PACKS) :]
+            target = os.path.realpath(os.path.join(root, *relative.split("/")))
+            if not relative or os.path.commonpath([root, target]) != root:
+                raise ShimError(f"{wheel} holds a rule pack path outside its folder: {info.filename}")
+            total += info.file_size
+            if info.file_size > _RULE_PACKS_MAX_FILE or total > _RULE_PACKS_MAX_TOTAL:
+                raise ShimError(f"{wheel} holds more rule pack data than a release ships")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with archive.open(info) as source, open(target, "wb") as out:
+                shutil.copyfileobj(source, out)
+    if not os.path.isdir(root):
+        raise ShimError(f"{wheel} holds no rule packs")
+
+
 def _write_private_json(path: str, document: dict[str, object]) -> None:
     _write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
@@ -1238,23 +1439,62 @@ def _drop_recovery_copy(recovery: tuple[str, str] | None) -> None:
         shutil.rmtree(os.path.dirname(recovery[0]), ignore_errors=True)
 
 
-# Runs hidden after the shim has exited and removes the recovery copy once the
-# installer it started has ended with exit code 0. A failed or unreadable run
-# keeps the copy, which the failed run's message names (GAP-1011). It uses
-# language operators and .NET calls only, so no PowerShell module has to load.
+# Runs hidden after the shim has exited. It waits for the installer the shim
+# started; when that ends with exit code 0 it removes the recovery copy, and
+# when it fails it puts back the rule packs the shim swapped in (the folder, the
+# backup and each pack's digest come in DC_WATCH_PACKS), then keeps the copy,
+# which the failed run's message names (GAP-1011). A pack that changed since
+# the swap is left alone. It uses language operators and .NET calls only, so no
+# PowerShell module has to load, and it holds no file under the venv, which the
+# installer's in-use check would refuse to replace (GAP-1084).
 # The process handle is read before the wait: without it a process found by id
 # reports no exit code at all, which would read as a failure.
 # Its own exit code says what it did: 0 removed the copy, 3 could not watch
-# the installer, 4 the installer failed (copy kept), 5 the folder is not a
-# recovery copy, 6 the removal failed.
+# the installer, 4 the installer failed (copy kept, packs put back), 5 the
+# folder is not a recovery copy, 6 the removal failed.
+# Get-Digest is profile_digest of guardrail_profiles.py: sha256 over each file's
+# "relative path, NUL, sha256 hex, newline", sorted by path, dot files skipped.
 _RECOVERY_WATCHER = (
     "$ErrorActionPreference = 'Stop'; "
+    "function Get-Digest([string]$root) { "
+    "$root = [System.IO.Path]::GetFullPath($root).TrimEnd('\\'); "
+    "$map = @{}; "
+    "foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -File -Force) { "
+    "$rel = $f.FullName.Substring($root.Length + 1).Replace('\\', '/'); "
+    "$skip = $false; "
+    "foreach ($part in $rel.Split('/')) { if ($part.StartsWith('.') -or $part -eq '__pycache__') { $skip = $true } }; "
+    "if (-not $skip) { $map[$rel] = $f.FullName } }; "
+    "$keys = [string[]]@($map.Keys); [System.Array]::Sort($keys, [System.StringComparer]::Ordinal); "
+    "$sha = [System.Security.Cryptography.SHA256]::Create(); "
+    "$ms = New-Object System.IO.MemoryStream; "
+    "foreach ($k in $keys) { "
+    "$h = [System.BitConverter]::ToString($sha.ComputeHash([System.IO.File]::ReadAllBytes($map[$k]))); "
+    "$h = $h.Replace('-', '').ToLower(); "
+    "$b = [System.Text.Encoding]::UTF8.GetBytes($k + [string][char]0 + $h + [string][char]10); "
+    "$ms.Write($b, 0, $b.Length) }; "
+    "return [System.BitConverter]::ToString($sha.ComputeHash($ms.ToArray())).Replace('-', '').ToLower() }; "
+    "function Restore-Packs { "
+    "$s = $env:DC_WATCH_PACKS | ConvertFrom-Json; "
+    "foreach ($n in @($s.packs.PSObject.Properties)) { "
+    "try { "
+    "$dst = Join-Path $s.dir $n.Name; $bk = Join-Path $s.backup $n.Name; "
+    "$st = Join-Path $s.dir ('.' + $n.Name + '.undo'); "
+    "if (-not (Test-Path -LiteralPath $bk -PathType Container)) { continue }; "
+    "if ((Get-Digest $dst) -ne $n.Value) { continue }; "
+    "if (Test-Path -LiteralPath $st) { Remove-Item -LiteralPath $st -Recurse -Force }; "
+    "Move-Item -LiteralPath $dst -Destination $st; "
+    "try { Move-Item -LiteralPath $bk -Destination $dst } "
+    "catch { Move-Item -LiteralPath $st -Destination $dst; throw }; "
+    "Remove-Item -LiteralPath $st -Recurse -Force "
+    "} catch { } }; "
+    "try { [System.IO.Directory]::Delete($s.backup) } catch { } }; "
     "try { $p = [System.Diagnostics.Process]::GetProcessById([int]$env:DC_WATCH_PID) } catch { exit 3 }; "
     "if (@('powershell', 'pwsh') -notcontains $p.ProcessName) { exit 3 }; "
     "$null = $p.Handle; "
     "$p.WaitForExit(); "
-    "if ($p.ExitCode -ne 0) { exit 4 }; "
+    "if ($p.ExitCode -ne 0) { if ($env:DC_WATCH_PACKS) { try { Restore-Packs } catch { } }; exit 4 }; "
     "$d = $env:DC_WATCH_DIR; "
+    "if (-not $d) { exit 0 }; "
     "if (-not [System.IO.Path]::GetFileName($d).StartsWith('defenseclaw-recovery-')) { exit 5 }; "
     "try { [System.IO.Directory]::Delete($d, $true) } catch { exit 6 }; "
     "exit 0"
@@ -1262,9 +1502,12 @@ _RECOVERY_WATCHER = (
 
 
 def _watch_recovery_copy(
-    powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str]
+    powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str], packs: str | None = None
 ) -> subprocess.Popen[bytes] | None:
     """Start the hidden process that removes *recovery* when the installer *pid* ends with exit code 0.
+
+    *packs* (``_rule_pack_undo_spec``) makes it put the swapped rule packs back
+    when the installer fails.
 
     The shim returns while the installer still runs (it must free the files of
     the running CLI), so only a process that outlives it can see the result.
@@ -1273,11 +1516,16 @@ def _watch_recovery_copy(
     it never holds the folder it removes. ``None`` when it could not start: the
     copy then stays, as it does after a failed run.
     """
-    if not recovery:
+    if not recovery and not packs:
         return None
     watch_env = dict(env)
     watch_env["DC_WATCH_PID"] = str(pid)
-    watch_env["DC_WATCH_DIR"] = os.path.dirname(recovery[0])
+    watch_env.pop("DC_WATCH_DIR", None)
+    watch_env.pop("DC_WATCH_PACKS", None)
+    if recovery:
+        watch_env["DC_WATCH_DIR"] = os.path.dirname(recovery[0])
+    if packs:
+        watch_env["DC_WATCH_PACKS"] = packs
     try:
         return subprocess.Popen(  # noqa: S603 - fixed interpreter and fixed script
             [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _RECOVERY_WATCHER],
@@ -1445,7 +1693,15 @@ def _await_installer_log(
 
 
 def _run_installer(
-    path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None, wait: bool = False
+    path: str,
+    args: list[str],
+    workdir: str,
+    *,
+    rerun: str,
+    newer: str | None = None,
+    wait: bool = False,
+    detach: bool = False,
+    packs: ProfileRefreshResult | None = None,
 ) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
@@ -1504,8 +1760,31 @@ def _run_installer(
             _drop_recovery_copy(recovery)
             raise ShimError(f"could not start {powershell}: {exc}") from None
         # The shim ends while the installer runs, so a process that outlives it
-        # removes the copy once the installer has ended with exit code 0.
-        _watch_recovery_copy(powershell, proc.pid, recovery, env)
+        # removes the copy once the installer has ended with exit code 0, and
+        # puts the swapped rule packs back when it fails.
+        undo = _rule_pack_undo_spec(packs) if detach else None
+        watcher = _watch_recovery_copy(powershell, proc.pid, recovery, env, undo)
+        if detach:
+            # The saved installer of this release checks that no DefenseClaw
+            # program runs from the venv before it opens its log (and the log
+            # that opens is the older installer's, with another process id).
+            # This shim is such a program: waiting for a log here would hold the
+            # check and fail the installer (GAP-1084). Leave now; the result is
+            # shown in the installer's window and kept by the watcher.
+            print("  → The installer was started in a new window; this command ends now so it can replace its files.")
+            print("    It has not reported a result yet: that window shows it when it ends.")
+            if undo and watcher is not None:
+                print("    If it fails, this release's rule packs are put back.")
+            elif undo:
+                print("  ! Could not start the process that puts the rule packs back: if the installer fails they stay")
+            if recovery:
+                print(
+                    "    If the window shows an error, run the kept installer copy, verified against SHA-256 "
+                    f"{recovery[1]}, in this terminal:\n      {_terminal_command(recovery[0], ps_args)}\n"
+                    f"    or run this command again:\n      {rerun}"
+                )
+            print("    Confirm the result afterwards with: defenseclaw --version")
+            return 0
         # A started process is not a running install (GAP-1011): the installer
         # opens its log only after it has the install lock, and an installer
         # that ends before then leaves nothing but a window that closes.
@@ -1555,7 +1834,7 @@ def _run_installer(
                 # picks the current controller again.
                 _drop_recovery_copy(recovery)
                 route = f"run this command again (the kept copy is not available):\n      {rerun}\n"
-            raise ShimOutcomeUnknownError(
+            ended = ShimOutcomeUnknownError(
                 f"the installer ended with exit code {rc} before it opened its log. It may have stopped before "
                 "changing anything, or later if it could not write its log, so the result is not known; the "
                 "reason was shown only in its window, which has closed. Check the install with: "
@@ -1563,6 +1842,8 @@ def _run_installer(
                 f"{route}"
                 "    The installer first restores an install it was replacing."
             )
+            ended.installer_ended = True
+            raise ended
         else:
             # Still running, so no result: the verified copy stays.
             raise ShimOutcomeUnknownError(

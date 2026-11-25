@@ -90,3 +90,37 @@ def test_upgrade_keeps_rego_beside_external_config(tmp_path: Path, monkeypatch: 
 
     assert module.read_bytes() == edited
     assert not list((data_dir / "backups").glob("rego-*"))
+
+
+def test_a_downgrade_needs_no_rego_step_the_older_release_replaces_every_shipped_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-1080: unlike the rule packs (GAP-1077), the older release's migrate
+    # does not keep a Rego module it does not know. rego_policies.py is the same
+    # file in 1.0.10 and 1.0.11, and its refresh_rego replaces every shipped module,
+    # edited ones too, with a copy in backups/rego-*. So a downgrade ends on the
+    # target's modules whatever this release seeded, and the user's edit is backed up.
+    target = tmp_path / "target-1.0.10"
+    target.mkdir()
+    (target / "admission.rego").write_bytes(b"package defenseclaw.admission\n# 1.0.10\n")
+    (target / "guardrail.rego").write_bytes(b"package defenseclaw.guardrail\n# 1.0.10\n")
+    monkeypatch.setattr(rego_policies, "shipped_modules", lambda: {p.name: p for p in sorted(target.iterdir())})
+    policy_dir = tmp_path / "policies"
+    rego = policy_dir / "rego"
+    rego.mkdir(parents=True)
+    unedited = b"package defenseclaw.admission\n# 1.0.11\n"
+    edited = b"package defenseclaw.guardrail\n# 1.0.11\n# mine\n"
+    (rego / "admission.rego").write_bytes(unedited)
+    (rego / "guardrail.rego").write_bytes(edited)
+    (rego / "custom-team.rego").write_bytes(b"package team\n")
+    stock = dict(rego_policies.STOCK_REGO_DIGESTS)
+    stock["admission.rego"] = stock["admission.rego"] | {rego_policies.module_digest(unedited)}
+    monkeypatch.setattr(rego_policies, "STOCK_REGO_DIGESTS", stock)
+
+    result = rego_policies.refresh_rego(str(policy_dir), str(tmp_path / "backups"))
+
+    assert (result.refreshed, result.replaced_edited) == (["admission.rego"], ["guardrail.rego"])
+    assert (rego / "admission.rego").read_bytes() == (target / "admission.rego").read_bytes()
+    assert (rego / "guardrail.rego").read_bytes() == (target / "guardrail.rego").read_bytes()
+    assert (Path(result.backup_dir) / "guardrail.rego").read_bytes() == edited
+    assert (rego / "custom-team.rego").read_bytes() == b"package team\n"

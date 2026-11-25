@@ -80,3 +80,27 @@ def test_migrate_keeps_an_edited_profile(seeded: Path) -> None:
 
     assert rules.read_bytes() == edited
     assert not (seeded / "backups").exists()
+
+
+def test_restore_unedited_profiles_replaces_a_stock_pack_and_keeps_an_edited_one(tmp_path: Path) -> None:
+    # GAP-1077: the packs of an older release are put in place of the unedited ones.
+    bundled = bundled_guardrail_profiles_dir()
+    assert bundled is not None
+    policy_dir = tmp_path / "policies"
+    for name in ("default", "strict"):
+        shutil.copytree(bundled / name, policy_dir / "guardrail" / name)
+        older = tmp_path / "older" / name / "rules" / "c2.yaml"
+        older.parent.mkdir(parents=True)
+        older.write_text("# the older release\n")
+    mine = policy_dir / "guardrail" / "strict" / "rules" / "c2.yaml"
+    mine.write_text(mine.read_text() + "# mine\n")
+    kept = mine.read_bytes()
+
+    assert guardrail_profiles.unedited_profiles(str(policy_dir)) == ["default"]
+    result = guardrail_profiles.restore_unedited_profiles(str(policy_dir), str(tmp_path / "backups"), tmp_path / "older")
+
+    assert result.refreshed == ["default"] and result.kept_modified == ["strict"]
+    assert (policy_dir / "guardrail/default/rules/c2.yaml").read_text() == "# the older release\n"
+    assert mine.read_bytes() == kept
+    (backup,) = (tmp_path / "backups").glob("guardrail-profiles-*/default")
+    assert guardrail_profiles.profile_digest(backup) == guardrail_profiles.profile_digest(bundled / "default")
