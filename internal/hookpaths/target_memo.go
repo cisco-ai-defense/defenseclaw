@@ -98,12 +98,13 @@ const (
 
 // parsedShell is parseShell of command for a reader that only reads the
 // tree: the memo parses each command once and hands every such reader the
-// same tree. One decision read the same 8 KB command with the parser three
-// times for the sed backup reader (both readings) and the make proof, most
-// of a copy-mode by-name decision (FIX-F3PERF). Only readers that never
-// change a tree may use it: literalWriteOperandsWithParsedKnown renames the
-// shadowed builtins of its tree in place (knownShadow), so it and the
-// readers that hand it their tree parse their own.
+// same tree. One decision read the same 8 KB command with the parser four
+// times for the sed backup reader (both readings), the make proof and the
+// POSIX mention scan, most of a copy-mode by-name decision (FIX-F3PERF).
+// Only readers that never change a tree may use it:
+// literalWriteOperandsWithParsedKnown renames the shadowed builtins of its
+// tree in place (knownShadow), so it and the readers that hand it their
+// tree parse their own.
 func (m *TargetMemo) parsedShell(command string) (*syntax.File, bool) {
 	if m == nil || len(command) > maxMemoParseBytes {
 		return parseShell(command)

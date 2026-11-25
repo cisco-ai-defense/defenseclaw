@@ -123,7 +123,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		return answer
 	}
-	file, parsed := parseShell(command)
+	// The scan only reads the tree (TargetMemo.parsedShell).
+	file, parsed := globs.targetMemo().parsedShell(command)
 	if depth == 0 && parsed && (actionKnownReadOnlyShell(file, home) ||
 		!stateOnly && (actionSSHSetupAndReadsOnly(file, cwd, home) ||
 			strings.Contains(command, "pwd") && actionReadOnlyListingCompound(file, cwd, home))) {
