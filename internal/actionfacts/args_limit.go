@@ -12,8 +12,10 @@ import (
 // Bounds of the generic tool-argument reading (extractArgsAtSchema), for a
 // caller that projects arguments to fit them.
 const (
-	MaxJSONDepth   = maxJSONDepth
-	MaxJSONMembers = maxJSONMembers
+	MaxJSONDepth           = maxJSONDepth
+	MaxArgsProjectionDepth = maxArgsProjectionDepth
+	MaxArgsJSONBytes       = maxArgsJSONBytes
+	MaxJSONMembers         = maxJSONMembers
 )
 
 // ArgsLimitIssue is the bound the generic argument reading stops at for raw:
@@ -33,8 +35,9 @@ func ArgsLimitIssue(raw json.RawMessage) IssueCode {
 	return ""
 }
 
-// ReadArgumentField returns the canonical field read for a top-level argument
-// key. It uses the same strings.ToLower mapping as the shared reader; callers
+// ReadArgumentField returns the canonical field read for an argument
+// key at any reader-permitted envelope depth. It uses the same
+// strings.ToLower mapping as the shared reader; callers
 // must not use Unicode simple folding to group aliases.
 func ReadArgumentField(key string) (string, bool) {
 	return canonicalInputFieldName(key)

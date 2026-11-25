@@ -25,6 +25,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
@@ -68,6 +69,9 @@ const (
 	substrateMCPControlMax   = 512
 	substrateMCPMaxHeldAsks  = 8
 	substrateMCPWriteTimeout = 30 * time.Second
+	// Over-reader-limit frames may use more CPU. Only one such call per
+	// actor runs at once; another gets a short bounded wait.
+	substrateMCPOverCapWait = 100 * time.Millisecond
 )
 
 // substrateMCPAskPoll is how often a held tools/call checks its ask.
@@ -487,16 +491,38 @@ func substrateMCPArgName(v any) (string, bool) {
 // A call judges at most substrateMCPReadingsPerArgs readings per argument
 // reading, including projections and distinct alias values (RV-0841b F6).
 func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substrateMCPJudgedCall) SubstrateCalloutVerdict {
+	if b.st != nil && substrateMCPOverCap(c) {
+		key := "mcp-judge:" + b.reg.Atespace + "/" + b.reg.UID
+		release, ok := b.st.streams.take(key, 1)
+		if !ok {
+			timer := time.NewTimer(substrateMCPOverCapWait)
+			tick := time.NewTicker(10 * time.Millisecond)
+			defer timer.Stop()
+			defer tick.Stop()
+			for !ok {
+				select {
+				case <-ctx.Done():
+					return substrateMCPBusyVerdict()
+				case <-timer.C:
+					return substrateMCPBusyVerdict()
+				case <-tick.C:
+					release, ok = b.st.streams.take(key, 1)
+				}
+			}
+		}
+		defer release()
+	}
 	readings := c.args
 	if c.params != nil {
 		readings = append(slices.Clip(c.args), c.params)
 	}
 	left := substrateMCPReadingsPerArgs*max(len(c.args), 1) - len(readings)
+	extraBytes := substrateMCPExtraBytesPerCall
 	var out SubstrateCalloutVerdict
 	for i, args := range readings {
 		req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: c.tool, Transport: "stdio", Method: method}, Args: args}
 		req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
-		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left}
+		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left, extraBytes: &extraBytes}
 		v := substrateMCPJudge(b.a, withSubstrateMCPReading(ctx, rd), b.reg, req)
 		if i == 0 {
 			out = v
@@ -508,6 +534,26 @@ func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substra
 		}
 	}
 	return out
+}
+
+// substrateMCPOverCap distinguishes frames that exceed the shared reader's
+// per-reading byte cap. Ordinary calls never enter the per-actor wait.
+func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
+	if len(c.params) > actionfacts.MaxArgsJSONBytes {
+		return true
+	}
+	for _, args := range c.args {
+		if len(args) > actionfacts.MaxArgsJSONBytes {
+			return true
+		}
+	}
+	return false
+}
+
+func substrateMCPBusyVerdict() SubstrateCalloutVerdict {
+	return SubstrateCalloutVerdict{V: "1", Verdict: "deny", Source: "tool_rules",
+		Reason: boundedTruncatedTitle + " (over-cap actor budget)", Severity: "HIGH",
+		Findings: []string{evaluationLimitRuleID}}
 }
 
 // notBridged refuses a method that is not on the bridge allow list with a

@@ -34,7 +34,8 @@ import (
 // default pack, a block where the pack or guardrail.cascade.unknown says so.
 // A large call is never a silent allow. The bridge reads each distinct value
 // of a recognized field within its fixed budget; excess members or values
-// receive the unknown-tier finding. Projections go to the rules alone. The
+// receive the unknown-tier finding. An exhausted byte budget refuses the
+// unresolved call. Projections go to the rules alone. The
 // LLM judge and AID read whole params when no earlier argument reading has
 // already denied (RV-0841b F6, RV-0841c F2).
 
@@ -53,6 +54,12 @@ const (
 	// values are read. Each may need a head and tail projection.
 	substrateMCPMaxAlternateValues = 8
 	substrateMCPMaxFieldMembers    = 8
+	// One call may spend at most this many bytes on additional rules
+	// readings. The original argument and params readings remain reserved.
+	substrateMCPExtraBytesPerCall = 160 << 10
+	// Conflicting aliases spend less of that reserve: if a long value
+	// exhausts it, the bridge refuses the unresolved call.
+	substrateMCPVariantBytesPerArgs = 96 << 10
 	// Full reading, eight base projections, and two per alternate value:
 	// at most 25 rule readings per argument reading. The bridge shares this
 	// budget across its readings (substrateMCPReading).
@@ -74,8 +81,9 @@ var substrateMCPStringLimits = []int{actionfacts.MaxCommandBytes, 16 << 10, 4 <<
 // params, and left is the projections the call may still add, shared by its
 // readings. The callout route sets neither: one reading, judged in full.
 type substrateMCPReading struct {
-	rulesOnly bool
-	left      *int
+	rulesOnly  bool
+	left       *int
+	extraBytes *int
 }
 
 type substrateMCPReadingKey struct{}
@@ -91,7 +99,8 @@ func substrateMCPReadingOf(ctx context.Context) substrateMCPReading {
 
 // substrateMCPBoundedVerdict judges bounded projections and, on the bridge,
 // each distinct value hidden by a conflicting read-key alias. A deny returns
-// early. Any reading left uncovered is floored at the configured unknown tier.
+// early. Item and input limits use the configured unknown tier; a spent
+// bridge byte budget refuses an unresolved alias.
 func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry.Registration, connectorName string,
 	args json.RawMessage, full SubstrateCalloutVerdict, judge func(json.RawMessage) SubstrateCalloutVerdict) SubstrateCalloutVerdict {
 	issue := actionfacts.ArgsLimitIssue(args)
@@ -100,9 +109,14 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 	base := args
 	var alternates []json.RawMessage
 	overflow := false
+	byteExhausted := false
 	changed := false
 	if rd.left != nil && out.Verdict != "deny" {
-		base, alternates, changed, overflow = substrateMCPReadFieldVariants(args)
+		limit := int(^uint(0) >> 1)
+		if rd.extraBytes != nil {
+			limit = min(*rd.extraBytes, substrateMCPVariantBytesPerArgs)
+		}
+		base, alternates, changed, overflow, byteExhausted = substrateMCPReadFieldVariantsUpTo(args, limit)
 	}
 	// Keep small calls with no conflicting values on their original path.
 	if issue == "" && !overflow && len(alternates) == 0 {
@@ -112,11 +126,19 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 		if out.Verdict == "deny" {
 			return
 		}
-		if rd.left != nil {
-			if *rd.left <= 0 {
+		if rd.left != nil && *rd.left <= 0 {
+			overflow = true
+			return
+		}
+		if rd.extraBytes != nil {
+			if len(raw) > *rd.extraBytes {
 				overflow = true
+				byteExhausted = true
 				return
 			}
+			*rd.extraBytes -= len(raw)
+		}
+		if rd.left != nil {
 			*rd.left--
 		}
 		out = substrateMCPStricter(out, judge(raw))
@@ -159,7 +181,7 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 			read(p)
 		}
 	}
-	if out.Verdict != "allow" || (issue == "" && !overflow) {
+	if out.Verdict == "deny" || (issue == "" && !overflow && !byteExhausted) {
 		return out
 	}
 	set := bounded.Of(bounded.Bytes)
@@ -169,111 +191,307 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 	case issue == actionfacts.IssueDepthLimit:
 		set = bounded.Of(bounded.Depth)
 	}
-	out.Source, out.Reason = "tool_rules", boundedTruncatedTitle+" ("+set.Reason()+")"
-	out.Findings = append(slices.Clip(out.Findings), evaluationLimitRuleID)
+	floor := out
+	floor.Source, floor.Reason = "tool_rules", boundedTruncatedTitle+" ("+set.Reason()+")"
+	floor.Findings = append(slices.Clip(floor.Findings), evaluationLimitRuleID)
 	switch bounded.Unknown(a.boundedTier(ctx, connectorName)) {
 	case bounded.Block:
-		out.Verdict, out.Severity = "deny", "HIGH"
+		floor.Verdict, floor.Severity = "deny", "HIGH"
 	case bounded.Confirm:
-		out.Verdict, out.Severity = "ask", "MEDIUM"
+		floor.Verdict, floor.Severity = "ask", "MEDIUM"
 		if reg.Unattended {
-			out.Verdict = "deny" // D12: unattended asks deny by default
+			floor.Verdict = "deny" // D12: unattended asks deny by default
 		}
 	default:
-		out.Severity = "MEDIUM"
+		floor.Severity = "MEDIUM"
 	}
-	return out
+	if byteExhausted {
+		floor.Verdict, floor.Severity = "deny", "HIGH"
+		floor.Reason += "; byte budget exhausted"
+	}
+	if out.Verdict == "ask" && floor.Verdict != "deny" {
+		out.Findings = append(slices.Clip(out.Findings), evaluationLimitRuleID)
+		return out
+	}
+	return floor
 }
 
-// substrateMCPReadFieldVariants is bridge-only. It keeps one spelling of
-// each field in the base reading, and one isolated reading per other value.
-// Sorting makes the representative stable; grouping uses exactly the shared
-// reader's canonicalization. Isolated readings cannot inherit ambiguity from
-// other fields. The caller floors over-budget input at the unknown tier.
-func substrateMCPReadFieldVariants(raw json.RawMessage) (json.RawMessage, []json.RawMessage, bool, bool) {
+// substrateMCPReadFieldVariantsUpTo is bridge-only. It walks exactly the
+// object envelopes and projection depth the shared reader walks. Each
+// candidate keeps one value of every conflicting resolved field, including
+// conflicts between a parent object and a nested envelope. Values in other
+// fields stay in place, so every candidate is a complete rules reading.
+func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json.RawMessage, []json.RawMessage, bool, bool, bool) {
 	if len(raw) == 0 {
-		return raw, nil, false, false
+		return raw, nil, false, false, false
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
 	if dec.Decode(&v) != nil {
-		return raw, nil, false, true
+		return raw, nil, false, true, false
 	}
-	obj, ok := v.(map[string]any)
+	root, ok := v.(map[string]any)
 	if !ok {
-		return raw, nil, false, false
+		return raw, nil, false, false, false
 	}
-	seen := make(map[string]bool)
-	collision := false
-	for key := range obj {
-		if field, known := actionfacts.ReadArgumentField(key); known {
-			if seen[field] {
-				collision = true
-				break
-			}
-			seen[field] = true
-		}
-	}
-	if !collision {
-		return raw, nil, false, false
-	}
-	type fieldValues struct {
-		members int
-		values  []any
-	}
-	fields := make(map[string]*fieldValues)
-	base := make(map[string]any, len(obj))
-	var alternates []json.RawMessage
+
+	first := make(map[string]substrateMCPVariantEntry)
+	byPath := make(map[string]substrateMCPVariantEntry)
+	counts := make(map[string]int)
+	values := make(map[string][]any)
+	entries := make(map[string][]substrateMCPVariantEntry)
+	var alternates []substrateMCPVariantEntry
 	changed, overflow := false, false
-	for _, key := range substrateMCPKeyOrder(obj) {
-		value := obj[key]
-		field, known := actionfacts.ReadArgumentField(key)
-		if !known {
-			base[key] = value
-			continue
-		}
-		group := fields[field]
-		if group == nil {
-			fields[field] = &fieldValues{members: 1, values: []any{value}}
-			base[key] = value
-			continue
-		}
-		changed = true
-		group.members++
-		if group.members > substrateMCPMaxFieldMembers {
-			overflow = true
-		}
-		distinct := true
-		for _, prior := range group.values {
-			if reflect.DeepEqual(prior, value) {
-				distinct = false
-				break
+	var walk func(map[string]any, []string, int)
+	walk = func(obj map[string]any, parent []string, depth int) {
+		for _, key := range substrateMCPKeyOrder(obj) {
+			value := obj[key]
+			field, known := actionfacts.ReadArgumentField(key)
+			if !known {
+				continue
+			}
+			if depth < actionfacts.MaxArgsProjectionDepth && (field == "nested" || field == "args") {
+				if s, isString := value.(string); isString {
+					trimmed := strings.TrimSpace(s)
+					if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') &&
+						actionfacts.ArgsLimitIssue(json.RawMessage(trimmed)) == "" {
+						nestedDec := json.NewDecoder(strings.NewReader(trimmed))
+						nestedDec.UseNumber()
+						var nested any
+						if nestedDec.Decode(&nested) == nil {
+							switch x := nested.(type) {
+							case map[string]any:
+								value = substrateMCPVariantString{object: x}
+							case []any:
+								value = substrateMCPVariantArrayString{elements: x}
+							}
+							obj[key] = value
+						}
+					}
+				}
+			}
+			path := append(slices.Clone(parent), key)
+			group := substrateMCPVariantGroup(field, value, parent)
+			entry := substrateMCPVariantEntry{group: group, path: path}
+			byPath[substrateMCPVariantPath(path)] = entry
+			if len(entries[group]) < substrateMCPMaxFieldMembers {
+				entries[group] = append(entries[group], entry)
+			}
+			counts[group]++
+			if counts[group] > substrateMCPMaxFieldMembers {
+				overflow = true
+			}
+			if _, exists := first[group]; !exists {
+				first[group] = entry
+				values[group] = []any{value}
+			} else {
+				changed = true
+				distinct := true
+				for _, prior := range values[group] {
+					if reflect.DeepEqual(prior, value) {
+						distinct = false
+						break
+					}
+				}
+				if distinct {
+					if len(alternates) >= substrateMCPMaxAlternateValues {
+						overflow = true
+					} else {
+						values[group] = append(values[group], value)
+						alternates = append(alternates, entry)
+					}
+				}
+			}
+			if depth >= actionfacts.MaxArgsProjectionDepth || (field != "nested" && field != "args") {
+				continue
+			}
+			switch x := value.(type) {
+			case map[string]any:
+				walk(x, path, depth+1)
+			case substrateMCPVariantString:
+				walk(x.object, path, depth+1)
 			}
 		}
-		if !distinct {
-			continue
+	}
+	walk(root, nil, 0)
+	if !changed {
+		return raw, nil, false, overflow, false
+	}
+
+	selected := make(map[string][]string, len(first))
+	for group, entry := range first {
+		selected[group] = entry.path
+	}
+	makeReading := func(entry *substrateMCPVariantEntry) (json.RawMessage, error) {
+		choice := make(map[string][]string, len(selected))
+		for group, path := range selected {
+			choice[group] = path
 		}
-		if len(alternates) >= substrateMCPMaxAlternateValues {
+		if entry != nil {
+			choice[entry.group] = entry.path
+			// A variant inside an alternate envelope must keep that
+			// envelope rather than the baseline envelope.
+			for i := 1; i < len(entry.path); i++ {
+				if ancestor, exists := byPath[substrateMCPVariantPath(entry.path[:i])]; exists {
+					choice[ancestor.group] = ancestor.path
+				}
+			}
+		}
+		// Keep another resolved field's value from the selected envelope
+		// when its baseline value belonged to an envelope now removed.
+		groups := make([]string, 0, len(choice))
+		for group := range choice {
+			groups = append(groups, group)
+		}
+		slices.SortFunc(groups, func(a, b string) int {
+			if c := cmp.Compare(len(first[a].path), len(first[b].path)); c != 0 {
+				return c
+			}
+			return strings.Compare(a, b)
+		})
+		for _, group := range groups {
+			if substrateMCPVariantCompatible(choice[group], choice, byPath) {
+				continue
+			}
+			for _, candidate := range entries[group] {
+				if substrateMCPVariantCompatible(candidate.path, choice, byPath) {
+					choice[group] = candidate.path
+					break
+				}
+			}
+		}
+		return substrateMCPEncode(substrateMCPVariantCopy(root, nil, choice, len(raw) > 64<<10))
+	}
+	base, err := makeReading(nil)
+	if err != nil {
+		return raw, nil, false, true, false
+	}
+	out := make([]json.RawMessage, 0, len(alternates))
+	remaining := byteLimit - len(base)
+	byteExhausted := false
+	if remaining < 0 {
+		overflow = true
+		byteExhausted = true
+	}
+	for i := range alternates {
+		if remaining <= 0 {
 			overflow = true
-			continue
+			byteExhausted = true
+			break
 		}
-		group.values = append(group.values, value)
-		alt, err := substrateMCPEncode(map[string]any{key: value})
+		alt, err := makeReading(&alternates[i])
 		if err != nil {
 			overflow = true
 			continue
 		}
-		alternates = append(alternates, alt)
+		duplicate := bytes.Equal(alt, base)
+		for _, prior := range out {
+			if bytes.Equal(alt, prior) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		if len(alt) > remaining {
+			overflow = true
+			byteExhausted = true
+			break
+		}
+		remaining -= len(alt)
+		out = append(out, alt)
 	}
-	if !changed {
-		return raw, nil, false, overflow
+	return base, out, true, overflow, byteExhausted
+}
+
+type substrateMCPVariantEntry struct {
+	group string
+	path  []string
+}
+
+// A nested JSON string remains a string in each candidate. The reader also
+// accepts object envelopes; changing the shape would be an inaccurate read.
+type substrateMCPVariantString struct {
+	object map[string]any
+}
+
+type substrateMCPVariantArrayString struct {
+	elements []any
+}
+
+func substrateMCPVariantCompatible(path []string, choice map[string][]string, byPath map[string]substrateMCPVariantEntry) bool {
+	for i := 1; i < len(path); i++ {
+		if ancestor, exists := byPath[substrateMCPVariantPath(path[:i])]; exists &&
+			!slices.Equal(choice[ancestor.group], ancestor.path) {
+			return false
+		}
 	}
-	enc, err := substrateMCPEncode(base)
-	if err != nil {
-		return raw, alternates, false, true
+	return true
+}
+
+func substrateMCPVariantPath(path []string) string {
+	return strings.Join(path, "\x00")
+}
+
+func substrateMCPVariantGroup(field string, value any, parent []string) string {
+	if field == "nested" {
+		switch value.(type) {
+		case map[string]any, substrateMCPVariantString:
+			return "nested\x00" + substrateMCPVariantPath(parent)
+		case []any, substrateMCPVariantArrayString:
+			return "argv"
+		case string:
+			return "command"
+		}
 	}
-	return enc, alternates, true, overflow
+	if field == "args" {
+		switch value.(type) {
+		case map[string]any, substrateMCPVariantString:
+			return "args\x00" + substrateMCPVariantPath(parent)
+		case []any, substrateMCPVariantArrayString:
+			return "argv"
+		case string:
+			return "command"
+		}
+	}
+	return field
+}
+
+func substrateMCPVariantCopy(v any, parent []string, selected map[string][]string, focus bool) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for key, value := range x {
+			field, known := actionfacts.ReadArgumentField(key)
+			if !known && focus {
+				continue
+			}
+			path := append(slices.Clone(parent), key)
+			if known {
+				group := substrateMCPVariantGroup(field, value, parent)
+				if !slices.Equal(path, selected[group]) {
+					continue
+				}
+			}
+			if (field == "nested" || field == "args") && len(parent) < actionfacts.MaxArgsProjectionDepth {
+				out[key] = substrateMCPVariantCopy(value, path, selected, focus)
+			} else {
+				out[key] = value
+			}
+		}
+		return out
+	case substrateMCPVariantString:
+		nested := substrateMCPVariantCopy(x.object, parent, selected, focus)
+		enc, _ := substrateMCPEncode(nested)
+		return string(enc)
+	case substrateMCPVariantArrayString:
+		enc, _ := substrateMCPEncode(x.elements)
+		return string(enc)
+	default:
+		return v
+	}
 }
 
 // substrateMCPStricter is the stricter of two verdicts (deny, ask, allow;
@@ -377,6 +595,14 @@ func substrateMCPKeyOrder(obj map[string]any) []string {
 	return keys
 }
 
+func substrateMCPPayloadField(field string) bool {
+	switch field {
+	case "body", "data", "payload", "content", "headers":
+		return true
+	}
+	return false
+}
+
 func substrateMCPContainer(v any) int {
 	switch v.(type) {
 	case map[string]any, []any:
@@ -418,6 +644,15 @@ func (p *substrateMCPProjector) value(v any, depth int, only []string) any {
 				continue
 			}
 			p.members++
+			if field, known := actionfacts.ReadArgumentField(k); known && substrateMCPPayloadField(field) {
+				if text, ok := x[k].(string); ok && len(text) > 64 {
+					// The shared reader retains only payload kind and
+					// non-emptiness. The full reading still sees every
+					// payload byte; a projection need not copy 64 KiB of it.
+					out[ck] = substrateMCPCut(text, 64, false)
+					continue
+				}
+			}
 			out[ck] = p.value(x[k], depth+1, nil)
 		}
 		return out
