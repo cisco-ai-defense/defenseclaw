@@ -101,6 +101,22 @@ func perlS1Enclosing(tokens []perlToken, assignment, callAt int) bool {
 	return true
 }
 
+func perlOpaqueAt(tokens []perlToken, at int) bool {
+	if at+1 >= len(tokens) {
+		return false
+	}
+	switch tokens[at].text {
+	case "eval", "do":
+		return tokens[at+1].text != "{"
+	case "require":
+		return tokens[at+1].kind != 'w'
+	case "$", "*", "&":
+		return at+3 < len(tokens) && tokens[at+1].text == "{" &&
+			tokens[at+2].kind == 's' && tokens[at+3].text == "}"
+	}
+	return false
+}
+
 func perlS1ValueSpan(tokens []perlToken, call perlCall, name string) ([2]int, bool) {
 	callAt := -1
 	for i := range tokens {
@@ -142,8 +158,7 @@ func perlS1ValueSpan(tokens []perlToken, call perlCall, name string) ([2]int, bo
 		if scalar == name {
 			return [2]int{}, false
 		}
-		if tokens[i].text == "eval" || tokens[i].text == "do" ||
-			tokens[i].text == "require" {
+		if perlOpaqueAt(tokens, i) {
 			return [2]int{}, false
 		}
 	}

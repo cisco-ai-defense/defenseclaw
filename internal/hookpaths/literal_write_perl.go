@@ -420,7 +420,24 @@ func perlBuiltinName(tokens []perlToken, at int) string {
 		if prev == "->" || prev == "::" || prev == "sub" || prev == "$" || prev == "@" {
 			return ""
 		}
-		if (prev == "&" || prev == "*" || prev == "%") && !qualified {
+		if prev == "&" && !qualified {
+			if at < 2 {
+				return ""
+			}
+			left := tokens[at-2]
+			switch left.text {
+			case ")", "]":
+			case "}":
+				if left.blockKind == "sub" {
+					return ""
+				}
+			default:
+				if left.kind != 'n' && left.kind != 's' {
+					return ""
+				}
+			}
+		}
+		if (prev == "*" || prev == "%") && !qualified {
 			if at < 2 || !perlTermToken(tokens[at-2]) {
 				return ""
 			}
@@ -558,7 +575,7 @@ func perlFixedPath(tokens []perlToken, start, end int) (string, bool) {
 
 // perlProvenWrites adds only paths supported by a complete Perl parse and a
 // positive write rule. An incomplete program contributes no new operands.
-func perlProvenWrites(code string) []string {
+func perlProvenWrites(code, cwd, home string) []string {
 	if !strings.ContainsAny(code, "'\"") ||
 		!strings.Contains(code, "open") && !strings.Contains(code, "unlink") &&
 			!strings.Contains(code, "rename") && !strings.Contains(code, "link") &&
@@ -577,7 +594,8 @@ func perlProvenWrites(code string) []string {
 	override := perlResolveOverrides(tokens, calls)
 	paths := perlResolveDirectWrites(tokens, calls, override.skip)
 	paths = append(paths, override.paths...)
-	return append(paths, perlSysopenWrites(tokens, calls, perlNamedDefinitions(tokens), override.skip)...)
+	paths = append(paths, perlSysopenWrites(tokens, calls, perlNamedDefinitions(tokens), override.skip)...)
+	return append(paths, perlPipeWrites(tokens, calls, override.skip, cwd, home)...)
 }
 
 func perlQuoteLikeExcluded(previous string) bool {
