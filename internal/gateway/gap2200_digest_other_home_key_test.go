@@ -50,14 +50,19 @@ func TestGAP2200DigestOfAnotherHomesKeyKeepsThe1010Cell(t *testing.T) {
 					}
 				}
 			}
-			// cmp -l and -b print the bytes they compare: the key
-			// read keeps its raise there (GAP-2212).
-			for _, command := range []string{"cmp -l " + other + ".ssh/id_ed25519 /dev/zero", "cmp -b " + other + ".ssh/id_ed25519 /dev/zero"} {
+			// cmp -l and -b print the bytes they compare, and a plain cmp
+			// names the first differing byte: the key read keeps its raise
+			// there, the parent's block HIGH in the strict tiers (GAP-2212;
+			// CHK-T23E-D2 N1 pins the cell and adds the plain cmp row).
+			for _, command := range []string{"cmp -l " + other + ".ssh/id_ed25519 /dev/zero", "cmp -b " + other + ".ssh/id_ed25519 /dev/zero", "cmp " + other + ".ssh/id_ed25519 /dev/zero"} {
 				for _, wrapper := range []string{"", "sudo "} {
 					ordinary, _ := route.decide(t, api, cwd, wrapper+strings.Replace(command, ".ssh/id_ed25519", "proj/notes.txt", 1))
 					action, severity := route.decide(t, api, cwd, wrapper+command)
 					if tier.tier == bounded.TierStrict && action == ordinary {
-						t.Errorf("%s %s %q = %s %s: the byte-printing compare of another home's key lost its raise", tier.name, route.connector, wrapper+command, action, severity)
+						t.Errorf("%s %s %q = %s %s: the compare of another home's key lost its raise", tier.name, route.connector, wrapper+command, action, severity)
+					}
+					if tier.tier == bounded.TierStrict && (action != "block" || severity != "HIGH") {
+						t.Errorf("%s %s %q = %s %s, want the parent's block HIGH", tier.name, route.connector, wrapper+command, action, severity)
 					}
 				}
 			}
