@@ -103,8 +103,12 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	}
 	calls.AddCalls(sc.Calls)
 	segs := sc.Segments
+	wire := len(data)
 	if snapshotEvent(sc.Type) {
-		// A snapshot repeats what earlier events carried.
+		// A snapshot repeats what earlier events carried, so its bytes do
+		// not spend a parked run's budget either: an OpenAI .done event
+		// repeats the very part text that is parked (rel-1-0-10:GAP-2224).
+		wire = 0
 		kept := segs[:0:0]
 		for _, seg := range segs {
 			if !strings.Contains(acc.String(), seg) {
@@ -113,7 +117,7 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 		}
 		segs = kept
 	}
-	acc.AddEvent(withWalkerPieces(typed, segs), len(data))
+	acc.AddEvent(withWalkerPieces(typed, segs), wire)
 	return sc.Ambiguous
 }
 
