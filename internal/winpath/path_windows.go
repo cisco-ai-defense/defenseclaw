@@ -51,6 +51,12 @@ func Extended(path string) (string, error) {
 		return "", err
 	}
 	absolute = filepath.Clean(absolute)
+	// filepath.Abs spells a bare device name (NUL, CON, CONIN$) as \\.\NUL:
+	// refuse it here too, or it becomes the UNC path \\?\UNC\.\NUL and costs
+	// a network lookup before it fails (review RV-2182 F3).
+	if strings.HasPrefix(absolute, `\\.\`) || strings.HasPrefix(absolute, `\\?\`) {
+		return "", fmt.Errorf("device path %s is not a filesystem path", absolute)
+	}
 	if strings.HasPrefix(absolute, `\\`) {
 		return `\\?\UNC\` + strings.TrimPrefix(absolute, `\\`), nil
 	}
