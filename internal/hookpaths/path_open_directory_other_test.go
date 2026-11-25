@@ -34,9 +34,7 @@ func TestActionGlobOpenDirRejectsFilesAndFollowsDirectoryAliases(t *testing.T) {
 	}
 	fileAlias, dirAlias := filepath.Join(home, "file-alias"), filepath.Join(home, "dir-alias")
 	for alias, target := range map[string]string{fileAlias: file, dirAlias: dir} {
-		if err := os.Symlink(target, alias); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, alias)
 	}
 	for _, name := range []string{file, fileAlias} {
 		t.Run(filepath.Base(name), func(t *testing.T) { assertGlobNotDirectory(t, name) })
@@ -103,9 +101,7 @@ func TestActionExpandGlobSkipsSpecialFilesAndRetainsDirectoryAlias(t *testing.T)
 		t.Fatal(err)
 	}
 	alias := filepath.Join(project, "keydir")
-	if err := os.Symlink(ssh, alias); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, ssh, alias)
 	// Exercise the actual walker, including its ENOTDIR handling. On failure,
 	// the shared bounded helper releases a regressed plain FIFO reader.
 	type expansion struct {
