@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -35,7 +36,55 @@ func evalLinks(path string) (string, error) {
 	if err != nil {
 		return "", &os.PathError{Op: "evallinks", Path: path, Err: err}
 	}
-	return plainWindowsPath(final), nil
+	return keepDriveSpelling(path, plainWindowsPath(final)), nil
+}
+
+// keepDriveSpelling spells final with the drive letter path was named
+// through when that letter is a subst drive or a mapped network drive and
+// final lies at or below the folder or share it maps to. The handle's final
+// path names the real folder (C:\...\target) or share (\\server\share\...),
+// where filepath.EvalSymlinks kept the drive letter, and the hook path share
+// gate reads a \\server\share spelling as a share (review RV-2182 F2). A path
+// whose links lead out of what the drive maps to keeps its real final path.
+// The respelling names the same file: the drive letter reaches the folder it
+// maps to, and the rest of final has no links left.
+func keepDriveSpelling(path, final string) string {
+	abs := path
+	if !filepath.IsAbs(abs) {
+		var err error
+		if abs, err = filepath.Abs(path); err != nil {
+			return final
+		}
+	}
+	volume := filepath.VolumeName(abs)
+	if len(volume) != 2 || volume[1] != ':' || !isASCIIDriveLetter(volume[0]) {
+		return final
+	}
+	if len(final) >= 2 && strings.EqualFold(final[:2], volume) {
+		return final
+	}
+	root := strings.ToUpper(volume) + `\`
+	handle, err := openForFinalPath(root, 0, 0)
+	if err != nil {
+		return final
+	}
+	mapped, err := finalPathByHandle(handle)
+	windows.CloseHandle(handle)
+	if err != nil {
+		return final
+	}
+	mapped = plainWindowsPath(mapped)
+	if SameWindowsPath(mapped, root) {
+		return final
+	}
+	if SameWindowsPath(mapped, final) {
+		return root
+	}
+	rest, err := windowsRelativeBelow(mapped, final)
+	if err != nil {
+		return final
+	}
+	return root + strings.Join(rest, `\`)
 }
 
 func openForFinalPath(path string, access, flags uint32) (windows.Handle, error) {
