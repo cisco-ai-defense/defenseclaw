@@ -847,7 +847,7 @@ X01 sl + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\autho
 X02 chdir + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
 X03 Push-Location + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
 X04 pushd + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
-X05 function cd + Add-Content	U|
+X05 function cd + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
 X06 if cd + Add-Content	U|
 X07 ForEach cd + Add-Content	U|
 X08 Invoke-Command cd + Add-Content	U|

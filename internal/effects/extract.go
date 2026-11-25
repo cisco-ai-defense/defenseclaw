@@ -1517,6 +1517,9 @@ func isEchoSwitch(v string) bool {
 
 // command processes one simple command / pipeline stage.
 func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
+	if c.MayCallFunc {
+		defer w.setCWDDynamic()
+	}
 	if !w.spend() {
 		return
 	}

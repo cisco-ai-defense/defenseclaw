@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
@@ -356,7 +357,22 @@ type psLower struct {
 	// port: the Script comes from the PowerShell parser port, so a native
 	// program's argv is its elements one for one (nativeParamWords).
 	port bool
+	// funcs are the bodies of the functions defined so far, by lower-case
+	// name; inlining names the ones being inlined now and inlined counts
+	// every inlined call (psMaxInlinedCalls).
+	funcs    map[string]*psparse.ScriptBlockExpr
+	inlining []string
+	inlined  int
 }
+
+// psMaxInlinedCalls bounds the calls of script-defined functions one
+// lowering inlines (each inline lowers the body again), and psMaxInlineDepth
+// the nesting of such calls; a call past either is lowered as before (the
+// walker reads the folder after it as unknown).
+const (
+	psMaxInlinedCalls = 32
+	psMaxInlineDepth  = 4
+)
 
 func (lw *psLower) statements(sts []psparse.Statement, cond bool) {
 	for _, st := range sts {
@@ -381,6 +397,24 @@ func (lw *psLower) statement(st psparse.Statement, cond bool) {
 			}
 		}
 		lw.statements(v.Conditions, cond)
+		if v.Name != "" && strings.EqualFold(v.Keyword, "function") && len(v.Bodies) == 1 && v.Bodies[0] != nil {
+			// A function body runs where the function is called, not here:
+			// its effects stay visible (conditional), but a Set-Location in
+			// it does not move the folder of the statements after the
+			// definition; a plain call of the function lowers the body there
+			// (inlineCall), rel-1-0-10:GAP-1156.
+			sub := &Script{Dialect: lw.out.Dialect}
+			outer := lw.out
+			lw.out = sub
+			lw.statements(v.Bodies[0].Statements, true)
+			lw.out = outer
+			lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
+			if lw.funcs == nil {
+				lw.funcs = map[string]*psparse.ScriptBlockExpr{}
+			}
+			lw.funcs[strings.ToLower(v.Name)] = v.Bodies[0]
+			return
+		}
 		for _, b := range v.Bodies {
 			if b != nil {
 				lw.statements(b.Statements, true)
@@ -404,7 +438,15 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 		for idx, el := range seg.Elements {
 			switch e := el.(type) {
 			case *psparse.Command:
+				if idx == 0 && len(seg.Elements) == 1 && len(seg.Redirs) == 0 && lw.inlineCall(e, segCond) {
+					continue
+				}
 				c := lw.command(e, segCond, idx > 0)
+				if _, literal := psparse.LiteralString(e.Name); !literal && len(lw.funcs) > 0 {
+					if _, block := e.Name.(*psparse.ScriptBlockExpr); !block {
+						c.MayCallFunc = true
+					}
+				}
 				lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: segCond})
 				lastCmd = c
 				lw.noteEnvDrive(c)
@@ -428,6 +470,32 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 		}
 		first = false
 	}
+}
+
+// inlineCall lowers a plain call of a function this script defined (the
+// bare name, no arguments, no redirection, not piped) as its body, in place
+// and under the call's condition: PowerShell runs the body in the session,
+// so its Set-Location moves the caller's folder (rel-1-0-10:GAP-1156:
+// function g { cd .defenseclaw }; g; Set-Content config.yaml). A recursive
+// call, or one past the bounds, is not inlined.
+func (lw *psLower) inlineCall(c *psparse.Command, cond bool) bool {
+	if c.InvokeOp != "" && c.InvokeOp != "&" || len(c.Elements) != 0 || len(c.Redirs) != 0 || c.StopParsing != "" {
+		return false
+	}
+	name, ok := psparse.LiteralString(c.Name)
+	if !ok {
+		return false
+	}
+	name = strings.ToLower(name)
+	body := lw.funcs[name]
+	if body == nil || lw.inlined >= psMaxInlinedCalls || len(lw.inlining) >= psMaxInlineDepth || slices.Contains(lw.inlining, name) {
+		return false
+	}
+	lw.inlined++
+	lw.inlining = append(lw.inlining, name)
+	lw.statements(body.Statements, cond)
+	lw.inlining = lw.inlining[:len(lw.inlining)-1]
+	return true
 }
 
 func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {

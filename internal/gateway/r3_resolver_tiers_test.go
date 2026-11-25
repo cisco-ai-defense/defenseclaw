@@ -51,10 +51,9 @@ type r3TierRoute struct {
 // not, is held to at least its lane-off (1.0.10) verdict; a pending row that
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
-	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
-	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
-	"GAP-1556":  "an unknown PowerShell environment folder stays Maybe (S4-R3)",
+	"GAP-0898": "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
+	"GAP-1553": "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
+	"GAP-1556": "an unknown PowerShell environment folder stays Maybe (S4-R3)",
 }
 
 // r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and
@@ -399,7 +398,7 @@ func r3WindowsTierRows() []r3TierRow {
 		{gap: "GAP-1191 dot-dot state write", command: `Set-Content -Path ..\.defenseclaw\config.yaml -Value x`, cwd: `C:\Users\alice\project`,
 			want: `ctl:Set-Content -Path C:\Users\alice\.defenseclaw\config.yaml -Value x`},
 		{gap: "GAP-1556 $env:X folder, keys", command: `Set-Location $env:X; Set-Content -Path authorized_keys -Value x`, cwd: `C:\Users\alice\project`, want: "maybe"},
-		{gap: "GAP-1156 cd in a function body", command: `function g { cd .defenseclaw }; g; Set-Content -Path config.yaml -Value x`, cwd: `C:\Users\alice`, want: "maybe"},
+		{gap: "GAP-1156 cd in a function body", command: `function g { cd .defenseclaw }; g; Set-Content -Path config.yaml -Value x`, cwd: `C:\Users\alice`, want: "maybe", needsHome: true},
 		// PowerShell reads localhost: as a drive name; the effects reading of
 		// the key file behind it is maybe (was allow).
 		{gap: "GAP-1671 localhost:/// key write", command: `Set-Content -Path localhost:///C:/Users/alice/.ssh/authorized_keys -Value k`, cwd: `C:\Users\alice\project`,
@@ -411,12 +410,53 @@ func r3WindowsTierRows() []r3TierRow {
 func TestDET111R3ResolverVerdictFiveTiersWindowsHost(t *testing.T) {
 	useDefaultEffectsLane(t)
 	gap0589WindowsHost(t)
+	r3CheckWindowsTierRows(t, r3WindowsRoutes(), r3WindowsTierRows())
+}
+
+// GAP-1156: the folder a function body or a newline-separated statement
+// leaves is read on every route, the Codex argv form included: a cd to a
+// folder that does not exist fails, so the write lands in the home's
+// .defenseclaw folder (the cd's failure reading), the cell of the plain
+// spelling; a project file keeps allow. The attack rows read the profile
+// (needsHome): on a Linux test gateway only the managed hook peer carries
+// it; the per-user cells are the native Windows readings.
+func TestDET111R3PowerShellFolderMovesFiveTiersWindowsHost(t *testing.T) {
+	useDefaultEffectsLane(t)
+	gap0589WindowsHost(t)
+	routes := append(r3WindowsRoutes(), r3TierRoute{"codex argv powershell", "codex",
+		func(t *testing.T, api *APIServer, ctx context.Context, cwd, command string) (string, []string) {
+			resp := api.evaluateCodexHook(ctx, codexHookRequest{
+				HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+				ToolInput: map[string]interface{}{"command": []interface{}{"powershell.exe", "-NoProfile", "-Command", command}},
+			})
+			return resp.Action, resp.Findings
+		}})
+	const home, project = `C:\Users\alice`, `C:\Users\alice\project`
+	ctl := `ctl:Set-Content -Path C:\Users\alice\.defenseclaw\config.yaml -Value x`
+	r3CheckWindowsTierRows(t, routes, []r3TierRow{
+		{gap: "GAP-1156 f11-fn: cd to a missing folder in a function body", command: "Set-Location " + home + "; function g { cd C:\\zz\\missing }; g; Set-Content -Path .defenseclaw\\config.yaml -Value x",
+			cwd: project, want: ctl, needsHome: true},
+		{gap: "GAP-1156 f3-nl: newline-separated moves", command: "Set-Location " + home + "\ncd C:\\zz\\missing\nSet-Content -Path .defenseclaw\\config.yaml -Value x",
+			cwd: project, want: ctl, needsHome: true},
+		{gap: "GAP-1156 f3-nl: newline-separated moves, type nul >>", command: "Set-Location " + home + "\ncd C:\\zz\\missing\ntype nul >> .defenseclaw\\config.yaml",
+			cwd: project, want: "maybe", needsHome: true},
+		{gap: "GAP-1156 fp: function body cd, then a project file", command: "function g { cd C:\\zz\\missing }; g; Set-Content -Path notes.txt -Value x",
+			cwd: project, want: "allow"},
+		{gap: "GAP-1156 fp: a function never called", command: "function g { cd .defenseclaw }; Set-Content -Path config.yaml -Value x",
+			cwd: home, want: "allow"},
+	})
+}
+
+// r3CheckWindowsTierRows judges Windows hook host rows on routes in every
+// tier (the ratchet of r3CheckPosixTierRows).
+func r3CheckWindowsTierRows(t *testing.T, routes []r3TierRoute, rows []r3TierRow) {
+	t.Helper()
 	probe := os.Getenv("DET111_R3_PROBE") != ""
 	ratchet := newR3Ratchet()
 	defer ratchet.finish(t)
 	for _, tier := range boundedTestTiers {
 		floor := bounded.Unknown(tier.tier)
-		for _, route := range r3WindowsRoutes() {
+		for _, route := range routes {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
 			// A Linux test gateway has no Windows profile of its own: the
 			// managed hook peer carries the account's home. A per-user cell
@@ -425,7 +465,7 @@ func TestDET111R3ResolverVerdictFiveTiersWindowsHost(t *testing.T) {
 			if tier.managed {
 				ctx = withManagedHookPeer(ctx, managedHookPeer{Home: `C:\Users\alice`})
 			}
-			for _, row := range r3WindowsTierRows() {
+			for _, row := range rows {
 				if row.needsHome && !tier.managed {
 					continue
 				}
