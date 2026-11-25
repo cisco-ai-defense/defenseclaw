@@ -1612,8 +1612,14 @@ func (r *credentialPathResolver) searchWorkFolders(command CommandFact, each boo
 	}
 	for _, folder := range folders {
 		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folder)
-		if !ok || !simplePathAbs(logical) {
+		if !ok || logical != "" && !simplePathAbs(logical) {
 			return unplaced, false
+		}
+		if logical == "" {
+			// The hook folder when the hook gives none (its folder is not
+			// there): read as a search that does not move is, no folder and
+			// no walk, while the folder the cd reaches is still walked.
+			continue
 		}
 		if base := filepath.FromSlash(logical); !slices.Contains(bases, base) {
 			bases = append(bases, base)

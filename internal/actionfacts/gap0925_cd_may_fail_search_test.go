@@ -37,11 +37,12 @@ func TestP2HookFSearchAfterACdThatMayFail(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	cwd := proj
 	reads := func(command string) []string {
 		t.Helper()
 		out := parsePOSIX(command, 1, 0)
 		classifyOutput(&out)
-		rec := resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, proj, home, out.commands, out.paths)
+		rec := resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, cwd, home, out.commands, out.paths)
 		var got []string
 		if rec == nil {
 			return nil
@@ -75,6 +76,24 @@ func TestP2HookFSearchAfterACdThatMayFail(t *testing.T) {
 			t.Errorf("%q: reads %v, want none (1.0.10 reads none)", command, got)
 		}
 	}
+	// The bar hook gave no folder (its transcript folder is not on the box):
+	// the search that stays reads nothing there, as one that does not cd
+	// does, and the folder the cd reaches is still walked.
+	cwd = ""
+	for _, command := range []string{
+		"cd " + root + "/nothere; grep -rn TODO .",
+		"cd " + proj + "; grep -rn exclude_groups . 2>/dev/null | head -8",
+		"cd ~/notes; grep -rn -i omnigent plans/r1/COVERAGE.md | head -5",
+		"grep -rn TODO .",
+	} {
+		if got := reads(command); len(got) != 0 {
+			t.Errorf("no hook folder: %q: reads %v, want none (1.0.10 reads none)", command, got)
+		}
+	}
+	if got := reads("cd ~/.config; grep -r oauth_token gh"); !slices.Contains(got, "/home/.config/gh/hosts.yml") {
+		t.Errorf("no hook folder: the folder the cd reaches: reads %v, want /home/.config/gh/hosts.yml", got)
+	}
+	cwd = proj
 	// Attack rows: the credentials file is read in the folder the cd reaches.
 	for _, row := range []struct{ command, want string }{
 		{"cd ~/.config; grep -r oauth_token gh", "/home/.config/gh/hosts.yml"},

