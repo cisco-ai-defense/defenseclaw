@@ -933,7 +933,8 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		actionPrivateKeyReadWords(shell, cwd, home, mode, depth+1) {
 		return true // A command an awk program starts reads the key.
 	}
-	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
+	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) ||
+		!windows && actionFindPrivateKeyRead(words, cwd, home) {
 		return true
 	}
 	switch program {

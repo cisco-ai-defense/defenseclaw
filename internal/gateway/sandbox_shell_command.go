@@ -167,6 +167,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
 		ShellStartup:                  action.ShellStartup,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
+		guestToolCWDUnresolved:        action.guestToolCWDUnresolved,
 		windowsDialectReadings:        action.windowsDialectReadings,
 	})
 	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {
@@ -199,6 +200,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 				SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 				ResolvedWriteTargets:          action.ResolvedWriteTargets,
 				SandboxGuestCWD:               action.SandboxGuestCWD,
+				guestToolCWDUnresolved:        action.guestToolCWDUnresolved,
 				windowsDialectReadings:        action.windowsDialectReadings,
 			}))
 		}

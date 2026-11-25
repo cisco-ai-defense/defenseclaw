@@ -163,7 +163,7 @@ func (k Ask) shown() Ask {
 }
 
 func (s Secret) shown() Secret {
-	for _, f := range []*string{&s.Name, &s.Scope, &s.Status, &s.Kind, &s.Template, &s.Reason, &s.AskID} {
+	for _, f := range []*string{&s.Name, &s.Scope, &s.Status, &s.Kind, &s.Template, &s.Reason, &s.AskID, &s.Registry, &s.Placeholder} {
 		*f = safetext.Line(*f)
 	}
 	s.Hosts, s.Agents = safeLines(s.Hosts), safeLines(s.Agents)
@@ -568,6 +568,11 @@ type Secret struct {
 	LastUsed      *time.Time `json:"last_used,omitempty"`
 	LastUsedHost  string     `json:"last_used_host,omitempty"`
 	LastUsedAgent string     `json:"last_used_agent,omitempty"`
+	// Registry is the registry file of the agent's home the secret feeds
+	// at start (npm, pypi; "" for none), and Placeholder the placeholder
+	// the file holds ("" for the default). Never a value (B1 2.6).
+	Registry    string `json:"registry,omitempty"`
+	Placeholder string `json:"placeholder,omitempty"`
 }
 
 // SecretTest is the answer of secrets test: the secret as list shows it
@@ -591,6 +596,17 @@ func (c *Client) Secrets(ctx context.Context, mine bool) ([]Secret, error) {
 	if mine {
 		q.Set("mine", "1")
 	}
+	return c.secrets(ctx, q)
+}
+
+// SecretsForAgent lists the usable secrets that reach the caller's agent
+// name (GET secrets?agent=NAME). A gateway before 1.0.11 ignores the
+// parameter and answers every secret, with no registry field.
+func (c *Client) SecretsForAgent(ctx context.Context, name string) ([]Secret, error) {
+	return c.secrets(ctx, url.Values{"agent": {name}})
+}
+
+func (c *Client) secrets(ctx context.Context, q url.Values) ([]Secret, error) {
 	var out struct {
 		Secrets []Secret `json:"secrets"`
 	}

@@ -295,14 +295,54 @@ func splitGapShellWord(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
+// splitGapJudged is what the reading of a sandbox call's twins placed as the
+// host places it leaves for the reading placed in the guest's folder
+// (withSandboxGuestSplitGapEffects): each twin text it judged, true when it
+// added that twin's findings (an exact twin), and whether it decided the
+// unknown tier. A copy-mode call spells its absolute operands the same in
+// both placements, and both judge them lexically: before, the guest reading
+// judged each such twin a second time within the call's one budget, so a
+// call of many absolute operands spent the budget the laptop leaves for its
+// later twins (substrate-1 GAP-0725).
+type splitGapJudged struct {
+	texts   map[string]bool
+	unknown bool
+}
+
+// judgedBefore reports a twin the host-placed reading already judged as
+// this reading would judge it: the same text, added as an exact twin when
+// this one is, and naming no folder (guestFolderMayChangeJudgment), so the
+// working directory of its child request changes nothing.
+func (j *splitGapJudged) judgedBefore(request trustedActionRequest, twin splitGapEffectTwin) bool {
+	if j == nil {
+		return false
+	}
+	proof, ok := j.texts[twin.text]
+	if !ok || twin.proof && !proof {
+		return false
+	}
+	input := request.Input
+	input.Command, input.Args, input.Argv = twin.text, nil, nil
+	return !guestFolderMayChangeJudgment(actionfacts.Analyze(input))
+}
+
 // withSplitGapEffects adds to findings the judgment of the files a call with
 // a parse gap in its split touches: the unknown tier when a twin is a finding
 // the pack enforces, and the findings of an exact twin of a file its operand
-// spells.
+// spells. prior is the host-placed reading's record for the guest-placed
+// reading of the same call (nil otherwise); the record returned is for the
+// guest-placed reading, and is kept only for a lexical sandbox call that
+// reading follows.
 func withSplitGapEffects(ctx context.Context, request trustedActionRequest, generation *compiledRulePackCategories,
-	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding) []RuleFinding {
+	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding, prior *splitGapJudged) ([]RuleFinding, *splitGapJudged) {
 	if facts.Parse.Dialect != actionfacts.DialectPOSIX {
-		return findings
+		return findings, nil
+	}
+	var record *splitGapJudged
+	if prior == nil && request.SandboxGuestCWD != "" && request.Input.CWD != request.SandboxGuestCWD && request.SkipLocalFilesystemResolution {
+		// The guest reading judges lexically; a host reading that reads
+		// this host's files is another judgment, and is not shared.
+		record = &splitGapJudged{texts: make(map[string]bool)}
 	}
 	var set splitGapTwinSet
 	// Both readings of the call: as the walk places it, and as rel placed
@@ -326,7 +366,8 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 		}
 	}
 	twins := set.statements()
-	unknown := set.over && hookpaths.BoundCallMayNameProtected(wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+	unknown := prior != nil && prior.unknown ||
+		set.over && hookpaths.BoundCallMayNameProtected(wholeCommand, request.Input.CWD, request.Input.ActiveHome)
 	judge := func(text string) []RuleFinding {
 		child := request
 		child.Input.Command, child.Input.Args, child.Input.Argv = text, nil, nil
@@ -345,7 +386,13 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 			// The tier is decided; only an exact twin still adds findings.
 			continue
 		}
+		if prior.judgedBefore(request, twin) {
+			continue
+		}
 		childFindings := judge(twin.text)
+		if record != nil {
+			record.texts[twin.text] = record.texts[twin.text] || twin.proof
+		}
 		if twin.proof {
 			findings = withSimpleCommandFindings(findings, childFindings)
 		}
@@ -365,7 +412,10 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 	if unknown {
 		findings = withUnknownFinding(findings, unknownReasonFinding(splitGapEffectTitle, splitGapEffectReason, request.EnforcementCapable))
 	}
-	return findings
+	if record != nil {
+		record.unknown = unknown
+	}
+	return findings, record
 }
 
 // splitGapEnforcedFinding is a finding of an effect twin that the pack

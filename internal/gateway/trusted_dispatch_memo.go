@@ -26,7 +26,8 @@ import (
 //     state it points at is the same object (pointer identity: ctx, budget,
 //     cap floor, rule generation, readings), it records into no function
 //     (record, recordTelemetry, recordEffectShadow) and asks for no
-//     out-parameter the memo does not replay (guestWriteClaimOnly);
+//     out-parameter the memo does not replay (guestWriteClaimOnly,
+//     guestByNameOnly);
 //   - the first run left the hook call's own budgets and causes as it found
 //     them (hookpaths.HookCallState, the cap floor, the reach of the budget,
 //     the shared evaluations, the session's page), and the repeat finds
@@ -130,7 +131,7 @@ func dispatchTrustedAction(parent context.Context, request trustedActionRequest)
 
 func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedActionRequest) []RuleFinding {
 	if request.record != nil || request.recordTelemetry != nil || request.recordEffectShadow != nil ||
-		request.guestWriteClaimOnly != nil ||
+		request.guestWriteClaimOnly != nil || request.guestByNameOnly != nil ||
 		trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
 		return dispatchTrustedActionOnce(ctx, request)
 	}

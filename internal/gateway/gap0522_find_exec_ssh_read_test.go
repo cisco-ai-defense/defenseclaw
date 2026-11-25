@@ -20,7 +20,8 @@ func TestGAP0522FindExecSSHReadersFourCell(t *testing.T) {
 		{"execdir-stat-plus", `find ~/.ssh -maxdepth 1 -type f -execdir stat {} +`, "allow"},
 		{"ok-cat-semicolon", `find ~/.ssh -maxdepth 1 -type f -ok cat {} \;`, "allow"},
 		{"okdir-wc-semicolon", `find ~/.ssh -maxdepth 1 -type f -okdir wc -l {} \;`, "allow"},
-		{"exec-head-plus", `find ~/.ssh -maxdepth 1 -type f -exec head -n 1 {} +`, "allow"},
+		// GAP-1025 treats this noninteractive content reader as a read.
+		{"exec-head-plus", `find ~/.ssh -maxdepth 1 -type f -exec head -n 1 {} +`, "block"},
 		{"exec-ls-and-print", `find ~/.ssh -maxdepth 1 -type f -exec ls -l {} + -print`, "allow"},
 		{"exec-copy-keys", `find ~/.ssh -maxdepth 1 -type f -exec cp {} ~/.ssh/authorized_keys \;`, "block"},
 		{"exec-shell-append-keys", `find ~/.ssh -maxdepth 1 -type f -exec sh -c 'printf key >> "$HOME/.ssh/authorized_keys"' _ {} \;`, "block"},

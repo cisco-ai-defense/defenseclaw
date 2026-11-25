@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 )
 
 // Grade is the strength of one path finding. Readers combine grades with Max:
@@ -306,10 +308,10 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 			}
 			read := &protectedRead{done: make(chan struct{})}
 			protectedReady[path] = read
-			go func() {
+			fixturefs.Go(func() {
 				read.info, read.err = PathStat(path)
 				close(read.done)
-			}()
+			})
 		}
 		for _, path := range names.files {
 			start(path)
@@ -330,10 +332,10 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	var entryReady chan answer
 	if share {
 		entryReady = make(chan answer, 1)
-		go func() { info, err := PathLstat(target); entryReady <- answer{info, err} }()
+		fixturefs.Go(func() { info, err := PathLstat(target); entryReady <- answer{info, err} })
 	}
-	go func() { info, err := PathStat(target); fileReady <- answer{info, err} }()
-	go func() { info, err := PathStat(parent); parentReady <- answer{info, err} }()
+	fixturefs.Go(func() { info, err := PathStat(target); fileReady <- answer{info, err} })
+	fixturefs.Go(func() { info, err := PathStat(parent); parentReady <- answer{info, err} })
 	file, directory, entry := <-fileReady, <-parentReady, answer{entryInfo, entryErr}
 	if share {
 		entry = <-entryReady
@@ -348,11 +350,11 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	if file.err == nil {
 		for _, path := range names.files {
 			wg.Add(1)
-			go func(path string) {
+			fixturefs.Go(func() {
 				defer wg.Done()
 				info, err := readProtected(path)
 				matches <- identityMatch{matched: err == nil && os.SameFile(file.info, info), unknown: ShareUnanswered(err), file: true}
-			}(path)
+			})
 		}
 	}
 	if directory.err == nil {
@@ -361,19 +363,19 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 				continue
 			}
 			wg.Add(1)
-			go func(path string) {
+			fixturefs.Go(func() {
 				defer wg.Done()
 				info, err := readProtected(filepath.Dir(path))
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
-			}(path)
+			})
 		}
 		for _, path := range names.trees {
 			wg.Add(1)
-			go func(path string) {
+			fixturefs.Go(func() {
 				defer wg.Done()
 				info, err := readProtected(path)
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
-			}(path)
+			})
 		}
 	}
 	wg.Wait()

@@ -81,7 +81,16 @@ func appendTrustedPrivateKeyReaderFindingOf(
 		case strings.EqualFold(request.Input.Tool, "PowerShell"):
 			dialect = actionfacts.DialectPowerShell
 		}
-		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBounded(command, request.Input.CWD, request.Input.ActiveHome, dialect)
+		// A copy-mode actor has no host CWD. Its verified guest CWD still
+		// places a relative find start: from the guest home, find . can
+		// hand the SSH folder to -exec just as the laptop can (GAP-1025).
+		keyCWD := request.Input.CWD
+		if keyCWD == "" && request.SandboxGuestCWD != "" &&
+			(strings.HasPrefix(command, "find ") || strings.HasPrefix(command, "gfind ") ||
+				strings.HasPrefix(command, "/usr/bin/find ")) {
+			keyCWD = request.SandboxGuestCWD
+		}
+		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBounded(command, keyCWD, request.Input.ActiveHome, dialect)
 		proved = proved || hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
 		judged := request
 		if !proved && request.substrateGuestClaimsProveKeyRead(command) {

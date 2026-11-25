@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // The run-time path: a skill or an MCP server that the agent adds while it
@@ -566,7 +567,7 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		case wholeFile && perr == nil:
 			for _, s := range servers {
 				s := s
-				out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: target, Server: &s, Files: serverFiles(attached), Project: agentProject(ev.CWD)})
+				out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: target, Server: &s, Files: serverFiles(attached), Project: agentProject(mcpConfigProject(target, ev.CWD))})
 			}
 		case mentions || perr != nil || (!wholeFile && mcpOnlyFile[path.Base(target)]):
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(target), Path: target, Files: serverFiles(attached)})
@@ -631,6 +632,19 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		}
 	}
 	return out
+}
+
+// mcpConfigProject is the folder the servers of the MCP config written at
+// target run in: the folder the kit checked for what a fetcher resolves
+// (kit.MCPConfigProject), with a relative target read from cwd.
+func mcpConfigProject(target, cwd string) string {
+	if cwd == "" {
+		return cwd
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(cwd, target)
+	}
+	return kit.MCPConfigProject(target, cwd)
 }
 
 // agentProject is the project of a server the agent adds in this call: the
