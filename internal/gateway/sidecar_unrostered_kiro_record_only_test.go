@@ -7,9 +7,11 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -46,14 +48,64 @@ func kiroBootTree(t *testing.T, root string) map[string]string {
 // guards only OpenClaw, and returns what it wrote to stderr.
 func bootReclaimOf(t *testing.T, dataDir, workspace string) string {
 	t.Helper()
+	return bootReclaimDuring(t, dataDir, workspace, nil)
+}
+
+// reclaimLogLine is a line the boot reclaim itself writes: every one of its
+// messages starts "[guardrail] connector <name>" or "[guardrail] WARNING:
+// connector <name>" (sidecar_unrostered_hooks.go).
+var reclaimLogLine = regexp.MustCompile(`^\[guardrail\] (WARNING: )?connector [a-z0-9_-]+ `)
+
+// bootReclaimDuring is bootReclaimOf with alongside run while the reclaim
+// is captured. The stderr tee is process-wide, so a line another test's
+// teardown still writes in that window ("[guardrail] removed connector devin
+// teardown verified clean", seen in a full-package run) is in the capture
+// too; only the reclaim's own lines are returned (rel-1-0-10:GAP-1772).
+func bootReclaimDuring(t *testing.T, dataDir, workspace string, alongside func()) string {
+	t.Helper()
 	cfg := &config.Config{DataDir: dataDir}
 	cfg.Guardrail.Enabled = true
 	cfg.Guardrail.Connector = "openclaw"
 	cfg.Claw.WorkspaceDir = workspace
 	s := &Sidecar{cfg: cfg}
-	return captureStderr(t, func() {
+	out := captureStderr(t, func() {
+		if alongside != nil {
+			alongside()
+		}
 		s.reclaimUnguardedConnectorHooks(context.Background(), connector.NewDefaultRegistry())
 	})
+	var own strings.Builder
+	for _, line := range strings.SplitAfter(out, "\n") {
+		if reclaimLogLine.MatchString(line) {
+			own.WriteString(line)
+		}
+	}
+	return own.String()
+}
+
+// Another test's teardown line in the capture window is not the boot
+// reclaim's output: a boot with no Kiro residue still logs nothing
+// (rel-1-0-10:GAP-1772).
+func TestBootReclaimOutputIgnoresAnotherTestsTeardownLine(t *testing.T) {
+	home := t.TempDir()
+	restore, err := connector.BindUserHomeDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restore)
+	dataC := filepath.Join(home, "c", ".defenseclaw")
+	if err := os.MkdirAll(dataC, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := func() {
+		fmt.Fprintf(os.Stderr, "[guardrail] removed connector devin teardown verified clean\n")
+	}
+	if out := bootReclaimDuring(t, dataC, "", foreign); out != "" {
+		t.Errorf("a boot with no Kiro residue was charged with another test's line: %q", out)
+	}
+	if !strings.Contains(captureStderr(t, foreign), "devin teardown") {
+		t.Error("the capture no longer sees a line written during it; the check above proves nothing")
+	}
 }
 
 // Review round 5 P2 of rel-1-0-10 GAP-1092/GAP-1174: the boot reclaim started
