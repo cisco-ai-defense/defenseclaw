@@ -110,13 +110,17 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 	var alternates []json.RawMessage
 	overflow := false
 	byteExhausted := false
+	depthLimit := false
 	changed := false
 	if rd.left != nil && out.Verdict != "deny" {
 		limit := int(^uint(0) >> 1)
 		if rd.extraBytes != nil {
 			limit = min(*rd.extraBytes, substrateMCPVariantBytesPerArgs)
 		}
-		base, alternates, changed, overflow, byteExhausted = substrateMCPReadFieldVariantsUpTo(args, limit)
+		base, alternates, changed, overflow, byteExhausted, depthLimit = substrateMCPReadFieldVariantsUpTo(args, limit)
+		if depthLimit && issue == "" {
+			issue = actionfacts.IssueDepthLimit
+		}
 	}
 	// Keep small calls with no conflicting values on their original path.
 	if issue == "" && !overflow && len(alternates) == 0 {
@@ -186,10 +190,10 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 	}
 	set := bounded.Of(bounded.Bytes)
 	switch {
-	case overflow:
-		set = bounded.Of(bounded.Items)
 	case issue == actionfacts.IssueDepthLimit:
 		set = bounded.Of(bounded.Depth)
+	case overflow:
+		set = bounded.Of(bounded.Items)
 	}
 	floor := out
 	floor.Source, floor.Reason = "tool_rules", boundedTruncatedTitle+" ("+set.Reason()+")"
@@ -221,19 +225,19 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 // candidate keeps one value of every conflicting resolved field, including
 // conflicts between a parent object and a nested envelope. Values in other
 // fields stay in place, so every candidate is a complete rules reading.
-func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json.RawMessage, []json.RawMessage, bool, bool, bool) {
+func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json.RawMessage, []json.RawMessage, bool, bool, bool, bool) {
 	if len(raw) == 0 {
-		return raw, nil, false, false, false
+		return raw, nil, false, false, false, false
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
 	if dec.Decode(&v) != nil {
-		return raw, nil, false, true, false
+		return raw, nil, false, true, false, false
 	}
 	root, ok := v.(map[string]any)
 	if !ok {
-		return raw, nil, false, false, false
+		return raw, nil, false, false, false, false
 	}
 
 	first := make(map[string]substrateMCPVariantEntry)
@@ -242,7 +246,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 	values := make(map[string][]any)
 	entries := make(map[string][]substrateMCPVariantEntry)
 	var alternates []substrateMCPVariantEntry
-	changed, overflow := false, false
+	changed, overflow, depthLimit := false, false, false
 	var walk func(map[string]any, []string, int)
 	walk = func(obj map[string]any, parent []string, depth int) {
 		for _, key := range substrateMCPKeyOrder(obj) {
@@ -303,7 +307,13 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 					}
 				}
 			}
-			if depth >= actionfacts.MaxArgsProjectionDepth || (field != "nested" && field != "args") {
+			if field != "nested" && field != "args" {
+				continue
+			}
+			if depth >= actionfacts.MaxArgsProjectionDepth {
+				// The shared reader reports IssueDepthLimit for this envelope.
+				// Carry it to the unknown-tier floor before forwarding.
+				depthLimit, overflow = true, true
 				continue
 			}
 			switch x := value.(type) {
@@ -316,7 +326,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 	}
 	walk(root, nil, 0)
 	if !changed {
-		return raw, nil, false, overflow, false
+		return raw, nil, false, overflow, false, depthLimit
 	}
 
 	selected := make(map[string][]string, len(first))
@@ -365,7 +375,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 	}
 	base, err := makeReading(nil)
 	if err != nil {
-		return raw, nil, false, true, false
+		return raw, nil, false, true, false, depthLimit
 	}
 	out := make([]json.RawMessage, 0, len(alternates))
 	remaining := byteLimit - len(base)
@@ -403,7 +413,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 		remaining -= len(alt)
 		out = append(out, alt)
 	}
-	return base, out, true, overflow, byteExhausted
+	return base, out, true, overflow, byteExhausted, depthLimit
 }
 
 type substrateMCPVariantEntry struct {

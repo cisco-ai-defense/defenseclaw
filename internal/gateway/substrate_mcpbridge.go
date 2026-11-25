@@ -536,14 +536,14 @@ func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substra
 	return out
 }
 
-// substrateMCPOverCap distinguishes frames that exceed the shared reader's
-// per-reading byte cap. Ordinary calls never enter the per-actor wait.
+// substrateMCPOverCap admits any call that reaches a shared reader limit
+// through the one-active-call actor budget. Ordinary calls do not wait.
 func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
-	if len(c.params) > actionfacts.MaxArgsJSONBytes {
+	if actionfacts.ArgsLimitIssue(c.params) != "" {
 		return true
 	}
 	for _, args := range c.args {
-		if len(args) > actionfacts.MaxArgsJSONBytes {
+		if actionfacts.ArgsLimitIssue(args) != "" {
 			return true
 		}
 	}
