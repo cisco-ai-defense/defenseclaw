@@ -18,11 +18,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// observabilityV8EvalSymlinks is filepath.EvalSymlinks; tests replace it to
+// observabilityV8EvalSymlinks is winpath.EvalLinks; tests replace it to
 // deny a folder where the test account cannot (root, Windows).
-var observabilityV8EvalSymlinks = filepath.EvalSymlinks
+var observabilityV8EvalSymlinks = winpath.EvalLinks
 
 type observabilityV8FileRole struct {
 	name     string

@@ -16,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -26,7 +27,9 @@ const nestedSkillDirectoryLimit = hermesskills.DefaultDirectoryLimit
 const nestedSkillEntryLimit = 8 * nestedSkillDirectoryLimit
 const nestedSkillDepthLimit = hermesskills.DefaultDepthLimit
 
-var watcherEvalSymlinks = filepath.EvalSymlinks
+// watcherEvalSymlinks follows every link on a path, a Windows junction
+// included (rel-1-0-10:GAP-2185); tests replace it.
+var watcherEvalSymlinks = winpath.EvalLinks
 
 // linkedRootRefusal is the error for a skill root whose link route is not
 // trusted. When a folder on the route is writable by another account it names
@@ -40,14 +43,16 @@ func linkedRootRefusal(root string, cause error) error {
 }
 
 // trustedWalkRoot gives WalkDir a real starting directory when the final
-// component is a trusted link. WalkDir does not descend through a final link.
-// A link below that starting directory remains a non-directory entry.
+// component is a trusted link, a Windows junction included (Lstat reports it
+// as irregular, rel-1-0-10:GAP-2185). WalkDir does not descend through a
+// final link. A link below that starting directory remains a non-directory
+// entry.
 func trustedWalkRoot(root string) (string, error) {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return "", err
 	}
-	if info.Mode()&os.ModeSymlink == 0 {
+	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 		return root, nil
 	}
 	return skillrootsafe.Resolve(root, watcherEvalSymlinks)

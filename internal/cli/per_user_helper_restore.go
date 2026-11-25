@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const (
@@ -44,7 +45,7 @@ func restorePerUserInstallerHelpers(dataDir string) {
 	if err != nil {
 		return
 	}
-	if resolved, err := filepath.EvalSymlinks(gateway); err == nil {
+	if resolved, err := winpath.EvalLinks(gateway); err == nil {
 		gateway = resolved
 	}
 	restorePerUserInstallerHelpersFor(dataDir, gateway)

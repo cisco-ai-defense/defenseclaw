@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // auditDBPathHooks provide deterministic fault/race injection without
@@ -767,7 +768,7 @@ func validateAuditDBDirectory(path string, info os.FileInfo, allowStickyWritable
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		if trustedAuditDBSystemDirectoryAlias(path, info) {
-			resolved, err := filepath.EvalSymlinks(path)
+			resolved, err := winpath.EvalLinks(path)
 			if err != nil {
 				return fmt.Errorf("audit: resolve trusted system directory alias: %w", err)
 			}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 type judgeBodyPathHooks struct {
@@ -318,7 +319,7 @@ func ensureTrustedJudgeBodyParents(parent string, hooks judgeBodyPathHooks, allo
 func validateJudgeBodyDirectory(path string, info os.FileInfo, allowStickyWritableAncestor bool) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		if trustedJudgeBodySystemDirectoryAlias(path, info) {
-			resolved, err := filepath.EvalSymlinks(path)
+			resolved, err := winpath.EvalLinks(path)
 			if err != nil {
 				return fmt.Errorf("judge_body: resolve trusted system directory alias: %w", err)
 			}

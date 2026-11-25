@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookevidence"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Static inspection cannot prove what a client actually loads: a
@@ -363,7 +364,7 @@ func missingScriptInterpreter(lo LiveOptions) string {
 // is binary, for this machine's architecture, or "" when the package holds
 // none or more than one: the probe then names the layout instead of a path.
 func npmNativeCodex(binary string) string {
-	real, err := filepath.EvalSymlinks(binary)
+	real, err := winpath.EvalLinks(binary)
 	if err != nil {
 		return ""
 	}

@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -25,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/budgetstore"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var (
@@ -253,7 +253,7 @@ func runBudgetStoreServe(cmd *cobra.Command, _ []string) error {
 	}
 	// The TLS key may be a link (certbot live/); its target must be private,
 	// and the bytes checked are the bytes loaded.
-	tlsKey, err := filepath.EvalSymlinks(srv.TLSKeyFile)
+	tlsKey, err := winpath.EvalLinks(srv.TLSKeyFile)
 	if err != nil {
 		return errors.New("budget-store serve: tls_key_file cannot be read")
 	}

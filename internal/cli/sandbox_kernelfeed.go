@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // sandboxKernelFeed is the feed's lifecycle; tests replace it.
@@ -48,7 +49,7 @@ var sandboxGatewayPath = func() string {
 	if err != nil {
 		return "defenseclaw-gateway"
 	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+	if resolved, err := winpath.EvalLinks(exe); err == nil {
 		return resolved
 	}
 	return exe

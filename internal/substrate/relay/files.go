@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // The file routes of the relay (A6): non-interactive exec and tar transfer,
@@ -175,9 +177,9 @@ func (s *Server) projectDir(p string) (string, error) {
 	}
 	// A folder that is a link to somewhere outside the working directory is
 	// not inside it (GAP-0163 residual): compare where both really are.
-	if real, err := filepath.EvalSymlinks(d); err != nil {
+	if real, err := winpath.EvalLinks(d); err != nil {
 		return "", errors.New("relay: no such folder in the actor")
-	} else if realRoot, err := filepath.EvalSymlinks(root); err != nil || (real != realRoot && !strings.HasPrefix(real, realRoot+string(filepath.Separator))) {
+	} else if realRoot, err := winpath.EvalLinks(root); err != nil || (real != realRoot && !strings.HasPrefix(real, realRoot+string(filepath.Separator))) {
 		return "", errors.New("relay: the agent starts only inside its working directory")
 	}
 	return d, nil
@@ -690,7 +692,7 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 // after a tar header. A mode changed between the check and the copy still
 // cuts the stream.
 func readable(p string) error {
-	top, err := filepath.EvalSymlinks(filepath.Clean(p))
+	top, err := winpath.EvalLinks(filepath.Clean(p))
 	if err != nil {
 		return err
 	}
@@ -719,7 +721,7 @@ func WriteTar(w io.Writer, p string) error {
 	if base == "." || base == string(filepath.Separator) {
 		return fmt.Errorf("cannot archive %q", p)
 	}
-	top, err := filepath.EvalSymlinks(p)
+	top, err := winpath.EvalLinks(p)
 	if err != nil {
 		return err
 	}

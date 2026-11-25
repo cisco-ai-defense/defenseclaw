@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // claudeStateMaxBytes bounds the Claude Code state file the relay rewrites.
@@ -96,7 +98,7 @@ func trustFolders(root, dir string) []string {
 	}
 	for d := dir; ; d = filepath.Dir(d) {
 		add(d)
-		if real, err := filepath.EvalSymlinks(d); err == nil {
+		if real, err := winpath.EvalLinks(d); err == nil {
 			add(real)
 		}
 		if d == root || !strings.HasPrefix(d, root+string(filepath.Separator)) || filepath.Dir(d) == d {
