@@ -192,6 +192,9 @@ func openNoFollow(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
+// openNoFollowOnce is openNoFollow, which has no retries here.
+func openNoFollowOnce(path string) (*os.File, error) { return openNoFollow(path) }
+
 // ensurePolicyDir creates missing directories 0755 and administrator-owned.
 func ensurePolicyDir(opts Options, dir string) ([]string, error) {
 	var missing []string

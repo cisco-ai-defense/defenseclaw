@@ -1625,6 +1625,26 @@ func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) 
 	return plugin.managedPluginArtifactDrift(opts)
 }
 
+// requirePluginFolderOpenable refuses, before anything is written, a plugin
+// folder this account cannot open the way the plugin write opens it. A folder
+// whose inheritance is removed and whose access list is empty passes the
+// custody check (no other account can write it), but the write then failed
+// with a bare "Access is denied" that named no folder and read as a busy
+// file, so the gateway retried it (GAP-1965). The underlying error is quoted,
+// not wrapped, so the refusal is never retried as a busy file.
+func (c *hookOnlyConnector) requirePluginFolderOpenable(path string) error {
+	folder := filepath.Dir(path)
+	handle, err := openAtomicTransformBoundDirectoryPlatform(folder)
+	if err != nil {
+		fix := fmt.Sprintf("chmod u+rwx %q", folder)
+		if runtime.GOOS == "windows" {
+			fix = fmt.Sprintf("icacls %q /reset", folder)
+		}
+		return fmt.Errorf("%s plugin folder %s cannot be opened by this account (%v); give your account access to it again (for example: %s), then run setup again", c.name, folder, err, fix)
+	}
+	return handle.Close()
+}
+
 // setupPluginArtifact writes the rendered bridge plugin to the host agent's
 // auto-load directory at 0o600. Its scoped token stays in an owner-only
 // sidecar. The managed-file backup lets Teardown restore a prior file only
@@ -1662,6 +1682,9 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	}
 	if err := validatePluginArtifactDestination(path); err != nil {
 		return fmt.Errorf("%s validate plugin destination: %w", c.name, err)
+	}
+	if err := c.requirePluginFolderOpenable(path); err != nil {
+		return err
 	}
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return rollback(fmt.Errorf("%s capture plugin backup: %w", c.name, err))

@@ -344,29 +344,38 @@ func openCodePluginLoadable(_ Options, path string) (bool, error) {
 func openNoFollow(path string) (*os.File, error) {
 	var file *os.File
 	err := safefile.RetryTransientRead(func() error {
-		info, err := pathidentity.LstatPinned(path)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
-			return fmt.Errorf("%s is a reparse point", path)
-		}
-		file, err = winpath.OpenReadShared(path)
-		if err != nil {
-			return err
-		}
-		opened, err := file.Stat()
-		if err != nil || !os.SameFile(info, opened) {
-			_ = file.Close()
-			file = nil
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("%s changed identity before open: %w", path, safefile.ErrReadIdentityChanged)
-		}
-		return nil
+		var err error
+		file, err = openNoFollowOnce(path)
+		return err
 	})
 	return file, err
+}
+
+// openNoFollowOnce is one attempt of openNoFollow, without the retries of a
+// transient name or identity change: for a check whose caller treats any
+// failure as a change (the version floor's check under the Claude Code
+// policy lock, GAP-1833).
+func openNoFollowOnce(path string) (*os.File, error) {
+	info, err := pathidentity.LstatPinned(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
+		return nil, fmt.Errorf("%s is a reparse point", path)
+	}
+	file, err := winpath.OpenReadShared(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s changed identity before open: %w", path, safefile.ErrReadIdentityChanged)
+	}
+	return file, nil
 }
 
 func applySDDL(path, sddl string) error {

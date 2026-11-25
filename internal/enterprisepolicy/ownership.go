@@ -75,25 +75,47 @@ func loadRecord(opts Options, connector string) (*ownershipRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	data, _, exists, err := readRecordFile(path)
+	if err != nil || !exists {
 		return nil, err
 	}
+	return decodeRecord(path, connector, data)
+}
+
+// recordFileLimit bounds an ownership record, which holds a preimage.
+const recordFileLimit = 2 * policyFileLimit
+
+// readRecordFile returns the bytes of the ownership record file at path and
+// the identity of the file they were read from (exists false: no record).
+func readRecordFile(path string) ([]byte, os.FileInfo, bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
+		return nil, nil, false, fmt.Errorf("%s is not a regular file", path)
 	}
 	file, err := openNoFollow(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 	defer file.Close()
-	data, err := readBounded(file, 2*policyFileLimit)
+	opened, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
+	data, err := readBounded(file, recordFileLimit)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return data, opened, true, nil
+}
+
+// decodeRecord decodes the ownership record of connector read from path.
+func decodeRecord(path, connector string, data []byte) (*ownershipRecord, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var record ownershipRecord
