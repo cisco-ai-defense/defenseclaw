@@ -1386,6 +1386,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return confirmed()
 			}
 		}
+		// A key file name below another process's root, cwd, exe or
+		// descriptor link is resolved in that process's tree. Unless this
+		// host proves the link (never for a sandbox guest, whose processes
+		// are not this host's), it may be the user's key file and is
+		// unknown, as a write that names one after a directory change the
+		// walk cannot place (rel-1-0-10:GAP-2227). A macOS or Windows laptop
+		// has no such /proc link to write through and keeps its reading.
+		if guest := cannotResolveLocally && request.sandboxGuest; guest || runtime.GOOS == "linux" {
+			operand := target
+			if guest {
+				operand = hookpaths.GuestOwnRootPath(filepath.Clean(target))
+			}
+			if isProtected(filepath.Join(facts.ActiveHome, ".ssh", filepath.Base(operand))) &&
+				hookpaths.ProcessLinkWriteUnproved(operand, guest) {
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
+			}
+		}
 		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
 			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
 			if !ok {

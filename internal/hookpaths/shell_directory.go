@@ -82,15 +82,18 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	}
 	physical := func(logical string) (string, bool) {
 		key := DirectoryFactPrefix + logical
+		// A guest's /proc/self/root/tmp is its /tmp and needs the same
+		// directory fact on every gateway OS (rel-1-0-10:GAP-2228).
+		named := logical
+		if linuxGuest {
+			named = GuestOwnRootPath(filepath.Clean(logical))
+		}
 		if !record && directoryFacts != nil {
 			if value, present := directoryFacts[key]; present {
 				return value, filepath.IsAbs(value)
 			}
-			if strict && directoryFactRequired(logical, home, linuxGuest) {
-				return "", false
-			}
 		}
-		if !record && strict && directoryFactRequired(logical, home, linuxGuest) {
+		if !record && strict && directoryFactRequired(named, home, linuxGuest) {
 			return "", false
 		}
 		if linuxGuest && runtime.GOOS != "linux" && runtime.GOOS != "windows" {

@@ -726,6 +726,23 @@ func (g *procLinkGuard) unproved(path string, below bool) bool {
 	return !fixedPIDLeafProved(link)
 }
 
+// ProcessLinkWriteUnproved reports a write operand that goes on below a
+// numbered process's link (/proc/<pid>/root, cwd, exe, fd/<n> or
+// map_files/<n>, also under task/<tid>) whose reading the hook cannot prove
+// is its own: the part below the link is resolved in that process's mount
+// tree, which may hold the user's key file under any name. A Linux gateway
+// that cannot read /proc/1/root judged echo k >> /proc/1/root<home>/.ssh/<keys>
+// an ordinary write (rel-1-0-10:GAP-2227). A sandbox guest's (guest)
+// process ids are not this host's, so for a guest no such link is proved.
+// A write to the link itself (echo m > /proc/1/fd/1) is not below it.
+func ProcessLinkWriteUnproved(path string, guest bool) bool {
+	link, ok := fixedPIDLink(path)
+	if !ok || filepath.ToSlash(filepath.Clean(path)) == link {
+		return false
+	}
+	return guest || !fixedPIDLinkProved(link)
+}
+
 func unprovedProcessLink(path string, below bool) bool {
 	var g procLinkGuard
 	return g.unproved(path, below)
