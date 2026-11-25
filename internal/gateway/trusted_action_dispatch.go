@@ -175,6 +175,11 @@ type trustedActionRequest struct {
 	sessionID string
 	// aliasPending commits cross-call link state only after the hook verdict.
 	aliasPending *effectAliasPending
+	// aliasTwin marks a reading inside a call's dispatch (a twin, a
+	// simple-command pass, a here-string or state twin): the call's own
+	// reading records its alias change (aliasPending), a twin records none
+	// (GAP-2204).
+	aliasTwin bool
 	// ManagedInstall is set for a call judged by a managed enterprise install:
 	// content the rules could not prove is judged as the strict tier judges it,
 	// because a managed device fails closed.
@@ -652,6 +657,14 @@ func dispatchTrustedActionOnceIn(
 			scheduleEffectShadow(request, mode, effectsRulesTierFor(), request.recordEffectShadow)
 		}
 		request.recordEffectShadow = nil
+		// The call's own effects reading (effectRequest) holds the call's
+		// pending alias change; the twins and passes below record none. They
+		// are spellings of this call, not calls the agent ran, and the
+		// recorder turned the dispatch memo off for each of them
+		// (trustedDispatchMemo.dispatch): a session's sudo tee F <<< WORD ran
+		// every repeat again, the cost the memo removed (GAP-2204,
+		// rel-1-0-10:GAP-1472).
+		request.aliasPending, request.aliasTwin = nil, true
 		// Secret flow tracking (S7). It keeps a bounded per-session state and
 		// alerts (default) or blocks (strict/managed) when a labeled secret
 		// reaches an external sink. Shadow records the hit and never changes the
