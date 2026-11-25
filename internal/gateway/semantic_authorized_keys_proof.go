@@ -1266,6 +1266,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
+	// A sandbox guest judged on a POSIX gateway host that is not Linux:
+	// its paths follow the Linux guest layout, never this host's
+	// (rel-1-0-10:GAP-2203, GAP-2223). A Linux gateway reads the same
+	// layout from its own file system; a Windows one spells no POSIX path.
+	guestLayoutHost := cannotResolveLocally && request.sandboxGuest &&
+		runtime.GOOS != "linux" && runtime.GOOS != "windows"
 	if !request.ProtectedHomeHook {
 		// Only the managed hook client walks the user's home for the gateway.
 		opaqueFacts = nil
@@ -1370,6 +1376,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if isProtected(target) {
 			return confirmed()
+		}
+		if guestLayoutHost {
+			// The guest's own root link (/proc/self/root,
+			// /proc/thread-self/root) is the guest's /: a Linux gateway
+			// reads its own root there and finds the guest's key file; a
+			// gateway host with no /proc does not (rel-1-0-10:GAP-2223).
+			if folded := hookpaths.GuestOwnRootPath(filepath.Clean(target)); folded != filepath.Clean(target) && isProtected(folded) {
+				return confirmed()
+			}
 		}
 		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
 			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))

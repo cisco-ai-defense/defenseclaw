@@ -99,10 +99,13 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			// written, as a Linux gateway, whose same-named system folders
 			// are no links, places it (rel-1-0-10:GAP-2203). A Windows host
 			// spells no POSIX folder, so its walk is left as it was.
-			if guestOtherProcessFolder(logical) {
+			// The guest's own root link (/proc/self/root) is its /, as a
+			// Linux gateway reads its own (rel-1-0-10:GAP-2223).
+			placed := GuestOwnRootPath(filepath.Clean(logical))
+			if guestOtherProcessFolder(placed) {
 				return "", false
 			}
-			return filepath.Clean(logical), true
+			return placed, true
 		}
 		value, ok := ResolveWriteTarget(logical)
 		if record && directoryFacts != nil {
@@ -853,6 +856,35 @@ func guestOtherProcessFolder(directory string) bool {
 		return false
 	}
 	return false
+}
+
+// GuestOwnRootPath folds the leading /proc/self/root and
+// /proc/thread-self/root links of a clean absolute path, again and again, to
+// /. A Linux sandbox guest process reads them as its own root, and a Linux
+// gateway reads its own the same way, so a gateway host that is not Linux
+// (no /proc) places the guest's /proc/self/root/sandbox where a Linux
+// gateway does: /sandbox (rel-1-0-10:GAP-2223; RV-2203c P2-1 for a
+// /proc/self/root/proc/<pid>/root chain). /proc/self/task/<tid>/root stays
+// as written: a Linux gateway holds none of the guest's thread ids and
+// places that path as written too.
+func GuestOwnRootPath(path string) string {
+	for {
+		folded := ""
+		for _, alias := range []string{"/proc/self/root", "/proc/thread-self/root"} {
+			if path == alias {
+				folded = "/"
+				break
+			}
+			if rest, ok := strings.CutPrefix(path, alias+"/"); ok {
+				folded = "/" + rest
+				break
+			}
+		}
+		if folded == "" {
+			return path
+		}
+		path = folded
+	}
 }
 
 // directoryCreationFact reports a path fact of a POSIX mkdir call.
