@@ -345,6 +345,12 @@ type trustedActionRequest struct {
 	// the authorized-keys proofs and the guest reading
 	// (sandboxGuestPlacedInput) read it, and only to add findings.
 	SandboxGuestCWD string
+	// sandboxGuest marks a call of an authenticated sandbox request
+	// (isSandboxHookRequest), set once by dispatchTrustedActionOnce: it runs
+	// in a Linux guest, so a walk this gateway cannot make on the guest's
+	// files places its folders by the Linux guest layout, whatever OS the
+	// gateway runs on (rel-1-0-10:GAP-2203).
+	sandboxGuest bool
 	// guestKeyReadCommand is the shell command a Substrate actor's kit
 	// proved reads the actor's SSH private key in the actor's file system
 	// (substrateGuestClaims): the private-key read proof of a request that
@@ -530,6 +536,7 @@ func dispatchTrustedActionOnce(
 		request.Input.CredentialWalkBudget = actionfacts.NewCredentialWalkBudget(parent)
 	}
 	request = windowsStatementsOnePerLine(request)
+	request.sandboxGuest = request.sandboxGuest || isSandboxHookRequest(parent)
 	// A call judged as the twin of its data word leaves a detection-only
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
