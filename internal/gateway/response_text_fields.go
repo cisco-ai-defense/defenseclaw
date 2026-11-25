@@ -128,8 +128,13 @@ type responseText struct {
 	last         int // the lane of the last text added
 	parked       int // lanes with a parked run (GAP-2162)
 	n            int
-	joined       string
-	fresh        bool
+	// untexted is the wire bytes of the stream events that added no typed
+	// model text, less the walker's strings they added (server tool
+	// results, block starts and stops): they spend a park as text does
+	// (parkClock, rel-1-0-10:GAP-2224).
+	untexted int
+	joined   string
+	fresh    bool
 }
 
 func (r *responseText) Add(p responsePiece) {
@@ -271,14 +276,14 @@ func (r *responseText) parkLane(i, limit int) {
 	s := &r.secret[i]
 	if s.parked {
 		if limit < s.parkLimit {
-			s.parkLimit, s.parkedAt = limit, r.n
+			s.parkLimit, s.parkedAt = limit, r.parkClock()
 		}
 		return
 	}
 	if !s.token(r.lanes[i].String()) {
 		return
 	}
-	s.parked, s.parkedAt, s.parkLimit = true, r.n, limit
+	s.parked, s.parkedAt, s.parkLimit = true, r.parkClock(), limit
 	r.parked++
 }
 
@@ -291,10 +296,18 @@ func (r *responseText) endLane(i int) {
 	r.secret[i].endRun(r.lanes[i].String())
 }
 
+// parkClock is what a park's budget is spent by: the model text and the
+// wire bytes of the events that added none. A park that counted text only
+// never expired behind server tool results (web_fetch, web_search, code
+// execution), so past the held bound a benign reply after thinking that
+// ends in a number got the GAP-1767 TRUNCATED verdict, where rel sends it
+// (rel-1-0-10:GAP-2224).
+func (r *responseText) parkClock() int { return r.n + r.untexted }
+
 // expireParked ends parked runs after their own bounded byte budget.
 func (r *responseText) expireParked() {
 	for i := range r.secret {
-		if r.secret[i].parked && r.secret[i].parkLimit > 0 && r.n-r.secret[i].parkedAt > r.secret[i].parkLimit {
+		if r.secret[i].parked && r.secret[i].parkLimit > 0 && r.parkClock()-r.secret[i].parkedAt > r.secret[i].parkLimit {
 			r.endLane(i)
 		}
 	}
@@ -303,6 +316,29 @@ func (r *responseText) expireParked() {
 func (r *responseText) AddAll(ps []responsePiece) {
 	for _, p := range ps {
 		r.Add(p)
+	}
+}
+
+// AddEvent is AddAll of the pieces of one stream event of wire bytes. An
+// event that adds no typed model text (a server tool result: a web_fetch
+// document, web_search or code execution results; a block start or stop)
+// spends a parked run's budget by its wire size; the walker's strings it
+// adds (an id, a URL) are part of that size, not more (parkClock,
+// rel-1-0-10:GAP-2224). An event with typed text spends it by that text
+// only, as before.
+func (r *responseText) AddEvent(ps []responsePiece, wire int) {
+	before := r.n
+	r.AddAll(ps)
+	for _, p := range ps {
+		if p.text != "" && p.lane.field != responseFieldOther {
+			return
+		}
+	}
+	if spent := wire - (r.n - before); spent > 0 {
+		r.untexted += spent
+		if r.parked > 0 {
+			r.expireParked()
+		}
 	}
 }
 

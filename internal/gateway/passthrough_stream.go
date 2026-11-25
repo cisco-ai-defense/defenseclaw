@@ -98,7 +98,7 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	sc, err := scanReplyJSON([]byte(data), true, s.p.maxBodyValues())
 	if err != nil {
 		// Not JSON: the text itself is the content.
-		acc.AddAll(withWalkerPieces(typed, []string{data}))
+		acc.AddEvent(withWalkerPieces(typed, []string{data}), len(data))
 		return ""
 	}
 	calls.AddCalls(sc.Calls)
@@ -113,7 +113,7 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 		}
 		segs = kept
 	}
-	acc.AddAll(withWalkerPieces(typed, segs))
+	acc.AddEvent(withWalkerPieces(typed, segs), len(data))
 	return sc.Ambiguous
 }
 
@@ -955,7 +955,7 @@ read:
 			var events []sseEvent
 			if s.bedrock != nil {
 				textBefore := accumulated.Len()
-				accumulated.AddAll(s.bedrock.Feed(chunk))
+				accumulated.AddEvent(s.bedrock.Feed(chunk), len(chunk))
 				if accumulated.Len()-textBefore > streamLineMaxText {
 					// One read completes at most the frame in progress plus
 					// 4 KiB of others, so the text it adds is that frame's.
