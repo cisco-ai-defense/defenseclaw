@@ -4810,17 +4810,20 @@ func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input,
 }
 
 // sandboxGuestPlacedChildrenWalk reads the placed children of a call
-// (sandboxGuestPlacedChildren) afresh.
+// (sandboxGuestPlacedChildren) afresh. A reading in a candidate folder is
+// kept only when its text may read a key (guestCandidateMayReadKey), the one
+// proof it counts for: a cd in each of 64 folders gave every later command
+// 64 candidate readings, each a full analysis that could prove nothing
+// (touch f1, cd /tmp/x), and the copy-mode actor took 2.6 to 5 times the
+// 1.0.10 actor's time (rel-1-0-10:GAP-2226).
 func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	placements, stopped := memo.plan(input, facts).placements(true)
+	read := memo.placedReader(input)
 	for _, placement := range placements {
-		child := input
-		child.Command, child.CWD = placement.text, placement.cwd
-		child.Args, child.Argv = nil, nil
-		if placement.candidate {
-			candidates = append(candidates, memo.analyze(child))
-		} else {
-			children = append(children, memo.analyze(child))
+		if !placement.candidate {
+			children = append(children, read(placement))
+		} else if guestCandidateMayReadKey(placement.text) {
+			candidates = append(candidates, read(placement))
 		}
 	}
 	if stopped {

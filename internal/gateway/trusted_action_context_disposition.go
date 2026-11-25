@@ -230,8 +230,8 @@ func sshPrivateKeyContentReadBy(
 		if expandingOperand {
 			continue
 		}
-		switch strings.ToLower(command.Program) {
-		case "head", "tail":
+		switch program := strings.ToLower(command.Program); {
+		case program == "head" || program == "tail":
 			emptyRead := false
 			for index, arg := range command.Argv {
 				if arg == "-c" && index+1 < len(command.Argv) && command.Argv[index+1] == "0" ||
@@ -244,17 +244,25 @@ func sshPrivateKeyContentReadBy(
 				continue
 			}
 			return true
-		// These readers return file content, including SSH private key data.
-		case "sed", "gsed", "awk", "gawk", "mawk", "nawk",
-			"cat", "base64", "cp", "copy", "copy-item", "cpi",
-			"get-content", "gc", "type", "read", "readfile", "read_file", "read-file",
-			"fsread", "fs_read", "fs-read", "fs.read", "fs.read_file",
-			"fileread", "file_read", "file-read", "catfile", "cat_file", "cat-file",
-			"openfile", "open_file", "open-file", "viewfile", "view_file", "view-file":
+		case slices.Contains(sshPrivateKeyContentReaders, program):
 			return true
 		}
 	}
 	return false
+}
+
+// sshPrivateKeyContentReaders are the programs whose read of an SSH private
+// key returns its content (sshPrivateKeyContentReadBy; head and tail unless
+// they read no byte). The guest placement reads a candidate folder only for
+// a text that may name one of them (guestCandidateMayReadKey).
+var sshPrivateKeyContentReaders = []string{
+	"head", "tail",
+	"sed", "gsed", "awk", "gawk", "mawk", "nawk",
+	"cat", "base64", "cp", "copy", "copy-item", "cpi",
+	"get-content", "gc", "type", "read", "readfile", "read_file", "read-file",
+	"fsread", "fs_read", "fs-read", "fs.read", "fs.read_file",
+	"fileread", "file_read", "file-read", "catfile", "cat_file", "cat-file",
+	"openfile", "open_file", "open-file", "viewfile", "view_file", "view-file",
 }
 
 func trustedActionProvesContainerRuntimeSocketUse(
