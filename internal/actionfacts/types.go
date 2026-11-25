@@ -157,8 +157,10 @@ type Input struct {
 	// that carries it, and of the twins made from that Input, resolves its
 	// private record of credentials-file reads on it, so a call waits for
 	// walk slots once whatever number of records it has
-	// (substrate-1:GAP-1083). It carries no action material.
-	CredentialWalkBudget *CredentialWalkBudget `json:"-"`
+	// (substrate-1:GAP-1083). It carries no action material, and no
+	// reflection over Input or Facts reaches its state or the call's
+	// context (substrate-1:GAP-1110).
+	CredentialWalkBudget CredentialWalkBudget `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-

@@ -32,10 +32,10 @@ func withHookWalkBudget(ctx context.Context) context.Context {
 
 // hookWalkBudgetFrom is the wait of the hook request ctx belongs to, nil if
 // it has none.
-func hookWalkBudgetFrom(ctx context.Context) *actionfacts.CredentialWalkBudget {
+func hookWalkBudgetFrom(ctx context.Context) actionfacts.CredentialWalkBudget {
 	if ctx == nil {
 		return nil
 	}
-	budget, _ := ctx.Value(hookWalkBudgetKey{}).(*actionfacts.CredentialWalkBudget)
+	budget, _ := ctx.Value(hookWalkBudgetKey{}).(actionfacts.CredentialWalkBudget)
 	return budget
 }

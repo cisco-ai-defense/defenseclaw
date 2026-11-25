@@ -143,21 +143,42 @@ func CredentialWalkSlotWaitsForTest() int64 {
 const credentialPathWalkSlotWait = time.Second
 
 // CredentialWalkBudget is what one hook call may still wait for walk slots,
-// whatever number of records it resolves, and the context of the call it
-// waits for (nil: none). The dispatch makes one for the call and carries it on
+// whatever number of records it resolves, and when the call is done. The
+// dispatch makes one for the call and carries it on
 // Input.CredentialWalkBudget, so the call's twins, statements and nested
 // shells draw on the same wait: a wait per record answered a call with a
 // wrapper or a second statement 1 s later for each, past the hook's budget
-// (substrate-1:GAP-1083). It is safe for concurrent use.
-type CredentialWalkBudget struct {
-	ctx  context.Context
-	mu   sync.Mutex
+// (substrate-1:GAP-1083). It is safe for concurrent use; nil is no wait.
+//
+// It is a channel that holds its state (credentialWalkWait) between takes,
+// and the state keeps the call's Done channel, never its context. Input and
+// Facts carry the budget, and their readers walk them by reflection
+// (mentionsString, the dispatch memos' reflect.DeepEqual), which never
+// enters a channel: no reader reaches the time left or the call's context.
+// A budget that held the context and a lock let mentionsString iterate the
+// context's children while the rule evaluator cancelled one, a fatal
+// concurrent map read (substrate-1:GAP-1110).
+type CredentialWalkBudget chan credentialWalkWait
+
+// credentialWalkWait is the state of a CredentialWalkBudget.
+type credentialWalkWait struct {
+	done <-chan struct{} // the call's Done (nil: the call is never done)
 	left time.Duration
 }
 
 // NewCredentialWalkBudget is the wait of one hook call judged within ctx.
-func NewCredentialWalkBudget(ctx context.Context) *CredentialWalkBudget {
-	return &CredentialWalkBudget{ctx: ctx, left: credentialPathWalkSlotWait}
+func NewCredentialWalkBudget(ctx context.Context) CredentialWalkBudget {
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
+	return newCredentialWalkBudget(done, credentialPathWalkSlotWait)
+}
+
+func newCredentialWalkBudget(done <-chan struct{}, left time.Duration) CredentialWalkBudget {
+	w := make(CredentialWalkBudget, 1)
+	w <- credentialWalkWait{done: done, left: left}
+	return w
 }
 
 // take takes a walk slot: a free one at once, else the first one freed within
@@ -165,39 +186,39 @@ func NewCredentialWalkBudget(ctx context.Context) *CredentialWalkBudget {
 // gone, its deadline has passed) waits for nothing, so it holds no place
 // among the walks that wait; a slot that is free is still its own, as it was
 // before the slots had a wait.
-func (w *CredentialWalkBudget) take() bool {
+func (w CredentialWalkBudget) take() bool {
 	select {
 	case credentialPathWalkSlots <- struct{}{}:
 		return true
 	default:
 	}
-	var done <-chan struct{}
-	if w.ctx != nil {
-		if w.ctx.Err() != nil {
-			return false
-		}
-		done = w.ctx.Done()
+	if w == nil {
+		return false
 	}
-	w.mu.Lock()
-	left := w.left
-	w.mu.Unlock()
-	if left <= 0 {
+	state := <-w
+	w <- state
+	select {
+	case <-state.done:
+		return false
+	default:
+	}
+	if state.left <= 0 {
 		return false
 	}
 	credentialPathWalkSlotWaits.Add(1)
 	start := time.Now()
-	timer := time.NewTimer(left)
+	timer := time.NewTimer(state.left)
 	defer func() {
 		timer.Stop()
-		w.mu.Lock()
-		w.left = max(0, w.left-time.Since(start))
-		w.mu.Unlock()
+		spent := <-w
+		spent.left = max(0, spent.left-time.Since(start))
+		w <- spent
 	}()
 	select {
 	case credentialPathWalkSlots <- struct{}{}:
 		return true
 	case <-timer.C:
-	case <-done:
+	case <-state.done:
 	}
 	return false
 }
@@ -631,7 +652,7 @@ type credentialPathResolver struct {
 	held       map[credentialHeldRead]bool
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
-	wait       *CredentialWalkBudget    // the wait for walk slots left, the call's
+	wait       CredentialWalkBudget     // the wait for walk slots left, the call's
 	// walkedBy holds the folders each command already searched, as named
 	// and as resolved: a folder named again by the same command adds
 	// nothing, so grep -r K . . . walks it once (rel-1-0-10:GAP-1668).
@@ -658,8 +679,9 @@ type credentialPathResult struct {
 	record  *credentialPathRecord
 	pending bool // the resolve has not run: the input below is its own
 	// budget is the wait of the call the parse belongs to (nil: the resolve
-	// has its own, within the context it is read with).
-	budget *CredentialWalkBudget
+	// has its own, within the context it is read with). A channel: no
+	// reflection over Facts reaches its state (substrate-1:GAP-1110).
+	budget CredentialWalkBudget
 	// The resolve's input, a copy of the parse's, dropped once resolved.
 	words    []credentialPathWord
 	cwd      string
@@ -707,7 +729,7 @@ func (l *credentialPathResult) getWithin(ctx context.Context) *credentialPathRec
 
 // resolveCredentialPathReads makes the private record of one call (nil when
 // the call reads no credentials file the record adds and no cap was hit).
-func resolveCredentialPathReads(wait *CredentialWalkBudget, words []credentialPathWord, cwd, home string, commands []CommandFact, paths []PathFact) *credentialPathRecord {
+func resolveCredentialPathReads(wait CredentialWalkBudget, words []credentialPathWord, cwd, home string, commands []CommandFact, paths []PathFact) *credentialPathRecord {
 	return resolveCredentialPathReadsWithin(wait, defaultCredentialPathLimits, words, cwd, home, commands, paths)
 }
 
@@ -721,7 +743,7 @@ type credentialHeldRead struct {
 }
 
 func resolveCredentialPathReadsWithin(
-	wait *CredentialWalkBudget,
+	wait CredentialWalkBudget,
 	limits credentialPathLimits,
 	words []credentialPathWord,
 	cwd, home string,
@@ -2080,7 +2102,7 @@ type credentialPathWalkResult struct {
 // One it does not get in time is a walk cut before it read anything and
 // charged all of limits, so every folder the call names after it is spent
 // too and waits no more (substrate-1:GAP-1083).
-func credentialPathWalk(wait *CredentialWalkBudget, dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits, room credentialWalkRoom) (walk credentialPathWalkResult) {
+func credentialPathWalk(wait CredentialWalkBudget, dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits, room credentialWalkRoom) (walk credentialPathWalkResult) {
 	if !wait.take() {
 		return credentialPathWalkResult{cut: true, used: limits}
 	}

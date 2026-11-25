@@ -16,8 +16,8 @@ const gap1083HookAnswerBudget = 3500 * time.Millisecond
 
 // credentialWalkBudgetUnbounded is a wait for walk slots with no limit that
 // matters, for the tests that call credentialPathWalk directly.
-func credentialWalkBudgetUnbounded() *CredentialWalkBudget {
-	return &CredentialWalkBudget{left: time.Hour}
+func credentialWalkBudgetUnbounded() CredentialWalkBudget {
+	return newCredentialWalkBudget(nil, time.Hour)
 }
 
 // gap1083HoldWalkSlots takes every walk slot, as walks of a slow folder (a
@@ -192,7 +192,7 @@ func TestGAP1083WalkSlotWaitEndsWithTheCall(t *testing.T) {
 // TestGAP1083WalkSlotFreeTakenAtOnce: a free slot is taken without a wait,
 // and a resolve that has used its wait takes a free slot still.
 func TestGAP1083WalkSlotFreeTakenAtOnce(t *testing.T) {
-	spent := &CredentialWalkBudget{}
+	spent := newCredentialWalkBudget(nil, 0)
 	if !spent.take() {
 		t.Fatal("a free slot was not taken")
 	}
