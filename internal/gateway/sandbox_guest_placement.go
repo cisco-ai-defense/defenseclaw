@@ -1569,10 +1569,14 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 		name       string
 	}
 	var loops, bodies []span
-	// programs holds the static program word of each call, "" for none.
+	// programs holds the static program word of each call, "" for none;
+	// callNodes every call of the script, in walk order (unread, below).
 	var programs []string
+	var callNodes []*syntax.CallExpr
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
+		case *syntax.CallExpr:
+			callNodes = append(callNodes, node)
 		case *syntax.ForClause, *syntax.WhileClause:
 			loops = append(loops, span{start: int(node.Pos().Offset()), end: int(node.End().Offset())})
 		case *syntax.FuncDecl:
@@ -1630,14 +1634,15 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	// > config.yaml; }; g; cd ~/.defenseclaw && ls cannot call g, and
 	// counting it ran the body at the end of the script, a strict block
 	// where the laptop and both rels allow (substrate-1 GAP-0989).
+	// The calls come from the walk above, in the same order a second walk
+	// of the tree visited them (FIX-F3PERF).
 	var unread []int
 	if len(bodies) != 0 {
-		syntax.Walk(file, func(node syntax.Node) bool {
-			if call, ok := node.(*syntax.CallExpr); ok && guestCallUnread(call, home) {
+		for _, call := range callNodes {
+			if guestCallUnread(call, home) {
 				unread = append(unread, int(call.Pos().Offset()))
 			}
-			return true
-		})
+		}
 	}
 	visits := 0
 	if work != nil {
