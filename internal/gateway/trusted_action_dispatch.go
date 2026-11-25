@@ -982,21 +982,6 @@ func dispatchTrustedActionOnce(
 			}))
 		}()
 	}
-	// A program run through a chain of static prefix wrappers that hands it
-	// its argv unchanged (taskset 1 sudo env LD_PRELOAD=x curl URL, chrt -i
-	// 0 pkill -f defenseclaw) keeps the cell its plain call gets for the
-	// rules that judge the program by its own words (wrappedProgramRules):
-	// the plain reading is judged too and the stricter of the two counts
-	// (GAP-1461, GAP-1494; DET111 ruling 2026-11-24T21:35Z). A wrapper read
-	// only with words that may expand, a shell STRING, a moved folder and
-	// the writer sink grammar keep the readings above.
-	if twin, ok := wrapperExactTwinRequest(request); ok {
-		defer func() {
-			findings = withOverLimitTwinFindings(findings, slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
-				return !wrappedProgramRule(f.RuleID)
-			}))
-		}()
-	}
 	// A shell named at run time ("$SHELL" -c TEXT, $BASH -ec TEXT, env
 	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
 	// call does: that reading is judged too, and the stricter of the two
@@ -10709,6 +10694,55 @@ var wrappedProgramRules = map[string]bool{
 	canonicalTrustedRuleID(defenseClawControlDisableRuleID): true,
 	"PATH-AWS-CREDS": true, "PATH-GIT-CREDS": true, "PATH-NETRC": true, "PATH-NPMRC": true,
 	"PATH-PYPIRC": true, "PATH-KUBE": true, "PATH-DOCKER": true, "PATH-SSH-KEY": true,
+}
+
+// withRaiseOnlyTwinFindings is findings with the findings of the plain
+// reading of a wrapped call (wrapperExactTwinRequest) that raise it: a rule
+// the call lacks is added, and an enforcing finding takes the place of the
+// calls finding of the same rule that may not enforce. The calls own
+// findings are never folded away or replaced by a weaker one: the wrapped
+// form keeps a cell above its plain spelling (taskset 1 cp
+// ~/.git-credentials /tmp/x keeps its effects-lane block, where the plain
+// cp alerts MEDIUM), as parity only raises the lower form (R-NOLOSS; DET111
+// ruling 2026-11-25T01:30Z).
+func withRaiseOnlyTwinFindings(findings, twin []RuleFinding) []RuleFinding {
+	for _, plain := range twin {
+		key := trustedActionFindingKey(plain.RuleID)
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return trustedActionFindingKey(finding.RuleID) == key
+		})
+		switch {
+		case index < 0:
+			if !foldsAStrongerEffectFinding(findings, plain) {
+				findings = append(findings, plain)
+			}
+		case plain.contributesToEnforcement() && !findings[index].contributesToEnforcement():
+			findings[index] = withFloorRaiseOnlyOf(plain, findings[index])
+		}
+	}
+	return findings
+}
+
+// foldsAStrongerEffectFinding reports that f, a 1.0.10 finding, would fold
+// an effects-lane finding of findings (decide.FoldsIntoLegacy, the fold the
+// call list gets last) that is stronger than f: by enforcement, or by
+// severity at the same enforcement.
+func foldsAStrongerEffectFinding(findings []RuleFinding, f RuleFinding) bool {
+	if isEffectFinding(f) {
+		return false
+	}
+	for _, effect := range findings {
+		if !isEffectFinding(effect) || len(withoutEffectsFoldedInto([]RuleFinding{effect}, []RuleFinding{f})) == 1 {
+			continue
+		}
+		switch enforces := effect.contributesToEnforcement(); {
+		case enforces && !f.contributesToEnforcement():
+			return true
+		case enforces == f.contributesToEnforcement() && guardrailSeverityRank(effect.Severity) > guardrailSeverityRank(f.Severity):
+			return true
+		}
+	}
+	return false
 }
 
 // wrappedProgramRule reports a rule of wrappedProgramRules.

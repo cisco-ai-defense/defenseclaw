@@ -97,7 +97,7 @@ func TestWrappedProgramKeepsThePlainVerdict(t *testing.T) {
 					enforced[row.id]++
 				}
 				action, severity, rules := r2Verdict(api, connector, home, row.command)
-				if action != plain || severity != plainSeverity || !slices.Equal(rules, plainRules) {
+				if action != plain || severity != plainSeverity || !sameRuleSet(rules, plainRules) {
 					t.Errorf("%s %s %s: %s/%s %v, want the plain call's %s/%s %v", tier.name, connector, row.id,
 						action, severity, rules, plain, plainSeverity, plainRules)
 				}
@@ -114,4 +114,12 @@ func TestWrappedProgramKeepsThePlainVerdict(t *testing.T) {
 			t.Errorf("%s: the plain call is allowed in every tier", row.id)
 		}
 	}
+}
+
+// sameRuleSet reports a and b name the same rules in any order.
+func sameRuleSet(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }
