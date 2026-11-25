@@ -104,6 +104,10 @@ func gap1110LiveType(typ reflect.Type, path string, seen map[reflect.Type]bool) 
 	return ""
 }
 
+// gap1110CallKey keys a value on the call's context, so the context the
+// test makes is a chain of contexts, as the hook's is.
+type gap1110CallKey struct{}
+
 // TestGAP1110NoContextReachableFromFactsByReflection: Facts and Input carry
 // the call's wait for walk slots, and mentionsString and the dispatch memos
 // walk them by reflection while the rule evaluator cancels contexts derived
@@ -113,7 +117,7 @@ func gap1110LiveType(typ reflect.Type, path string, seen map[reflect.Type]bool) 
 // read (substrate-1:GAP-1110, from GAP-1083's one wait per call).
 func TestGAP1110NoContextReachableFromFactsByReflection(t *testing.T) {
 	root, home := gap1083Tree(t)
-	call, cancel := context.WithCancel(context.WithValue(context.Background(), struct{}{}, "call"))
+	call, cancel := context.WithCancel(context.WithValue(context.Background(), gap1110CallKey{}, "call"))
 	defer cancel()
 	// A child, as the evaluator's, so a context reached here has children.
 	_, cancelChild := context.WithCancel(call)
