@@ -1399,7 +1399,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
 					innerInput.CWD = state.cwd
 					var wrapperFolderUnknown bool
-					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd); changed {
+					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd, input.StandInCWD); changed {
 						innerInput.CWD = folder
 						wrapperFolderUnknown = unknown
 						innerCWDUnknown = innerCWDUnknown || unknown
@@ -3477,8 +3477,10 @@ func directoryStackTildeName(name string) bool {
 
 // simpleNestedChildFolder follows the same static wrapper child indexes as
 // simpleNestedScript. A changed root or working directory belongs to the
-// child, not to the caller's later statements.
-func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd string) (folder string, changed, unknown bool) {
+// child, not to the caller's later statements. standIn is Input.StandInCWD:
+// a relative nsenter working directory based at a folder reached from it is
+// unknown, not resolved (rel-1-0-10:GAP-2188).
+func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, standIn string) (folder string, changed, unknown bool) {
 	words := make([]string, len(args))
 	static := make([]bool, len(args))
 	for i, arg := range args {
@@ -3516,7 +3518,7 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 			if parsed.workDir != "" {
 				if filepath.IsAbs(parsed.workDir) {
 					folder = filepath.Clean(parsed.workDir)
-				} else if folder != "" {
+				} else if folder != "" && !standInReached(folder, standIn) {
 					folder = filepath.Join(folder, parsed.workDir)
 				} else {
 					return "", true, true
@@ -3532,6 +3534,19 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 		words, static = words[child:], static[child:]
 	}
 	return folder, changed, false
+}
+
+// standInReached reports that folder is the stand-in folder (Input.StandInCWD),
+// a folder in it or one of its parents: a folder whose place on the caller's
+// file system is not known.
+func standInReached(folder, standIn string) bool {
+	if standIn == "" || folder == "" {
+		return false
+	}
+	folder, standIn = filepath.Clean(folder), filepath.Clean(standIn)
+	sep := string(filepath.Separator)
+	return folder == standIn || strings.HasPrefix(folder, standIn+sep) ||
+		strings.HasPrefix(standIn, strings.TrimSuffix(folder, sep)+sep)
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the

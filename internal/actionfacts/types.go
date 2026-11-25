@@ -121,6 +121,18 @@ type Input struct {
 	// folder, so its current-folder heads and relative operands are read as
 	// the top level reads them (rel-1-0-10:GAP-1042).
 	folderUnknown bool
+	// StandInCWD is trusted caller context set by a gateway that does not
+	// know the caller's folder and judges the call in a private empty
+	// stand-in folder instead (the LLM proxy, which a model reply gives no
+	// session directory). It names that folder; CWD starts there. Operands
+	// relative to it resolve in it as in a fresh project. A folder the walk
+	// reaches from it by relative moves (it, a folder in it, one of its
+	// parents) has no known place on the caller's file system, so a wrapper
+	// that places its child relative to the caller's folder (nsenter
+	// --wd=REL) leaves the child in an unknown folder there, as it did before
+	// relative nsenter folders were resolved (rel-1-0-10:GAP-2188).
+	// ActionFacts never derives it from action input.
+	StandInCWD string `json:"-"`
 	// CurrentWindowsDrive is trusted caller context: the drive letter of the
 	// directory the hook payload reported, for a gateway that could not place
 	// that directory itself (CWD is empty). A Windows path with no drive of
