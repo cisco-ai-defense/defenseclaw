@@ -15,6 +15,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -452,7 +453,7 @@ func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testin
 		t.Fatal(err)
 	}
 	// The purge returns what it keeps to the owner-private setup shape.
-	relaxed, err := windows.SecurityDescriptorFromString(windowsSetupRelaxedDirectorySDDL)
+	relaxed, err := windows.SecurityDescriptorFromString(managed.WindowsSetupRelaxedDirectorySDDL)
 	if err != nil {
 		t.Fatal(err)
 	}

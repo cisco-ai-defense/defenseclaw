@@ -20,10 +20,17 @@ const (
 	// arguments about a dozen times per call. Smaller arguments are decoded
 	// each time, as before.
 	argsMemoMin = 64 << 10
+	// argsMemoCommandFieldMin is argsMemoMin for the command field
+	// (argsTopLevelCommandField): a sandbox hook reads the command field of
+	// one 8 KB call some hundred times, 1.5 ms a hook, so its answer is
+	// remembered from a few hundred bytes (substrate-1 GAP-1028).
+	argsMemoCommandFieldMin = 256
 	// argsMemoMax bounds the arguments remembered.
 	argsMemoMax = 4 << 20
-	// argsMemoEntries bounds how many arguments are remembered.
-	argsMemoEntries = 4
+	// argsMemoEntries bounds how many arguments are remembered: the call,
+	// its twins and the hooks that run at the same time (substrate-1
+	// GAP-1028).
+	argsMemoEntries = 8
 	// argsMemoLife is how long an answer is kept: one hook call, with room
 	// for a retry.
 	argsMemoLife = 30 * time.Second
@@ -68,7 +75,11 @@ func memoArgsBytes[T any](reader argsReader, raw []byte, read func() T) T {
 }
 
 func memoArgsMatch[T any](reader argsReader, size int, match func(string) bool, keep func() string, read func() T) T {
-	if size < argsMemoMin || size > argsMemoMax {
+	low := argsMemoMin
+	if reader == argsTopLevelCommandField {
+		low = argsMemoCommandFieldMin
+	}
+	if size < low || size > argsMemoMax {
 		return read()
 	}
 	now := time.Now()

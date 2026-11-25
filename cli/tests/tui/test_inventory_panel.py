@@ -744,3 +744,21 @@ def test_ide_table_fits_wide_unicode_cells() -> None:
     fitted, = _fit_cells(columns, (row,), 80, keep=("Enabled", "AI"))
     assert sum(cell_len(cell) for cell in fitted) <= 80 - 8 - 2 * len(columns)
     assert fitted[4:] == ("yes", "yes")
+
+
+async def test_inventory_sub_tabs_are_drawn_once_at_80x24(tmp_path) -> None:
+    # GAP-2051: the sub-tab strip was drawn as body text and again as the button
+    # bar below it, which took two rows and left the table 3 to 6 rows.
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from fixtures import snapshot_app
+
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("inventory")
+        await pilot.pause()
+        body = app._inventory_body_text()
+    assert not any(label in body for label in ("Summary", "Skills", "Plugins", "MCPs", "Memory")), body
+    assert body.count("\n") <= 1, body

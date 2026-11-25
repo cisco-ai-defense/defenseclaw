@@ -602,7 +602,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// .config/systemd/user/x.service` from /sandbox gets the laptop's verdict
 	// (rel-1-0-10:GAP-1002). It runs for the native file tools too.
 	if guest, ok := sandboxGuestPlacedInput(request, facts); ok {
-		guestFacts := actionfacts.Analyze(guest)
+		guestFacts := request.guestMemo.analyze(guest)
 		for _, p := range guestFacts.Paths {
 			for _, id := range homePathRuleIDs(guestFacts, p, text) {
 				if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(guestFacts, p.CommandID) {

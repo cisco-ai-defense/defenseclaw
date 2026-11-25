@@ -42,6 +42,7 @@ func TestGAP1624WindowsKeySpellingKeepsTheMention(t *testing.T) {
 	// The ordinary twins name a project file the same ways: no decision.
 	twins := []string{
 		`echo marker >> "$out"; printf '%s' ` + filepath.Join(cwd, "notes.txt"),
+		`echo marker >> "$out"; printf '%s' "` + filepath.Join(cwd, "notes.txt") + `"`,
 	}
 	if runtime.GOOS == "windows" {
 		// %USERPROFILE% and %HOMEDRIVE%%HOMEPATH% are the home to every

@@ -1497,12 +1497,27 @@ var (
 	// credentials or session, or start, connect to or change an agent runtime.
 	// A Substrate verb in neither table is judged the same way (an ambiguous
 	// verb is a control); this table names the registered ones so the CLI
-	// drift test can tell a new verb from a reviewed one.
+	// drift test can tell a new verb from a reviewed one. `admin` is the
+	// administrators' group (`admin revoke --user PERSON` ends every sign-in
+	// of a person, closes their open terminals and, with --lift, removes an
+	// end early; `--list` prints who is ended): it changes who may use the
+	// cluster, so like `login`, `logout` and `approve` it is a control, never a
+	// read. The judge reads only the first word after `substrate`, so the whole
+	// group, `--list` included, is a control exactly as at rel (where an
+	// unnamed verb already is).
+	// `port` forwards a port of a running agent to this computer over the
+	// agent's tunnel: like `connect` it reaches into an agent runtime with
+	// the person's session, and it opens a listener and a presence record, so
+	// it is not a read. `recover` (an owner or administrator clears the relay
+	// certificate record of an actor, GAP-0861) changes who the relay trusts.
+	// `secrets templates` is listed like every `secrets` verb but `list`:
+	// a control (GAP-1042; the judge already treated both as controls).
 	defenseClawSubstrateStopVerbs = map[string]bool{
 		"run": true, "connect": true, "pull": true, "checkpoint": true, "undo": true, "delete": true,
 		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
 		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
-		"publish": true, "keygen": true, "serve": true,
+		"publish": true, "keygen": true, "serve": true, "admin": true, "port": true,
+		"recover": true, "templates": true,
 		// scan-worker is the hidden, pod-only command the skill scanner sidecar runs
 		// inside its own pod (read-only root, private /tmp and /dev/shm). It is
 		// never typed by a person and it starts a scanner process, so it is a

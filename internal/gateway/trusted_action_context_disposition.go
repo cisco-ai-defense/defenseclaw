@@ -227,7 +227,7 @@ func sshPrivateKeyContentReadBy(
 		if !ok || command.Effect != actionfacts.EffectExecute {
 			continue
 		}
-		if trustedActionPrivateHomeCopy(facts, command) {
+		if trustedActionPrivateHomeCopy(facts, command, nil) {
 			// A copy of the key to a private place in the same home leaves
 			// its content with the user (rel-1-0-10:GAP-0018).
 			continue

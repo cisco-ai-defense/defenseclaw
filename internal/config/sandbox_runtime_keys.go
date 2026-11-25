@@ -57,7 +57,7 @@ var sandboxActorSecretName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,25
 // SandboxSubstrateOnlyKeys are the floor keys only Agent Substrate actors
 // read; openshell.admin refuses them.
 var SandboxSubstrateOnlyKeys = []string{"sandbox_class", "idle_suspend_after", "idle_suspend_tasks", "unattended_asks", "ask_timeout", "actor_secrets",
-	"ask_hosts", "url_rules"}
+	"ask_hosts", "url_rules", "git_push"}
 
 // SandboxHostOnlyKeys are the floor keys only a sandbox on a computer
 // reads (mounts, host ports, the process tree, the KVM driver fallback and
@@ -84,6 +84,7 @@ func (a *SandboxAdminConfig) validateRuntimeKeys(prefix string) error {
 	}
 	check(validateOpenShellEnum(prefix+".sandbox_class", a.SandboxClass, true, SubstrateSandboxGVisor, SubstrateSandboxMicroVM))
 	check(validateOpenShellEnum(prefix+".unattended_asks", a.UnattendedAsks, true, SubstrateAsksDeny, SubstrateAsksQueue))
+	check(validateOpenShellEnum(prefix+".git_push", a.GitPush, true, SubstrateGitPushAllow, SubstrateGitPushAsk, SubstrateGitPushDeny))
 	check(validateGoDuration(prefix+".idle_suspend_after", a.IdleSuspendAfter, SandboxMinIdleSuspendAfter, 0, "1m", "30m"))
 	check(validateGoDuration(prefix+".ask_timeout", a.AskTimeout, SandboxMinAskTimeout, SandboxMaxAskTimeout, "1m", "30m"))
 	if a.ActorSecrets != nil && len(a.ActorSecrets) == 0 {
@@ -144,7 +145,7 @@ func (a *SandboxAdminConfig) setSubstrateOnlyKeys() []string {
 	for key, set := range map[string]bool{
 		"sandbox_class": a.SandboxClass != "", "idle_suspend_after": a.IdleSuspendAfter != "", "idle_suspend_tasks": a.IdleSuspendTasks != nil,
 		"unattended_asks": a.UnattendedAsks != "", "ask_timeout": a.AskTimeout != "", "actor_secrets": a.ActorSecrets != nil,
-		"ask_hosts": a.AskHosts != nil, "url_rules": a.URLRules != nil,
+		"ask_hosts": a.AskHosts != nil, "url_rules": a.URLRules != nil, "git_push": a.GitPush != "",
 	} {
 		if set {
 			out = append(out, key)
@@ -230,6 +231,9 @@ func tightenRuntimeKeys(out *SandboxAdminConfig, o SandboxAdminConfig) error {
 	if v := strings.ToLower(o.UnattendedAsks); v == SubstrateAsksDeny || (v != "" && out.UnattendedAsks == "") {
 		out.UnattendedAsks = v
 	}
+	if gitPushRank(o.GitPush) > gitPushRank(out.GitPush) {
+		out.GitPush = strings.ToLower(strings.TrimSpace(o.GitPush))
+	}
 	out.IdleSuspendAfter = minGoDuration(out.IdleSuspendAfter, o.IdleSuspendAfter)
 	if o.IdleSuspendTasks != nil && (*o.IdleSuspendTasks || out.IdleSuspendTasks == nil) {
 		v := *o.IdleSuspendTasks
@@ -305,6 +309,41 @@ func (a SandboxAdminConfig) EffectiveIdleSuspendAfter(def time.Duration) time.Du
 		return d
 	}
 	return def
+}
+
+// gitPushRank orders git_push values for tightening: deny > ask > allow >
+// unset.
+func gitPushRank(v string) int {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case SubstrateGitPushDeny:
+		return 3
+	case SubstrateGitPushAsk:
+		return 2
+	case SubstrateGitPushAllow:
+		return 1
+	}
+	return 0
+}
+
+// EffectiveGitPush is allow, ask or deny for `substrate pull --push-branch`
+// (B2 2.4): the floor's git_push (deny wins between substrate.admin and the
+// profiles), else def, substrate.git.push_branch. A push_branch of deny is
+// the cluster's off switch and wins over any floor.
+func (a SandboxAdminConfig) EffectiveGitPush(def string) string {
+	def = strings.ToLower(strings.TrimSpace(def))
+	if def == "" {
+		def = SubstrateGitPushAsk
+	}
+	if def == SubstrateGitPushDeny {
+		return SubstrateGitPushDeny
+	}
+	if gitPushRank(a.GitPush) > 0 {
+		return strings.ToLower(strings.TrimSpace(a.GitPush))
+	}
+	if gitPushRank(def) > 0 {
+		return def
+	}
+	return SubstrateGitPushDeny
 }
 
 // EffectiveUnattendedAsks is deny or queue for an unattended actor: the

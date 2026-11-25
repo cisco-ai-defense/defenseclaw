@@ -158,7 +158,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: [{{ .Values.gateway.relaySessionSecret | quote }}]
+  resourceNames: [{{ .Values.gateway.relaySessionSecret | quote }}, {{ .Values.gateway.relayCASecret | quote }}]
   verbs: [get]
 - apiGroups: [""]
   resources: [secrets]
@@ -206,6 +206,12 @@ rules:
 - apiGroups: [""]
   resources: [pods]
   verbs: [list]
+# Delete the Jobs (and, by propagation, the pods) of earlier failed hooks,
+# by name: setup.LeftoverHookJobs (GAP-0609).
+- apiGroups: [batch]
+  resources: [jobs]
+  resourceNames: [defenseclaw-chain-key, defenseclaw-relay-session, defenseclaw-pre-upgrade, defenseclaw-pre-rollback, defenseclaw-bootstrap]
+  verbs: [delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -45,3 +45,16 @@ func skillManifestOwned(file *os.File, rootInfo fs.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && info.Mode().IsRegular() && st.Nlink == 1 && st.Uid == root.Uid
 }
+
+// skillHardLinked reports whether the opened regular file has more than one
+// name. A user can hard-link a file only root can read into a skill folder on
+// macOS (no protected hard links), and a root scan would then hash it
+// (GAP-2146).
+func skillHardLinked(file *os.File) bool {
+	info, err := file.Stat()
+	if err != nil {
+		return true // unknown: ask the trust
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return !ok || st.Nlink > 1
+}

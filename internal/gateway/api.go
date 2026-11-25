@@ -175,6 +175,10 @@ type APIServer struct {
 	// preToolDecisions pairs audited Claude Code/Codex PreToolUse decisions
 	// with later post-tool observations, without a background worker.
 	preToolDecisions preToolDecisionTracker
+	// claudeDisplays holds the streamed MessageDisplay chunks of each Claude
+	// Code message until the message ends, so its llm_response row is
+	// redacted over the whole message (GAP-0511).
+	claudeDisplays claudeDisplayBuffer
 
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.

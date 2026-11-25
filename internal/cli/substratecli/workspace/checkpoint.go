@@ -41,6 +41,9 @@ var (
 	ErrNoGit = errors.New("this actor has no git, so it cannot take or restore checkpoints; use an image that includes git")
 	// ErrNoCheckpoint: there is nothing to restore.
 	ErrNoCheckpoint = errors.New("there is no checkpoint to go back to")
+	// ErrNoFolder: the project folder is not in the actor (an actor that
+	// came back from a crash at its template's start; GAP-0410).
+	ErrNoFolder = errors.New("the project folder is not in the actor")
 )
 
 const (
@@ -98,6 +101,8 @@ type UndoOptions struct {
 
 // UndoInfo is the checkpoint the folder went back to.
 type UndoInfo struct {
+	// Pushes counts the pushes the undo took back.
+	Pushes int
 	ID     string
 	Commit string
 }
@@ -282,6 +287,8 @@ func Undo(ctx context.Context, opts UndoOptions) (*UndoInfo, error) {
 		return nil, ErrNoGit
 	case exitNoCheckpoint:
 		return nil, ErrNoCheckpoint
+	case exitNoDir:
+		return nil, fmt.Errorf("%w: %s", ErrNoFolder, dir)
 	case exitUnknownID:
 		known := strings.Fields(kv(res.Stdout)["known"])
 		msg := fmt.Sprintf("there is no checkpoint %s", strings.TrimPrefix(opts.ID, tagPrefix))
@@ -296,5 +303,15 @@ func Undo(ctx context.Context, opts UndoOptions) (*UndoInfo, error) {
 	if m["restored"] == "" {
 		return nil, fmt.Errorf("workspace: the actor answered the undo with %q", strings.TrimSpace(string(res.Stdout)))
 	}
-	return &UndoInfo{ID: safetext.Line(m["restored"]), Commit: safetext.Line(m["commit"])}, nil
+	info := &UndoInfo{ID: safetext.Line(m["restored"]), Commit: safetext.Line(m["commit"])}
+	if opts.DataDir != "" && opts.Name != "" && !usesHostCopy(opts.DataDir, opts.Name) {
+		// A push after this restore point is undone with the files, so
+		// the baseline goes back too; pull then shows the right work.
+		n, err := osw.RewindPushes(ctx, opts.DataDir, opts.Name, opts.Exec, info.ID)
+		if err != nil {
+			return info, cleanErr("put the copy's baseline back", err)
+		}
+		info.Pushes = n
+	}
+	return info, nil
 }

@@ -54,10 +54,10 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 		Client: client, Attestor: lv.Attestor, Activity: act, CPU: cpu,
 		Registry: reg, Resolver: lv.Resolver,
 		Sink:     sink,
-		Settings: lv.Settings, Secrets: lv.Secrets,
+		Settings: lv.Settings, Secrets: lv.Secrets, Bindings: lv.Bindings,
 		LauncherAtespaces: lv.LauncherAtespaces, RequireAttestation: lv.RequireAttestation, Templates: lv.Templates,
 		KitVersion: appVersion, IdleSuspendAfter: lv.IdleSuspendAfter, IdleSuspendWithoutCPU: lv.IdleSuspendWithoutCPU,
-		Resets: resets, Namespace: namespace,
+		Resets: resets, Namespace: namespace, CalloutMode: lv.CalloutMode,
 	}
 	if src != nil {
 		o.Config, o.Live = src, live
@@ -92,8 +92,10 @@ func substrateControllerLive(cfg *config.Config, idle bool, resolver controller.
 	}
 	return controller.Live{
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
+		Bindings:          controller.BindingsFrom(substrateBindingStore(cfg), cfg, time.Now),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
 		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after, IdleSuspendWithoutCPU: sub.IdleSuspendWithoutCPU,
+		CalloutMode: controller.CalloutFailModeFromConfig(cfg),
 	}
 }
 
@@ -121,7 +123,7 @@ func substrateTemplateKit(a controller.Attestor) func(context.Context, *ateapi.A
 			return gateway.SubstrateTemplateKit{}, &gateway.SubstrateTemplateAttestation{Reason: "the attestation carries no connector label", Unlabeled: true}
 		}
 		return gateway.SubstrateTemplateKit{Connector: att.Connector, AgentVersion: att.AgentVersion,
-			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest}, nil
+			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest, RelayStreams: att.RelayStreams}, nil
 	}
 }
 
@@ -271,6 +273,9 @@ func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver contro
 		// holds llm_providers on Substrate, GAP-0589): rendering their hosts
 		// live would open egress before the callout inspects it (GAP-0306).
 		lv.Settings.MCPHosts, lv.Settings.ProviderHosts = bootSettings.MCPHosts, bootSettings.ProviderHosts
+		// substrate.extproc is restart-only: a callout replacement follows
+		// the fail mode the pods started with (GAP-0505).
+		lv.CalloutMode = controller.CalloutFailModeFromConfig(boot)
 		return lv
 	}
 }

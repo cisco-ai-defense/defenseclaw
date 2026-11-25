@@ -50,8 +50,18 @@ const (
 )
 
 const (
-	// DefaultFilesMaxBytes caps the content of one upload.
+	// DefaultFilesMaxBytes is the compatibility cap for a pre-launcher-settings gateway.
 	DefaultFilesMaxBytes int64 = 1 << 30
+	// MaxFilesBytes bounds the cap the gateway can pass to a relay.
+	MaxFilesBytes int64 = 64 << 30
+	// UploadMaxHeader carries the gateway's cap and the relay's applied cap.
+	UploadMaxHeader = "X-DefenseClaw-Upload-Max"
+	// OpHeader names an upload that is not the first copy of a run: OpPush
+	// (substrate push) or OpSync (a sync --watch batch). The gateway
+	// refuses it when the admin turned that path off (substrate.files).
+	OpHeader = "X-DefenseClaw-Op"
+	OpPush   = "push"
+	OpSync   = "sync"
 	// DefaultExecMaxOutput caps stdout plus stderr of one exec.
 	DefaultExecMaxOutput int64 = 1 << 30
 	// DefaultExecTimeout applies when a request sets none.
@@ -63,9 +73,6 @@ const (
 	// tarOverhead is what an upload body may carry beyond twice the content
 	// cap: block headers and padding.
 	tarOverhead = 1 << 20
-	// FilesMaxBytesEnv overrides DefaultFilesMaxBytes for the relay process
-	// (the upload cap, "max_bytes"). A later kit config field replaces it.
-	FilesMaxBytesEnv = "DEFENSECLAW_RELAY_FILES_MAX_BYTES"
 )
 
 // ExecRequest is the body of POST /dcrelay/1/exec.
@@ -183,13 +190,13 @@ func (s *Server) resolvePath(p string) string {
 	return filepath.Join(relayWorkdir(s.opts.Config.Relay.Workdir), p)
 }
 
-func filesMaxBytes() int64 {
-	if v := os.Getenv(FilesMaxBytesEnv); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n
-		}
+func filesMaxBytes(header string) int64 {
+	n, err := strconv.ParseInt(header, 10, 64)
+	if err != nil || n <= 0 {
+		return DefaultFilesMaxBytes
 	}
-	return DefaultFilesMaxBytes
+	// Preserve lower limits already supported by workspace_max_bytes.
+	return min(n, MaxFilesBytes)
 }
 
 // execStream writes frames to one response, safely from the two copiers of
@@ -591,7 +598,8 @@ func (s *Server) filePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dir = s.resolvePath(dir)
-	limit := filesMaxBytes()
+	limit := filesMaxBytes(r.Header.Get(UploadMaxHeader))
+	w.Header().Set(UploadMaxHeader, strconv.FormatInt(limit, 10))
 	// Content is capped by ExtractTar; the body (headers and padding
 	// included) by a looser bound.
 	body := http.MaxBytesReader(w, r.Body, 2*limit+tarOverhead)

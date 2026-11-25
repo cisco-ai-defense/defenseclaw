@@ -3000,6 +3000,9 @@ func searchCommandOptionPresent(
 	program string,
 	option string,
 ) bool {
+	if program == "rg" || program == "ripgrep" {
+		return parseRgCommandLine(argv).has(strings.TrimPrefix(option, "--"))
+	}
 	options := true
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
@@ -3037,7 +3040,7 @@ func classifyPatternSearchPaths(
 	command *CommandFact,
 	program string,
 ) {
-	patternFromOption, patternFiles := searchPatternOptions(command.Argv)
+	patternFromOption, patternFiles := searchPatternOptions(command.Argv, program)
 	for _, path := range patternFiles {
 		appendPath(out, command.ID, PathAccessRead, path)
 	}
@@ -3065,6 +3068,9 @@ func searchOperands(argv []string, program string) []string {
 // searchOperandIndexes is searchOperands as argv indexes (the pattern, when
 // no option gives it, first).
 func searchOperandIndexes(argv []string, program string) []int {
+	if program == "rg" || program == "ripgrep" {
+		return parseRgCommandLine(argv).operands
+	}
 	var operands []int
 	options := true
 	for i := 1; i < len(argv); i++ {
@@ -3084,6 +3090,9 @@ func searchOperandIndexes(argv []string, program string) []int {
 	return operands
 }
 
+// searchOptionConsumesValue reports a grep option word that takes the next
+// word as its value. rg reads its argv with parseRgCommandLine
+// (substrate-1:GAP-0673).
 func searchOptionConsumesValue(program, arg string) bool {
 	if strings.Contains(arg, "=") {
 		return false
@@ -3092,13 +3101,8 @@ func searchOptionConsumesValue(program, arg string) bool {
 		lower := strings.ToLower(arg)
 		switch lower {
 		case "--after-context", "--before-context", "--binary-files", "--color",
-			"--context", "--dfa-size-limit", "--devices", "--directories",
-			"--encoding", "--engine", "--exclude", "--exclude-dir",
-			"--field-context-separator", "--field-match-separator", "--file",
-			"--glob", "--iglob", "--include", "--label", "--max-columns",
-			"--max-count", "--max-depth", "--max-filesize", "--path-separator",
-			"--pre", "--pre-glob", "--regexp", "--replace", "--sort", "--sortr",
-			"--type", "--type-not":
+			"--context", "--devices", "--directories", "--exclude", "--exclude-dir",
+			"--file", "--include", "--label", "--max-count", "--regexp":
 			return true
 		default:
 			return false
@@ -3110,17 +3114,14 @@ func searchOptionConsumesValue(program, arg string) bool {
 		case "-A", "-B", "-C", "-D", "-d", "-e", "-f", "-m":
 			return true
 		}
-	case "rg", "ripgrep":
-		switch arg {
-		case "-A", "-B", "-C", "-E", "-e", "-f", "-g", "-j", "-M", "-m",
-			"-r", "-t", "-T":
-			return true
-		}
 	}
 	return false
 }
 
-func searchPatternOptions(argv []string) (bool, []string) {
+func searchPatternOptions(argv []string, program string) (bool, []string) {
+	if program == "rg" || program == "ripgrep" {
+		return parseRgCommandLine(argv).patternOptions()
+	}
 	var files []string
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]

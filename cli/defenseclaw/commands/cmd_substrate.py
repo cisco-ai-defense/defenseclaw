@@ -107,6 +107,39 @@ PASSTHROUGH: frozenset[tuple[str, ...]] = frozenset(
 
 SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
+        ("admin",),
+        "Administer people's access to the cluster (administrators)",
+    ),
+    _Cmd(
+        ("admin", "revoke"),
+        "End every sign-in of a person, list the ended ones, or lift an end",
+        long=(
+            "--user PERSON ends every token of that person issued before now, on every device, and closes their "
+            "open\n"
+            "terminals (PERSON is a principal such as bob@example.com, or issuer#subject to end the sign-ins of "
+            "a person who\n"
+            "has not signed in yet). A refresh token the person holds can still get new tokens from the sign-in "
+            "server: to\n"
+            "lock someone out, also end their sessions there. --list shows the people whose sign-ins are ended. "
+            "--lift --user\n"
+            "PERSON removes an end early; it is audited."
+        ),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("lift", "bool", "remove the end of --user's sign-ins early"),
+            _Flag("list", "bool", "list the people whose sign-ins are ended"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag(
+                "reason",
+                "string",
+                "why (one line, up to 256 characters; kept with the end and audited)",
+                metavar="TEXT",
+            ),
+            _Flag("user", "string", "the person: a principal (bob@example.com) or issuer#subject"),
+        ),
+    ),
+    _Cmd(
         ("approvals",),
         "List what your agents are waiting for you to approve",
         long=(
@@ -114,24 +147,30 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             '"defenseclaw substrate approve ID" or "defenseclaw substrate reject ID". An agent attached to your\n'
             "terminal shows the same question on its last line. An unattended run (--task, --batch)\n"
             "denies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n"
-            '"unattended" in the RUN column and is denied when its time runs out.'
+            '"unattended" in the RUN column and is denied when its time runs out.\n'
+            "\n"
+            'With --standing it lists the approvals given with "approve --always" that are still in force:\n'
+            "the agent, the host, what the approval covers, who approved it and when. Take one back with\n"
+            '"defenseclaw substrate revoke NAME HOST".'
         ),
         flags=(
+            _Flag("all", "bool", "every person's, not only yours (administrators only)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("standing", "bool", "list the approvals given with --always that are still in force"),
         ),
     ),
     _Cmd(
         ("approve",),
         "Approve a waiting question",
         long=(
-            'Approves one question from "defenseclaw substrate approvals" once, or with --always for every later '
-            "run that asks the same thing."
+            'Approves one question from "defenseclaw substrate approvals" for one request: the next request asks '
+            "again. With --always it covers every later request of the agent that asks the same thing."
         ),
         args=(_Arg("id"),),
         flags=(
-            _Flag("always", "bool", "keep this approval for later runs"),
+            _Flag("always", "bool", "keep this approval for every later request of the agent"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("reason", "string", "note recorded with the decision", metavar="TEXT"),
         ),
@@ -210,9 +249,13 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("checkpoint",),
         "Save the agent's work so you can undo back to it",
         long=(
-            'Saves a restore point of the agent\'s folder inside the agent. "defenseclaw substrate undo NAME"\n'
-            "goes back to the last one. With --every 1h it saves one on that schedule for as long as the command "
-            "runs."
+            "Saves a restore point of the agent's folder inside the agent, then has the cluster store a snapshot "
+            "of\n"
+            "the agent (it pauses for a few seconds), so the restore point survives a crash of the agent's "
+            "worker.\n"
+            '"defenseclaw substrate undo NAME" goes back to the last one; after a crash it first brings the '
+            "agent back to\n"
+            "that snapshot. With --every 1h it saves one on that schedule for as long as the command runs."
         ),
         example=(
             "defenseclaw substrate checkpoint fix-tests-7f3a\n"
@@ -235,12 +278,34 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Ctrl-]\n"
             'to detach again. If the connection drops, it reconnects by itself. NAME is the name "defenseclaw '
             'substrate list"\n'
-            "shows, or the --name you gave run when only one agent has it."
+            "shows, or the --name you gave run when only one agent has it.\n"
+            "\n"
+            "With --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this "
+            "computer, while this\n"
+            'command is attached. See "defenseclaw substrate run --help". An agent that is already running reads '
+            "its MCP servers\n"
+            "when it starts, so start a new session in it to see NAME."
         ),
         example="defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "key-replay",
+                "string",
+                (
+                    "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); "
+                    "only tightens the cluster setting"
+                ),
+            ),
+            _Flag(
+                "mcp",
+                "stringArray",
+                (
+                    "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while "
+                    "this command is attached (repeatable)"
+                ),
+            ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
             _Flag(
                 "transport",
@@ -255,9 +320,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("delete",),
         "Delete agents with their work and snapshots",
         long=(
-            "Deletes the named agents (or every agent of --batch) and the snapshots the cluster\n"
-            'holds for them. Pull the changes first with "defenseclaw substrate pull": what is not pulled\n'
-            "is gone."
+            "Deletes the named agents (or every agent of --batch), the snapshots the cluster\n"
+            "holds for them and the checkpoints saved inside them. The question and the output say how\n"
+            'many snapshots each agent had. Pull the changes first with "defenseclaw substrate pull":\n'
+            "what is not pulled is gone."
         ),
         args=(_Arg("name", required=False, many=True),),
         flags=(
@@ -274,10 +340,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "answers\n"
             "over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through "
             "the gateway works and\n"
-            "you have what it asks for, your sign-in can be kept safely, and (for administrators, when the "
-            "cluster uses signed policy\n"
-            "bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in "
-            "the\n"
+            "you have what it asks for, your sign-in can be kept safely, the cluster can check ended sign-ins "
+            "(for administrators: whether\n"
+            "it ends them at all), and (for administrators, when the cluster uses signed policy bundles) every "
+            "stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\n"
             "cluster changes.\n"
             "\n"
             "Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, "
@@ -287,8 +353,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "kubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without "
             "it says what is missing.\n"
             "\n"
-            'The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each '
-            "failed check says how to fix\n"
+            'The last line is "ready for agents" when no check failed and the cluster components (gateway, '
+            "leader, controller,\n"
+            "callout) were checked, which needs --install-file. Without it the last line says that the checks on "
+            "this computer pass\n"
+            'and that the cluster components were not checked. Otherwise it is "not ready" and each failed check '
+            "says how to fix\n"
             "it, and the exit code is 1."
         ),
         example="defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
@@ -427,12 +497,22 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("logout",),
-        "Sign out of a cluster and forget the stored sign-in",
+        "Sign out of a cluster: end the sign-in there and forget it",
         long=(
-            "Removes your stored sign-in for the cluster and, where the sign-in server supports it, ends it "
-            "there too. Your agents keep running; sign in again to reach them."
+            "Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the "
+            "sign-in server\n"
+            "where that server supports it, and removes the stored sign-in. --all ends every token of yours "
+            "issued before now, on\n"
+            "every device, and closes their open terminals. An end covers tokens already issued: a refresh token "
+            "held on another\n"
+            "device or in a copied store can still get new ones, so also end your sessions at the sign-in server "
+            "(ask your\n"
+            "administrator). Your agents keep running; sign in again to reach them."
         ),
-        flags=(_Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),),
+        flags=(
+            _Flag("all", "bool", "end every token of yours issued before now, on every device"),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+        ),
     ),
     _Cmd(
         ("logs",),
@@ -472,8 +552,17 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("policy", "explain"),
-        "Explain the rules and recent decisions for one agent",
-        args=(_Arg("name"),),
+        "Explain the rules and recent decisions for one agent, or the profile you get",
+        long=(
+            "With an agent name, explains the rules and recent decisions for that agent. With no name, explains "
+            "the profile you get\n"
+            "for a new agent: the profile and where it came from (the profile assignment that selected you, or "
+            "default_profile when none\n"
+            "did), default_profile, and the assignments that were checked first and did not select you (by place "
+            "and the selector that\n"
+            "failed, never another person's group or account)."
+        ),
+        args=(_Arg("name", required=False),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
@@ -530,6 +619,32 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("port",),
+        "Open an agent's dev server in your browser (port forward)",
+        long=(
+            "Forwards a port the agent's app listens on (127.0.0.1:PORT inside the agent) to 127.0.0.1:LOCAL on "
+            "this\n"
+            "computer, so you can open http://127.0.0.1:LOCAL in your browser. LOCAL is PORT unless you give "
+            "PORT:LOCAL; when PORT\n"
+            "is taken here, the next free port is used. The forward listens on 127.0.0.1 only and only you can "
+            "open it. It stays\n"
+            "in the foreground until you press Ctrl-C.\n"
+            "\n"
+            "Ports 1024-65535 can be forwarded, except the relay's own port; your administrator can allow fewer "
+            "or turn port\n"
+            "forwarding off. Every forward is recorded in the cluster's audit log. The forwarded app runs as "
+            '"localhost" in your\n'
+            "browser, like any local dev server: open only apps you trust there."
+        ),
+        example="defenseclaw substrate port web-3f2a 3000\ndefenseclaw substrate port web-3f2a 3000:8000 5173",
+        args=(_Arg("name"), _Arg("port[:local]>", many=True)),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
         ("pull",),
         "Review what the agent changed and bring it home",
         long=(
@@ -540,32 +655,66 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "your folder\n"
             "until you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git "
             "branch,\n"
-            "--patch-out FILE writes a patch.\n"
+            "--patch-out FILE writes a patch. --push-branch NAME (Preview) pushes the agent's work from inside "
+            "the\n"
+            "agent to its checkout's origin as a new branch, with the credential the cluster adds for that host; "
+            "it\n"
+            "asks first unless your profile allows it, and never forces.\n"
             "\n"
             "When a change can run code on this machine, --apply asks first (the default answer is no). --yes "
             "takes\n"
             "that safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged "
             "files,\n"
-            "--allow-flagged writes them too."
+            "--allow-flagged writes them too.\n"
+            "\n"
+            "On the computer you started the agent from, it compares the changes with the folder you sent. On\n"
+            "another computer, run it in a git checkout of that folder: it compares the agent's work with the\n"
+            "checkout's last commit, so files sent that were not committed show as added. That computer cannot "
+            "know\n"
+            "what run left out with --exclude, so repeat it (--exclude GLOB, once for each) or say there was "
+            "none\n"
+            "(--no-exclude) before --apply or --branch; until then they refuse, and --patch-out still works."
         ),
         example=(
             "defenseclaw substrate pull fix-tests-7f3a\n"
-            "defenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests"
+            "defenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests\n"
+            "defenseclaw substrate pull fix-tests-7f3a --push-branch agent/fix-tests"
         ),
         args=(_Arg("name"),),
         flags=(
             _Flag(
                 "allow-flagged",
                 "bool",
-                "with --apply: also write the files flagged as able to run code (review them first)",
+                "with --apply or --push-branch: also take the flagged files (review them first)",
             ),
             _Flag("apply", "bool", "write the changes into this folder"),
             _Flag("branch", "string", "put the changes on a new git branch of this name", metavar="NAME"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("diff", "bool", "print the full diff"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                (
+                    "on another computer: a path or glob run was given with --exclude, held back on both sides "
+                    "(repeatable)"
+                ),
+                metavar="GLOB",
+            ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("no-exclude", "bool", "on another computer: run was given no --exclude"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag("patch-out", "string", "write the changes as a patch to this file", metavar="FILE"),
+            _Flag(
+                "push-branch", "string", "push the agent's work to its origin as a new branch of this name (Preview)"
+            ),
+            _Flag(
+                "restore-secret-lines",
+                "bool",
+                (
+                    "in files uploaded with credentials replaced, keep the agent's changed lines with the value put "
+                    "back (default: keep your line)"
+                ),
+            ),
             _Flag(
                 "timeout",
                 "duration",
@@ -574,6 +723,79 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 metavar="DURATION",
             ),
             _Flag("yes", "bool", "take the safe default at each question", short="y"),
+        ),
+    ),
+    _Cmd(
+        ("push",),
+        "Send your newer changes into a running agent (Preview)",
+        long=(
+            "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\n"
+            "agent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are "
+            "held\n"
+            "back (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n"
+            "\n"
+            'Before it writes, it saves a restore point: "defenseclaw substrate undo NAME --to N" goes back to '
+            "it.\n"
+            "When the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\n"
+            "Then choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps "
+            "the\n"
+            "agent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\n"
+            "When sending yours would remove an agent file or folder in its way (a file where you made a folder, "
+            "or\n"
+            "a folder where you made a file), --mine names it and sends nothing; add --replace to send yours "
+            "anyway.\n"
+            "What you send is not shown as the agent's work in a later pull. This command is a Preview."
+        ),
+        example=(
+            "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine"
+        ),
+        args=(_Arg("name"), _Arg("path", required=False, many=True)),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("dry-run", "bool", "show what would be sent and the conflicts; send nothing"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "hold a path or glob back too (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "on a conflict, send your version (the agent's stays in the restore point)"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag(
+                "patch-out",
+                "string",
+                "on a conflict, keep the agent's version and write your change to this file",
+                metavar="FILE",
+            ),
+            _Flag(
+                "replace",
+                "bool",
+                "with --mine, also remove an agent file or folder in the way of yours (it stays in the restore point)",
+            ),
+            _Flag("theirs", "bool", "on a conflict, keep the agent's version and send the rest"),
+            _Flag(
+                "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
+            ),
+        ),
+    ),
+    _Cmd(
+        ("recover",),
+        "Let the agent's relay get a new certificate; bring a crashed agent back",
+        long=(
+            "Clears the cluster's record of the agent's relay certificate, so the relay's next request\n"
+            "gets a first certificate and no certificate issued before it can renew. Use it when\n"
+            '"defenseclaw substrate connect" fails because the relay restarted inside the agent, or after an\n'
+            "emergency relay CA rotation, while substrate.relay_cert_reissue is refuse (the managed default).\n"
+            'A crashed agent is also brought back to its last snapshot, as "defenseclaw substrate undo" does;\n'
+            "what it did after that snapshot is lost, so it asks first. Only the agent's owner or an\n"
+            "administrator can run it."
+        ),
+        example="defenseclaw substrate recover fix-tests-7f3a",
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("yes", "bool", "do not ask", short="y"),
         ),
     ),
     _Cmd(
@@ -587,6 +809,22 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("revoke",),
+        "Take back an approval given with --always",
+        long=(
+            'Takes back what "defenseclaw substrate approve --always" allowed for one agent and host: the '
+            "agent's\n"
+            "next request to the host asks you again. The cluster drops the host from the agent's network rules\n"
+            'within about a minute. List the approvals in force with "defenseclaw substrate approvals '
+            '--standing".\n'
+            "An administrator names another person's agent as ATESPACE/NAME; the revoke is recorded under their\n"
+            "own name."
+        ),
+        example="defenseclaw substrate revoke fix-tests-7f3a registry.example.test",
+        args=(_Arg("name"), _Arg("host")),
+        flags=(_Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),),
+    ),
+    _Cmd(
         ("run",),
         "Run a coding agent in the cluster on a copy of this folder",
         long=(
@@ -595,10 +833,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "claude,\n"
             "codex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that "
             "sign in to a\n"
-            "vendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, "
-            "because the\n"
-            "sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows "
-            "the guard profile, model, allowed hosts and how to leave. When the\n"
+            "vendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you "
+            "say yes to a\n"
+            "warning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed "
+            "cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When "
+            "the\n"
             "guard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, "
             "always or deny.\n"
             "\n"
@@ -614,26 +853,69 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             'running and follow it with "defenseclaw substrate logs -f NAME".\n'
             "With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run "
             "at once.\n"
-            "With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments "
-            "after -- go\n"
-            "to the agent."
+            "With --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . "
+            "(Preview)\n"
+            "it starts from this checkout: the agent fetches the branch's history from its remote, and only the "
+            "unpushed\n"
+            "commits and uncommitted changes are sent from here. Arguments after -- go to the agent.\n"
+            "\n"
+            "With --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this "
+            "computer. This command\n"
+            "starts COMMAND when the agent opens the server NAME and carries its messages through the cluster "
+            "while this command is\n"
+            "attached; every tool call goes through the cluster's guard first. COMMAND is split like a shell "
+            "would split it, with\n"
+            "quotes and backslashes only, and runs without a shell. NAME is a-z, 0-9, _ and -, up to 32 "
+            "characters. --mcp does not\n"
+            "go with --detach or --batch."
         ),
         example=(
             "defenseclaw substrate run claude\n"
             'defenseclaw substrate run codex --task "fix the failing tests" --detach\n'
             "defenseclaw substrate run claude --batch tasks.yaml --parallel 5\n"
-            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git"
+            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git\n"
+            "defenseclaw substrate run claude --clone .\n"
+            'defenseclaw substrate run claude --mcp "files=npx -y @modelcontextprotocol/server-filesystem ."'
         ),
         args=(_Arg("agent"), _Arg("agent_args", required=False, many=True)),
         flags=(
             _Flag("batch", "string", "run every task in this YAML file, one agent each", metavar="ID"),
-            _Flag("clone", "string", "start from this repository instead of a copy of the folder", metavar="URL"),
+            _Flag(
+                "clone",
+                "string",
+                (
+                    "start from this repository instead of a copy of the folder; . for this checkout with its history "
+                    "(Preview)"
+                ),
+                metavar="URL",
+            ),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("detach", "bool", "with --task, start it and return; follow it with logs -f", short="d"),
-            _Flag("exclude", "stringArray", "hold a path or pattern back from the copy (repeatable)", metavar="GLOB"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "exclude a path or glob from the copy (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
-            _Flag("max-upload-mb", "int", "refuse a copy larger than this many MB (default 500)", default="0"),
+            _Flag(
+                "key-replay",
+                "string",
+                (
+                    "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); "
+                    "only tightens the cluster setting"
+                ),
+            ),
+            _Flag("max-upload-mb", "int", "lower the cluster upload limit for this copy, in MiB", default="0"),
+            _Flag(
+                "mcp",
+                "stringArray",
+                (
+                    "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while "
+                    "this command is attached (repeatable)"
+                ),
+            ),
             _Flag(
                 "name",
                 "string",
@@ -691,7 +973,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
             ),
             _Flag("workload-token-file", "string", "CI: file holding the workload identity token", metavar="FILE"),
-            _Flag("yes", "bool", "answer questions with their defaults", short="y"),
+            _Flag("yes", "bool", "say yes to the vendor sign-in warning without asking", short="y"),
         ),
     ),
     _Cmd(
@@ -701,6 +983,52 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "A secret is a key an agent can use without ever seeing it: the cluster adds the real value\n"
             "to requests to the hosts the secret is bound to. These commands list the names you can use,\n"
             "store your own, and remove or test them. Values are never shown."
+        ),
+    ),
+    _Cmd(
+        ("secrets", "add"),
+        "Add a secret of your own for one host, under a template",
+        long=(
+            "Creates your own secret NAME for HOST under TEMPLATE (see secrets templates) and stores its\n"
+            "value. A host the template covers is used from your agents' next request; any other host waits\n"
+            "until an administrator approves it. For a basic template (git hosts, PyPI) give only the token:\n"
+            "the cluster adds the user name. generic-basic needs --user.\n"
+            "\n"
+            "The value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\n"
+            "GitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n"
+            "(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\n"
+            "and never printed."
+        ),
+        example=(
+            "defenseclaw substrate secrets add gl-work --template gitlab --host gitlab.com --from-op "
+            "op://eng/gitlab/token\n"
+            "defenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example "
+            "--user ci-bot --from-file ~/.nexus-token"
+        ),
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("account", "string", "with --from-keychain: the item's account"),
+            _Flag(
+                "allow-echo",
+                "bool",
+                "allow a host that returns the requests it gets (only when your administrator allows it)",
+            ),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "expires",
+                "string",
+                "when the secret stops being used: 90d, 12h or a date (2027-01-31); at most 400 days",
+            ),
+            _Flag("from-env", "string", "read the value from this environment variable"),
+            _Flag("from-file", "string", "read the value from this file"),
+            _Flag("from-gh", "bool", "read the value from the GitHub CLI's sign-in (gh auth token)"),
+            _Flag("from-keychain", "string", "read the value from this macOS keychain item (its service name)"),
+            _Flag("from-op", "string", "read the value from 1Password (op://vault/item/field)"),
+            _Flag("gh-host", "string", "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"),
+            _Flag("host", "string", "the one host the secret is for"),
+            _Flag("stdin", "bool", "read the value from standard input"),
+            _Flag("template", "string", "the template to use (see secrets templates)", metavar="NAME"),
+            _Flag("user", "string", "the user name for a basic template (generic-basic needs it)"),
         ),
     ),
     _Cmd(
@@ -719,7 +1047,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
-            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true", hidden=True),
             _Flag("yes", "bool", "do not ask", short="y"),
         ),
     ),
@@ -727,26 +1055,54 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("secrets", "set"),
         "Store one of your own secrets",
         long=(
-            "Stores the value for NAME, bound to the hosts your administrator allowed for it. The value\n"
-            "is read from the terminal without echo, from standard input with --stdin, or from an environment\n"
-            "variable with --from-env VAR. It is never put on the command line."
+            "Stores the value for NAME, bound to the hosts your administrator allowed for it.\n"
+            "\n"
+            "The value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\n"
+            "GitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n"
+            "(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\n"
+            "and never printed."
+        ),
+        example=(
+            "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\n"
+            "defenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\n"
+            "defenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish"
         ),
         args=(_Arg("name"),),
         flags=(
+            _Flag("account", "string", "with --from-keychain: the item's account"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("from-env", "string", "read the value from this environment variable"),
-            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
+            _Flag("from-file", "string", "read the value from this file"),
+            _Flag("from-gh", "bool", "read the value from the GitHub CLI's sign-in (gh auth token)"),
+            _Flag("from-keychain", "string", "read the value from this macOS keychain item (its service name)"),
+            _Flag("from-op", "string", "read the value from 1Password (op://vault/item/field)"),
+            _Flag("gh-host", "string", "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true", hidden=True),
             _Flag("stdin", "bool", "read the value from standard input"),
         ),
     ),
     _Cmd(
-        ("secrets", "test"),
-        "Check that a secret is bound and the cluster can use it",
-        args=(_Arg("name"),),
+        ("secrets", "templates"),
+        "List the templates you may use to add your own secrets",
+        long=(
+            "Lists the templates your administrator approved for your own secrets: the hosts each one\n"
+            "covers without an approval and how the value goes into the request. Use one with secrets add."
+        ),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
-            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
+        ("secrets", "test"),
+        "Check that a secret is stored and usable, and whether an agent gets it",
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("agent", "string", "also say whether this agent's policy carries the secret"),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true", hidden=True),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
         ),
     ),
@@ -889,6 +1245,40 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("sync",),
+        "Keep sending your changes into a running agent while you work (Preview)",
+        long=(
+            "Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or\n"
+            "the agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the "
+            "first.\n"
+            "Each batch follows the rules of push: secret files are held back, ignored files, .git and package\n"
+            "caches are not sent, and a file the agent also changed keeps the agent's version (it is named once;\n"
+            "send yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n"
+            "10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is "
+            "back.\n"
+            "Nothing keeps running after it stops. --watch is required. This command is a Preview."
+        ),
+        example=(
+            "defenseclaw substrate sync fix-tests-7f3a --watch\n"
+            "defenseclaw substrate sync fix-tests-7f3a --watch --for 2h"
+        ),
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "hold a path or glob back too (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
+            _Flag("for", "duration", "stop after this long, for example 2h", default="0s"),
+            _Flag(
+                "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
+            ),
+            _Flag("watch", "bool", "watch the folder and send changes as you save (required)"),
+        ),
+    ),
+    _Cmd(
         ("template",),
         "Build, check and publish actor images with their attestation (administrators)",
         long=(
@@ -958,10 +1348,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "https://<substrate.services.admin>\n"
             "                                  of --config, the issuer the gateway signs with)\n"
             "  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n"
-            "  --verify-url URL                ask the gateway to check each session token, instead of "
-            "--session-key\n"
-            "                                  An image that starts the relay needs --session-key or "
-            "--verify-url.\n"
+            "  --verify-url URL                gateway URL the relay checks each session token with (default\n"
+            "                                  the relay verify endpoint of <gateway-url>; --session-key keys "
+            "are checked first)\n"
             "\n"
             "Flags build, verify, scan and publish all take:\n"
             "  --json                          print JSON\n"
@@ -1133,7 +1522,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         "Put the agent's folder back to a restore point",
         long=(
             "Goes back to the last restore point (or --to ID) inside the agent and discards what the agent "
-            "changed since. It asks first."
+            "changed since. It asks first. After a crash it first brings the agent back to its last snapshot; a "
+            "--task agent this computer started whose task was lost then starts that task again from the "
+            "beginning, on a fresh copy of its folder."
         ),
         args=(_Arg("name"),),
         flags=(
@@ -1227,6 +1618,26 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("watch",),
+        "Say when one of your agents needs an answer or finishes its task",
+        long=(
+            "Follows your agents (all of them, or the one you name) and prints a line when one raises an ask\n"
+            "or when a --task run ends. With notifications on (notifications.enabled and notifications.substrate "
+            "in config.yaml),\n"
+            "it also shows a desktop notification, once per ask. A notification names the kind and the host or "
+            "tool of an ask,\n"
+            "never its arguments. An administrator can turn notifications off for the cluster "
+            "(substrate.activity.notifications: off).\n"
+            "Ctrl-C stops it."
+        ),
+        args=(_Arg("name", required=False),),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("every", "duration", "how often to look (at least 2s)", default="10s", metavar="DURATION"),
+            _Flag("once", "bool", "look once, print what is new and stop"),
+        ),
+    ),
+    _Cmd(
         ("whoami",),
         "Show who you are signed in as",
         long="Shows the account, groups and expiry of your sign-in for the cluster. The token itself is never shown.",
@@ -1253,6 +1664,7 @@ def _option(flag: _Flag) -> GatewayOption:
         type=click.STRING,
         metavar=flag.metavar or None,
         help=flag.help,
+        hidden=flag.hidden,
     )
 
 

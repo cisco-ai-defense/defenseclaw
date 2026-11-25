@@ -64,3 +64,31 @@ func TestCalloutRecordsAnInjectedSecretGAP0452(t *testing.T) {
 		t.Errorf("blocked request: %+v", got)
 	}
 }
+
+type personUIDs struct{}
+
+func (personUIDs) ResolveActor(context.Context, string, string) (ActorRecord, bool, error) {
+	return ActorRecord{UID: "uid-1", Profile: "eng", Person: "https://idp.example#eng1", Principal: "eng1@example.com"}, true, nil
+}
+
+// GAP-0513: log.secret.injected also names the person the actor is
+// registered to, so a use of a managed secret is attributable.
+func TestInjectedSecretNamesThePersonGAP0513(t *testing.T) {
+	h := newHarness(t, func(_ *Config, o *Options) { o.UIDs = personUIDs{} })
+	r := req("eng-web", "GET", "api.github.com", "/user", "Authorization", "Bearer DC_SECRET_GITHUB")
+	h.eng.Finish(r, h.eng.DecideHeaders(context.Background(), r))
+	h.events.mu.Lock()
+	defer h.events.mu.Unlock()
+	found := false
+	for _, ev := range h.events.events {
+		if ev.Event == EventSecretInjected {
+			found = true
+			if ev.Person != "https://idp.example#eng1" || ev.Principal != "eng1@example.com" {
+				t.Errorf("event %+v does not name the person", ev)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no log.secret.injected event")
+	}
+}

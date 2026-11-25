@@ -498,6 +498,11 @@ type SandboxAdminConfig struct {
 	// UnattendedAsks is deny or queue (D12): what an ask of an unattended
 	// actor does, over substrate.unattended.asks; deny wins.
 	UnattendedAsks string `mapstructure:"unattended_asks" yaml:"unattended_asks,omitempty" json:",omitempty"`
+	// GitPush is allow, ask or deny (B2 2.4): whether `substrate pull
+	// --push-branch` may push an actor's work to its origin. deny wins over
+	// ask, ask over allow, between substrate.admin and the profiles; unset
+	// follows substrate.git.push_branch, and push_branch: deny wins over all.
+	GitPush string `mapstructure:"git_push" yaml:"git_push,omitempty" json:",omitempty"`
 	// AskTimeout (a Go duration, 1m to 24h) is how long a queued ask waits
 	// before it is denied, over substrate.unattended.ask_timeout; the
 	// shortest wins.
@@ -559,7 +564,7 @@ func (a SandboxAdminConfig) IsZero() bool {
 		len(a.AllowedCredentials) == 0 && a.OnSilence == "" && a.MaxSilenceAfter == "" &&
 		a.ProcessTree == nil && a.ForeignSandboxes == "" && a.AllowUpstreamTelemetry == nil &&
 		a.DeleteStoppedAfter == "" && a.RequestAccess == "" && a.DriverFallback == "" &&
-		a.Runtimes == nil && a.SandboxClass == "" && a.IdleSuspendAfter == "" && a.IdleSuspendTasks == nil && a.UnattendedAsks == "" &&
+		a.Runtimes == nil && a.SandboxClass == "" && a.IdleSuspendAfter == "" && a.IdleSuspendTasks == nil && a.UnattendedAsks == "" && a.GitPush == "" &&
 		a.AskTimeout == "" && a.ActorSecrets == nil && a.AskHosts == nil && a.URLRules == nil
 }
 
@@ -1247,7 +1252,7 @@ func validateOpenShellNonNegative(field string, value int) error {
 // openShellAdminEnumKeys are the floor settings (openshell.admin and a
 // guardrail profile's sandbox section) whose values are lowercase words.
 var openShellAdminEnumKeys = []string{"when_unavailable", "user_approvals", "on_silence", "foreign_sandboxes", "driver_fallback", "min_profile",
-	"sandbox_class", "unattended_asks"}
+	"sandbox_class", "unattended_asks", "git_push"}
 
 // foldOpenShellEnumCase lowercases, in a parsed config document, the string
 // values of the administrator's OpenShell settings whose values are
@@ -1283,7 +1288,7 @@ func foldOpenShellEnumCase(root *yaml.Node) {
 // (foldOpenShellEnumCase folds the same in the document).
 func (a *SandboxAdminConfig) foldEnumCase() {
 	for _, v := range []*string{&a.WhenUnavailable, &a.UserApprovals, &a.OnSilence, &a.ForeignSandboxes, &a.DriverFallback, &a.MinProfile,
-		&a.SandboxClass, &a.UnattendedAsks} {
+		&a.SandboxClass, &a.UnattendedAsks, &a.GitPush} {
 		*v = strings.ToLower(*v)
 	}
 }

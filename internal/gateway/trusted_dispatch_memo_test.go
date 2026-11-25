@@ -17,19 +17,24 @@ import (
 // out-parameter the memo replays, or a recorder that turns the memo off
 // (trustedDispatchMemo). A new such field must be placed here first.
 // ShellStartup is a value: the key keeps the pointer and reflect.DeepEqual
-// compares the startup it points at (GAP-1296's client header).
+// compares the startup it points at (GAP-1296's client header). So are a
+// Substrate actor's home places (homePlaceSet, substrate-1 GAP-0758).
+// guestWriteClaimOnly is an out-parameter the memo does not replay: a request
+// that asks for it is judged without the memo.
 func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 	placed := map[string]string{
 		"conflictSource": "value", "parentPatch": "value",
 		"ResolvedWriteTargets": "value", "ActiveAgentFileIdentities": "value", "ShellStartup": "value",
+		"guestClaimHomePlaces": "value", "guestHomePlaces": "value",
 		"budget": "identity", "capFloor": "identity", "generation": "identity", "targetMemo": "identity",
 		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity", "Tiers": "identity",
 		"preservedHookConfigTargets": "value",
-		"simpleMemo":                 "cache",
-		"overBudgetOmission":         "out", "unresolvedTarget": "out", "resolvedTarget": "out",
+		"simpleMemo":                 "cache", "guestMemo": "cache",
+		"overBudgetOmission": "out", "unresolvedTarget": "out", "resolvedTarget": "out",
 		"nonWriteMention": "out", "unprovenTarget": "out", "unknownMention": "out",
 		"record": "recorder", "recordTelemetry": "recorder", "recordEffectShadow": "recorder",
-		"aliasPending": "recorder",
+		"aliasPending":        "recorder",
+		"guestWriteClaimOnly": "off",
 	}
 	rt := reflect.TypeOf(trustedActionRequest{})
 	for i := range rt.NumField() {

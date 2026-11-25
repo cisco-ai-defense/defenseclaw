@@ -149,7 +149,7 @@ def test_collector_preserves_three_signal_pipeline_and_agent360_dimensions() -> 
 def test_managed_sandbox_counters_reach_prometheus_without_host_or_account_labels() -> None:
     """Remote write makes every resource attribute a label; the managed
     sandbox counters take their own branch that keeps only the service,
-    environment and OS attributes (owner rule: no host or account label)."""
+    environment, OS and Kubernetes namespace attributes (owner rule: no host or account label)."""
     collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
     pipelines = collector["service"]["pipelines"]
     processors = collector["processors"]
@@ -176,6 +176,7 @@ def test_managed_sandbox_counters_reach_prometheus_without_host_or_account_label
         "service.instance.id",
         "deployment.environment.name",
         "os.type",
+        "k8s.namespace.name",
     }
     assert not {key for key in kept if key.startswith(("host.", "tenant.", "workspace.", "defenseclaw.device"))}
     assert set(compat.MANAGED_SANDBOX_RESOURCE_ATTRIBUTES) == kept

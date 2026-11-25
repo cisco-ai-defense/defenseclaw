@@ -68,3 +68,21 @@ func (c *Client) BundleStatus(ctx context.Context) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, http.MethodGet, "bundle/status", nil, nil, &out)
 }
+
+// GatewayCheck is one row of the gateway's own doctor.
+type GatewayCheck struct {
+	ID     string `json:"id"`
+	Status string `json:"status"` // pass, warn, fail
+	Detail string `json:"detail"`
+	Fix    string `json:"fix,omitempty"`
+}
+
+// GatewayDoctor returns the checks the gateway runs from where it runs
+// (GET /api/v1/substrate/doctor, administrators).
+func (c *Client) GatewayDoctor(ctx context.Context) ([]GatewayCheck, error) {
+	var out struct {
+		Checks []GatewayCheck `json:"checks"`
+	}
+	err := c.do(ctx, http.MethodGet, "doctor", nil, nil, &out)
+	return out.Checks, err
+}

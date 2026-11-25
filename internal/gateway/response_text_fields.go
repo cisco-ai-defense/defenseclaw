@@ -20,15 +20,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 )
 
 // The model text of a response, read per provider (GAP-0370). A client
 // receives more model text than the answer: thinking or reasoning, a
 // refusal, streamed tool input, and every choice or candidate. The
 // completion checks read all of it. Each run of text (one field of one
-// choice) is its own lane, and lanes are checked side by side, one per
-// line, so the text of two choices or two fields never runs together into
-// one match. A response with one lane is checked byte for byte as before.
+// choice) is its own lane. The canonical text keeps the lanes on separate
+// lines. CheckText adds only a same-choice reasoning-to-answer boundary
+// line, so unrelated choices and tool input remain separate.
 
 type responseField uint8
 
@@ -52,8 +53,9 @@ type responseLane struct {
 }
 
 type responsePiece struct {
-	lane responseLane
-	text string
+	lane    responseLane
+	text    string
+	summary bool // Responses summary is not a reasoning-to-answer boundary
 	// end: the provider ended lanes of lane.choice here
 	// (rel-1-0-10:GAP-2154, GAP-2162). It carries no text.
 	end laneEnd
@@ -93,6 +95,10 @@ func reasoningPiece(choice int, text string) responsePiece {
 	return responsePiece{lane: responseLane{choice: choice, field: responseFieldReasoning}, text: text}
 }
 
+func summaryPiece(choice, part int, text string) responsePiece {
+	return responsePiece{lane: responseLane{choice: choice, field: responseFieldReasoning, part: part}, text: text, summary: true}
+}
+
 func refusalPiece(choice int, text string) responsePiece {
 	return responsePiece{lane: responseLane{choice: choice, field: responseFieldRefusal}, text: text}
 }
@@ -103,15 +109,27 @@ func toolInputPiece(choice, call int, text string) responsePiece {
 
 // responseText accumulates the model text of a response by lane, in the
 // order the lanes first appear.
+type responseBoundary struct {
+	reasoning, answer         int
+	reasoningEnd, answerStart int
+	secret                    secretLane
+	line                      string // cached once the first answer line is final
+	final                     bool
+}
+
 type responseText struct {
-	lanes  []*strings.Builder
-	secret []secretLane // the open-secret state of each lane (stream_secret_hold.go)
-	index  map[responseLane]int
-	last   int // the lane of the last text added
-	parked int // lanes with a parked run (GAP-2162)
-	n      int
-	joined string
-	fresh  bool
+	boundaries   []responseBoundary
+	lastChoice   map[int]responseLane
+	lastSummary  map[int]bool
+	hasReasoning map[responseLane]bool
+	lanes        []*strings.Builder
+	secret       []secretLane // the open-secret state of each lane (stream_secret_hold.go)
+	index        map[responseLane]int
+	last         int // the lane of the last text added
+	parked       int // lanes with a parked run (GAP-2162)
+	n            int
+	joined       string
+	fresh        bool
 }
 
 func (r *responseText) Add(p responsePiece) {
@@ -122,6 +140,9 @@ func (r *responseText) Add(p responsePiece) {
 	if p.text == "" {
 		return
 	}
+	previous, hadPrevious := r.lastChoice[p.lane.choice]
+	previousSummary := r.lastSummary[p.lane.choice]
+	previousIndex := r.index[previous]
 	i, ok := r.index[p.lane]
 	if ok && i != r.last {
 		r.laneMoved(p.lane)
@@ -139,6 +160,30 @@ func (r *responseText) Add(p responsePiece) {
 		r.secret = append(r.secret, secretLane{})
 	}
 	r.secret[i].mark(r.lanes[i].Len(), r.n)
+	if p.lane.field == responseFieldAnswer && hadPrevious && previous.field == responseFieldReasoning && !previousSummary {
+		r.boundaries = append(r.boundaries, responseBoundary{
+			reasoning: previousIndex, answer: i,
+			reasoningEnd: r.lanes[previousIndex].Len(), answerStart: r.lanes[i].Len(),
+		})
+	}
+	if !hadPrevious || previous != p.lane {
+		if r.lastChoice == nil {
+			r.lastChoice = make(map[int]responseLane)
+		}
+		r.lastChoice[p.lane.choice] = p.lane
+	}
+	if p.summary != previousSummary {
+		if r.lastSummary == nil {
+			r.lastSummary = make(map[int]bool)
+		}
+		r.lastSummary[p.lane.choice] = p.summary
+	}
+	if p.lane.field == responseFieldReasoning && !p.summary && !r.hasReasoning[p.lane] {
+		if r.hasReasoning == nil {
+			r.hasReasoning = make(map[responseLane]bool)
+		}
+		r.hasReasoning[p.lane] = true
+	}
 	if r.secret[i].parked {
 		// The lane resumed: its run goes on and is held as before (GAP-2162).
 		r.secret[i].parked = false
@@ -153,37 +198,13 @@ func (r *responseText) Add(p responsePiece) {
 	}
 }
 
-// The end of a lane (rel-1-0-10:GAP-2154). A token or digit run open at the
-// end of a lane is held until more of that lane decides it (GAP-0429,
-// GAP-1265). When the lane has ended, nothing more of it comes: the run is
-// as long as it will be, so it is ended as the end of the stream ends it
-// (the check reads it whole before what holds it goes out; a card or a
-// token there gets its verdict then). Before, nothing ended it, so the rest
-// of the reply (the other lanes) was held behind it until
-// streamSecretMaxHeld bytes or the end of the stream, where rel/1.0.10
-// streamed it live, and past that bound a strict pack cut the reply
-// (GAP-1767). A lane ends at the provider's own signal (laneEndPiece: an
-// Anthropic or Converse content block stop, an OpenAI Responses .done
-// event, a chat or Gemini finish reason), or, in the order every provider
-// streams a choice in, when a later lane of the same choice starts: the
-// reasoning once the answer, a refusal, a tool call or code starts, and a
-// tool call once a later one starts (laneMoved). An open private-key block
-// is not ended here: it keeps its own bounds.
-//
-// Only the end of the choice or the message (laneEndMessage: a chat or
-// Gemini finish reason, Anthropic message_delta or message_stop, Responses
-// completed, incomplete or failed, Converse messageStop) and the answer, a
-// refusal or code after the reasoning (laneMoved) end a run at once
-// (rel-1-0-10:GAP-2162). The end of a block and a switch to a tool call
-// (laneEndBlock, laneMoved) park it: the same lane can resume in a later block (text on
-// both sides of a tool call, interleaved thinking blocks, Responses summary
-// parts), and a run ended there let the first part of a token or a card
-// cut by the block go out, while the rest, resumed past the end, was not
-// held either; the check matched only the whole secret, after its first
-// part had reached the client. A parked run stays held until its lane
-// resumes (the run goes on and is held as before), the message ends, or
-// streamRunParkMax bytes of other reply text arrive (then it ends: the
-// rest of the reply is not held behind it, GAP-2154).
+// A lane end holds an open token or digit run until the last possible
+// piece has been checked. Message ends close the run. Block ends park it
+// because the same lane can resume after an interleaved block (GAP-2162).
+// A switch to a tool call also parks it. A switch from reasoning to answer
+// parks its open run until reasoning resumes or the message ends, while
+// the answer can stream with that run masked (GAP-2170). A refusal or code ends
+// reasoning at once. Private-key blocks keep their own bounds.
 
 // streamRunParkMax is how much reply text may follow the end of a block
 // while its open run stays parked (GAP-2162): about 64 KiB of stream bytes
@@ -201,42 +222,63 @@ func (r *responseText) endChoice(choice int, message bool) {
 		if message {
 			r.endLane(i)
 		} else {
-			r.parkLane(i)
+			r.parkLane(i, streamRunParkMax)
+		}
+	}
+	if message {
+		delete(r.lastChoice, choice)
+		delete(r.lastSummary, choice)
+		for i := range r.boundaries {
+			b := &r.boundaries[i]
+			if lane, ok := r.laneForIndex(b.reasoning); ok && lane.choice == choice {
+				b.secret.endRun(r.boundaryLine(b))
+			}
 		}
 	}
 }
 
-// laneMoved ends or parks the lanes of l's choice that l follows in stream
-// order. The answer, a refusal or code after the reasoning ends the
-// reasoning's run (GAP-2154): parking it held the start of the answer, up
-// to streamRunParkMax, whenever the thinking ended in a number (GAP-2162
-// round 3), where the parent and rel/1.0.10 streamed it live. A secret cut
-// there is still held whole: the lanes are read joined by a line feed, so
-// a card's later digits open a run in the answer and hold the reply, and a
-// token never spans the line feed. A tool call after the reasoning or after
-// another tool call parks the run.
+// laneMoved ends or parks open runs of the new lane's choice. A short
+// answer may precede more reasoning, while a tool call may be followed by
+// more of the same lane. Summary parts are marked separately so they do not
+// create a reasoning-to-answer check boundary.
 func (r *responseText) laneMoved(l responseLane) {
 	for k, i := range r.index {
 		if k.choice != l.choice || k == l {
 			continue
 		}
 		switch {
-		case k.field == responseFieldReasoning && (l.field == responseFieldAnswer || l.field == responseFieldRefusal || l.field == responseFieldCode):
+		case k.field == responseFieldReasoning && l.field == responseFieldAnswer:
+			if r.lastSummary[l.choice] {
+				r.endLane(i)
+			} else {
+				r.parkLane(i, streamReasoningAnswerParkMax)
+			}
+		case k.field == responseFieldReasoning && (l.field == responseFieldRefusal || l.field == responseFieldCode):
 			r.endLane(i)
 		case k.field == responseFieldReasoning && l.field == responseFieldToolInput,
 			k.field == responseFieldToolInput && l.field == responseFieldToolInput && k.part < l.part:
-			r.parkLane(i)
+			r.parkLane(i, streamRunParkMax)
 		}
 	}
 }
 
 // parkLane parks the open token or digit run of lane i (GAP-2162).
-func (r *responseText) parkLane(i int) {
+// A zero limit keeps a reasoning run parked until it resumes or the message
+// ends. The wire release masks only that unresolved run (GAP-2170).
+const streamReasoningAnswerParkMax = 0
+
+func (r *responseText) parkLane(i, limit int) {
 	s := &r.secret[i]
-	if s.parked || !s.token(r.lanes[i].String()) {
+	if s.parked {
+		if limit < s.parkLimit {
+			s.parkLimit, s.parkedAt = limit, r.n
+		}
 		return
 	}
-	s.parked, s.parkedAt = true, r.n
+	if !s.token(r.lanes[i].String()) {
+		return
+	}
+	s.parked, s.parkedAt, s.parkLimit = true, r.n, limit
 	r.parked++
 }
 
@@ -249,11 +291,10 @@ func (r *responseText) endLane(i int) {
 	r.secret[i].endRun(r.lanes[i].String())
 }
 
-// expireParked ends the parked runs that more than streamRunParkMax bytes of
-// reply text have followed.
+// expireParked ends parked runs after their own bounded byte budget.
 func (r *responseText) expireParked() {
 	for i := range r.secret {
-		if r.secret[i].parked && r.n-r.secret[i].parkedAt > streamRunParkMax {
+		if r.secret[i].parked && r.secret[i].parkLimit > 0 && r.n-r.secret[i].parkedAt > r.secret[i].parkLimit {
 			r.endLane(i)
 		}
 	}
@@ -268,7 +309,7 @@ func (r *responseText) AddAll(ps []responsePiece) {
 // Len is the number of model text bytes, separators not counted.
 func (r *responseText) Len() int { return r.n }
 
-// String is the text the checks read: the lanes one per line.
+// String is the canonical telemetry and audit text: lanes one per line.
 func (r *responseText) String() string {
 	switch len(r.lanes) {
 	case 0:
@@ -288,6 +329,119 @@ func (r *responseText) String() string {
 		r.joined, r.fresh = sb.String(), true
 	}
 	return r.joined
+}
+
+func (r *responseText) laneForIndex(i int) (responseLane, bool) {
+	for lane, n := range r.index {
+		if n == i {
+			return lane, true
+		}
+	}
+	return responseLane{}, false
+}
+
+// boundaryLine copies the last reasoning line and the first answer line at
+// this switch. Both searches see at most 513 bytes. A completed line is
+// cached; a newline at the boundary becomes one space (GAP-2166, GAP-2177).
+func (r *responseText) boundaryLine(b *responseBoundary) string {
+	if b.final {
+		return b.line
+	}
+	const maxSide = 512
+	left := r.lanes[b.reasoning].String()[:b.reasoningEnd]
+	right := r.lanes[b.answer].String()[b.answerStart:]
+	hadBreak := strings.HasSuffix(left, "\n") || strings.HasPrefix(right, "\n")
+	final := len(right) > maxSide
+	if len(left) > maxSide+1 {
+		left = left[len(left)-maxSide-1:]
+		for len(left) > 0 && !utf8.RuneStart(left[0]) {
+			left = left[1:]
+		}
+	}
+	if len(right) > maxSide+1 {
+		right = right[:maxSide+1]
+	}
+	left = strings.TrimRight(left, "\r\n")
+	right = strings.TrimLeft(right, "\r\n")
+	if n := strings.LastIndexByte(left, '\n'); n >= 0 {
+		left = left[n+1:]
+	}
+	if n := strings.IndexByte(right, '\n'); n >= 0 {
+		right, final = right[:n], true
+	}
+	if len(left) > maxSide {
+		left = left[len(left)-maxSide:]
+		for len(left) > 0 && !utf8.RuneStart(left[0]) {
+			left = left[1:]
+		}
+	}
+	if len(right) > maxSide {
+		right, final = right[:maxSide], true
+		for len(right) > 0 {
+			ch, size := utf8.DecodeLastRuneInString(right)
+			if ch != utf8.RuneError || size > 1 {
+				break
+			}
+			right = right[:len(right)-1]
+		}
+	}
+	if hadBreak {
+		b.line = strings.TrimRight(left, " \t") + " " + strings.TrimLeft(right, " \t")
+	} else {
+		b.line = left + right
+	}
+	b.final = final
+	return b.line
+}
+
+// CheckText adds only same-choice reasoning-to-answer boundaries. String
+// remains byte-for-byte the telemetry and audit view (GAP-2166).
+func (r *responseText) CheckText() string {
+	base := r.String()
+	if len(r.boundaries) == 0 {
+		return base
+	}
+	var sb strings.Builder
+	sb.Grow(len(base) + len(r.boundaries)*64)
+	sb.WriteString(base)
+	for i := range r.boundaries {
+		if line := r.boundaryLine(&r.boundaries[i]); line != "" {
+			sb.WriteString("\n\x00\n")
+			sb.WriteString(line)
+		}
+	}
+	return sb.String()
+}
+
+// Buffered chat JSON gives the answer before reasoning. Pair them for
+// checks in reasoning-then-answer order without changing String.
+func (r *responseText) CheckTextNonStream() string {
+	base := r.CheckText()
+	joined := make(map[int]bool)
+	for _, boundary := range r.boundaries {
+		joined[boundary.reasoning] = true
+	}
+	for i := range r.lanes {
+		lane, ok := r.laneForIndex(i)
+		if !ok || lane.field != responseFieldReasoning || !r.hasReasoning[lane] || joined[i] {
+			continue
+		}
+		answer, ok := r.index[responseLane{choice: lane.choice, field: responseFieldAnswer}]
+		if !ok {
+			continue
+		}
+		boundary := responseBoundary{reasoning: i, answer: answer, reasoningEnd: r.lanes[i].Len()}
+		if line := r.boundaryLine(&boundary); line != "" {
+			base += "\n\x00\n" + line
+		}
+	}
+	return base
+}
+
+func responsePiecesCheckText(ps []responsePiece) string {
+	var r responseText
+	r.AddAll(ps)
+	return r.CheckTextNonStream()
 }
 
 func responsePiecesText(ps []responsePiece) string {
@@ -588,6 +742,8 @@ func streamEventPieces(data, provider string) []responsePiece {
 				return []responsePiece{answerPiece(0, text)}
 			case strings.HasPrefix(ev.Type, "response.refusal."):
 				return []responsePiece{refusalPiece(0, text)}
+			case strings.HasPrefix(ev.Type, "response.reasoning_summary"):
+				return []responsePiece{summaryPiece(0, ev.OutputIndex, text)}
 			case strings.HasPrefix(ev.Type, "response.reasoning"):
 				return []responsePiece{{lane: responseLane{field: responseFieldReasoning, part: ev.OutputIndex}, text: text}}
 			default:

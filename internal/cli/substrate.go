@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/reasons"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
@@ -246,6 +247,10 @@ func substrateAPIMessage(e *api.Error) string {
 		// allows: signing in again with it changes nothing (GAP-0543).
 		return "the cluster does not allow this identity (" + e.Reason + "): the token is valid, but its subject or claims are not ones the cluster accepts " +
 			"(for a workload, substrate.identity.workload_oidc). Signing in again with the same identity will not help; ask your administrator"
+	case e.Unauthorized() && substrateSecretReason(e.Reason) != "":
+		// signin_ended (B5.1) and any other table reason answered with 401:
+		// the words and the fix come from the one reason table (GAP-0748).
+		return substrateSecretReason(e.Reason)
 	case e.Unauthorized():
 		return "the cluster did not accept your sign-in (" + orWord(e.Reason, "token refused") + "). Sign in again with: defenseclaw substrate login"
 	case e.NotImplemented():
@@ -278,6 +283,10 @@ func substrateAPIMessage(e *api.Error) string {
 			"); nothing was started. Run a template published for that class (template publish --class, or --worker-label of a pool of that class), or ask your administrator"
 	case e.Status == 403 && e.Reason == "template_connector_unlabeled":
 		return "the template's attestation names no agent connector, so a managed cluster starts nothing from it; ask your administrator to rebuild it with defenseclaw substrate template build"
+	case substrateSecretReason(e.Reason) != "":
+		// One reason table (internal/substrate/reasons): the gateway sends
+		// the code, the words and the fix come from the table.
+		return substrateSecretReason(e.Reason)
 	case e.Status == 403:
 		return "the cluster refused this (" + orWord(e.Reason, "not allowed") + ")"
 	case e.Status == 404:
@@ -286,12 +295,23 @@ func substrateAPIMessage(e *api.Error) string {
 		return "that was too large for the cluster (" + orWord(e.Reason, "too large") + ")"
 	case e.Status == 503 && e.Reason == "no_free_worker":
 		return "the cluster has no free worker for a new agent right now; nothing was started. Your running agents hold workers: see them with defenseclaw substrate list, and free one with defenseclaw substrate delete NAME, or ask your administrator for more workers"
+	case e.Status == 503 && e.Reason == "resume_busy":
+		return "the cluster is busy starting other agents and could not start this one in time; nothing was left behind. Try again, or start fewer agents at once (for a batch, a lower --parallel)"
 	case e.Status == 429:
 		return "the cluster is rate limiting you; wait a moment and try again"
 	case e.Status == 502 || e.Status == 503:
 		return "the cluster could not do that right now (" + orWord(e.Reason, "unavailable") + "); try again in a minute"
 	}
 	return e.Error()
+}
+
+// substrateSecretReason is the table message of a gateway secret reason,
+// or "" when the code is not a gateway answer in the table.
+func substrateSecretReason(code string) string {
+	if r, ok := reasons.Lookup(code); ok && r.Where == reasons.API {
+		return reasons.Message(code)
+	}
+	return ""
 }
 
 // substrateUsageMessage says a usage refusal in plain words ("" for a reason
@@ -348,12 +368,13 @@ func substrateTable(w io.Writer, header []string, rows [][]string) {
 func init() {
 	substrateCmd.AddCommand(
 		newSubstrateLoginCmd(), newSubstrateLogoutCmd(), newSubstrateWhoamiCmd(),
-		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(),
-		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(),
-		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(),
-		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateUsageCmd(),
+		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(), newSubstrateWatchCmd(),
+		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(), newSubstrateRecoverCmd(),
+		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(), newSubstratePortCmd(),
+		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateRevokeCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),
 		newSubstrateDoctorCmd(), newSubstrateVerifyCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),
+		newSubstrateAdminCmd(),
 		newSubstrateScanWorkerCmd(),
 	)
 	rootCmd.AddCommand(substrateCmd)

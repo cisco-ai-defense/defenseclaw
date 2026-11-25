@@ -393,7 +393,12 @@ def test_a_recovery_republishes_a_hand_edited_requirements_file_instead_of_stopp
     assert gate < deployment.index("-Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))")
     assert "(Test-DefenseClawStandaloneProfile)" in deployment[gate : gate + 200]
     body = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
-    assert body.index("-Action verify)") < body.index("[IO.FileMode]::CreateNew") < body.index("-Action reconcile)")
+    backup = body.index("[IO.FileMode]::CreateNew")
+    # A hand edit is saved before the merge (GAP-2056: DefenseClaw's own
+    # publication is published again without a backup, after the held checks).
+    assert body.index("-Action verify)") < backup < body.index("-Action reconcile)", backup)
+    own = body.index("Test-DefenseClawCodexRequirementsOwnPublication")
+    assert body.index("New-DefenseClawCodexFileHeldMessage") < own < body.index("-Action reconcile)") < backup
     # Held: the retryable code, before anything is saved or written.
     assert body.index("New-DefenseClawCodexFileHeldMessage") < body.index("[IO.FileMode]::CreateNew")
     # The content comes from DefenseClaw's record, verified by its hash.

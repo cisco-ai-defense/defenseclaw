@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -118,11 +119,13 @@ func TestSubstrateAttachThroughTheAdminListener(t *testing.T) {
 // cap, with the client tag and the person check unchanged; every other
 // admin route keeps the JSON gate.
 func TestSubstrateAttachRoutesHaveTheirOwnLimits(t *testing.T) {
-	var got int64
+	var got atomic.Int64
+	var forwardedCap atomic.Value
 	f := newSubstrateFixture(t, func(c *SubstrateConfig) { c.WorkspaceMaxBytes = 3 << 20 })
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n, _ := io.Copy(io.Discard, r.Body)
-		got = n
+		got.Store(n)
+		forwardedCap.Store(r.Header.Get("X-DefenseClaw-Upload-Max"))
 		w.WriteHeader(200)
 	}))
 	defer relay.Close()
@@ -130,6 +133,7 @@ func TestSubstrateAttachRoutesHaveTheirOwnLimits(t *testing.T) {
 	put := func(size int, ctype, client string) int {
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/substrate/actors/eng-web/alice-1/attach/files", bytes.NewReader(make([]byte, size)))
 		req.Header.Set("Authorization", "Bearer p-alice")
+		req.Header.Set("X-DefenseClaw-Upload-Max", "68719476736")
 		if ctype != "" {
 			req.Header.Set("Content-Type", ctype)
 		}
@@ -140,10 +144,22 @@ func TestSubstrateAttachRoutesHaveTheirOwnLimits(t *testing.T) {
 		f.admin.ServeHTTP(rec, req)
 		return rec.Code
 	}
-	if c := put(2<<20, "application/x-tar", "dc-launcher/1"); c != 200 || got != 2<<20 {
-		t.Fatalf("2 MiB tar upload: %d, relay read %d", c, got)
+	if c := put(2<<20, "application/x-tar", "dc-launcher/1"); c != 200 || got.Load() != 2<<20 {
+		t.Fatalf("2 MiB tar upload: %d, relay read %d", c, got.Load())
 	}
-	if c := put(5<<20, "application/x-tar", "dc-launcher/1"); c == 200 && got == 5<<20 {
+	if cap := forwardedCap.Load(); cap != "3145728" {
+		t.Errorf("relay received client cap %q; want configured cap 3145728", cap)
+	}
+	unauthenticated := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/launcher", "", "")
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Errorf("launcher settings without sign-in: %d", unauthenticated.Code)
+	}
+	settings := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/launcher", "p-alice", "")
+	if settings.Code != http.StatusOK || !strings.Contains(settings.Body.String(), `"workspace_max_bytes":3145728`) {
+		t.Errorf("launcher settings: %d %s", settings.Code, settings.Body)
+	}
+
+	if c := put(5<<20, "application/x-tar", "dc-launcher/1"); c == 200 && got.Load() == 5<<20 {
 		t.Fatalf("an upload over the workspace cap reached the relay whole")
 	}
 	if c := put(1024, "application/x-tar", ""); c != http.StatusForbidden {

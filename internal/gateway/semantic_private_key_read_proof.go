@@ -20,6 +20,26 @@ func appendTrustedPrivateKeyReaderFinding(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	out := appendTrustedPrivateKeyReaderFindingOf(findings, generation, request, facts)
+	if request.guestClaimHomePlaces != nil && request.guestHomePlaces == nil {
+		// A Substrate actor's own SSH folder copy whose private destination
+		// only the kit can see (cp -r ~/.ssh ~/sshbak): the laptop's alert,
+		// added only to a call that names no key rule (substrate-1 GAP-0549).
+		judged := request
+		judged.guestHomePlaces = request.guestClaimHomePlaces
+		if trustedActionOwnSSHFolderCopy(judged, judged.Input) {
+			return appendTrustedPrivateKeyHomeCopyAlert(out, generation, request)
+		}
+	}
+	return out
+}
+
+func appendTrustedPrivateKeyReaderFindingOf(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+) []RuleFinding {
 	if trustedActionOwnSSHFolderCopy(request, request.Input) {
 		// A copy of the user's own SSH folder content to a private place of the
 		// same home: the key is read only to be copied there, which alerts and does
@@ -63,8 +83,20 @@ func appendTrustedPrivateKeyReaderFinding(
 		}
 		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBoundedIn(request.hookCall, command, request.Input.CWD, request.Input.ActiveHome, dialect)
 		proved = proved || hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
-		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) && !trustedActionCallOpensAccess(request) ||
-			trustedActionOwnSSHFolderCopy(request, request.Input)) {
+		judged := request
+		if !proved && request.substrateGuestClaimsProveKeyRead(command) {
+			// A Substrate actor's kit makes the same proof in the actor's file
+			// system, which this gateway cannot open (substrate-1 GAP-0471).
+			// Only the kit sees whether the copy's destination is private, and
+			// without the kit the call has no key finding, so its places
+			// decide the home copy alert (substrate-1 GAP-0549).
+			proved = true
+			if request.guestHomePlaces == nil {
+				judged.guestHomePlaces = request.guestClaimHomePlaces
+			}
+		}
+		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(judged.Input, facts, judged.guestHomePlaces) && !trustedActionCallOpensAccess(judged) ||
+			trustedActionOwnSSHFolderCopy(judged, judged.Input)) {
 			// Every command copies inside the home and nothing in the call
 			// opens access (rel-1-0-10:GAP-0854): the key is read only to be
 			// copied there, which alerts and does not block.

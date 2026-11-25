@@ -91,6 +91,15 @@ type SimpleCommand struct {
 	// (rel-1-0-10:GAP-0996). A write there is judged against the previous
 	// home only (GAP-2476): a scratch HOME=$(mktemp -d) keeps its writes.
 	UnprovenHome bool
+	// LastStageOrBackground marks a command in the last stage of a pipeline
+	// or in a statement run in the background (&), or in a body such a
+	// command runs. Bash runs it in a subshell, so the walk drops a folder
+	// it moves to there, but zsh and Bash with lastpipe run the last stage
+	// in the shell itself, and the laptop's readers keep that folder for the
+	// later commands; the copy-mode guest placement keeps it as a folder the
+	// call runs in (substrate-1 GAP-0648 review P2-1). It is no other
+	// reading: a piece of the call is the same piece without it.
+	LastStageOrBackground bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced, EvaluationFailureInternal when the reader
 	// itself failed, and EvaluationFailureSyntax when a text with a syntax
@@ -145,7 +154,7 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). The consumer
 // reading takes the readable statements for the bindings that may rename a
 // data program (hereDocCallBindings, GAP-0902, GAP-0913).
-func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool, operands *RelativeOperandMemo) []SimpleCommand {
 	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
 	capped := tail.Truncated.Any()
@@ -168,7 +177,7 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 		if !add(SimpleCommand{Text: statement, CWD: input.CWD}) {
 			return false
 		}
-		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil) {
+		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil, operands) {
 			if command.EvaluationFailure == "limit" {
 				// A statement whose own reading is past the statement
 				// budget is a capped reading of the text, not a refusal of
@@ -538,11 +547,11 @@ func (pieces *simplePieces) add(command SimpleCommand) {
 }
 
 // has reports a command that is one of the pieces. A reading marked
-// LoginGuess is judged as the piece it repeats.
+// LoginGuess or LastStageOrBackground is judged as the piece it repeats.
 func (pieces *simplePieces) has(command SimpleCommand) bool {
-	command.LoginGuess = false
+	command.LoginGuess, command.LastStageOrBackground = false, false
 	return slices.ContainsFunc(*pieces, func(piece SimpleCommand) bool {
-		piece.LoginGuess = false
+		piece.LoginGuess, piece.LastStageOrBackground = false, false
 		return piece == command
 	})
 }
@@ -552,7 +561,14 @@ func (pieces *simplePieces) has(command SimpleCommand) bool {
 // addition to the original action. A plain single command needs no second
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
-func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
+func SimpleCommands(input Input, facts Facts) []SimpleCommand {
+	return SimpleCommandsWith(input, facts, nil)
+}
+
+// SimpleCommandsWith is SimpleCommands with the relative-operand answers of
+// relative (nil: none kept), for callers that split several readings of one
+// call (GAP-0923).
+func SimpleCommandsWith(input Input, facts Facts, operands *RelativeOperandMemo) (commands []SimpleCommand) {
 	defer func() {
 		if recover() != nil {
 			commands = []SimpleCommand{{EvaluationFailure: EvaluationFailureInternal}}
@@ -566,7 +582,7 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 	if argsOnly && argsExecutionTool(input.Tool) {
 		pieces = new(simplePieces)
 	}
-	result := simpleCommandsOfCall(input, facts, pieces)
+	result := simpleCommandsOfCall(input, facts, pieces, operands)
 	if facts.Parse.Dialect == DialectPOSIX && facts.Parse.Status != StatusInvalid {
 		source := input.Command
 		if source == "" && (bytes.Contains(input.Args, []byte("<<")) || facts.Parse.Status == StatusPartial) {
@@ -925,8 +941,8 @@ func hereDocBodyMayWriteState(body string, input Input) bool {
 	return false
 }
 
-func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []SimpleCommand {
-	result := simpleCommands(input, facts, 0, "", nil, false, pieces)
+func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces, operands *RelativeOperandMemo) []SimpleCommand {
+	result := simpleCommands(input, facts, 0, "", nil, false, pieces, operands)
 	// USER and LOGNAME carry a value from the home only as the guess that the
 	// login is the home's last element, and the shell may hold another. A
 	// second walk reads the action with that guess, to prove a write to state
@@ -939,7 +955,7 @@ func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []Simp
 	if input.Command != "" && !strings.Contains(input.Command, "USER") && !strings.Contains(input.Command, "LOGNAME") {
 		return result
 	}
-	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true, pieces) {
+	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true, pieces, operands) {
 		if !slices.Contains(result, guessed) {
 			guessed.LoginGuess = true
 			result = append(result, guessed)
@@ -954,7 +970,7 @@ func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []Simp
 // hands one to a shell body. inherited holds the values USER and LOGNAME
 // have where a shell body starts (simpleChildUserVars); nil is the start of
 // the action, where guess gives both the home base name.
-func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool, pieces *simplePieces) []SimpleCommand {
+func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool, pieces *simplePieces, operands *RelativeOperandMemo) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -988,7 +1004,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// for its tail, so a call that parses pays no second parse.
 	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
 		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
-			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
+			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess, operands)
 		}
 	}
 	// A ~+ head is the working folder, which only the walk writes
@@ -1299,7 +1315,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if strings.TrimSpace(text) == "" {
 				return parseGap()
 			}
-			relative := state.cwdUnknown && simpleRelativePathOperand(text)
+			relative := state.cwdUnknown && operands.of(text)
 			if relative {
 				unproven = true
 			}
@@ -1313,6 +1329,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative,
 				UnresolvedFolder:        relative,
+				LastStageOrBackground:   lastStageOrBackgroundScope(part.scope),
 				UnprovenHome:            simpleReadsThroughUnprovenHome(input, state, part.text, text, resolvedVariable)}
 			if text == part.text {
 				pieces.add(command)
@@ -1335,6 +1352,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
 						AbsoluteOnly:            command.AbsoluteOnly,
+						LastStageOrBackground:   command.LastStageOrBackground,
 						UnprovenHome:            command.UnprovenHome}
 					if reading == unprefixed {
 						pieces.add(alone)
@@ -1433,7 +1451,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						innerPieces = nil
 					}
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
-						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
+						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces, operands)
 					if !bodyParsed && !slices.ContainsFunc(inner, isSyntaxTailUnread) {
 						return parseGap()
 					}
@@ -1459,6 +1477,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
 						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+						child.LastStageOrBackground = child.LastStageOrBackground || command.LastStageOrBackground
 						result = append(result, child)
 						if child.bodyReading {
 							extra++
@@ -1497,7 +1516,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							otherInput := innerInput
 							otherInput.CWD, otherInput.folderUnknown = dir, false
 							others := simpleCommands(otherInput, Analyze(otherInput), depth+1, innerInterpreter,
-								simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, nil)
+								simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, nil, operands)
 							if len(others) == 0 && strings.TrimSpace(otherInput.Command) != "" {
 								others = []SimpleCommand{{Text: otherInput.Command, CWD: dir}}
 							}
@@ -1510,7 +1529,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 									unproven = true
 									continue
 								}
-								if !simpleRelativePathOperand(child.Text) {
+								if !operands.of(child.Text) {
 									continue // read in its own folder above
 								}
 								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
@@ -1531,7 +1550,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						}
 						if capped {
 							for _, child := range inner {
-								if child.EvaluationFailure != "" || child.OtherFolder || !simpleRelativePathOperand(child.Text) {
+								if child.EvaluationFailure != "" || child.OtherFolder || !operands.of(child.Text) {
 									continue
 								}
 								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
@@ -1644,7 +1663,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			// IFS=x; read u <<< w), and placed in a folder it proved one the
 			// shell never makes.
 			dirs := mayRunIn[partIndex]
-			if len(dirs) == 0 || guess || command.LoginGuess || !simpleRelativePathOperand(command.Text) {
+			if len(dirs) == 0 || guess || command.LoginGuess || !operands.of(command.Text) {
 				continue
 			}
 			for _, dir := range mayRunIn[partIndex] {

@@ -93,6 +93,7 @@ classes:
       ActionSandboxFinding: "sandbox-finding"
       ActionSandboxActivity: "sandbox-activity"
       ActionSandboxProcess: "sandbox-process"
+      ActionSubstrateSecretChanged: "substrate.secret.changed"
       ActionSandboxManaged: "sandbox.managed"
       ActionSandboxPolicyRematched: "sandbox.policy.rematched"
       ActionSandboxPolicyForeignRule: "sandbox.policy.foreign_rule"

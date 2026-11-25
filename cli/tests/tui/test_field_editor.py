@@ -125,3 +125,37 @@ async def test_paste_on_a_text_row_opens_the_text_box_with_the_pasted_text(tmp_p
         await pilot.pause()
         assert isinstance(app.screen, FieldEditorScreen)
         assert app.screen.query_one("#field-editor-input", Input).value == "DEFENSECLAW_LLM_KEY"
+
+
+class _EditorWithoutItsInput(FieldEditorScreen):
+    """An editor whose text box is already gone when the screen mounts.
+
+    That is the state a queued key leaves behind when the app is being torn
+    down (Esc then Ctrl+C right after keys were typed): the screen is mounted
+    but its Input never made it (or no longer is) in the DOM.
+    """
+
+    def compose(self):  # type: ignore[no-untyped-def]
+        from textual.widgets import Static
+
+        yield Static("closing")
+
+
+async def test_editor_mounted_without_its_text_box_closes_without_a_traceback() -> None:
+    # GAP-1995: on_mount raised NoMatches (#field-editor-input) when the app was
+    # torn down mid-edit, and the traceback reached the terminal.
+    app = _Harness(_EditorWithoutItsInput("Name", value="keep"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+    assert app.results == [None]
+
+
+async def test_editor_without_its_text_box_commits_nothing() -> None:
+    app = _Harness(_EditorWithoutItsInput("Name", value="keep"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._editor.action_commit()
+        await pilot.pause()
+    assert app.results == [None]

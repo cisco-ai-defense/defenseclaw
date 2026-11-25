@@ -218,6 +218,7 @@
             "sandbox-lifecycle",
             "sandbox-policy",
             "sandbox-process",
+            "substrate.secret.changed",
             "sandbox-workspace",
             "sandbox.managed",
             "sandbox.policy.foreign_rule",

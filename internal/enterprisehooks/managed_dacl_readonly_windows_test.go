@@ -325,7 +325,7 @@ func TestWindowsManagedRuntimeRepairPlanRecoversAStaleGuardianSetupRelax(t *test
 		return err
 	}
 
-	setDACL(windowsSetupRelaxedDirectorySDDL)
+	setDACL(managed.WindowsSetupRelaxedDirectorySDDL)
 	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return false }
 	if err := plan(); err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
 		t.Fatalf("plan over a running setup's relax = %v, want the refusal", err)

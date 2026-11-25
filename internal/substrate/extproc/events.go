@@ -38,24 +38,28 @@ const (
 // query string, a credential, a placeholder or a body; Headers, when
 // LogHeaders is on, are redacted.
 type Event struct {
-	Time          time.Time         `json:"time"`
-	Event         string            `json:"event"`
-	RequestID     string            `json:"request_id,omitempty"`
-	Atespace      string            `json:"atespace,omitempty"`
-	Actor         string            `json:"actor,omitempty"`
-	ActorUID      string            `json:"actor_uid,omitempty"`
-	Profile       string            `json:"profile,omitempty"`
-	Host          string            `json:"host,omitempty"`
-	Method        string            `json:"method,omitempty"`
-	Path          string            `json:"path,omitempty"`
-	Decision      string            `json:"decision"`
-	Alert         bool              `json:"alert,omitempty"`
-	Category      string            `json:"category,omitempty"`
-	Source        string            `json:"source,omitempty"`
-	Rule          string            `json:"rule,omitempty"`
-	Reason        string            `json:"reason,omitempty"`
-	Feed          string            `json:"feed,omitempty"`
-	Secret        string            `json:"secret,omitempty"`
+	Time      time.Time `json:"time"`
+	Event     string    `json:"event"`
+	RequestID string    `json:"request_id,omitempty"`
+	Atespace  string    `json:"atespace,omitempty"`
+	Actor     string    `json:"actor,omitempty"`
+	ActorUID  string    `json:"actor_uid,omitempty"`
+	Profile   string    `json:"profile,omitempty"`
+	Host      string    `json:"host,omitempty"`
+	Method    string    `json:"method,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	Decision  string    `json:"decision"`
+	Alert     bool      `json:"alert,omitempty"`
+	Category  string    `json:"category,omitempty"`
+	Source    string    `json:"source,omitempty"`
+	Rule      string    `json:"rule,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	Feed      string    `json:"feed,omitempty"`
+	Secret    string    `json:"secret,omitempty"`
+	// Person and Principal name who used the actor; only on
+	// log.secret.injected (GAP-0513).
+	Person        string            `json:"person,omitempty"`
+	Principal     string            `json:"principal,omitempty"`
 	AskID         string            `json:"ask_id,omitempty"`
 	Findings      []string          `json:"findings,omitempty"`
 	BodyInspected bool              `json:"body_inspected"`
@@ -123,6 +127,7 @@ func (e *Engine) Finish(req *Request, v Verdict) {
 			Time: ev.Time, Event: EventSecretInjected, Decision: "inject", RequestID: req.ID,
 			Atespace: req.Actor.Atespace, Actor: req.Actor.Name, ActorUID: req.Actor.UID, Profile: v.Profile,
 			Host: req.Host, Method: ev.Method, Secret: b.name,
+			Person: req.Actor.Person, Principal: req.Actor.Principal,
 		})
 	}
 }

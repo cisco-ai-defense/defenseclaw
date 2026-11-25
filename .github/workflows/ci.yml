@@ -786,7 +786,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -806,6 +806,23 @@ jobs:
           trap 'rm -rf "$ramdir"' EXIT
           test "$(stat -f -c %T "$ramdir")" = tmpfs
           TMPDIR="$ramdir" go test -p 1 -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
+      - name: Run the real full-filesystem audit tests (sudo tmpfs)
+        # substrate-1:GAP-0578 (b): the only tests that fill a real volume
+        # (GAP-0554: one ALERT line, hooks fail closed with the named reason)
+        # skip unless DEFENSECLAW_REAL_FS_TESTS=1 and sudo -n mount work, as
+        # on a hosted runner. A skip fails this step: each test must run and
+        # pass (internal/testenv TestEveryRealFilesystemTestRunsInCI lists
+        # them).
+        env:
+          DEFENSECLAW_REAL_FS_TESTS: "1"
+        run: |
+          set -euo pipefail
+          sudo -n true
+          go test -count=1 -timeout 5m -v -run '^TestRealFullStoreLogsOneAlertForEveryWritePath$' ./internal/audit | tee realfs-audit.log
+          go test -count=1 -timeout 5m -v -run '^TestSandboxHookOnARealFullAuditStoreFailsClosedWithOneAlert$' ./internal/gateway | tee realfs-gateway.log
+          for name in TestRealFullStoreLogsOneAlertForEveryWritePath TestSandboxHookOnARealFullAuditStoreFailsClosedWithOneAlert; do
+            grep -q -- "--- PASS: $name " realfs-audit.log realfs-gateway.log || { echo "::error::$name did not run and pass"; exit 1; }
+          done
 
   go-test:
     # Preserve the existing required-check name while combining the complete

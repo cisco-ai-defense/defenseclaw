@@ -122,6 +122,12 @@ type WindowsCodexManagedRuntimeRegistry struct {
 	GatewayAddr        string
 	GatewayServiceName string
 	Targets            []WindowsCodexManagedRuntimeTarget
+	// HookExecutable is the hook image the protected runtime state records:
+	// the one the active requirements were verified against. It can be
+	// another image of this install's hook (GAP-0751); a writer that
+	// publishes for a different image republishes the requirements first
+	// (GAP-2056).
+	HookExecutable string
 	// AdminConflict names the administrator setting that turned DefenseClaw's
 	// managed Codex hooks off. Only a Secure Client host without the strict
 	// pin sets it; the registry is then inactive and Codex stays unhooked.

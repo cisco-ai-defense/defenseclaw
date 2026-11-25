@@ -88,7 +88,7 @@ func (d substrateActorDirectory) ResolveActor(ctx context.Context, atespace, nam
 	case !l.Found:
 		return extproc.ActorRecord{}, true, nil
 	}
-	return extproc.ActorRecord{UID: l.UID, Profile: l.Profile, Unattended: l.Unattended}, true, nil
+	return extproc.ActorRecord{UID: l.UID, Profile: l.Profile, Unattended: l.Unattended, Person: l.Person, Principal: l.Principal}, true, nil
 }
 
 // substrateExtprocLeader is the callout's leader client: the chain check
@@ -276,7 +276,11 @@ type substrateRelayEgress struct {
 
 func (s substrateRelayEgress) EgressEvent(ev extproc.Event) {
 	s.next.EgressEvent(ev)
-	if ev.Actor == "" || ev.Host == "" {
+	// A log.secret.injected line stays in the log only: the gateway exports
+	// decisions, and the leader reads a binding's last use from the allowed
+	// decision itself (telemetryrelay host uses, S6b). Relaying it took one
+	// queue record per bound secret per request.
+	if ev.Actor == "" || ev.Host == "" || ev.Event == extproc.EventSecretInjected {
 		return
 	}
 	s.relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindEgress, At: ev.Time,

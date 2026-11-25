@@ -142,6 +142,13 @@ type Options struct {
 	// detection under the alert action, is answered at once. Known limit: a
 	// gateway with a long note backlog, or a leader too busy to take a note,
 	// can deliver one after the grace.
+	//
+	// The grace never lasts past startGraceCap(StartGrace) after the leader
+	// term began (Leading; New when Leading is never called): a new leader
+	// is reachable within its readiness period, and a gateway's waiting
+	// note arrives within one retry and its timeout after that. Without the
+	// cap the first clear check after any restart was refused, however long
+	// after the restart it came (GAP-0601, IB5 TST-2593).
 	StartGrace time.Duration
 }
 
@@ -154,10 +161,15 @@ type Service struct {
 	// action is the chain egress action in force: opts.EgressAction at
 	// start, then SetEgressAction (a config.yaml change, GAP-0276).
 	action atomic.Pointer[string]
-	// servingAt is when the first clear egress check came, for
-	// opts.StartGrace (monotonic with the default clock).
-	servingOnce sync.Once
-	servingAt   time.Time
+	// servingAt is when the term's first clear egress check came (served
+	// says it did), and termAt is when the term began, for
+	// opts.StartGrace and its cap; graceMu guards them (monotonic with the
+	// default clock). Before GAP-0601 (IB5) a sync.Once kept servingAt for
+	// the process and nothing capped the grace.
+	graceMu   sync.Mutex
+	served    bool
+	servingAt time.Time
+	termAt    time.Time
 
 	mu      sync.Mutex
 	actors  map[string]*actorEntry // atespace/uid
@@ -384,6 +396,7 @@ func New(opts Options) (*Service, error) {
 	}
 	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{},
 		calls: newCallTable()}
+	s.termAt = opts.Now()
 	s.action.Store(&opts.EgressAction)
 	if err := s.load(); err != nil {
 		return nil, err
@@ -1305,7 +1318,9 @@ func toResponse(snap intentstore.Snapshot, task string) IntentResponse {
 	return out
 }
 
-// IntentGet serves IntentGet: a session's context without recording.
+// IntentGet serves IntentGet: a session's context without recording. Found
+// reports a context for the key or a task of the actor. Only the actor's
+// own store is read: the leader keys every store by the verified actor.
 func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse, error) {
 	e, release, err := s.acquire(in.Actor)
 	if err != nil {
@@ -1313,8 +1328,11 @@ func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse
 	}
 	defer release()
 	s.touch(e)
-	snap, _ := s.intents(e).Peek(in.Key)
-	return toResponse(snap, s.stateOf(e).Task), nil
+	snap, found := s.intents(e).Peek(in.Key)
+	task := s.stateOf(e).Task
+	out := toResponse(snap, task)
+	out.Found = found || task != ""
+	return out, nil
 }
 
 // IntentPut serves IntentPut.
@@ -1646,14 +1664,45 @@ var errStarting = &leader.WireError{Code: leader.CodeUnavailable,
 	Message: "the gateway leader started moments ago; tool calls a gateway could not record while no leader answered may still be arriving"}
 
 // starting reports whether a clear egress check is within opts.StartGrace
-// of the first one this leader answered.
+// of the first one this leader term answered, and within startGraceCap of
+// the term's start.
 func (s *Service) starting() bool {
 	if s.opts.StartGrace <= 0 {
 		return false
 	}
+	s.graceMu.Lock()
+	defer s.graceMu.Unlock()
 	now := s.opts.Now()
-	s.servingOnce.Do(func() { s.servingAt = now })
+	if now.Sub(s.termAt) >= startGraceCap(s.opts.StartGrace) {
+		return false
+	}
+	if !s.served {
+		s.servingAt, s.served = now, true
+	}
 	return now.Sub(s.servingAt) < s.opts.StartGrace
+}
+
+// startGraceCap is how long after the start of a leader term the start
+// grace can last at most: twice the grace (30 s on the leader). A new
+// leader is reachable within its readiness period (5 s) and the Service
+// endpoint update; a gateway's waiting note then arrives within one retry
+// (5 s) and its timeout (2 s). A clear check later than that cannot be
+// ahead of a note, so it is answered: before the cap, the first git clone
+// after any leader restart was refused (GAP-0601, IB5 TST-2593).
+func startGraceCap(grace time.Duration) time.Duration { return 2 * grace }
+
+// Leading starts the leader term (leader.Elector OnStarted, once per
+// process: the elector leads once per Run, and the leader exits when Run
+// ends): the start grace and its cap run from here, not from New, which
+// can come a lease duration earlier while the old leader's lease expires.
+func (s *Service) Leading() {
+	if s == nil {
+		return
+	}
+	s.graceMu.Lock()
+	defer s.graceMu.Unlock()
+	s.served, s.servingAt = false, time.Time{}
+	s.termAt = s.opts.Now()
 }
 
 // staleVerdict answers an egress check under a UID that is not the

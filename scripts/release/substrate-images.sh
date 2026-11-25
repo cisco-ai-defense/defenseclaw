@@ -7,15 +7,23 @@
 # by hand against a test registry):
 #   - defenseclaw-gateway, linux/amd64 + linux/arm64, with SBOM and
 #     provenance attestations (deploy/images/gateway/Dockerfile);
+#   - defenseclaw-scanner, the skill scanner sidecar the chart runs by
+#     default (gateway.skillScanner), the same way
+#     (deploy/images/scanner/Dockerfile, with the scanner runtime of the
+#     same-version defenseclaw-enterprise .deb);
 #   - one kit image per connector recipe deploy/images/actor-kit/<c>/Dockerfile,
 #     built with the build context "kitbin" holding linux-<arch>/ binaries;
-#   - the defenseclaw-substrate chart, its image pinned to the pushed
-#     gateway digest, packaged and pushed as an OCI artifact.
+#   - the defenseclaw-substrate chart, its gateway and scanner images pinned
+#     to the pushed digests, packaged and pushed as an OCI artifact.
+# Every image the chart renders by default is built here and in the kind
+# E2E (test/substrate-e2e/defenseclaw.sh); the chart test
+# TestChartDefaultImagesHaveABuildSource holds that (GAP-1071).
 # Signing is not done here: the workflow signs every digest in images.txt
 # with cosign keyless, under the identity that signs checksums.txt.
 #
 # usage: substrate-images.sh --version X.Y.Z --registry REG --dist DIR --out DIR [--push] [--plain-http]
 #   --dist  the directory with defenseclaw-X.Y.Z-linux-{amd64,arm64}.tar.gz
+#           and defenseclaw-enterprise-X.Y.Z-linux-{amd64,arm64}.deb
 #   --out   receives defenseclaw-substrate-X.Y.Z.tgz and images.txt
 #   without --push nothing leaves the machine: the images are built into the
 #   buildx cache only and images.txt lists them without digests.
@@ -110,7 +118,7 @@ for recipe in "${recipes[@]}"; do
   build "defenseclaw-kit-$connector" "$recipe" "$root/deploy/images/actor-kit" --build-context "kitbin=$work/kitbin" >/dev/null
 done
 
-# 3. The chart, pinned to the gateway image just built.
+# 3. The chart, pinned to the gateway and scanner images just built.
 chart="$work/chart/defenseclaw-substrate"
 mkdir -p "$work/chart"
 cp -R "$root/deploy/helm/defenseclaw-substrate" "$chart"

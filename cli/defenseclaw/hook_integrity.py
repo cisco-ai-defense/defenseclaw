@@ -2585,40 +2585,108 @@ def _windows_path_as_posix(name: str) -> str:
     verbatim and device forms of either give the same POSIX path. Under the
     verbatim and device prefixes a forward slash is part of a name, so such a
     path is refused, as is a drive-relative or volume-less path. The text is
-    read only; the path is never opened.
+    read only; the path is never opened. The path is not cleaned and its
+    volume is dropped: whether a path lies in a folder is decided on
+    :func:`_windows_resolved_path`.
+    """
+
+    parts = _windows_path_parts(name)
+    return parts[1] if parts else ""
+
+
+def _windows_path_parts(name: str) -> tuple[str, str, bool] | None:
+    """The lower-case volume, the POSIX form of the rest and the verbatim flag of a Windows absolute path, or None.
+
+    Mirrors ``windowsAbsolutePathParts``: the volume is ``c:`` for a drive and
+    ``//server/share`` for a UNC path, either under the verbatim or device
+    prefix too.
     """
 
     if any(char in name for char in "\x00\r\n"):
-        return ""
+        return None
     verbatim = False
     for prefix in ("\\\\?\\", "\\\\.\\"):
         if name.startswith(prefix):
             rest = name[len(prefix) :]
             if "/" in rest:
-                return ""
+                return None
             name, verbatim = rest, True
             break
     name = name.replace("\\", "/")
     if verbatim and len(name) > 4 and name[:4].upper() == "UNC/":
         name = "//" + name[4:]
     if len(name) >= 3 and name[1] == ":" and name[2] == "/" and name[0] in string.ascii_letters:
-        name = name[2:]
+        volume, name = name[:2], name[2:]
     elif name.startswith("//"):
         parts = name[2:].split("/", 2)
         if len(parts) != 3 or not parts[0] or not parts[1]:
-            return ""
-        name = "/" + parts[2]
+            return None
+        volume, name = "//" + parts[0] + "/" + parts[1], "/" + parts[2]
     else:
+        return None
+    return volume.lower(), name.lower(), verbatim
+
+
+def _windows_resolved_path(name: str) -> tuple[str, str] | None:
+    """A Windows absolute path as Windows resolves it: its volume and cleaned POSIX form, or None.
+
+    Mirrors ``windowsResolvedPath``: ``.`` and ``..`` segments are resolved,
+    except under the verbatim and device prefixes, where such a path (or one
+    with an empty segment) is refused; a segment that ends in a dot or a space
+    is refused, because Windows drops those. The path is never opened.
+    """
+
+    parts = _windows_path_parts(name)
+    if parts is None:
+        return None
+    volume, posix, verbatim = parts
+    for segment in posix.removeprefix("/").split("/"):
+        if segment in (".", ".."):
+            if verbatim:
+                return None
+        elif segment == "":
+            if verbatim and posix != "/":
+                return None
+        elif segment.endswith((".", " ")):
+            return None
+    clean = posixpath.normpath(posix)
+    # normpath keeps two leading slashes (POSIX leaves their meaning open);
+    # Go's path.Clean, which windowsResolvedPath uses, keeps one.
+    return volume, "/" + clean.lstrip("/")
+
+
+def _windows_hook_command_in_dir(command: str, hooks: tuple[str, str] | None) -> str:
+    """The path relative to *hooks* (a resolved volume and path) of *command*'s Windows first word inside it, else "".
+
+    Mirrors ``windowsHookCommandInDir``: both paths resolved
+    (:func:`_windows_resolved_path`) and on the same volume.
+    """
+
+    word = _windows_hook_command_word(command)
+    resolved = _windows_resolved_path(word[0]) if word and hooks else None
+    if resolved is None or hooks is None or resolved[0] != hooks[0]:
         return ""
-    return name.lower()
+    prefix = hooks[1].rstrip("/") + "/"
+    return resolved[1][len(prefix) :] if resolved[1].startswith(prefix) else ""
 
 
 def _windows_hook_command_split(command: str) -> tuple[str, str] | None:
     """The first word of *command* as :func:`_windows_path_as_posix` gives it, and the rest, or None.
 
     Mirrors ``windowsHookScriptCommandAsPOSIX``: the word is a Windows
-    absolute path, bare or in single or double quotes. A double-quoted word
-    with a ``$`` or a backquote is not a path: the shell would expand it.
+    absolute path (:func:`_windows_hook_command_word`).
+    """
+
+    split = _windows_hook_command_word(command)
+    posix = _windows_path_as_posix(split[0]) if split else ""
+    return (posix, split[1]) if split and posix else None
+
+
+def _windows_hook_command_word(command: str) -> tuple[str, str] | None:
+    """The first word of *command* as written, bare or in single or double quotes, and the rest, or None.
+
+    Mirrors ``windowsHookCommandWord``. A double-quoted word with a ``$`` or a
+    backquote is not a path: the shell would expand it.
     """
 
     command = command.strip()
@@ -2629,13 +2697,8 @@ def _windows_hook_command_split(command: str) -> tuple[str, str] | None:
         word, rest = command[1:end], command[end + 1 :]
         if rest and rest[0] not in " \t":
             return None
-    else:
-        split = _split_hook_command(command)
-        if split is None:
-            return None
-        word, rest = split
-    posix = _windows_path_as_posix(word)
-    return (posix, rest) if posix else None
+        return word, rest
+    return _split_hook_command(command)
 
 
 def edited_windows_hook_script(command: str, script_name: str) -> tuple[str, str] | None:
@@ -2958,6 +3021,10 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     windows_data_dir = _windows_path_as_posix(data_dir)
     windows_current = posixpath.join(windows_data_dir, "hooks", script_name.lower()) if windows_data_dir else ""
     windows_owner = posixpath.dirname(windows_data_dir).rstrip("/") + "/" if windows_data_dir else ""
+    # Setup's hooks dir on a Windows host, as its hooks-dir claim resolves it
+    # (hookCommandInWindowsDir).
+    windows_resolved = _windows_resolved_path(data_dir)
+    windows_hooks = (windows_resolved[0], posixpath.join(windows_resolved[1], "hooks")) if windows_resolved else None
     written = _hermes_written_command(cfg, connector)
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -2989,9 +3056,14 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
                     continue
                 # Claude Code's exact missing-script guard is unwrapped first, as
                 # hookDocumentEditedEntry does: Unix Setup writes that form (GAP-1956).
+                # Only Claude Code's Setup claims a guarded handler, and it reads
+                # the guard off the command as written (GAP-1963).
                 runs = entry.strip()
-                command = claude_unguarded_hook_command(runs)
-                guarded = command != runs
+                command, guarded = runs, False
+                if connector == "claudecode":
+                    unguarded = claude_unguarded_hook_command(entry)
+                    if unguarded != entry:
+                        command, guarded = unguarded.strip(), True
                 word = edited_hook_script(command, script_name)
                 first, first_rest = _split_hook_command(command) or ("", "")
                 rest = (_split_after_wrapper(command) or ("", ""))[1]
@@ -3008,8 +3080,16 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
                 if windows is None:
                     continue
                 windows_word, windows_rest = windows
+                # Setup's hooks-dir claim reads a Windows path in this install's
+                # Windows hooks dir too, on its volume and with . and .. resolved
+                # (hookCommandInWindowsDir, GAP-1981, GAP-2116): such a word is
+                # passed as the same name under current's dir.
+                claim_word = ""
+                name = _windows_hook_command_in_dir(command, windows_hooks)
+                if name:
+                    claim_word = os.path.dirname(current) + "/" + name
                 if not _setup_claims_edited_entry(
-                    connector, command, current, "", windows_rest, windows_rest, guarded, unbound_event
+                    connector, command, current, claim_word, windows_rest, windows_rest, guarded, unbound_event
                 ):
                     continue
                 if windows_word != windows_current and (

@@ -1965,8 +1965,8 @@ compromised hook shows:
   or identical calls each get their own pair. Devin CLI documents no
   per-call ID and is keyed the same way (`session_id`, `tool_name` and
   `tool_input`). Measured on a logged-in Devin CLI 3000.11.3 in its own TUI
-  (the image pins 3000.4.25, whose hook payload declares the same fields
-  but was not run): `tool_input` is the same object in both events, and
+  (the image pins 3000.14.30821, which a sandbox treats as that reviewed
+  hook surface; its hook payload was not run in a logged-in session): `tool_input` is the same object in both events, and
   `PostToolUse` fires only for a tool that ran. A call a `PreToolUse` exit 2
   or `{"decision":"block"}` denied, one the user refused at Devin's
   permission prompt, and one that failed before it ran (a read of a missing
@@ -2344,7 +2344,7 @@ images stay unverified, so they are never selected for a sandbox.
 | Amp | 0.0.1785334225-g9abe75 (npm, native sha256 pinned) | User-owned plugin `~/.config/amp/plugins/defenseclaw.ts` | user | `--dangerously-allow-all` | Amp API key (endpoints unverified) | unverified |
 | Cursor Agent | 2026.07.23-e383d2b (release archive, sha256 measured by DefenseClaw) | Enterprise `/etc/cursor/hooks.json`, every event `failClosed` | managed | `--force` | Cursor API key (endpoints unverified), or `cursor-launch login` inside the sandbox (the session is readable by the workload) | unverified |
 | Kiro CLI | 2.24.1 (release archive, vendor sha256) | Root-owned agent `/usr/local/lib/defenseclaw/kiro/defenseclaw.json`, alone in the directory the launcher forces `KIRO_AGENT_CONFIG_DIR` to | user | `--trust-all-tools` | Kiro Pro API key (endpoints unverified), or `kiro-launch login --use-device-flow` inside the sandbox (the token is readable by the workload) | verified (hooks and blocking; no real model) |
-| Devin CLI | 3000.4.25 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start; workspace trust skipped | user | `--permission-mode dangerous` | `devin-launch auth login` inside the sandbox (the credential is readable by the workload) | unverified |
+| Devin CLI | 3000.14.30821 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start; workspace trust skipped | user | `--permission-mode dangerous` | `devin-launch auth login` inside the sandbox (the credential is readable by the workload) | unverified |
 | Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (default model `openai.gpt-oss-20b`; the curated profiles carried no real model in a sandbox) | verified (mock model) |
 | Antigravity CLI (agy) | 1.2.12 (release tarball, SHA-512 pinned) | User-owned `~/.gemini/config/hooks.json`, restored from a root-owned copy on every start; a non-file hooks path is refused | user | `--dangerously-skip-permissions` | Gemini API key (unverified with a real key) | verified (mock model) |
 
@@ -2683,8 +2683,9 @@ harness observations name the release that was measured.
   CodeWhisperer telemetry events to `q.us-east-1.amazonaws.com`
   (`Failed to send cw telemetry event` in its log without a working key); no
   Kiro setting stops them.
-- **Devin CLI 3000.4.25.** Devin's versioned release manifest publishes
-  SHA-256 digests. Hooks come from `~/.config/devin/config.json` (`hooks`) or
+- **Devin CLI 3000.14.30821.** Devin's versioned release manifest publishes
+  SHA-256 digests (Devin serves only its current build, so an older pin answers
+  403 and no image can be built from it). Hooks come from `~/.config/devin/config.json` (`hooks`) or
   a project `.devin/hooks.v1.json`; there is no system hook tier, so the tier
   is user, and the launcher puts the DefenseClaw hooks back from a root-owned
   template on every start (keeping the other settings), drops

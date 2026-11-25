@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/regauth"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
 // TemplateAttestor admits a template only when every container image is
@@ -146,6 +147,7 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 				out.KitVersion = st.Predicate.Kit.Version
 				out.AgentVersion = st.Predicate.Template.AgentVersion
 				out.HookContract = st.Predicate.Kit.HookContract
+				out.RelayStreams = registry.JoinStreams(st.Predicate.Kit.RelayStreams)
 			}
 		}
 	}

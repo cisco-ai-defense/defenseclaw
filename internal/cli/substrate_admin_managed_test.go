@@ -30,6 +30,7 @@ func TestSubstrate_Admin_ManagedTableOffersTheUserCommands(t *testing.T) {
 		{"substrate", "undo", "fix-tests"}, {"substrate", "delete", "fix-tests"}, {"substrate", "migrate", "fix-tests"},
 		{"substrate", "approvals"}, {"substrate", "approve", "ask-1"}, {"substrate", "reject", "ask-1"}, {"substrate", "usage"},
 		{"substrate", "secrets", "list"}, {"substrate", "policy", "explain"}, {"substrate", "doctor", "--json"},
+		{"substrate", "port", "fix-tests", "3000"},
 	}
 	for _, args := range offered {
 		if !launcherOffers(args) {

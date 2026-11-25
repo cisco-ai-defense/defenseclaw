@@ -1,5 +1,5 @@
 # Every optional part: digest pin, admin ingress, alerts, local collector,
-# metrics peers, store class.
+# metrics peers, store class, the skill scanner sidecar (off by default).
 image:
   repository: registry.example.com/defenseclaw-gateway
   digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -45,3 +45,9 @@ callout:
     tokenSecret: defenseclaw-callout-judge
   actorSecrets:
     secretName: defenseclaw-actor-secrets-dlp
+gateway:
+  skillScanner:
+    enabled: true
+    image:
+      repository: registry.example.com/defenseclaw-scanner
+      digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

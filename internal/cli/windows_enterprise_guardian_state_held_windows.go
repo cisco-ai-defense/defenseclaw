@@ -73,7 +73,7 @@ var (
 // not gated: gating a file a standard account can open would let that account
 // block every ensure and repair (N2).
 var (
-	windowsEnterpriseGuardianAuthorizationCriticalFiles = []string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, managed.HookGuardianUserCleanupFile}
+	windowsEnterpriseGuardianAuthorizationCriticalFiles = []string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, managed.HookGuardianUserCleanupFile, managed.HookGuardianEnrolledAccountsFile}
 	windowsEnterpriseGuardianRuntimeCriticalFiles       = []string{hookGuardianStateFile}
 )
 

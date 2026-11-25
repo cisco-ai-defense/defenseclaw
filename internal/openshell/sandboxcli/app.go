@@ -179,6 +179,10 @@ type App struct {
 	// decides dockerDesktopRefusal. It is also the doctor's probe
 	// (defaultDoctor): one probe for both (rel-1-0-10:GAP-1746).
 	DockerVMLandlock func(ctx context.Context) (abi int, kernel string, err error)
+	// doctorLandlock is the probe the last report's Landlock row asked
+	// (defaultDoctor: DockerVMLandlock, asked at most once per report),
+	// which the doctor's last line reads again (doctorRunRefusal).
+	doctorLandlock func(ctx context.Context) (abi int, kernel string, err error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// LifecycleDir is the OpenShell configuration directory whose gateway
@@ -673,9 +677,9 @@ func apiError(err error) error {
 				// is the organization's service, never a gateway command
 				// (GAP-0451).
 				if detail != "" {
-					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix)
+					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix())
 				}
-				return errors.New("your sandbox service does not answer; " + managedServiceFix)
+				return errors.New("your sandbox service does not answer; " + managedServiceFix())
 			}
 			if detail != "" {
 				return fmt.Errorf("the DefenseClaw daemon did not answer or could not be verified (%s); run `defenseclaw sandbox doctor`, and if it is stopped, start it with `defenseclaw-gateway start`", detail)

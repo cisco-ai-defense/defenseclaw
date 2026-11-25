@@ -228,7 +228,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 	// The organization's refusals come first; then what this gateway
 	// cannot do, and what the run needs from this terminal.
-	if err := a.dockerDesktopRefusal(ctx, drv, spec); err != nil {
+	if err := a.dockerDesktopRefusal(ctx, drv, spec, a.DockerVMLandlock); err != nil {
 		return err
 	}
 	if len(o.Context) > 0 && !drv.HostMounts {
@@ -976,17 +976,18 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 // as on Linux.
 //
 // It is the one verdict on that VM: the doctor's last line asks it too
-// (spec nil), with the same probe (App.DockerVMLandlock, which the doctor's
-// Landlock row reads), so the doctor never calls ready a Mac where every
-// run is refused (rel-1-0-10:GAP-1746).
-func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec *harness.Spec) error {
+// (spec nil), with the answer its Landlock row read (probe: the doctor's
+// App.doctorLandlock, run's App.DockerVMLandlock), so the doctor never
+// calls ready a Mac where every run is refused (rel-1-0-10:GAP-1746). Only
+// a run says it built and created nothing (rel-1-0-10:GAP-1758).
+func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec *harness.Spec, probe func(context.Context) (int, string, error)) error {
 	if a.GOOS != "darwin" || d.Name != openshell.DriverDocker {
 		return nil
 	}
 	if engine, err := a.DockerEngine(ctx); err != nil || !openshell.IsDockerDesktop(engine) {
 		return nil
 	}
-	abi, _, err := a.DockerVMLandlock(ctx)
+	abi, _, err := probe(ctx)
 	if err == nil && abi >= openshell.MinLandlockABI {
 		return nil
 	}
@@ -1011,7 +1012,11 @@ func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec
 	case err == nil && abi > 0:
 		why = fmt.Sprintf("Docker Desktop's Linux VM has Landlock ABI %d, and OpenShell sandboxes need ABI %d or newer", abi, openshell.MinLandlockABI)
 	}
-	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and "+why+"; nothing was built or created"), step)
+	msg := "no sandbox can start on this gateway: it runs sandboxes on the docker driver, and " + why
+	if spec != nil {
+		msg += "; nothing was built or created"
+	}
+	return withNextStep(errors.New(msg), step)
 }
 
 // withNextStep puts DefenseClaw's way on after err on a line of its own

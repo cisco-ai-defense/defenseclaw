@@ -198,17 +198,20 @@ func failedOpenHookDelivery(resp agentHookResponse, reason string) agentHookResp
 //     mode is known.
 //   - A 1.0.4 hook that released its request before the gateway's late 103
 //     took the answer without a receipt, the same as an earlier binary.
-//   - A managed shell hook post (shellBridge, HookShellBridgeHeader) has no
-//     answer watchdog and never sends a receipt: the agent got the answer
-//     the gateway sent unless the caller hung up first (GAP-2614).
+//   - A managed shell hook post (HookShellBridgeHeader) has no answer
+//     watchdog and never sends a receipt: the agent got the answer the
+//     gateway sent unless the caller hung up first (GAP-2614). A verified
+//     Agent Substrate actor's kit post is the same: one synchronous post
+//     whose reply the kit renders to its agent (GAP-0550). synchronous names
+//     both.
 //   - Every other call keeps its evaluated decision. In-agent plugins, policy
 //     bridges and events without an answer deadline send no receipt.
-func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool, connectorName, event string, resp agentHookResponse) agentHookResponse {
+func (a *APIServer) unreceiptedHookDecision(synchronous, hungUpBeforeAnswer bool, connectorName, event string, resp agentHookResponse) agentHookResponse {
 	if a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() || hookexec.NeutralLifecycleEvent(connectorName, event) {
 		return resp
 	}
 	if !a.scannerCfg.StandaloneEnterprise() {
-		if a.scannerCfg.DeploymentMode == "per_user" && !shellBridge &&
+		if a.scannerCfg.DeploymentMode == "per_user" && !synchronous &&
 			hookexec.DeliveryReceiptEvent(connectorName, event) {
 			if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) != "open" && resp.Action == "block" {
 				return resp
@@ -221,7 +224,7 @@ func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool
 	switch {
 	case closed && resp.Action == "block":
 		return resp
-	case hungUpBeforeAnswer, !shellBridge && hookexec.DeliveryReceiptEvent(connectorName, event):
+	case hungUpBeforeAnswer, !synchronous && hookexec.DeliveryReceiptEvent(connectorName, event):
 		return unconfirmedHookDelivery(resp)
 	}
 	return resp

@@ -300,18 +300,25 @@ func (p claudeFloorPlan) occupied() bool {
 }
 
 func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []higherClaudeSource) (claudeFloorPlan, error) {
-	plan := claudeFloorPlan{mode: opts.claudeVersionFloorMode(), floor: claudeVersionFloorFor(opts)}
 	path, err := ClaudeVersionFloorPath(opts)
 	if err != nil {
-		return plan, err
+		return claudeFloorPlan{}, err
 	}
-	plan.path = path
-	if plan.current, plan.exists, err = readPolicyFile(opts, path); err != nil {
-		return plan, err
+	current, exists, err := readPolicyFile(opts, path)
+	if err != nil {
+		return claudeFloorPlan{}, err
 	}
-	if plan.record, err = loadRecord(opts, claudeVersionFloorRecord); err != nil {
-		return plan, err
+	record, err := loadRecord(opts, claudeVersionFloorRecord)
+	if err != nil {
+		return claudeFloorPlan{}, err
 	}
+	return planClaudeVersionFloorFrom(opts, sources, higher, path, current, exists, record), nil
+}
+
+// planClaudeVersionFloorFrom is planClaudeVersionFloor on the drop-in at path
+// (current, exists) and its ownership record, already read.
+func planClaudeVersionFloorFrom(opts Options, sources []claudeSource, higher []higherClaudeSource, path string, current []byte, exists bool, record *ownershipRecord) claudeFloorPlan {
+	plan := claudeFloorPlan{mode: opts.claudeVersionFloorMode(), floor: claudeVersionFloorFor(opts), path: path, current: current, exists: exists, record: record}
 	plan.owned = plan.exists && plan.record != nil && plan.record.Path == path &&
 		sha256Hex(plan.current) == plan.record.PostimageSHA256 ||
 		claudeFloorAdoptable(opts, plan.record, path, plan.current, plan.exists)
@@ -343,7 +350,7 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 		plan.adminInvalid = !claudeVersionPattern.MatchString(strings.TrimSpace(version))
 		plan.adminOutranks = plan.admin.higher || plan.admin.source == path || claudeDropInSortsAfterFloor(opts, plan.admin.source)
 	}
-	return plan, nil
+	return plan
 }
 
 // claudeFloorAdoptable reports a drop-in that DefenseClaw's record names and
@@ -430,10 +437,19 @@ func applyClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPolicy
 	if err != nil {
 		return err
 	}
+	return applyClaudeVersionFloorPlan(opts, policy, plan, state)
+}
+
+// applyClaudeVersionFloorPlan writes or withdraws the floor drop-in as plan,
+// made from what is on disk now, says.
+func applyClaudeVersionFloorPlan(opts Options, policy config.ResolvedConnectorPolicy, plan claudeFloorPlan, state *State) error {
 	if plan.wanted(policy) {
 		rendered, err := renderClaudeVersionFloor(plan.floor)
 		if err != nil {
 			return err
+		}
+		if claudeVersionFloorInPlace(opts, plan, rendered) {
+			return nil
 		}
 		if !plan.exists && (plan.record == nil || plan.record.Path != plan.path) {
 			// The first write records the drop-in before writing it: a crash
@@ -452,6 +468,19 @@ func applyClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPolicy
 		return nil
 	}
 	return withdrawClaudeVersionFloor(opts, plan, state)
+}
+
+// claudeVersionFloorInPlace reports a pass with nothing to write: the drop-in
+// is DefenseClaw's, holds rendered, its record names it with that postimage,
+// and its mode and folders need no repair. publishWithRecord would only save
+// the same record again with a new updated_at, which no reader uses; on
+// Windows that save (a flushed write, two descriptor writes and a rename)
+// cost about 5 ms of every guardian pass under the Claude Code managed
+// policy lock (GAP-1833).
+func claudeVersionFloorInPlace(opts Options, plan claudeFloorPlan, rendered []byte) bool {
+	return plan.owned && plan.exists && bytes.Equal(plan.current, rendered) &&
+		plan.record != nil && plan.record.Path == plan.path && plan.record.PostimageSHA256 == sha256Hex(rendered) &&
+		publishedFileProblem(opts, plan.path) == "" && publishedDirProblem(opts, plan.path) == "" && publishedDirWriteProblem(opts, plan.path) == ""
 }
 
 // withdrawClaudeVersionFloor removes DefenseClaw's floor drop-in when the
@@ -588,16 +617,48 @@ func reconcileClaudeVersionFloorFor(opts Options, connectors []string, transacti
 			return err
 		}
 	}
-	return transaction(func(policyDir string) error {
-		if err := requireClaudeFloorDir(opts, policyDir); err != nil {
+	// The reads and trust checks the plan needs run before the lock: one
+	// read of a file that does not exist (managed-settings.json mostly)
+	// takes about 230 ms on Windows, the transient-name retries of
+	// readPolicyFile, and that read held the lock on every guardian pass
+	// (GAP-1833). Under the lock the pass only checks that every file the
+	// plan was made from is still the same file with the same bytes. A
+	// change releases the lock and the pass reads again before taking it
+	// again; a second change, or a snapshot that cannot be taken, reads
+	// everything under the lock, as before.
+	for attempt := 1; ; attempt++ {
+		var snapshot *claudeFloorSnapshot
+		if active {
+			snapshot = snapshotClaudeVersionFloor(opts)
+		}
+		last := snapshot == nil || attempt == claudeFloorSnapshotAttempts
+		done := false
+		err := transaction(func(policyDir string) error {
+			if err := requireClaudeFloorDir(opts, policyDir); err != nil {
+				return err
+			}
+			switch {
+			case !active:
+				done = true
+				return removeClaudeVersionFloor(opts, state)
+			case snapshot.unchanged(opts):
+				done = true
+				return applyClaudeVersionFloorPlan(opts, policy, snapshot.plan, state)
+			case last:
+				done = true
+				return applyClaudeVersionFloor(opts, policy, state)
+			}
+			return nil
+		})
+		if err != nil || done {
 			return err
 		}
-		if !active {
-			return removeClaudeVersionFloor(opts, state)
-		}
-		return applyClaudeVersionFloor(opts, policy, state)
-	})
+	}
 }
+
+// claudeFloorSnapshotAttempts bounds the snapshots of one version floor pass:
+// a source that changes again after the second is read under the lock.
+const claudeFloorSnapshotAttempts = 2
 
 // requireClaudeFloorDir refuses a transaction whose lock guards a different
 // directory than the one the floor is written to.

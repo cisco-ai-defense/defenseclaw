@@ -5,8 +5,10 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -142,5 +144,185 @@ func TestDeploymentPodsCountsTerminatingPods(t *testing.T) {
 	}
 	if podQuery != "app.kubernetes.io/component=controller,app.kubernetes.io/name=defenseclaw" {
 		t.Fatalf("label selector %q", podQuery)
+	}
+}
+
+// GAP-0609: a failed hook keeps its Job and Error pod (hook-succeeded), so
+// the pre-delete hook deletes the chart's other hook Jobs, by name in the
+// release namespace, with background propagation so their pods go too.
+func TestPreDeleteDeletesLeftoverHookJobs(t *testing.T) {
+	var deletes []string
+	var bodies []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/apis/batch/v1/") {
+			deletes = append(deletes, r.URL.Path)
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(b))
+			if strings.HasSuffix(r.URL.Path, "/defenseclaw-pre-upgrade") {
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Success"}`))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	tok := filepath.Join(dir, "token")
+	if err := os.WriteFile(tok, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	k, err := NewKube(srv.URL, tok, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := testPlan()
+	plan.CredentialProvider.Grant = false
+	r, err := PreDelete(context.Background(), plan, newFakeAPI(), k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{}
+	for _, n := range []string{"defenseclaw-chain-key", "defenseclaw-relay-session", "defenseclaw-pre-upgrade", "defenseclaw-pre-rollback", "defenseclaw-bootstrap"} {
+		want["/apis/batch/v1/namespaces/defenseclaw-system/jobs/"+n] = true
+	}
+	for _, p := range deletes {
+		if !want[p] {
+			t.Errorf("deleted %s, which is not a leftover hook Job of the release namespace", p)
+		}
+		delete(want, p)
+	}
+	if len(want) > 0 {
+		t.Errorf("hook Jobs not deleted: %v (deleted %v)", want, deletes)
+	}
+	for _, b := range bodies {
+		if !strings.Contains(b, `"propagationPolicy":"Background"`) {
+			t.Errorf("a Job delete without background propagation leaves its pods: %s", b)
+		}
+	}
+	notes := strings.Join(r.Notes, "\n")
+	if !strings.Contains(notes, "deleted the hook Job(s) defenseclaw-pre-upgrade and their pods") {
+		t.Errorf("notes do not name the deleted Job: %s", notes)
+	}
+}
+
+// GAP-0609 (2): the kept access-policy grants come with the exact commands a
+// global owner runs, for the global policy and each writable atespace.
+func TestPurgeStepsGiveTheExactGrantCommands(t *testing.T) {
+	steps := strings.Join(PurgeSteps(testPlan()), "\n")
+	for _, w := range []string{
+		"kubectl ate get access-policy --global -o yaml > global.yaml",
+		"kubectl ate update access-policy --global -f global.yaml",
+		"kubectl ate get access-policy -a eng-web -o yaml > eng-web.yaml",
+		"kubectl ate update access-policy -a eng-web -f eng-web.yaml",
+		"kubectl ate update access-policy -a data-team -f data-team.yaml",
+	} {
+		if !strings.Contains(steps, w) {
+			t.Errorf("purge steps lack %q:\n%s", w, steps)
+		}
+	}
+}
+
+// GAP-0611: a Job that cannot be deleted (403 here, 500 for another) is a
+// note with the kubectl command; the other Jobs are still deleted and the
+// uninstall succeeds.
+func TestPreDeleteKeepsGoingWhenAHookJobCannotBeDeleted(t *testing.T) {
+	var deletes []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/apis/batch/v1/") {
+			deletes = append(deletes, r.URL.Path)
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/defenseclaw-pre-rollback"):
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Failure","reason":"Forbidden","code":403}`))
+				return
+			case strings.HasSuffix(r.URL.Path, "/defenseclaw-chain-key"):
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Failure","code":500}`))
+				return
+			case strings.HasSuffix(r.URL.Path, "/defenseclaw-pre-upgrade"):
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Success"}`))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	tok := filepath.Join(dir, "token")
+	if err := os.WriteFile(tok, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	k, err := NewKube(srv.URL, tok, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := testPlan()
+	plan.CredentialProvider.Grant = false
+	r, err := PreDelete(context.Background(), plan, newFakeAPI(), k)
+	if err != nil {
+		t.Fatalf("a hook Job that cannot be deleted stopped the uninstall: %v", err)
+	}
+	if len(deletes) != len(LeftoverHookJobs) {
+		t.Errorf("deletes %v: every leftover hook Job must still be tried", deletes)
+	}
+	notes := strings.Join(r.Notes, "\n")
+	for _, w := range []string{
+		"kubectl -n defenseclaw-system delete job defenseclaw-pre-rollback",
+		"kubectl -n defenseclaw-system delete job defenseclaw-chain-key",
+		"deleted the hook Job(s) defenseclaw-pre-upgrade and their pods",
+	} {
+		if !strings.Contains(notes, w) {
+			t.Errorf("notes lack %q:\n%s", w, notes)
+		}
+	}
+}
+
+// GAP-0909: UpdateConfigMap is a full PUT, so it carries the labels it read
+// as well as the annotations; a grant write must not wipe the labels other
+// tools put on the policy ConfigMap.
+func TestUpdateConfigMapKeepsLabelsAndAnnotations(t *testing.T) {
+	var put map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write([]byte(`{"metadata":{"name":"p","namespace":"ns","resourceVersion":"7","labels":{"app.kubernetes.io/managed-by":"helm","team":"sec"},"annotations":{"note":"kept"}},"data":{"k":"v"}}`))
+		case http.MethodPut:
+			if err := json.NewDecoder(r.Body).Decode(&put); err != nil {
+				t.Error(err)
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	tok := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tok, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k, err := NewKube(srv.URL, tok, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm, err := k.GetConfigMap(context.Background(), "ns", "p")
+	if err != nil || cm == nil {
+		t.Fatalf("get: %v %v", cm, err)
+	}
+	cm.Data["k"] = "w"
+	if err := k.UpdateConfigMap(context.Background(), cm); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := put["metadata"].(map[string]any)
+	labels, _ := meta["labels"].(map[string]any)
+	if labels["app.kubernetes.io/managed-by"] != "helm" || labels["team"] != "sec" || len(labels) != 2 {
+		t.Errorf("the PUT dropped the labels: %v", meta)
+	}
+	if ann, _ := meta["annotations"].(map[string]any); ann["note"] != "kept" {
+		t.Errorf("the PUT dropped the annotations: %v", meta)
 	}
 }

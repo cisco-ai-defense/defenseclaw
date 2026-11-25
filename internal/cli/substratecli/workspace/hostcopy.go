@@ -56,12 +56,14 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -69,6 +71,10 @@ import (
 // operating system the OpenShell copy pipeline does not support. Tests set
 // it on any OS.
 var hostCopy = runtime.GOOS == "windows"
+
+// UsesHostCopy reports whether copies on this system are host copies (no
+// git history in the actor).
+func UsesHostCopy() bool { return hostCopy }
 
 const hostRecordVersion = 1
 
@@ -98,6 +104,16 @@ type hostRecord struct {
 	// folder pull runs in as the project, on any OS.
 	CloneURL string `json:"clone_url,omitempty"`
 	CloneRef string `json:"clone_ref,omitempty"`
+	// LocalHead is set on a computer that did not run run (GAP-0489): the
+	// baseline is this commit of Project, and the record serves pull and
+	// apply only (push, sync, checkpoint and undo still refuse here).
+	LocalHead string `json:"local_head,omitempty"`
+	// Masks are the --exclude globs the person repeated for such a record,
+	// held back on both sides as run held them; ExcludesStated says they
+	// said what run left out (--exclude or --no-exclude). Without it, apply
+	// and branch refuse (ExcludesUnknownError).
+	Masks          []string `json:"masks,omitempty"`
+	ExcludesStated bool     `json:"excludes_stated,omitempty"`
 }
 
 func hostDir(dataDir string) string { return filepath.Join(dataDir, "substrate", "hostcopies") }
@@ -143,7 +159,7 @@ func RemoteDirOf(dataDir, name string) string {
 	if rec, err := osw.LoadCopy(dataDir, name); err == nil && rec != nil && rec.RemoteDir != "" {
 		return rec.RemoteDir
 	}
-	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.RemoteDir != "" {
+	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.RemoteDir != "" && rec.LocalHead == "" {
 		return rec.RemoteDir
 	}
 	return ""
@@ -153,31 +169,50 @@ func RemoteDirOf(dataDir, name string) string {
 // copy: on Windows, and for a clone everywhere.
 func usesHostCopy(dataDir, name string) bool {
 	rec, err := loadHostRecord(dataDir, name)
-	return err == nil && (hostCopy || rec.CloneURL != "")
+	return err == nil && (hostCopy || rec.CloneURL != "" || rec.LocalHead != "")
 }
 
-// HasCopy reports whether this computer has a copy record for name that
-// pull can read.
+// HasCopy reports whether this computer has the record of a copy it sent
+// (run or run --clone) for name. A baseline pull took from a checkout on
+// another computer (GAP-0489) is not one.
 func HasCopy(dataDir, name string) bool {
 	if _, err := osw.LoadCopy(dataDir, name); err == nil {
 		return true
 	}
-	_, err := loadHostRecord(dataDir, name)
-	return err == nil
+	rec, err := loadHostRecord(dataDir, name)
+	return err == nil && rec.LocalHead == ""
 }
 
 // --- git on this computer ---------------------------------------------------
 
-// hostGit runs git with a private configuration: no system or user config,
-// no hooks, no filters, no line-ending conversion, no prompts.
+// hostGit runs git with a private configuration: no system config, no hooks,
+// no line-ending conversion, no prompts.
 func hostGit(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
-	base := []string{"-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.hooksPath=" + os.DevNull,
+	return runHostGit(ctx, dir, true, env, stdin, args...)
+}
+
+// hostCheckoutGit runs git with this computer's own configuration (system,
+// user and repository: core.autocrlf, core.eol, filter drivers), still with
+// no hooks and no prompts, to write files as a checkout here writes them
+// (GAP-0489).
+func hostCheckoutGit(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
+	return runHostGit(ctx, dir, false, env, stdin, args...)
+}
+
+func runHostGit(ctx context.Context, dir string, private bool, env []string, stdin []byte, args ...string) ([]byte, error) {
+	base := []string{"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "core.fsmonitor=false", "-c", "core.quotePath=false", "-c", "commit.gpgSign=false", "-c", "core.longpaths=true"}
+	if private {
+		base = append([]string{"-c", "core.autocrlf=false", "-c", "core.safecrlf=false"}, base...)
+	}
 	cmd := exec.CommandContext(ctx, "git", append(base, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
 		"GIT_AUTHOR_NAME=defenseclaw", "GIT_AUTHOR_EMAIL=defenseclaw@localhost",
 		"GIT_COMMITTER_NAME=defenseclaw", "GIT_COMMITTER_EMAIL=defenseclaw@localhost")
+	if private {
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1")
+	}
 	cmd.Env = append(cmd.Env, env...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -322,24 +357,17 @@ func hostFolderName(project string) string {
 	return n
 }
 
-func hostStart(ctx context.Context, opts StartOptions, t interface {
-	Root(context.Context) (string, error)
-}) (*StartResult, error) {
-	c, ok := t.(*Client)
-	if !ok {
-		return nil, errors.New("workspace: the host copy needs the relay client")
-	}
+type hostUpload struct {
+	dir, project, folder, baseline string
+	held, unmasked, warnings       []string
+	files                          int
+	bytes                          int64
+}
+
+func prepareHostUpload(ctx context.Context, opts StartOptions, summary *osw.CopySummary) (_ *hostUpload, err error) {
 	project, err := filepath.Abs(opts.Project)
 	if err != nil {
 		return nil, err
-	}
-	root, err := c.Root(ctx)
-	if err != nil {
-		return nil, err
-	}
-	maxBytes := opts.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = DefaultMaxBytes
 	}
 	listed, warnings, err := listHostProject(ctx, project)
 	if err != nil {
@@ -351,7 +379,6 @@ func hostStart(ctx context.Context, opts StartOptions, t interface {
 	}
 	var files []hostFile
 	var held, unmasked []string
-	var total int64
 	for _, f := range listed {
 		abs := filepath.Join(project, filepath.FromSlash(f.rel))
 		content := func() ([]byte, bool) {
@@ -368,51 +395,80 @@ func hostStart(ctx context.Context, opts StartOptions, t interface {
 		if _, h := osw.HeldBack(f.rel, opts.Masks, nil, nil, nil); h {
 			unmasked = append(unmasked, f.rel)
 		}
-		total += f.size
-		if total > maxBytes {
-			return nil, &TooLargeError{Size: total, Limit: maxBytes}
-		}
+		summary.Add(f.rel, f.size)
 		files = append(files, f)
 	}
-	folder := hostFolderName(project)
-	remoteDir := path.Join(root, folder)
-	stateDir := opts.StateDir
-	if stateDir == "" {
-		base := root
-		if d, err := c.StateRoot(ctx); err == nil && d != "" {
-			base = d
-		}
-		if stateDir, err = NewStateDir(base, opts.Name); err != nil {
-			return nil, cleanErr("copy the project", err)
-		}
+	if summary.Bytes > opts.MaxBytes {
+		return nil, &osw.TooLargeError{What: "the working tree", Size: summary.Bytes, Limit: opts.MaxBytes}
 	}
-	// The baseline: the exact bytes about to be sent, no filters.
-	gitDir := hostGitDir(opts.DataDir, opts.Name)
-	_ = os.RemoveAll(gitDir)
-	if err := os.MkdirAll(hostDir(opts.DataDir), 0o700); err != nil {
+	if err := safefile.ProtectDirectory(hostDir(opts.DataDir)); err != nil {
 		return nil, err
 	}
-	if _, err := hostGit(ctx, project, nil, nil, "init", "-q", "--bare", gitDir); err != nil {
-		return nil, cleanErr("copy the project", err)
-	}
-	baseline, err := hostCommit(ctx, gitDir, project, files, "")
+	dir, err := os.MkdirTemp(hostDir(opts.DataDir), ".preflight-")
 	if err != nil {
-		return nil, cleanErr("record the copy's baseline", err)
+		return nil, err
 	}
-	if err := c.uploadHostTar(ctx, project, folder, files, root); err != nil {
+	p := &hostUpload{dir: dir, project: project, folder: hostFolderName(project),
+		held: held, unmasked: unmasked, warnings: warnings, files: summary.Files, bytes: summary.Bytes}
+	defer func() {
+		if err != nil {
+			p.close()
+		}
+	}()
+	gitDir := filepath.Join(dir, "baseline.git")
+	if _, err = hostGit(ctx, project, nil, nil, "init", "-q", "--bare", gitDir); err != nil {
+		return nil, err
+	}
+	p.baseline, err = hostCommit(ctx, gitDir, project, files, "")
+	if err != nil {
+		return nil, err
+	}
+	tarFile, err := os.OpenFile(filepath.Join(dir, "upload.tar"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	err = errors.Join(writeHostTar(tarFile, project, p.folder, files), tarFile.Close())
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *hostUpload) close() { _ = os.RemoveAll(p.dir) }
+
+func (p *hostUpload) send(ctx context.Context, c *Client, dataDir, name, root, stateDir string) (*StartResult, error) {
+	if err := osw.ValidateName(name); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(filepath.Join(p.dir, "upload.tar"))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	resp, err := c.request(ctx, "the upload", http.MethodPut, relay.RouteFiles, url.Values{"dir": {root}}, f, "application/x-tar", http.StatusNoContent)
+	if err != nil {
 		return nil, cleanErr("upload the project to the actor", err)
 	}
-	now := time.Now().UTC()
-	rec := &hostRecord{Version: hostRecordVersion, Name: opts.Name, Project: project, Folder: folder,
-		RemoteDir: remoteDir, StateDir: stateDir, Baseline: baseline, HeldBack: held, Unmasked: unmasked,
-		Files: len(files), Bytes: total, UploadedAt: now}
-	if err := rec.save(opts.DataDir); err != nil {
+	resp.Body.Close()
+	gitDir := hostGitDir(dataDir, name)
+	if err := os.RemoveAll(gitDir); err != nil {
 		return nil, err
 	}
-	cr := &osw.CopyRecord{Version: 1, Name: opts.Name, Project: project, RepoName: folder, RemoteDir: remoteDir,
-		StateDir: stateDir, Baseline: baseline, HeldBack: held, Unmasked: unmasked, Files: len(files), Bytes: total,
+	if err := os.Rename(filepath.Join(p.dir, "baseline.git"), gitDir); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	remoteDir := path.Join(root, p.folder)
+	rec := &hostRecord{Version: hostRecordVersion, Name: name, Project: p.project, Folder: p.folder,
+		RemoteDir: remoteDir, StateDir: stateDir, Baseline: p.baseline, HeldBack: p.held, Unmasked: p.unmasked,
+		Files: p.files, Bytes: p.bytes, UploadedAt: now}
+	if err := rec.save(dataDir); err != nil {
+		return nil, err
+	}
+	cr := &osw.CopyRecord{Version: 1, Name: name, Project: p.project, RepoName: p.folder, RemoteDir: remoteDir,
+		StateDir: stateDir, Baseline: p.baseline, HeldBack: p.held, Unmasked: p.unmasked, Files: p.files, Bytes: p.bytes,
 		StagedAt: now, UploadedAt: &now, VerifiedAt: &now}
-	return &StartResult{CopyRecord: cr, KeptBack: held, Unmasked: unmasked, Warnings: warnings}, nil
+	return &StartResult{CopyRecord: cr, KeptBack: p.held, Unmasked: p.unmasked, Warnings: p.warnings}, nil
 }
 
 // hostCommit records files of dir (their bytes as they are now) as a
@@ -456,30 +512,6 @@ func hostCommit(ctx context.Context, gitDir, dir string, files []hostFile, paren
 		return "", err
 	}
 	return strings.TrimSpace(string(commit)), nil
-}
-
-// uploadHostTar streams files as <folder>/<rel> to remoteRoot. A file that
-// changed since its baseline was taken stops the upload (the agent would
-// start from bytes the baseline does not have).
-func (c *Client) uploadHostTar(ctx context.Context, project, folder string, files []hostFile, remoteRoot string) error {
-	pr, pw := io.Pipe()
-	done := make(chan error, 1)
-	go func() {
-		err := writeHostTar(pw, project, folder, files)
-		pw.CloseWithError(err)
-		done <- err
-	}()
-	resp, err := c.request(ctx, "the upload", http.MethodPut, relay.RouteFiles, url.Values{"dir": {remoteRoot}}, pr, "application/x-tar", http.StatusNoContent)
-	pr.CloseWithError(errUploadDone)
-	tarErr := <-done
-	if err != nil {
-		if tarErr != nil && !errors.Is(tarErr, errUploadDone) && !errors.Is(tarErr, io.ErrClosedPipe) {
-			return tarErr
-		}
-		return err
-	}
-	resp.Body.Close()
-	return nil
 }
 
 func writeHostTar(w io.Writer, project, folder string, files []hostFile) error {
@@ -699,7 +731,11 @@ func (c *Client) downloadHostTree(ctx context.Context, rec *hostRecord, dir stri
 		if heldSet[rel] {
 			return true
 		}
-		_, h := osw.HeldBack(rel, nil, rec.Unmasked, nil, nil)
+		// The shared files are exact paths, not patterns (RV1 P1-1).
+		if slices.Contains(rec.Unmasked, rel) {
+			return false
+		}
+		_, h := osw.HeldBack(rel, rec.Masks, nil, nil, nil)
 		return h
 	})
 }
@@ -790,6 +826,13 @@ func hostPull(ctx context.Context, opts PullOptions, label string) (*Review, err
 		b, err := hostGit(ctx, gitDir, []string{"GIT_DIR=" + gitDir}, nil, "cat-file", "blob", oid)
 		return b, err == nil
 	}
+	if rec.LocalHead != "" {
+		head := []string{elsewhereNote(rec.LocalHead)}
+		if n := elsewhereExcludesNote(rec); n != "" {
+			head = append(head, n)
+		}
+		notes = append(head, notes...)
+	}
 	rep := osw.ReviewReport{Name: opts.Name, Project: rec.Project, Changes: changes, Warnings: notes}
 	rep.Flags = osw.ReviewFlags(changes, content, nil)
 	det := osw.DefaultSecretDetector()
@@ -870,6 +913,9 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 		return nil, errors.New("pull first: there is nothing reviewed to bring back")
 	}
 	pr := rec.Pulled
+	if rec.LocalHead != "" && !rec.ExcludesStated && opts.Mode != ModePatch {
+		return nil, &ExcludesUnknownError{Name: opts.Name}
+	}
 	if needsDecision(pr) && !opts.AcceptSensitive && opts.Mode != ModePatch {
 		if opts.Mode != ModeBranch || len(pr.Review.SecretPaths()) != 0 {
 			return nil, &SensitiveError{Files: flaggedPaths(pr)}

@@ -148,6 +148,11 @@
       "id": "worker_drain",
       "status": "pass",
       "message": "ok"
+    },
+    {
+      "id": "relay_tls",
+      "status": "pass",
+      "message": "ok"
     }
   ]
 }

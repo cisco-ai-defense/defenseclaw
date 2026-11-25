@@ -90,9 +90,10 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		}
 
 		switch typed := node.(type) {
-		case *syntax.Redirect, *syntax.Assign, *syntax.ParamExp:
+		case *syntax.Redirect, *syntax.Assign, *syntax.WordIter, *syntax.ParamExp:
 			// The secret-read chain's evidence: input redirects, variable
-			// values and the variables a word expands (credentialPathRecord).
+			// values (for-loop words too) and the variables a word expands
+			// (credentialPathRecord).
 			captureCredentialPathWord(&out, typed, stack, statementIDs, &credentialArgIndexes)
 		case *syntax.FuncDecl:
 			// A definition is inert until invoked. Do not project its body as
@@ -139,6 +140,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		for i := range out.commands {
 			for j := range out.commands[i].Arguments {
 				out.commands[i].Arguments[j].homeSpelling = ""
+				out.commands[i].Arguments[j].homeTilde = ""
 			}
 		}
 	}
@@ -614,6 +616,9 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	if result.Expands {
 		if !expands && unquotedExpansion && quote == QuoteNone {
 			result.StaticGlob = staticValue
+			if (staticValue == "~" || strings.HasPrefix(staticValue, "~/")) && !strings.ContainsAny(staticValue, "*?[\\") {
+				result.homeTilde = staticValue
+			}
 		}
 		result.Value = ""
 	} else {

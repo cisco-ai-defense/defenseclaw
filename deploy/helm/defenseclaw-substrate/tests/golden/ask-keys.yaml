@@ -1,4 +1,15 @@
 ---
+# Source: defenseclaw-substrate/templates/secret-bindings.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: defenseclaw-user-secrets
+  labels:
+    app.kubernetes.io/managed-by: defenseclaw
+    app.kubernetes.io/part-of: defenseclaw
+  annotations:
+    helm.sh/resource-policy: keep
+---
 # Source: defenseclaw-substrate/templates/networkpolicy.yaml
 # Deny every ingress to this release's pods; the policies below open only
 # what each listener needs.
@@ -662,6 +673,11 @@ data:
       identity:
         audience: defenseclaw
         issuer: https://idp.ate-system.svc
+        revocation:
+          enabled: true
+          max_stale: 60s
+          max_tokens_per_person: 64
+          sync_interval: 5s
         token_lifetime_seconds: 300
       idle_suspend_after: 30m
       launcher_atespaces:
@@ -673,6 +689,9 @@ data:
       services:
         actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local
         admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local
+      skills:
+        scan:
+          enabled: false
       supported_versions: '>=1.0.0 <1.1.0'
       unattended:
         ask_timeout: 30m
@@ -693,6 +712,23 @@ metadata:
     app.kubernetes.io/component: gateway
 data:
   admin_url: "https://defenseclaw-admin.defenseclaw-system.svc"
+---
+# Source: defenseclaw-substrate/templates/secret-bindings.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-secret-bindings
+  namespace: defenseclaw-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: gateway
+  annotations:
+    helm.sh/resource-policy: keep
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 apiVersion: v1
@@ -798,6 +834,11 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+# The self-service binding store (B1): only the gateway writes it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get, update]
 ---
 # Source: defenseclaw-substrate/templates/rbac.yaml
 # The controller reads and clears admin policy_conflict resets (the gateway
@@ -824,6 +865,59 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+# The self-service binding store (B1): the controller renders it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The controller reads which egress callout Substrate uses from
+# atenet-egress's live Envoy config (GAP-0505): when it is not the
+# DefenseClaw callout, actor policies follow the fail mode. get on that one
+# ConfigMap in the Substrate namespace, nothing else there (it holds no
+# secret: certificates come through SDS files), for the controller alone:
+# the gateway reads the controller's result through the leader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-defenseclaw-system-egress-read
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: controller
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [atenet-egress]
+  verbs: [get]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-user-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get, patch]
 ---
 # Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -889,6 +983,52 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-controller
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-defenseclaw-system-egress-read
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-defenseclaw-system-egress-read
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-user-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway-secrets
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
   namespace: defenseclaw-system
 ---
 # Source: defenseclaw-substrate/templates/callout.yaml
@@ -1035,7 +1175,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: 5f5555d08b5f9f85881f0124765955bbc38c1b472fa8473ef15f58a753d211b4
+        checksum/config: dceda81c080983ef1f57dd6f7ac2bcf3e9f214dcdf6f2f8a0f4ee8425d1cef79
         checksum/callout: 69e3d7777557c73201fbd321fbb97f75b95bd50fc3fbf2761d63f8a58bb389bd
     spec:
       
@@ -1253,7 +1393,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: 5f5555d08b5f9f85881f0124765955bbc38c1b472fa8473ef15f58a753d211b4
+        checksum/config: dceda81c080983ef1f57dd6f7ac2bcf3e9f214dcdf6f2f8a0f4ee8425d1cef79
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -1439,7 +1579,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: 5f5555d08b5f9f85881f0124765955bbc38c1b472fa8473ef15f58a753d211b4
+        checksum/config: dceda81c080983ef1f57dd6f7ac2bcf3e9f214dcdf6f2f8a0f4ee8425d1cef79
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1452,8 +1592,6 @@ spec:
         runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
-      # The scan worker must be PID 1 of its container (GAP-0828).
-      shareProcessNamespace: false
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -1573,6 +1711,9 @@ spec:
         - name: relay-session
           mountPath: /var/run/secrets/defenseclaw-relay-session
           readOnly: true
+        - name: relay-ca
+          mountPath: /var/run/secrets/defenseclaw-relay-ca
+          readOnly: true
         - name: llm-credentials
           mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
@@ -1588,49 +1729,6 @@ spec:
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
-        # Scan jobs for the skill scanner sidecar (GAP-0477).
-        - name: skill-scan
-          mountPath: /run/defenseclaw-scan
-      # The skill scanner sidecar (GAP-0477): no Secret mounts and no
-      # service-account token (the pod mounts none by default and this
-      # container lists only its two folders), no port.
-      - name: skill-scanner
-        image: ghcr.io/cisco-ai-defense/defenseclaw-scanner:1.0.11
-        imagePullPolicy: IfNotPresent
-        args:
-        - substrate
-        - scan-worker
-        - --dir=/run/defenseclaw-scan
-        # One scan's bound: substrate.skills.scan.timeout (B5.4).
-        - --timeout=20s
-        # The container is the scanner's boundary (GAP-0828): RuntimeDefault
-        # refuses the namespaces the laptop's containment uses, so the worker
-        # is PID 1 of this container's own PID namespace (the pod does not
-        # share one), scans one job at a time and clears the container after
-        # each. Its security settings are fixed here; its uid and gid are the
-        # gateway's, from podSecurityContext (GAP-0876).
-        - --pod-contained
-        resources:
-          limits:
-            memory: 1Gi
-          requests:
-            cpu: 100m
-            memory: 256Mi
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 65532
-          runAsGroup: 65532
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop: [ALL]
-          seccompProfile:
-            type: RuntimeDefault
-        volumeMounts:
-        - name: skill-scan
-          mountPath: /run/defenseclaw-scan
-        - name: skill-scan-tmp
-          mountPath: /tmp
       volumes:
       - name: config
         configMap:
@@ -1696,6 +1794,11 @@ spec:
           secretName: defenseclaw-relay-session
           optional: true
           defaultMode: 0440
+      - name: relay-ca
+        secret:
+          secretName: defenseclaw-relay-ca
+          optional: true
+          defaultMode: 0440
       - name: llm-credentials
         secret:
           secretName: defenseclaw-llm
@@ -1728,13 +1831,6 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
-      - name: skill-scan
-        emptyDir:
-          medium: Memory
-          sizeLimit: 64Mi
-      - name: skill-scan-tmp
-        emptyDir:
-          sizeLimit: 512Mi
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 # The gateway leader: one replica holding the lease and the RWO store. Recreate,
@@ -1769,7 +1865,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: 5f5555d08b5f9f85881f0124765955bbc38c1b472fa8473ef15f58a753d211b4
+        checksum/config: dceda81c080983ef1f57dd6f7ac2bcf3e9f214dcdf6f2f8a0f4ee8425d1cef79
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1884,6 +1980,9 @@ spec:
         - name: relay-session
           mountPath: /var/run/secrets/defenseclaw-relay-session
           readOnly: true
+        - name: relay-ca
+          mountPath: /var/run/secrets/defenseclaw-relay-ca
+          readOnly: true
         - name: llm-credentials
           mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
@@ -1960,6 +2059,11 @@ spec:
       - name: relay-session
         secret:
           secretName: defenseclaw-relay-session
+          optional: true
+          defaultMode: 0440
+      - name: relay-ca
+        secret:
+          secretName: defenseclaw-relay-ca
           optional: true
           defaultMode: 0440
       - name: llm-credentials
@@ -2183,7 +2287,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: ["defenseclaw-relay-session"]
+  resourceNames: ["defenseclaw-relay-session", "defenseclaw-relay-ca"]
   verbs: [get]
 - apiGroups: [""]
   resources: [secrets]
@@ -2223,6 +2327,12 @@ rules:
 - apiGroups: [""]
   resources: [pods]
   verbs: [list]
+# Delete the Jobs (and, by propagation, the pods) of earlier failed hooks,
+# by name: setup.LeftoverHookJobs (GAP-0609).
+- apiGroups: [batch]
+  resources: [jobs]
+  resourceNames: [defenseclaw-chain-key, defenseclaw-relay-session, defenseclaw-pre-upgrade, defenseclaw-pre-rollback, defenseclaw-bootstrap]
+  verbs: [delete]
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2437,9 +2547,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2553,9 +2663,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2669,9 +2779,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2785,9 +2895,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2901,9 +3011,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nguardrail:\n  profiles:\n    engineering:\n      sandbox:\n        ask_hosts:\n        - '*.files.example.com'\n        - uploads.example.com\n        url_rules:\n        - action: Ask\n          hosts:\n          - api.github.com\n          methods:\n          - POST\n          name: release-ask\n          path_prefix: /repos/acme/releases\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  admin:\n    ask_hosts:\n    - uploads.example.com\n    url_rules:\n    - action: deny\n      hosts:\n      - api.github.com\n      methods:\n      - DELETE\n      name: no-repo-delete\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - uploads.example.com\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE

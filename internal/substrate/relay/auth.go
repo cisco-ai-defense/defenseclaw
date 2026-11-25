@@ -49,6 +49,9 @@ type Session struct {
 	// TaskDigest is the SHA-256 (hex) of the --task text the actor was
 	// registered for; empty for an interactive session (GAP-0071).
 	TaskDigest string `json:"task_digest,omitempty"`
+	// Scope is the token's dc.scope (B3): "port:N" or "mcp:NAME" for a
+	// stream token, "" for a terminal, task or file token.
+	Scope string `json:"scope,omitempty"`
 }
 
 // Verifier checks the credential of an incoming request.
@@ -113,7 +116,9 @@ func IdentityFiles(dir string) func() (Identity, error) {
 }
 
 // KeyVerifier verifies session tokens against public keys. It holds no
-// secret (D14).
+// secret (D14). Skew (default 60 s) is allowed on nbf only, for a gateway
+// whose clock runs ahead of this actor's: a token is refused from the
+// second it expires (GAP-0569).
 type KeyVerifier struct {
 	// Keys maps a kid to an *ecdsa.PublicKey (P-256) or ed25519.PublicKey.
 	Keys     map[string]crypto.PublicKey
@@ -165,6 +170,8 @@ type Claims struct {
 	} `json:"dc.actor"`
 	// TaskDigest is the registered task's digest (dc.task_sha256).
 	TaskDigest string `json:"dc.task_sha256"`
+	// Scope is the stream scope (dc.scope).
+	Scope string `json:"dc.scope"`
 }
 
 // Verify implements Verifier.
@@ -245,7 +252,7 @@ func (v *KeyVerifier) VerifyToken(tok string) (Session, error) {
 	t := now()
 	exp, nbf, iat := time.Unix(c.Expiry, 0), time.Unix(c.NotBefore, 0), time.Unix(c.IssuedAt, 0)
 	switch {
-	case c.Expiry == 0 || t.After(exp.Add(skew)):
+	case c.Expiry == 0 || !t.Before(exp):
 		return Session{}, errors.New("session token expired")
 	case c.NotBefore != 0 && t.Add(skew).Before(nbf):
 		return Session{}, errors.New("session token not valid yet")
@@ -281,7 +288,24 @@ func (v *KeyVerifier) VerifyToken(tok string) (Session, error) {
 		return Session{}, errors.New("session token is for another actor")
 	}
 	return Session{Person: sub, Actor: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID, TokenID: c.ID, Expires: exp,
-		TaskDigest: c.TaskDigest}, nil
+		TaskDigest: c.TaskDigest, Scope: c.Scope}, nil
+}
+
+// CheckedVerifier checks a session token with the gateway's public keys
+// (signature, issuer, audience, this actor), then asks the gateway, which
+// also checks that the token names the actor's own person (GAP-0435). A
+// token the keys refuse never reaches the gateway.
+type CheckedVerifier struct {
+	Keys    *KeyVerifier
+	Gateway *GatewayVerifier
+}
+
+// Verify implements Verifier.
+func (v *CheckedVerifier) Verify(ctx context.Context, r *http.Request) (Session, error) {
+	if _, err := v.Keys.Verify(ctx, r); err != nil {
+		return Session{}, err
+	}
+	return v.Gateway.Verify(ctx, r)
 }
 
 // LoadPublicKey reads a PEM public key (PKIX: P-256 ECDSA or Ed25519).

@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 type managedHookAuditFixture struct {
@@ -358,7 +359,11 @@ func managedHookBody(session, event string) string {
 // an allow, and answers it with receipt ("" lets the hook time out).
 func (f managedHookAuditFixture) offer(t *testing.T, session, receipt string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	// The writer stays open until the answer is read, so a gateway that
+	// waits for the hook's body to end never answers: this window waits for
+	// a signal, it is not a speed limit, and it stretches with the host
+	// (GAP-0639: 3 s ran out in a long native Windows run).
+	ctx, cancel := context.WithTimeout(t.Context(), max(30*time.Second, testenv.Scale(3*time.Second, 3*testenv.HostSlowdown())))
 	defer cancel()
 	reader, writer := io.Pipe()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.server.URL+"/api/v1/claudecode/hook", reader)
@@ -530,8 +535,9 @@ func (w *cancelOnHookAnswerFlushWriter) Flush() {
 // it records an unconfirmed result rather than the proposed allow.
 func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	var late atomic.Bool
+	var timing lateAnswerTiming
 	f := newManagedHookAuditFixture(t, func(w http.ResponseWriter) http.ResponseWriter {
-		return &lateAnswerWriter{ResponseWriter: w, late: &late}
+		return &lateAnswerWriter{ResponseWriter: w, late: &late, timing: &timing, started: time.Now()}
 	})
 	run := func(session string) (int, string) {
 		t.Helper()
@@ -555,25 +561,50 @@ func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 		})
 		return code, stdout.String() + stderr.String()
 	}
+	// audited waits for the session's row (a signal, not a speed limit).
+	audited := func(session string) string {
+		t.Helper()
+		deadline := time.Now().Add(max(10*time.Second, testenv.Scale(5*time.Second, 3*testenv.HostSlowdown())))
+		for {
+			if got := f.audited(t, session)[session]; got != "" || time.Now().After(deadline) {
+				return got
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 	if code, out := run("hook-in-time"); code != 0 || strings.Contains(out, "deny") {
 		t.Fatalf("answer in time: code=%d output=%q", code, out)
 	}
-	late.Store(true)
-	if code, out := run("hook-late"); code == 0 && !strings.Contains(out, "deny") {
-		t.Fatalf("late answer was taken: code=%d output=%q", code, out)
+	if got := audited("hook-in-time"); got != "allow" {
+		t.Fatalf("audited hook-in-time = %q, want allow", got)
 	}
-	// The late hook now reports its committed block on the receipt channel.
-	want := map[string]string{"hook-in-time": "allow", "hook-late": "block/no_answer"}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		got := f.audited(t, "hook-in-time", "hook-late")
-		if got["hook-in-time"] == want["hook-in-time"] && got["hook-late"] == want["hook-late"] {
+	// The late hook reports its committed block on the receipt channel. That
+	// channel exists only if the gateway's 103 reached the hook within its
+	// capability wait (250 ms, hookexec.hookDeliveryCapabilityWait), and the
+	// gateway reads the receipt within 5 s of offering the answer, which this
+	// writer holds for 4 s. A starved host can miss either window; the hook
+	// then takes the answer as an ordinary one and the gateway records it
+	// unconfirmed, the late-hint result TestManagedHookAndGatewayAfterALateEarlyHint
+	// pins (GAP-0639: red in a 913 s native Windows run, green by name). Such
+	// an attempt says nothing about the receipt path, so it is repeated; an
+	// attempt that kept both windows must give the block.
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		session := "hook-late-" + strconv.Itoa(attempt)
+		late.Store(true)
+		if code, out := run(session); code == 0 && !strings.Contains(out, "deny") {
+			t.Fatalf("late answer was taken: code=%d output=%q", code, out)
+		}
+		got := audited(session)
+		if got == "block/no_answer" {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("audited = %v, want %v", got, want)
+		hint, held := time.Duration(timing.hintAfter.Load()), time.Duration(timing.answerHeld.Load())
+		starved := hint >= 100*time.Millisecond || held >= 4700*time.Millisecond
+		if got != "unconfirmed/no_answer" || !starved || attempt == attempts {
+			t.Fatalf("audited %s = %q, want block/no_answer (attempt %d, 103 after %v, answer held %v)", session, got, attempt, hint, held)
 		}
-		time.Sleep(50 * time.Millisecond)
+		t.Logf("attempt %d missed the receipt window on this host (103 after %v, answer held %v): %q; again", attempt, hint, held, got)
 	}
 }
 
@@ -661,15 +692,32 @@ func (w *lateHintWriter) WriteHeader(code int) {
 func (w *lateHintWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // lateAnswerWriter holds the next hook answer, once late is set, until the
-// hook's answer budget (3.5 s) has run out.
+// hook's answer budget (3.5 s) has run out. timing, if set, records when the
+// request's 103 left the handler and how long the late answer was held.
 type lateAnswerWriter struct {
 	http.ResponseWriter
-	late *atomic.Bool
+	late    *atomic.Bool
+	timing  *lateAnswerTiming
+	started time.Time
+}
+
+// lateAnswerTiming holds the last request's readings, in nanoseconds.
+type lateAnswerTiming struct{ hintAfter, answerHeld atomic.Int64 }
+
+func (w *lateAnswerWriter) WriteHeader(code int) {
+	if code == http.StatusEarlyHints && w.timing != nil {
+		w.timing.hintAfter.Store(int64(time.Since(w.started)))
+	}
+	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *lateAnswerWriter) Write(p []byte) (int, error) {
 	if bytes.Contains(p, []byte(`"action"`)) && w.late.CompareAndSwap(true, false) {
+		held := time.Now()
 		time.Sleep(4 * time.Second)
+		if w.timing != nil {
+			defer func() { w.timing.answerHeld.Store(int64(time.Since(held))) }()
+		}
 	}
 	return w.ResponseWriter.Write(p)
 }

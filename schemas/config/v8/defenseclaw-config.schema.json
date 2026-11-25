@@ -1530,6 +1530,16 @@
             "queue"
           ]
         },
+        "git_push": {
+          "description": "Agent Substrate only: whether substrate pull --push-branch may push an actor's work to its origin: allow, ask or deny. Deny wins, then ask; unset takes substrate.git.push_branch, and push_branch deny wins over this key.",
+          "type": "string",
+          "enum": [
+            "",
+            "allow",
+            "ask",
+            "deny"
+          ]
+        },
         "ask_timeout": {
           "description": "Agent Substrate only: how long a queued ask waits before it is denied (a Go duration, 1m to 24h), instead of substrate.unattended.ask_timeout. The shortest wins.",
           "type": "string",
@@ -3397,6 +3407,20 @@
           "minimum": 0,
           "maximum": 1000000,
           "default": 12
+        },
+        "substrate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asks": {
+              "type": "boolean",
+              "default": true
+            },
+            "task_end": {
+              "type": "boolean",
+              "default": true
+            }
+          }
         }
       }
     },
@@ -4488,7 +4512,7 @@
           "minimum": 0,
           "maximum": 1048576,
           "default": 0,
-          "description": "Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration)."
+          "description": "Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, once the used pages of the audit database pass nine tenths of the cap, down to seven tenths of it, the newest hour too when the cap needs it (the cap wins over the age of the history). Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration)."
         },
         "keep_rejected_records": {
           "type": "boolean",
@@ -7897,6 +7921,28 @@
                 }
               }
             },
+            "revocation": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Ended sign-ins (logout, logout --all, admin revoke). enabled is read at gateway start; managed_enterprise may not turn it off. max_stale is at least 2 x sync_interval and at most 1h (unset: 60s or 2 x sync_interval, whichever is longer).",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "sync_interval": {
+                  "$ref": "#/$defs/duration"
+                },
+                "max_stale": {
+                  "$ref": "#/$defs/duration"
+                },
+                "max_tokens_per_person": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                }
+              }
+            },
             "kube_sign_in": {
               "type": "boolean",
               "default": true
@@ -8096,10 +8142,147 @@
           ],
           "default": "block"
         },
+        "relay_tls": {
+          "description": "How the gateway reaches an actor's relay: auto (default) uses TLS when the template's signed kit serves it and plain HTTP with an audit row for older templates; required refuses those; off drops the row and the doctor warning.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "required",
+            "off"
+          ],
+          "default": "auto"
+        },
+        "relay_cert_reissue": {
+          "description": "What the gateway does with a second relay serving certificate for an actor asked for without proof of the live key: refuse answers 403 reissue_refused with a HIGH audit row until the owner or an administrator runs recover; flag issues it with a HIGH audit row; auto (default) is refuse in a managed enterprise install and flag in OSS.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "flag",
+            "refuse"
+          ],
+          "default": "auto"
+        },
         "workspace_max_bytes": {
           "type": "integer",
           "minimum": 0,
           "maximum": 68719476736
+        },
+        "launcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "key_replay": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "on",
+                "off"
+              ],
+              "default": "ask"
+            },
+            "upload_scan": {
+              "description": "Agent Substrate launcher: the secret scan of a project copy before upload (Linux and macOS copies).",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "max_file_bytes": {
+                  "description": "Largest file the scan reads; a bigger one is uploaded unscanned and named in the run's report.",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 67108864,
+                  "default": 8388608
+                },
+                "time_budget": {
+                  "description": "How long the scan may take (a Go duration, 1s to 1h); files it did not reach are named in the run's report.",
+                  "type": "string",
+                  "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$",
+                  "default": "120s"
+                },
+                "secret_action": {
+                  "description": "replace: the value is replaced with a placeholder in the uploaded copy; hold_back: the whole file stays on the computer (the admin-off switch).",
+                  "type": "string",
+                  "enum": [
+                    "replace",
+                    "hold_back"
+                  ],
+                  "default": "replace"
+                },
+                "placeholder_form": {
+                  "type": "string",
+                  "enum": [
+                    "token",
+                    "env"
+                  ],
+                  "default": "token"
+                }
+              }
+            }
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "push": {
+              "type": "boolean",
+              "default": true
+            },
+            "sync": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "https_rewrite": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^-\\s\"\\\\][^\\s\"\\\\]*[:/]$"
+                  },
+                  "to": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 256,
+                    "pattern": "^https://[^\\s\"\\\\@/]+/([^\\s\"\\\\]*/)?$"
+                  }
+                }
+              }
+            },
+            "submodules": {
+              "type": "boolean",
+              "default": true
+            },
+            "lfs": {
+              "type": "boolean",
+              "default": true
+            },
+            "push_branch": {
+              "description": "Whether substrate pull --push-branch pushes an actor's work to its origin as a new branch: allow, ask (the default) or deny. Deny is the off switch and wins over every profile.",
+              "type": "string",
+              "enum": [
+                "",
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "default": "ask"
+            }
+          }
         },
         "skills": {
           "type": "object",
@@ -8143,6 +8326,67 @@
               "minimum": 0,
               "maximum": 1,
               "default": 1.0
+            }
+          }
+        },
+        "interactive": {
+          "description": "Port forwards and MCP bridges an actor's owner opens through attach (B3). Each enabled switch is auto, on or off; off is the admin switch.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "port_forward": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "auto (default) is on in open source and managed installs. off also closes the forwards already open, within a minute (at the next check), not at once.",
+                  "type": "string",
+                  "enum": ["auto", "on", "off"],
+                  "default": "auto"
+                },
+                "ports": {
+                  "description": "Actor ports a forward may reach: a port or lo-hi range list such as 3000,8000-8999, within 1024-65535. The actor relay's own port 8080 is never forwarded.",
+                  "type": "string",
+                  "pattern": "^\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?(\\s*,\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?)*\\s*$",
+                  "default": "1024-65535"
+                },
+                "max_streams": {
+                  "description": "Open forwarded connections per actor on each gateway replica (the count is not shared between replicas).",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1024,
+                  "default": 32
+                }
+              }
+            },
+            "mcp_bridge": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "auto (default) is on in open source and off in managed installs. off also closes the bridges already open, within a minute (at the next check), not at once.",
+                  "type": "string",
+                  "enum": ["auto", "on", "off"],
+                  "default": "auto"
+                },
+                "max_servers": {
+                  "description": "Bridged MCP servers per actor on each gateway replica (the count is not shared between replicas).",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32,
+                  "default": 4
+                },
+                "message_max_bytes": {
+                  "description": "A bigger JSON-RPC message is refused, never cut.",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777216,
+                  "default": 1048576
+                }
+              }
+            },
+            "idle_close": {
+              "$ref": "#/$defs/duration"
             }
           }
         },
@@ -8424,6 +8668,15 @@
                 "minLength": 1,
                 "maxLength": 253
               }
+            },
+            "no_swap_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
             }
           }
         },
@@ -8480,6 +8733,9 @@
                   "placeholder": {
                     "type": "string",
                     "pattern": "^[A-Z_][A-Z0-9_]*$"
+                  },
+                  "allow_echo": {
+                    "type": "boolean"
                   }
                 }
               },
@@ -8501,6 +8757,37 @@
                   "maxLength": 256
                 }
               }
+            }
+          }
+        },
+        "self_service_secrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "enum": ["bindings", "values_only", "off"]},
+            "namespace": {"type": "string", "minLength": 1, "maxLength": 63},
+            "provider": {"type": "string", "minLength": 1, "maxLength": 253},
+            "max_per_person": {"type": "integer", "minimum": 1, "maximum": 200},
+            "outside_templates": {"type": "string", "enum": ["ask", "refuse"]},
+            "ask_timeout": {"type": "string", "minLength": 1, "maxLength": 32},
+            "allow_echo_bindings": {"type": "boolean"}
+          }
+        },
+        "secret_templates": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+              "hosts": {"type": "array", "maxItems": 1024, "items": {"type": "string", "minLength": 1, "maxLength": 253}},
+              "header": {"type": "string", "minLength": 1, "maxLength": 64},
+              "form": {"type": "string", "enum": ["bearer", "basic", "raw"]},
+              "basic_user": {"type": "string", "minLength": 1, "maxLength": 128},
+              "profiles": {"type": "array", "maxItems": 256, "items": {"type": "string", "minLength": 1, "maxLength": 253}},
+              "registry": {"type": "string", "enum": ["none", "npm", "pypi"]}
             }
           }
         },
@@ -8603,6 +8890,23 @@
                   }
                 }
               }
+            }
+          }
+        },
+        "activity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status_window": {
+              "$ref": "#/$defs/duration"
+            },
+            "notifications": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "off"
+              ],
+              "default": "auto"
             }
           }
         }

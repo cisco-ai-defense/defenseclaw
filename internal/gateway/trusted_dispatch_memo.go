@@ -22,10 +22,12 @@ import (
 //
 // A repeat is answered from the memo only when a run of it would give the
 // same answer:
-//   - the request is the same in every field (reflect.DeepEqual), the shared
+//   - the request is the same in every field (reflect.DeepEqual; a Substrate
+//     actor's home places are compared as the set they point at), the shared
 //     state it points at is the same object (pointer identity: ctx, budget,
-//     cap floor, rule generation, readings), and it records into no
-//     function (record, recordTelemetry, recordEffectShadow);
+//     cap floor, rule generation, readings), it records into no function
+//     (record, recordTelemetry, recordEffectShadow) and asks for no
+//     out-parameter the memo does not replay (guestWriteClaimOnly);
 //   - the first run left the hook call's own budgets and causes as it found
 //     them (hookpaths.HookCallState, the cap floor, the reach of the budget,
 //     the shared evaluations, the session's page), and the repeat finds
@@ -152,7 +154,8 @@ func trustedDispatchRun(request trustedActionRequest) {
 
 func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedActionRequest) []RuleFinding {
 	if request.record != nil || request.recordTelemetry != nil || request.recordEffectShadow != nil ||
-		request.aliasPending != nil || trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
+		request.aliasPending != nil || request.guestWriteClaimOnly != nil ||
+		trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
 		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(ctx, request)
 	}

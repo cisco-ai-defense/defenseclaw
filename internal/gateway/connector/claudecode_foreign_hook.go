@@ -90,21 +90,10 @@ func claudeCodeOneLineLauncherPath(launcher string) bool {
 // windowsHookScriptCommandAsPOSIX rewrites a hook command whose first word is
 // a Windows absolute path (windowsAbsolutePathAsPOSIX), bare or in single or
 // double quotes, as the same command with that path in POSIX form, so the
-// POSIX script rules read it. Any other command gives "". A double-quoted word
-// with a $ or a backquote is not a path: the shell would expand it.
+// POSIX script rules read it. Any other command gives "".
 func windowsHookScriptCommandAsPOSIX(command string) string {
-	command = strings.TrimSpace(command)
-	var word, rest string
-	if quoted, ok := strings.CutPrefix(command, `"`); ok {
-		end := strings.IndexByte(quoted, '"')
-		if end < 0 || strings.ContainsAny(quoted[:end], "$`") {
-			return ""
-		}
-		word, rest = quoted[:end], quoted[end+1:]
-		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
-			return ""
-		}
-	} else if word, rest, ok = posixHookCommandSplit(command); !ok {
+	word, rest, ok := windowsHookCommandWord(command)
+	if !ok {
 		return ""
 	}
 	posix, ok := windowsAbsolutePathAsPOSIX(word)
@@ -114,21 +103,50 @@ func windowsHookScriptCommandAsPOSIX(command string) string {
 	return posixHookCommandWord(posix) + rest
 }
 
+// windowsHookCommandWord splits a hook command into its first word, as
+// written, bare or in single or double quotes, and the rest. A double-quoted
+// word with a $ or a backquote is not a path: the shell would expand it.
+func windowsHookCommandWord(command string) (word, rest string, ok bool) {
+	command = strings.TrimSpace(command)
+	if quoted, isQuoted := strings.CutPrefix(command, `"`); isQuoted {
+		end := strings.IndexByte(quoted, '"')
+		if end < 0 || strings.ContainsAny(quoted[:end], "$`") {
+			return "", "", false
+		}
+		word, rest = quoted[:end], quoted[end+1:]
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+			return "", "", false
+		}
+		return word, rest, true
+	}
+	return posixHookCommandSplit(command)
+}
+
 // windowsAbsolutePathAsPOSIX returns a Windows absolute path without its
 // volume, with forward slashes and in lower case (Windows file names are case
 // insensitive): C:\a\b and C:/a\b give /a/b, \\server\share\a gives /a, and
 // the \\?\ and \\.\ forms of either give the same. Under \\?\ and \\.\ a
 // forward slash is part of a name, not a separator, so such a path is
-// refused, as is a drive-relative (C:a) or volume-less (\a) path.
+// refused, as is a drive-relative (C:a) or volume-less (\a) path. The path is
+// not cleaned and its volume is dropped: a rule that decides whether a path
+// lies in a folder compares windowsResolvedPath instead.
 func windowsAbsolutePathAsPOSIX(name string) (string, bool) {
+	_, posix, _, ok := windowsAbsolutePathParts(name)
+	return posix, ok
+}
+
+// windowsAbsolutePathParts splits a Windows absolute path, read as
+// windowsAbsolutePathAsPOSIX reads it, into its volume in lower case (c: for
+// a drive, //server/share for a UNC path, either under \\?\ or \\.\ too) and
+// the POSIX form of the rest, and reports a \\?\ or \\.\ prefix.
+func windowsAbsolutePathParts(name string) (volume, posix string, verbatim, ok bool) {
 	if strings.ContainsAny(name, "\x00\r\n") {
-		return "", false
+		return "", "", false, false
 	}
-	verbatim := false
 	for _, prefix := range []string{`\\?\`, `\\.\`} {
-		if rest, ok := strings.CutPrefix(name, prefix); ok {
+		if rest, found := strings.CutPrefix(name, prefix); found {
 			if strings.Contains(rest, "/") {
-				return "", false
+				return "", "", false, false
 			}
 			name, verbatim = rest, true
 			break
@@ -140,15 +158,79 @@ func windowsAbsolutePathAsPOSIX(name string) (string, bool) {
 	}
 	switch {
 	case isWindowsDriveAbsolutePath(name):
-		name = name[2:]
+		volume, name = name[:2], name[2:]
 	case strings.HasPrefix(name, "//"):
 		parts := strings.SplitN(name[2:], "/", 3)
 		if len(parts) != 3 || parts[0] == "" || parts[1] == "" {
-			return "", false
+			return "", "", false, false
 		}
-		name = "/" + parts[2]
+		volume, name = "//"+parts[0]+"/"+parts[1], "/"+parts[2]
 	default:
+		return "", "", false, false
+	}
+	return strings.ToLower(volume), strings.ToLower(name), verbatim, true
+}
+
+// windowsResolvedPath returns a Windows absolute path as Windows resolves it,
+// read as text and never opened: its volume (windowsAbsolutePathParts) and
+// its cleaned POSIX form on that volume, both in lower case. A . or ..
+// segment is resolved as Windows resolves it, except under \\?\ or \\.\,
+// where the name goes to the file system as written, so such a path is
+// refused, as is one with an empty segment there. A segment that ends in a
+// dot or a space is refused too: Windows drops those, so "hooks." is
+// "hooks" and ".. " is "..". A refused path lies in no folder.
+func windowsResolvedPath(name string) (volume, posix string, ok bool) {
+	volume, posix, verbatim, ok := windowsAbsolutePathParts(name)
+	if !ok {
+		return "", "", false
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(posix, "/"), "/") {
+		switch {
+		case segment == "." || segment == "..":
+			if verbatim {
+				return "", "", false
+			}
+		case segment == "":
+			if verbatim && posix != "/" {
+				return "", "", false
+			}
+		case strings.HasSuffix(segment, ".") || strings.HasSuffix(segment, " "):
+			return "", "", false
+		}
+	}
+	return volume, path.Clean(posix), true
+}
+
+// windowsHookCommandInDir returns the path, relative to dir, of a hook
+// command's first word when that word is a Windows absolute path inside dir:
+// both resolved (windowsResolvedPath) and on the same volume, in any case and
+// with either separator. dir is a windowsResolvedPath volume and path.
+func windowsHookCommandInDir(command, volume, dir string) (string, bool) {
+	word, _, ok := windowsHookCommandWord(command)
+	if !ok {
 		return "", false
 	}
-	return strings.ToLower(name), true
+	wordVolume, wordPath, ok := windowsResolvedPath(word)
+	if !ok || wordVolume != volume {
+		return "", false
+	}
+	name, found := strings.CutPrefix(wordPath, strings.TrimSuffix(dir, "/")+"/")
+	return name, found && name != ""
+}
+
+// hookCommandInWindowsDir reports whether command's first word is a Windows
+// path inside dir, a Windows path too (windowsHookCommandInDir): on dir's
+// volume, after . and .. are resolved, in any case and with either
+// separator. On a Windows host the hooks dir is a backslash path, so the
+// hooks-dir claim never matched a handler there and Setup kept one the doctor
+// reported, then failed its final check (GAP-1981). The same folder on
+// another drive or share, or a path that leaves it through .., is the user's,
+// as in 1.0.10 (GAP-2116).
+func hookCommandInWindowsDir(command, dir string) bool {
+	volume, dirPath, ok := windowsResolvedPath(dir)
+	if !ok {
+		return false
+	}
+	_, found := windowsHookCommandInDir(command, volume, dirPath)
+	return found
 }

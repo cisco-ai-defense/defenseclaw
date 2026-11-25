@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -109,9 +110,14 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 	}
 	// Off Linux the Docker VM's kernel is checked in a local image: the
 	// base image, else an overlay image built on it. The doctor's Landlock
-	// row and sandbox run read the same probe (rel-1-0-10:GAP-1746).
+	// row and sandbox run read the same probe (rel-1-0-10:GAP-1746). It
+	// starts a container: one report asks it once, and the doctor's last
+	// line reads that answer (doctorRunRefusal), not a second probe that
+	// also counts against the Python and TUI doctor's 90 s
+	// (rel-1-0-10:GAP-1758).
 	d.ProbeImages = a.harnessImageTags()
-	d.DockerVMLandlockABI = a.DockerVMLandlock
+	a.doctorLandlock = landlockOnce(a.DockerVMLandlock)
+	d.DockerVMLandlockABI = a.doctorLandlock
 	return d
 }
 
@@ -834,7 +840,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		switch {
 		case serr != nil && managed:
 			c.Status, c.Detail = openshell.StatusFail, "your sandbox service does not answer: "+managedDaemonError(serr)
-			c.Fix = &openshell.Fix{Summary: managedServiceFix}
+			c.Fix = &openshell.Fix{Summary: managedServiceFix()}
 		case serr != nil:
 			c.Status, c.Detail = openshell.StatusFail, apiError(serr).Error()
 			c.Fix = &openshell.Fix{Summary: "start the daemon", Command: "defenseclaw-gateway start"}
@@ -912,7 +918,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 	} else {
 		c.Status, c.Detail = openshell.StatusFail, err.Error()
 		if managed {
-			c.Fix = &openshell.Fix{Summary: managedServiceFix}
+			c.Fix = &openshell.Fix{Summary: managedServiceFix()}
 		}
 	}
 	p.check = c
@@ -937,8 +943,24 @@ func dockerGroupMissingRow(managed bool) (openshell.CheckStatus, string, *opensh
 // managedServiceFix is the way on when a managed computer's sandbox service
 // does not answer: the organization installs it, and every sandbox command
 // starts it.
-const managedServiceFix = "your organization installs this service and every sandbox command starts it: if it still does not answer, " +
-	sandboxapi.RequestAccessFallback + " with this output"
+//
+// Only the launcher (`defenseclaw`, the managed symlink to
+// defenseclaw-gateway) starts the service: the same sandbox command run as
+// defenseclaw-gateway, by its path, does not, and it said every sandbox
+// command starts it (rel-1-0-10:GAP-1937).
+func managedServiceFix() string {
+	if LauncherStartsService {
+		return "your organization installs this service and every sandbox command starts it: if it still does not answer, " +
+			sandboxapi.RequestAccessFallback + " with this output"
+	}
+	return "your organization installs this service, and only the `defenseclaw sandbox` commands start it: " +
+		"run this as `defenseclaw sandbox …`; if it still does not answer, " + sandboxapi.RequestAccessFallback + " with this output"
+}
+
+// LauncherStartsService is set by the managed launcher, whose sandbox
+// commands start the account's sandbox service (internal/cli
+// launcherSandboxPreRun); managedServiceFix says so only then.
+var LauncherStartsService bool
 
 // managedDaemonError is why a managed computer's sandbox service did not
 // answer, without the HTTP request the client made (`Get "http://…": `).
@@ -1419,7 +1441,26 @@ func (a *App) doctorRunRefusal(ctx context.Context, rep *openshell.DoctorReport)
 	if rep.Driver != openshell.DriverDocker {
 		return nil
 	}
-	return a.dockerDesktopRefusal(ctx, openshell.Driver{Name: rep.Driver}, nil)
+	probe := a.doctorLandlock
+	if probe == nil {
+		probe = a.DockerVMLandlock
+	}
+	return a.dockerDesktopRefusal(ctx, openshell.Driver{Name: rep.Driver}, nil, probe)
+}
+
+// landlockOnce is probe asked at most once: later calls get the first
+// answer.
+func landlockOnce(probe func(context.Context) (int, string, error)) func(context.Context) (int, string, error) {
+	var (
+		once   sync.Once
+		abi    int
+		kernel string
+		err    error
+	)
+	return func(ctx context.Context) (int, string, error) {
+		once.Do(func() { abi, kernel, err = probe(ctx) })
+		return abi, kernel, err
+	}
 }
 
 // printDoctor prints the checks and the verdict; refusal is what sandbox

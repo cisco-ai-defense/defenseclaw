@@ -129,6 +129,12 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	connectorName := strings.ToLower(strings.TrimSpace(req.ConnectorName))
 	if actor, ok := substrateActorFrom(ctx); ok && connectorName != "" {
 		reg, _ := substrateRegistrationFrom(ctx)
+		// GAP-0514: the identity is the registered connector's, not the one
+		// the request names (the actor route already refuses a mismatch,
+		// but the identity must not depend on that).
+		if registered := strings.ToLower(strings.TrimSpace(reg.Connector)); registered != "" {
+			connectorName = sandboxauth.CanonicalConnector(registered)
+		}
 		return substrateAgentIdentityFacts(actor, reg, connectorName)
 	}
 	user := hookAgentIdentityUser(ctx)

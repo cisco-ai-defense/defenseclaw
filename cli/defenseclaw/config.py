@@ -2275,6 +2275,7 @@ class SandboxAdminConfig:
     idle_suspend_after: str = ""  # Go duration, >= 1m (the shortest wins)
     idle_suspend_tasks: bool | None = None  # true opts --task runs into idle suspend (true wins)
     unattended_asks: str = ""  # deny | queue (deny wins)
+    git_push: str = ""  # allow | ask | deny (deny wins; unset follows substrate.git.push_branch)
     ask_timeout: str = ""  # Go duration, 1m to 24h (the shortest wins)
     actor_secrets: list[str] | None = None  # exposed values (unset = none)
     # The egress ask keys (Go sandbox_ask_keys.go, GAP-0171): allowed hosts
@@ -2313,6 +2314,7 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "actor_secrets",
     "ask_hosts",
     "url_rules",
+    "git_push",
 )
 
 # The Agent Substrate floor keys, refused in openshell.admin (Go
@@ -2326,6 +2328,7 @@ _SANDBOX_SUBSTRATE_ONLY_KEYS = (
     "actor_secrets",
     "ask_hosts",
     "url_rules",
+    "git_push",
 )
 
 
@@ -4034,7 +4037,11 @@ def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str 
     for index, name in enumerate(runtimes if isinstance(runtimes, list) else []):
         if name not in ("openshell", "substrate"):
             return f"{prefix}.runtimes[{index}]: {_go_quote(name)} must be openshell or substrate"
-    for key, allowed in (("sandbox_class", ("gvisor", "microvm")), ("unattended_asks", ("deny", "queue"))):
+    for key, allowed in (
+        ("sandbox_class", ("gvisor", "microvm")),
+        ("unattended_asks", ("deny", "queue")),
+        ("git_push", ("allow", "ask", "deny")),
+    ):
         error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
         if error:
             return error
@@ -4507,6 +4514,14 @@ def _default_notifications_enabled() -> bool:
 
 
 @dataclass
+class NotificationsSubstrateConfig:
+    """``notifications.substrate`` (mirrors Go ``NotificationsSubstrateConfig``)."""
+
+    asks: bool = True
+    task_end: bool = True
+
+
+@dataclass
 class NotificationsConfig:
     """User-session OS notifications. Mirrors internal/config.NotificationsConfig.
 
@@ -4538,6 +4553,9 @@ class NotificationsConfig:
     # YAML round-trips through both ends without translation.
     dedup_window: str = "30s"
     max_per_minute: int = 12
+    # ``notifications.substrate``: ``substrate watch`` and the attached
+    # launcher (B3.6). Both on by default; still need ``enabled``.
+    substrate: NotificationsSubstrateConfig = field(default_factory=lambda: NotificationsSubstrateConfig())
 
 
 @dataclass
@@ -4640,6 +4658,22 @@ class SubstrateWorkloadOIDCConfig:
 
 
 @dataclass
+class SubstrateRevocationConfig:
+    """substrate.identity.revocation (mirror of Go SubstrateRevocationConfig).
+
+    enabled None is the default (on); managed_enterprise may not turn it
+    off. Durations are Go duration strings; "" is the default (5s, and for
+    max_stale 60s or 2 x sync_interval, whichever is longer). max_stale is
+    at least 2 x sync_interval; the Go config validation refuses it
+    otherwise. max_tokens_per_person None is the default (64)."""
+
+    enabled: bool | None = None
+    sync_interval: str = ""
+    max_stale: str = ""
+    max_tokens_per_person: int | None = None
+
+
+@dataclass
 class SubstrateIdentityConfig:
     issuer: str = ""
     audience: str = ""
@@ -4654,6 +4688,8 @@ class SubstrateIdentityConfig:
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
     # Groups whose members are Substrate administrators (GAP-0191).
     admin_groups: list[str] = field(default_factory=list)
+    # Ended sign-ins (B5.1): logout, logout --all, admin revoke.
+    revocation: SubstrateRevocationConfig = field(default_factory=SubstrateRevocationConfig)
     # False turns the Kubernetes sign-in off (None = on, GAP-0939).
     kube_sign_in: bool | None = None
 
@@ -4665,10 +4701,72 @@ class SubstrateServicesConfig:
 
 
 @dataclass
+class SubstrateUploadScanConfig:
+    # Secret scan of a project copy before upload (B1): max_file_bytes
+    # (8 MiB), time_budget (120s), secret_action replace or hold_back (the
+    # admin-off switch), placeholder_form token or env.
+    max_file_bytes: int | None = None
+    time_budget: str = ""
+    secret_action: str = ""
+    placeholder_form: str = ""
+
+
+@dataclass
+class SubstrateLauncherConfig:
+    # ask (default), on or off: keys typed while a launcher's terminal link
+    # is down (B3.1); a launcher flag only tightens it.
+    key_replay: str = ""
+    upload_scan: SubstrateUploadScanConfig = field(default_factory=lambda: SubstrateUploadScanConfig())
+
+
+@dataclass
+class SubstrateFilesConfig:
+    # Admin switches of substrate push and sync --watch; None means on.
+    push: bool | None = None
+    sync: bool | None = None
+
+
+@dataclass
+class SubstrateGitConfig:
+    # How agents reach private repositories (B2 2.5). https_rewrite is a
+    # list of {"from": ..., "to": ...} pairs added to the rules every actor
+    # image bakes in (None means the built-in default of the three SaaS
+    # hosts); a "to" must end in "/". submodules and lfs: None means on.
+    https_rewrite: list[dict[str, str]] | None = None
+    submodules: bool | None = None
+    lfs: bool | None = None
+    # allow | ask | deny ("" means ask): pull --push-branch (B2 2.4).
+    push_branch: str = ""
+
+
+@dataclass
 class SubstrateUnattendedConfig:
     asks: str = ""
     ask_timeout: str = ""
     telemetry_sampling: float | None = None
+
+
+@dataclass
+class SubstratePortForwardConfig:
+    # auto (default: on), on or off (the admin switch).
+    enabled: str = ""
+    ports: str = ""  # "1024-65535" (default) or "3000,8000-8999"; never below 1024 or the relay port 8080
+    max_streams: int | None = None  # open forwarded connections per actor on each gateway replica; None = 32
+
+
+@dataclass
+class SubstrateMCPBridgeConfig:
+    # auto (default: on in open source, off in managed), on or off.
+    enabled: str = ""
+    max_servers: int | None = None  # bridged servers per actor on each gateway replica; None = 4
+    message_max_bytes: int | None = None  # a bigger JSON-RPC message is refused; None = 1 MiB
+
+
+@dataclass
+class SubstrateInteractiveConfig:
+    port_forward: SubstratePortForwardConfig = field(default_factory=SubstratePortForwardConfig)
+    mcp_bridge: SubstrateMCPBridgeConfig = field(default_factory=SubstrateMCPBridgeConfig)
+    idle_close: str = ""  # Go duration, 1m to 24h; "" = 30m
 
 
 @dataclass
@@ -4761,6 +4859,9 @@ class SubstrateEgressConfig:
     # None = every ecosystem pack (Go nil); [] = none.
     ecosystem_packs: list[str] | None = None
     registries: list[str] = field(default_factory=list)
+    # Hosts added to the built-in echo hosts: no secret is added there
+    # unless the entry sets inject.allow_echo (Go NoSwapHosts).
+    no_swap_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4797,6 +4898,8 @@ class SubstrateSecretInject:
     header: str = ""
     prefix: str = ""
     placeholder: str = ""
+    # Lets the secret be added on a host that returns requests (Go AllowEcho).
+    allow_echo: bool = False
 
 
 @dataclass
@@ -4849,6 +4952,49 @@ class SubstrateBundlesConfig:
 
 
 @dataclass
+class SubstrateSelfServiceSecretsConfig:
+    """substrate.self_service_secrets (Go SubstrateSelfServiceSecretsConfig)."""
+
+    # bindings (default), values_only or off.
+    mode: str = ""
+    namespace: str = ""
+    provider: str = ""
+    max_per_person: int = 0
+    # ask (default) or refuse, for a host no template covers.
+    outside_templates: str = ""
+    ask_timeout: str = ""
+    allow_echo_bindings: bool = False
+
+
+@dataclass
+class SubstrateSecretTemplate:
+    """One substrate.secret_templates entry (Go SubstrateSecretTemplate)."""
+
+    name: str = ""
+    # None = unset (a built-in template keeps its hosts); [] = no host
+    # without an administrator. A save keeps the difference (Go MarshalYAML).
+    hosts: list[str] | None = None
+    header: str = ""
+    form: str = ""
+    basic_user: str = ""
+    profiles: list[str] = field(default_factory=list)
+    registry: str = ""
+
+
+@dataclass
+class SubstrateActivityConfig:
+    """``substrate.activity``: the agent state in ``substrate list`` and
+    ``status`` and the administrator's notification switch (mirrors Go
+    ``SubstrateActivityConfig``). ``status_window`` is how recent a model or
+    hook call must be to show "thinking" ("" = 20s, "0s" = off).
+    ``notifications`` is ``auto`` (the person's own ``notifications.substrate``
+    keys decide) or ``off`` (the administrator's switch)."""
+
+    status_window: str = ""
+    notifications: str = ""
+
+
+@dataclass
 class SubstrateSkillsScanConfig:
     # None = on (Go *bool); False is the admin-off switch.
     enabled: bool | None = None
@@ -4887,18 +5033,31 @@ class SubstrateConfig:
     # block (default) or alert: a request after a secret read at the egress
     # callout; the leader reads it (GAP-0250).
     chain_egress_action: str = ""
+    # auto (default), required or off: how the gateway reaches an actor's
+    # relay (TLS when the template's kit serves it).
+    relay_tls: str = ""
+    # auto (default), flag or refuse: a second relay certificate for an actor
+    # without proof of the live key (auto: refuse in managed, flag in OSS).
+    relay_cert_reissue: str = ""
     # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
     workspace_max_bytes: int | None = None
+    launcher: SubstrateLauncherConfig = field(default_factory=SubstrateLauncherConfig)
+    files: SubstrateFilesConfig = field(default_factory=SubstrateFilesConfig)
+    git: SubstrateGitConfig = field(default_factory=SubstrateGitConfig)
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
+    interactive: SubstrateInteractiveConfig = field(default_factory=SubstrateInteractiveConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     usage: SubstrateUsageConfig = field(default_factory=SubstrateUsageConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
     egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
     secrets: list[SubstrateSecret] = field(default_factory=list)
+    self_service_secrets: SubstrateSelfServiceSecretsConfig = field(default_factory=SubstrateSelfServiceSecretsConfig)
+    secret_templates: list[SubstrateSecretTemplate] = field(default_factory=list)
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
     bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
+    activity: SubstrateActivityConfig = field(default_factory=SubstrateActivityConfig)
     skills: SubstrateSkillsConfig = field(default_factory=SubstrateSkillsConfig)
 
 
@@ -6320,7 +6479,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # touched (e.g. ``setup notifications`` flipping ``enabled:
     # true``).
     notifications = d.get("notifications")
-    if isinstance(notifications, dict) and notifications == _default_notifications_dict():
+    # Go omits notifications.substrate at its defaults (both on).
+    if isinstance(notifications, dict) and notifications.get("substrate") == {"asks": True, "task_end": True}:
+        notifications.pop("substrate")
+    if isinstance(notifications, dict) and notifications == _without_substrate(_default_notifications_dict()):
         d.pop("notifications", None)
     if d.get("asset_policy") == _default_asset_policy_dict():
         d.pop("asset_policy", None)
@@ -6887,6 +7049,10 @@ def _apply_v8_modeled_delta(
             target.pop(key, None)
         return
     target[key] = copy.deepcopy(current)
+
+
+def _without_substrate(d: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in d.items() if k != "substrate"}
 
 
 def _default_notifications_dict() -> dict[str, Any]:
@@ -8167,6 +8333,9 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     oidc = _mapping(ident.get("oidc"))
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))
+    interactive = _mapping(raw.get("interactive"))
+    port_forward = _mapping(interactive.get("port_forward"))
+    mcp_bridge = _mapping(interactive.get("mcp_bridge"))
     limits = _mapping(raw.get("rate_limits"))
     usage = _mapping(raw.get("usage"))
     extproc = _mapping(raw.get("extproc"))
@@ -8188,12 +8357,14 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                     header=str(inject.get("header", "") or ""),
                     prefix=str(inject.get("prefix", "") or ""),
                     placeholder=str(inject.get("placeholder", "") or ""),
+                    allow_echo=bool(inject.get("allow_echo", False)),
                 ),
                 scope=str(item.get("scope", "") or ""),
                 profiles=_string_list(item.get("profiles")),
             )
         )
     packs = egress.get("ecosystem_packs")
+    self_service = _mapping(raw.get("self_service_secrets"))
     return SubstrateConfig(
         enabled=raw.get("enabled") is True,
         api=SubstrateAPIConfig(
@@ -8230,6 +8401,14 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 for w in ident.get("workload_oidc") or []
             ],
             admin_groups=_string_list(ident.get("admin_groups")),
+            revocation=SubstrateRevocationConfig(
+                enabled=_optional_bool(_mapping(ident.get("revocation")).get("enabled")),
+                sync_interval=str(_mapping(ident.get("revocation")).get("sync_interval", "") or ""),
+                max_stale=str(_mapping(ident.get("revocation")).get("max_stale", "") or ""),
+                max_tokens_per_person=_optional_number(
+                    _mapping(ident.get("revocation")).get("max_tokens_per_person"), int
+                ),
+            ),
             kube_sign_in=_optional_bool(ident.get("kube_sign_in")),
         ),
         services=SubstrateServicesConfig(
@@ -8243,11 +8422,48 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
         idle_suspend_without_cpu=_optional_bool(raw.get("idle_suspend_without_cpu")),
         chain_egress_action=str(raw.get("chain_egress_action", "") or ""),
+        relay_tls=str(raw.get("relay_tls", "") or ""),
+        relay_cert_reissue=str(raw.get("relay_cert_reissue", "") or ""),
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
+        launcher=SubstrateLauncherConfig(
+            key_replay=str(_mapping(raw.get("launcher")).get("key_replay", "") or ""),
+            upload_scan=SubstrateUploadScanConfig(
+                max_file_bytes=_optional_number(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("max_file_bytes"), int
+                ),
+                time_budget=_duration_text(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("time_budget")
+                ),
+                secret_action=str(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("secret_action", "") or ""
+                ),
+                placeholder_form=str(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("placeholder_form", "") or ""
+                ),
+            ),
+        ),
+        files=SubstrateFilesConfig(
+            push=_optional_bool(_mapping(raw.get("files")).get("push")),
+            sync=_optional_bool(_mapping(raw.get("files")).get("sync")),
+        ),
+        git=_merge_substrate_git(_mapping(raw.get("git"))),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),
             telemetry_sampling=_optional_number(unattended.get("telemetry_sampling"), float),
+        ),
+        interactive=SubstrateInteractiveConfig(
+            port_forward=SubstratePortForwardConfig(
+                enabled=str(port_forward.get("enabled", "") or ""),
+                ports=str(port_forward.get("ports", "") or ""),
+                max_streams=_optional_number(port_forward.get("max_streams"), int),
+            ),
+            mcp_bridge=SubstrateMCPBridgeConfig(
+                enabled=str(mcp_bridge.get("enabled", "") or ""),
+                max_servers=_optional_number(mcp_bridge.get("max_servers"), int),
+                message_max_bytes=_optional_number(mcp_bridge.get("message_max_bytes"), int),
+            ),
+            idle_close=_duration_text(interactive.get("idle_close")),
         ),
         rate_limits=SubstrateRateLimitsConfig(
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
@@ -8270,11 +8486,62 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             allow=_string_list(egress.get("allow")),
             ecosystem_packs=None if packs is None else _string_list(packs),
             registries=_string_list(egress.get("registries")),
+            no_swap_hosts=_string_list(egress.get("no_swap_hosts")),
         ),
         secrets=secrets,
+        self_service_secrets=SubstrateSelfServiceSecretsConfig(
+            mode=str(self_service.get("mode", "") or ""),
+            namespace=str(self_service.get("namespace", "") or ""),
+            provider=str(self_service.get("provider", "") or ""),
+            max_per_person=_int_or_zero(self_service.get("max_per_person")),
+            outside_templates=str(self_service.get("outside_templates", "") or ""),
+            ask_timeout=str(self_service.get("ask_timeout", "") or ""),
+            allow_echo_bindings=bool(self_service.get("allow_echo_bindings", False)),
+        ),
+        secret_templates=[
+            SubstrateSecretTemplate(
+                name=str(t.get("name", "") or ""),
+                hosts=None if t.get("hosts") is None else _string_list(t.get("hosts")),
+                header=str(t.get("header", "") or ""),
+                form=str(t.get("form", "") or ""),
+                basic_user=str(t.get("basic_user", "") or ""),
+                profiles=_string_list(t.get("profiles")),
+                registry=str(t.get("registry", "") or ""),
+            )
+            for t in (_mapping(x) for x in (raw.get("secret_templates") or []))
+        ],
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
+        activity=_merge_substrate_activity(raw.get("activity")),
+    )
+
+
+def _merge_substrate_activity(raw: Any) -> SubstrateActivityConfig:
+    raw = _mapping(raw)
+    return SubstrateActivityConfig(
+        status_window=_duration_text(raw.get("status_window")),
+        notifications=str(raw.get("notifications", "") or ""),
+    )
+
+
+def _merge_substrate_git(raw: dict[str, Any]) -> SubstrateGitConfig:
+    rewrite = raw.get("https_rewrite")
+    pairs: list[dict[str, str]] | None = None
+    if isinstance(rewrite, list):
+        pairs = [
+            {"from": r["from"], "to": r["to"]}
+            for r in rewrite
+            if isinstance(r, dict)
+            and isinstance(r.get("from"), str)
+            and isinstance(r.get("to"), str)
+            and r["to"].endswith("/")
+        ]
+    return SubstrateGitConfig(
+        https_rewrite=pairs,
+        submodules=_optional_bool(raw.get("submodules")),
+        lfs=_optional_bool(raw.get("lfs")),
+        push_branch=raw.get("push_branch") if isinstance(raw.get("push_branch"), str) else "",
     )
 
 
@@ -8398,6 +8665,9 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if isinstance(admin, dict):
         _strip_unset_sandbox_keys(admin)
     packs = (block.get("egress") or {}).get("ecosystem_packs")
+    no_hosts = [
+        i for i, t in enumerate(block.get("secret_templates") or []) if isinstance(t, dict) and t.get("hosts") == []
+    ]
     pruned = _prune_unset(block)
     if pruned is _V8_MISSING:
         pruned = {}
@@ -8434,8 +8704,23 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
                 bundles.pop("oci")
         if not bundles:
             pruned.pop("bundles")
+    for sec in pruned.get("secrets") or []:
+        inject = sec.get("inject") if isinstance(sec, dict) else None
+        if isinstance(inject, dict) and inject.get("allow_echo") is False:  # Go omitempty
+            inject.pop("allow_echo")
+    self_service = pruned.get("self_service_secrets")
+    if isinstance(self_service, dict):
+        # Go omitempty: false and 0 are not written.
+        if self_service.get("allow_echo_bindings") is False:
+            self_service.pop("allow_echo_bindings")
+        if self_service.get("max_per_person") == 0:
+            self_service.pop("max_per_person")
+        if not self_service:
+            pruned.pop("self_service_secrets")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
+    for i in no_hosts:  # an explicit hosts: [] stays (Go MarshalYAML)
+        pruned["secret_templates"][i]["hosts"] = []
     d["substrate"] = pruned
 
 
@@ -8896,6 +9181,7 @@ def _merge_openshell_admin(raw: Any) -> SandboxAdminConfig:
         idle_suspend_after=_openshell_str(admin.get("idle_suspend_after")),
         idle_suspend_tasks=_openshell_optional_bool(admin.get("idle_suspend_tasks")),
         unattended_asks=_openshell_str(admin.get("unattended_asks")),
+        git_push=_openshell_str(admin.get("git_push")),
         ask_timeout=_openshell_str(admin.get("ask_timeout")),
         actor_secrets=_openshell_optional_str_list(admin.get("actor_secrets")),
         ask_hosts=_openshell_optional_str_list(admin.get("ask_hosts")),
@@ -9893,6 +10179,13 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
     if max_per_minute < 0:
         max_per_minute = defaults.max_per_minute
 
+    substrate_raw = raw.get("substrate")
+    substrate_raw = substrate_raw if isinstance(substrate_raw, dict) else {}
+    substrate = NotificationsSubstrateConfig(
+        asks=bool(substrate_raw.get("asks", defaults.substrate.asks)),
+        task_end=bool(substrate_raw.get("task_end", defaults.substrate.task_end)),
+    )
+
     return NotificationsConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         block_enforced=bool(raw.get("block_enforced", defaults.block_enforced)),
@@ -9901,6 +10194,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
         sources=sources,
         dedup_window=dedup_window,
         max_per_minute=max_per_minute,
+        substrate=substrate,
     )
 
 

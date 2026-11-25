@@ -607,9 +607,9 @@ func TestAttachmentEndsWithItsToken(t *testing.T) {
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 	now := time.Now()
-	tok := ec.token(t, claims(now, func(c map[string]any) { c["exp"] = now.Add(2 * time.Second).Unix() }), TokenType)
-	// The verifier allows 60 s of skew; the relay itself ends the
-	// attachment at the token's exp.
+	tok := ec.token(t, claims(now, func(c map[string]any) { c["exp"] = now.Add(4 * time.Second).Unix() }), TokenType)
+	// exp is 3 to 4 s away (whole seconds), so the dial is inside it with no
+	// skew grace (GAP-0569); the relay ends the attachment at that exp.
 	c, _, err := dialWS(t, srv.URL, tok, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -668,8 +668,9 @@ func TestSessionKeysNeedAnIssuer(t *testing.T) {
 	os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o644)
 	cfg := kit.DefaultConfig()
 	cfg.Relay.SessionKeys = map[string]string{"k1": p}
-	if _, err := NewVerifier(cfg); err == nil {
-		t.Fatal("session keys without an issuer accepted")
+	cfg.Relay.VerifyURL = kit.RelayVerifyURL(cfg.GatewayURL)
+	if _, err := NewVerifier(cfg); err == nil || !strings.Contains(err.Error(), "session_issuer") {
+		t.Fatalf("session keys without an issuer accepted: %v", err)
 	}
 	cfg.Relay.SessionIssuer = "https://defenseclaw-admin"
 	if v, err := NewVerifier(cfg); err != nil || v == nil {

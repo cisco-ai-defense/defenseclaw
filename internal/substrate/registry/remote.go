@@ -77,6 +77,9 @@ func Serve(srv *leader.Server, s Store) {
 	srv.HandleRead(leader.MethodRegistrationLookup, leader.Typed(func(ctx context.Context, in lookupIn) (Lookup, error) {
 		return LookupName(ctx, s, in.Atespace, in.Name)
 	}))
+	if rc, ok := s.(RelayCerts); ok {
+		serveRelayCerts(srv, rc)
+	}
 }
 
 // remoteTTL is how long a follower reuses a registration it read. A
@@ -158,6 +161,15 @@ func (s *Remote) GetLatest(ctx context.Context, atespace, uid string) (Registrat
 	delete(s.cache, atespace+"/"+uid)
 	s.mu.Unlock()
 	return s.Get(ctx, atespace, uid)
+}
+
+// Invalidate forgets the cached registration atespace/uid, so the next Get
+// reads the leader: a revoked approval stops at once on this replica
+// (GAP-0492).
+func (s *Remote) Invalidate(atespace, uid string) {
+	s.mu.Lock()
+	delete(s.cache, atespace+"/"+uid)
+	s.mu.Unlock()
 }
 
 // Put implements Store.

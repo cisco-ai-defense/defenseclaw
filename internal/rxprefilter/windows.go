@@ -236,6 +236,11 @@ func (t *Text) FindStringIndex(re *regexp.Regexp) []int {
 			return nil
 		}
 	}
+	if len(t.text) >= MinText {
+		if loc, ok := t.literalFind(re); ok {
+			return loc
+		}
+	}
 	return re.FindStringIndex(t.text)
 }
 
@@ -254,6 +259,11 @@ func (t *Text) FindAllStringIndex(re *regexp.Regexp) [][]int {
 					out = append(out, []int{lo + loc[0], lo + loc[1]})
 				}
 			}
+			return out
+		}
+	}
+	if len(t.text) >= MinText {
+		if out, ok := t.literalFindAll(re); ok {
 			return out
 		}
 	}

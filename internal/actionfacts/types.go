@@ -208,10 +208,11 @@ type Facts struct {
 	// projection did not. Private, in process only.
 	sendSources []sendSource
 	// credentialPaths is the private record of the secret-read chain
-	// (credentialPathRecord, substrate-1:GAP-0341). Only the parse of the
-	// call sets it; it is unexported, never serialized and printed as a
-	// pointer. Read it with CredentialPathReads.
-	credentialPaths *credentialPathRecord
+	// (credentialPathRecord, substrate-1:GAP-0341), resolved when first
+	// read (credentialPathResult). Only the parse of the call sets it; it is
+	// unexported, never serialized and printed as a pointer. Read it with
+	// CredentialPathReads.
+	credentialPaths *credentialPathResult
 	// kubeCut is the private record of a Kubernetes request cut
 	// (KubeRequestCaps).
 	kubeCut kubeCutRecord
@@ -1272,6 +1273,12 @@ type ArgumentFact struct {
 	// with "~" for it ("$HOME/.dotfiles" -> "~/.dotfiles"). It is empty when
 	// the action may rebind HOME.
 	homeSpelling string
+	// homeTilde is an unquoted "~" or "~/..." word with no pattern
+	// character: the home of the calling shell, which the parser keeps as a
+	// static glob (StaticGlob). Empty when the action may rebind HOME. Only
+	// a recursive search reads it, to walk the folder it names
+	// (substrate-1:GAP-0689).
+	homeTilde string
 }
 
 // HomeSpelling is the word with its leading $HOME written as "~", or "".

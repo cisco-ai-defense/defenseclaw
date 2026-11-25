@@ -67,6 +67,26 @@ substrate:
     # The namespace holding the Secrets egress injects into actors (never
     # this release's namespace: DefenseClaw's own Secrets stay here).
     secretsNamespace: defenseclaw-actor-secrets
+    # Create config.substrate.self_service_secrets.namespace (default
+    # defenseclaw-user-secrets, where people's own secret values live) when
+    # self-service secrets are on. false: the namespace already exists. The
+    # hooks grant the credential provider this namespace too.
+    createUserSecretsNamespace: true
+  # Launcher, file-copy and git switches for the whole cluster (Preview).
+  # Each fills its config.substrate key (key_replay, files.push, files.sync,
+  # git.https_rewrite, git.submodules, git.lfs, git.push_branch) unless
+  # config.substrate already sets it, so a raw config: override still works
+  # and wins. Unset adds nothing and the config defaults apply.
+  # launcher:
+  #   keyReplay: ask        # ask, on or off; off is the admin-off switch
+  # files:
+  #   push: true            # false refuses the upload of a push or a sync batch
+  #   sync: true            # false refuses sync batches (needs push too)
+  # git:
+  #   httpsRewrite: []      # [{from: "git@git.example.test:", to: "https://git.example.test/"}], at most 64
+  #   submodules: true      # run --clone also clones submodules
+  #   lfs: true             # run --clone fetches Git LFS files
+  #   pushBranch: ask       # allow, ask or deny; deny is the admin-off switch
 
 # Sets config.deployment_mode. managed_enterprise mounts config.yaml as one
 # read-only file and gives each pod a data volume owned by the gateway
@@ -90,17 +110,37 @@ config:
   observability:
     local:
       # The audit store size cap (MiB). Retention deletes the oldest audit
-      # history above it (never the last hour) and checks it every 10
-      # minutes, so audit.db stays inside homeSizeLimit (GAP-0402).
+      # history once the store passes nine tenths of it, down to seven tenths
+      # (the newest hour too when the cap needs it), and checks it every 30
+      # seconds, so audit.db stays inside homeSizeLimit (GAP-0402, GAP-0570).
       max_store_mb: 1024
   substrate:
     enabled: true
+    # The launchers' secret scan of a project copy before upload (Preview).
+    # secret_action replace (default) uploads a file with each credential
+    # replaced by a placeholder; hold_back keeps the whole file on the
+    # person's computer (the admin-off switch). Files over max_file_bytes,
+    # or past time_budget, are named in the run's report.
+    # launcher:
+    #   upload_scan:
+    #     max_file_bytes: 8388608
+    #     time_budget: 120s
+    #     secret_action: replace
+    #     placeholder_form: token
     supported_versions: ">=1.0.0 <1.1.0"
     identity:
       # Unique per cluster (E13): doctor fails when two clusters share one.
       issuer: https://idp.ate-system.svc
       audience: defenseclaw
       token_lifetime_seconds: 300
+      # Ended sign-ins (logout, logout --all, admin revoke). enabled is read
+      # at gateway start; managed_enterprise may not turn it off. max_stale
+      # is at least 2 x sync_interval (the gateway refuses to start otherwise).
+      revocation:
+        enabled: true
+        sync_interval: 5s
+        max_stale: 60s
+        max_tokens_per_person: 64
     launcher_atespaces: {}
     require_attested_templates: true
     default_sandbox_class: gvisor
@@ -151,6 +191,11 @@ gateway:
   # are built with public.pem): the relay-session hook creates it when
   # absent and never replaces it; uninstall keeps it.
   relaySessionSecret: defenseclaw-relay-session
+  # The relay CA Secret (ca.pem, ca-key.pem): the gateway signs each
+  # relay's TLS serving certificate with it and verifies the relay on
+  # attach. The relay-session hook creates it when absent and never
+  # replaces it; uninstall keeps it.
+  relayCASecret: defenseclaw-relay-ca
   llmCredentialsSecret: defenseclaw-llm
   # The chart's one cluster-wide grant: with no OIDC issuer (people sign in
   # with Kubernetes credentials, not on a managed install), a
@@ -187,10 +232,14 @@ gateway:
   # of this release, in their own container of the gateway pod with no Secret
   # mounts and no service-account token. It listens only on a 0600 unix
   # socket in a shared in-memory folder; it has no port and no Service.
-  # enabled: false renders no sidecar, and every skill an agent adds while it
-  # runs follows the fail mode (a managed install refuses it).
+  # Off by default: the sidecar's image is not published yet, and a default
+  # install must come up with the images the release publishes (GAP-1103).
+  # enabled: true needs gateway.skillScanner.image to name an image the
+  # cluster can pull. enabled: false renders no sidecar, and every skill an
+  # agent adds while it runs follows the fail mode (a managed install
+  # refuses it).
   skillScanner:
-    enabled: true
+    enabled: false
     image:
       repository: ghcr.io/cisco-ai-defense/defenseclaw-scanner
       # Defaults to the chart's appVersion; the release sets the digest.

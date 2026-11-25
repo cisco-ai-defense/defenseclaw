@@ -8,11 +8,13 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
@@ -117,5 +119,35 @@ func TestSubstrateSecretsAPI(t *testing.T) {
 		if strings.Contains(string(raw), "ghp_x") {
 			t.Fatalf("value in the list: %s", raw)
 		}
+	}
+}
+
+// TestB1SecretSetRemoveTypedAudit: a person's set and remove each write one
+// typed log.substrate.secret.changed record (B1 M-OBS-1) naming the secret,
+// never the value; the old stderr "set by" line is gone.
+func TestB1SecretSetRemoveTypedAudit(t *testing.T) {
+	store := &memSecrets{m: map[string][]byte{}}
+	var got []audit.SubstrateSecretChangeEvent
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
+		c.SecretStore = store
+		c.SecretAudit = func(_ context.Context, ev audit.SubstrateSecretChangeEvent) { got = append(got, ev) }
+		c.Profiles = func(identity.Person, string, string, bool) (string, string, error) { return "eng", "eng-web", nil }
+		c.Secrets = []config.SubstrateSecret{
+			{Name: "npm-token", Source: "ate-secret://k8s.io/default/dc-people/{person}-npm/token", Scope: "per_person",
+				Inject: config.SubstrateSecretInject{Hosts: []string{"registry.npmjs.org"}, Header: "Authorization"}, Profiles: []string{"eng*"}},
+		}
+	})
+	if rec := f.do(t, f.admin, http.MethodPut, "/api/v1/substrate/secrets/npm-token", "p-alice", `{"value":"npm_value_123"}`); rec.Code != 200 {
+		t.Fatalf("set %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, f.admin, http.MethodDelete, "/api/v1/substrate/secrets/npm-token", "p-alice", ""); rec.Code != 200 {
+		t.Fatalf("rm %d %s", rec.Code, rec.Body)
+	}
+	if len(got) != 2 || got[0].Operation != audit.SubstrateSecretSet || got[1].Operation != audit.SubstrateSecretRemoved ||
+		got[0].Name != "npm-token" || got[0].Failed || got[1].Failed {
+		t.Fatalf("audit records %+v", got)
+	}
+	if s := fmt.Sprintf("%+v", got); strings.Contains(s, "npm_value_123") {
+		t.Fatalf("value in audit record: %s", s)
 	}
 }

@@ -34,8 +34,9 @@ func TestGAP0183GatewayCanWriteThePersonSecrets(t *testing.T) {
 			bindings[ns] = o
 		}
 	}
-	if len(roles) != 2 || len(bindings) != 2 {
-		t.Fatalf("roles in %v, bindings in %v; want defenseclaw-actor-secrets and dc-people", keysOf(roles), keysOf(bindings))
+	// defenseclaw-user-secrets: the self-service values (B1, on by default).
+	if len(roles) != 3 || len(bindings) != 3 {
+		t.Fatalf("roles in %v, bindings in %v; want defenseclaw-actor-secrets, dc-people and defenseclaw-user-secrets", keysOf(roles), keysOf(bindings))
 	}
 	rules := map[string][]any{}
 	for ns, o := range roles {
@@ -54,7 +55,7 @@ func TestGAP0183GatewayCanWriteThePersonSecrets(t *testing.T) {
 				case "list", "watch", "delete", "*":
 					t.Errorf("%s: verb %v", ns, v)
 				case "get", "patch":
-					want := map[string][]any{"defenseclaw-actor-secrets": {"github-app", "pypi"}, "dc-people": nil}[ns]
+					want := map[string][]any{"defenseclaw-actor-secrets": {"github-app", "pypi"}, "dc-people": nil, "defenseclaw-user-secrets": nil}[ns]
 					if !slices.Equal(names, want) {
 						t.Errorf("%s: %v by names %v, want %v", ns, v, names, want)
 					}
@@ -74,8 +75,9 @@ func TestGAP0183GatewayCanWriteThePersonSecrets(t *testing.T) {
 			t.Errorf("%s: binding %v %v", ns, b["roleRef"], subjects)
 		}
 	}
-	// Without Kubernetes sources there is no such Role.
-	for _, o := range decodeObjects(t, renderChart(t, helm, "launcher")) {
+	// Without Kubernetes sources and with self-service secrets off there
+	// is no such Role.
+	for _, o := range decodeObjects(t, renderChart(t, helm, "launcher", "--set", "config.substrate.self_service_secrets.mode=off")) {
 		if o.Metadata["name"] == "defenseclaw-gateway-secrets" {
 			t.Fatalf("launcher render has %s %v", o.Kind, o.Metadata)
 		}

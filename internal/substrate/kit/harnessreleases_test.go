@@ -41,7 +41,9 @@ func TestHarnessReleasesAreInstallableAndCovered(t *testing.T) {
 		if _, err := SubstrateArtifacts(h.Provider, version, DefaultConfig()); err != nil {
 			t.Errorf("%s %s: render: %v", name, version, err)
 		}
-		if version == h.DefaultVersion {
+		// Devin serves only its current build, so its OpenShell default and
+		// its kit release are one pin (GAP-0651).
+		if version == h.DefaultVersion && name != "devin" {
 			t.Errorf("%s: %s is the OpenShell default, not a kit release", name, version)
 		}
 	}

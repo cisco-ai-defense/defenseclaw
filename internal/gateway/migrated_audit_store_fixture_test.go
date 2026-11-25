@@ -29,15 +29,9 @@ var migratedAuditTemplate struct {
 	err  error
 }
 
-// migratedAuditFiles are the files of a closed audit database; a WAL that a
-// close did not fold back in is copied with it.
-var migratedAuditFiles = []string{"audit.db", "audit.db-wal"}
-
-// newMigratedTestAuditStore opens an audit store at path from a copy of the
-// migrated template; its Init still runs every readiness check of a store
-// opened on an existing database. The caller owns path's directory.
-func newMigratedTestAuditStore(t testing.TB, path string) *audit.Store {
-	t.Helper()
+// migrateAuditTemplate makes the template once, in the temp folder of its
+// first call; it lives as long as the test process.
+func migrateAuditTemplate() error {
 	migratedAuditTemplate.once.Do(func() {
 		migratedAuditTemplate.dir, migratedAuditTemplate.err = os.MkdirTemp("", "gateway-audit-template-")
 		if migratedAuditTemplate.err != nil {
@@ -49,7 +43,19 @@ func newMigratedTestAuditStore(t testing.TB, path string) *audit.Store {
 		}
 		migratedAuditTemplate.err = err
 	})
-	if err := migratedAuditTemplate.err; err != nil {
+	return migratedAuditTemplate.err
+}
+
+// migratedAuditFiles are the files of a closed audit database; a WAL that a
+// close did not fold back in is copied with it.
+var migratedAuditFiles = []string{"audit.db", "audit.db-wal"}
+
+// newMigratedTestAuditStore opens an audit store at path from a copy of the
+// migrated template; its Init still runs every readiness check of a store
+// opened on an existing database. The caller owns path's directory.
+func newMigratedTestAuditStore(t testing.TB, path string) *audit.Store {
+	t.Helper()
+	if err := migrateAuditTemplate(); err != nil {
 		t.Fatalf("migrate the template audit database: %v", err)
 	}
 	for _, name := range migratedAuditFiles {

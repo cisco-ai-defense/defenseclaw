@@ -118,7 +118,7 @@ func TestGAP1030GlobWildcardNeverMatchesALeadingDot(t *testing.T) {
 		{"*", ".env", false}, {"?env", ".env", false}, {"[.]env", ".env", false}, {".*", ".env", true},
 		{".en?", ".env", true}, {`\.env`, ".env", true}, {"*", "id_rsa", true}, {"id_*", "id_rsa", true},
 	} {
-		if got := credentialGlobSegmentMatches(row.pattern, row.name); got != row.want {
+		if got := credentialGlobSegmentMatches(row.pattern, row.name, false); got != row.want {
 			t.Errorf("%q vs %q: %v, want %v", row.pattern, row.name, got, row.want)
 		}
 	}
@@ -265,7 +265,7 @@ func TestGAP1029ResolveStopsAtEachCapAndKeepsWhatItRead(t *testing.T) {
 	}{
 		{"candidates", credentialPathLimits{candidates: 2, work: 1 << 20, lookups: 64}, "sed -n p .env a.x b.x c.x", bounded.Items},
 		{"work", credentialPathLimits{candidates: 64, work: 16, lookups: 64}, "sed -n p .env " + strings.Repeat("a", 32) + ".x", bounded.Time},
-		{"lookups", credentialPathLimits{candidates: 64, work: 1 << 20, lookups: 1}, "sed -n p .env; grep -r KEY .", bounded.Paths},
+		{"lookups", credentialPathLimits{candidates: 64, work: 1 << 20, lookups: 1}, "sed -n p .env; grep -r KEY .; grep -r KEY src", bounded.Paths},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			record := analyze(row.limits, row.command)

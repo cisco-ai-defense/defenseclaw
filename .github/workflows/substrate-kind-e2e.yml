@@ -1,7 +1,8 @@
 name: Substrate Kind E2E
 
 # A scripted smoke test of DefenseClaw on Agent Substrate: a kind cluster with the Substrate
-# release images (gVisor only: hosted runners have no KVM), the DefenseClaw chart, a stub
+# release images (gVisor only: hosted runners have no KVM), the DefenseClaw chart with its gateway
+# and skill scanner sidecar images built from this checkout, a stub
 # agent, a policy written for its actor, a hook deny through the real gateway, default-deny
 # egress, and an uninstall that leaves nothing open. The script is test/substrate-e2e/run.sh;
 # run it on a dev cluster with E2E_CLUSTER_MODE=existing (see test/substrate-e2e/README.md).
@@ -15,6 +16,9 @@ on:
       - 'internal/substrate/**'
       - 'deploy/helm/defenseclaw-substrate/**'
       - 'deploy/images/actor-kit/**'
+      - 'deploy/images/gateway/**'
+      - 'deploy/images/scanner/**'
+      - 'packaging/unix/build-scanner-runtime.sh'
       - 'test/substrate-e2e/**'
       - '**/*substrate*.go'
       - 'schemas/substrate/**'
@@ -25,6 +29,9 @@ on:
       - 'internal/substrate/**'
       - 'deploy/helm/defenseclaw-substrate/**'
       - 'deploy/images/actor-kit/**'
+      - 'deploy/images/gateway/**'
+      - 'deploy/images/scanner/**'
+      - 'packaging/unix/build-scanner-runtime.sh'
       - 'test/substrate-e2e/**'
       - '**/*substrate*.go'
       - '.github/workflows/substrate-kind-e2e.yml'
@@ -69,6 +76,15 @@ jobs:
           go build -o "$RUNNER_TEMP/substrate-e2e/bin/ate-setup" ./cmd/ate-setup
           go build -o "$RUNNER_TEMP/substrate-e2e/bin/kubectl-ate" ./cmd/kubectl-ate
           echo "$RUNNER_TEMP/substrate-e2e/bin" >> "$GITHUB_PATH"
+      # The skill scanner sidecar image (gateway.skillScanner, on by default) is built from this checkout as the
+      # release builds it: its scanner runtime (packaging/unix/build-scanner-runtime.sh) needs uv, and the
+      # DefenseClaw wheel in it needs npm for the plugin build.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
       - name: Run the Substrate kind E2E
         env:
           E2E_CLUSTER_MODE: create

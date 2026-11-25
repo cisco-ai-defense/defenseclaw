@@ -130,6 +130,7 @@ type kubeItem struct {
 					Name  string `json:"name"`
 					Image string `json:"image"`
 				} `json:"containers"`
+				// The gateway's relay-ca volume names the relay CA Secret.
 				Volumes []struct {
 					Name   string `json:"name"`
 					Secret *struct {
@@ -227,6 +228,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	}
 
 	// Workloads, the lease, the store state and the config.
+	relayCASecret := setup.DefaultRelayCASecret
 	loads, err := kubeGetList(cctx, f, "get", "deployments,statefulsets", "-n", f.namespace)
 	if err != nil {
 		return o, r, &errClusterUnreachable{err}
@@ -241,12 +243,14 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 		switch {
 		case strings.HasSuffix(n, "gateway-leader"):
 			r.Health.Leader.Ready = rep.Ready > 0
+			r.Health.Leader.Desired = rep.Desired
 		case strings.HasSuffix(n, "controller"):
 			r.Health.Controller = fleet.Controller(rep)
 		case strings.HasSuffix(n, "callout"):
 			r.Health.Callout.Desired, r.Health.Callout.Ready = rep.Desired, rep.Ready
 		case strings.HasSuffix(n, "gateway"):
 			r.Health.Gateway = rep
+			relayCASecret = relayCASecretOf(it, relayCASecret)
 		}
 	}
 	if leases, err := kubeGetList(cctx, f, "get", "leases.coordination.k8s.io", "-n", f.namespace); err == nil {
@@ -305,6 +309,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 				Extproc  struct {
 					Enabled *bool `yaml:"enabled"`
 				} `yaml:"extproc"`
+				RelayTLS string `yaml:"relay_tls"`
 			} `yaml:"substrate"`
 			Guardrail struct {
 				Assignments []struct {
@@ -326,6 +331,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 			keysCfg.API.ServerName, keysCfg.Services.Actor = doc.Substrate.API.ServerName, doc.Substrate.Services.Actor
 			keysCfg.LauncherAtespaces = doc.Substrate.Launcher
 			o.ExtprocOff = doc.Substrate.Extproc.Enabled != nil && !*doc.Substrate.Extproc.Enabled
+			o.RelayTLS = config.SubstrateConfig{RelayTLS: doc.Substrate.RelayTLS}.EffectiveRelayTLS()
 			for _, a := range doc.Guardrail.Assignments {
 				if len(a.Match.Groups) > 0 {
 					r.AssignmentGroups = append(r.AssignmentGroups, fleet.ProfileGroups{Profile: a.Profile, Groups: a.Match.Groups})
@@ -380,6 +386,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	readInventory(cctx, &r, o.LauncherAtespaces, o.WritableAtespaces, cluster, apiErr)
 	readPolicyConflicts(cctx, f, &o)
 	readWorkerDrain(cctx, &o, cluster, apiErr)
+	readRelayCA(cctx, f, &o, relayCASecret)
 	if len(globs) > 0 {
 		// GAP-0506: the controller warns per actor; doctor and verify say
 		// it once per atespace, before anyone wonders why a profile does not
@@ -636,5 +643,30 @@ func printSubstrateFleet(w io.Writer, kind, cluster string, doc any, checks []fl
 		} else {
 			fmt.Fprintf(w, "not verified: %d check(s) failed\n", failed)
 		}
+	}
+}
+
+// relayCASecretOf is the Secret the gateway mounts as its relay-ca volume
+// (Helm gateway.relayCASecret), or def when the workload has none.
+func relayCASecretOf(it kubeItem, def string) string {
+	for _, v := range it.Spec.Template.Spec.Volumes {
+		if v.Name == "relay-ca" && v.Secret != nil && v.Secret.SecretName != "" {
+			return v.Secret.SecretName
+		}
+	}
+	return def
+}
+
+// readRelayCA fills o.RelayCA: whether the relay CA Secret exists (B3.5).
+// Only its name is read, never its data.
+func readRelayCA(ctx context.Context, f *substrateClusterFlags, o *fleet.Observed, secret string) {
+	ca := &fleet.RelayCA{Secret: secret}
+	o.RelayCA = ca
+	out, err := substrateKubectl(ctx, f, "get", "secret", secret, "-n", f.namespace, "-o", "name", "--ignore-not-found")
+	switch {
+	case err != nil:
+		ca.Note = firstLineOf(err.Error())
+	default:
+		ca.Present = strings.TrimSpace(string(out)) != ""
 	}
 }

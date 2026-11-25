@@ -26,6 +26,14 @@ Start with `defenseclaw substrate doctor`. It checks your computer and your sign
 
 ![defenseclaw substrate doctor when the cluster cannot be reached: ok for context and token_store (the sign-in is kept in a file because DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file), fail for admin_address (cannot connect, connection refused), skip for sign_in, ok for sign_in_server, fail for agent_entrance, then not ready: 2 problem(s) with one fix line for each failed check](/images/substrate/oss/doctor-not-ready.png)
 
+### My sign-in was ended (Preview)
+
+- `This sign-in was ended on the cluster: you signed out, or an administrator ended it (signin_ended). Sign in again: defenseclaw substrate login` (`401`): you signed out of this sign-in, `logout --all` ran on another device, or an administrator ended your sign-ins (`admin revoke`). Run `defenseclaw substrate login`: an end covers only the sign-ins made before it, so a new sign-in works. The exception is a Kubernetes sign-in whose token has no issue time (a static kubeconfig token, not a ServiceAccount token): after `logout --all` on another device or `admin revoke`, a new sign-in with the same token is refused too, until an administrator lifts the end (`admin revoke --lift`) or it lapses after about 24 hours. Your agents kept running; `connect` reaches them again.
+- `This sign-in has no issue time the cluster can use ... (signin_no_issue_time)` (`400`): `logout --all` with a Kubernetes token that has no issue time (a static token or a legacy Secret-based ServiceAccount token), or whose issue time is more than 60 s ahead of the cluster's clock (fix the clock of the machine that issued it). An end by time would also refuse your next sign-in with that token, so nothing was changed. Run `defenseclaw substrate logout` to end this one token; to stop the token everywhere, remove it at the cluster.
+- `The cluster can't check ended sign-ins right now (revocation_unavailable). Try again in a minute; if it stays, run defenseclaw substrate doctor.` (`503`): the gateway replica that answered has not read the list of ended sign-ins for longer than `substrate.identity.revocation.max_stale`, so it refuses every sign-in. `doctor` fails `sign_in` and `signin_revocation`. Administrators: check that the leader pod is running and that the gateway reaches it; the gateway's own doctor row `substrate.signin_revocation` says how old its list is.
+- `Signed out of NAME, but the cluster could not end this sign-in: ...`: the cluster could not be reached, or could not end it then, so you are signed out on this computer only, and a copy of the token works until the time printed. When the cluster answers again, sign in and run `defenseclaw substrate logout --all`, or ask an administrator to run `admin revoke --user`.
+- `This cluster's gateway can't end sign-ins (it is older than DefenseClaw 1.0.11, or ending sign-ins is off there)`: `logout` forgot the stored sign-in, but a copy of the token works until the time printed. For an administrator, `doctor` warns in `signin_revocation`. Upgrade the cluster, or set `substrate.identity.revocation.enabled: true` and restart the gateway.
+
 ### "no network route to the cluster address" on macOS
 
 The launcher's connection got "no route to host". If `nc` or `curl` reach the same address from the same session, macOS Local Network privacy refused the launcher: it gives that error to a program it has not allowed to reach a private address, and Apple's own tools are exempt. This happens when the launcher runs from a session with no terminal app to ask for it, for example under `launchctl asuser` or a background job. Run it once from Terminal and allow it, or allow the app you run it from in **System Settings > Privacy & Security > Local Network**.
@@ -38,9 +46,15 @@ the cluster has no free worker for a new agent right now; nothing was started. 2
 
 Substrate answers `503` with the reason `no_free_worker` when no worker has room for the actor. `run` starts nothing and says which of your agents hold workers. Delete the ones you don't need (`list` has a `STATE` column), or add workers to the pool. A finished `--task` agent gives its worker back about a minute after its task ends (it is suspended, not deleted), and a batch task waits up to 15 minutes for a free worker before it reports this. If none of your agents are running, other work holds the pool. A golden-snapshot build also takes a worker. Lowering a worker pool's replica count while it hosts a running actor crashes that actor. Revert it with `kubectl ate revert`.
 
-### A request to a new site hangs for several seconds after I approved it
+A `503` with the reason `resume_busy` ("the cluster is busy starting other agents") means the worker did not finish restoring the agent in time, usually because one node is restoring many microVM agents at once. Nothing is left behind; start it again, or start fewer at once (`--parallel` for a batch).
 
-After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain NAME` and check that your profile lets you approve (`allow_unblock`).
+### The agent retries its model calls for minutes while every gateway replica is down
+
+When no gateway replica is ready (all of them restarting, or the deployment scaled to 0), the agent's tool calls follow the hook fail mode and say so: for example `defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): the DefenseClaw gateway in the cluster is not available (status 503)`. Its model calls get a plain `503` from Substrate's network, with no DefenseClaw text, because no DefenseClaw process is there to answer them, and the agent retries them with a growing back-off (Claude Code shows its spinner) until a replica is back, about a minute after it is ready. Policies stay in force and nothing is let through. The launcher's attach goes through the gateway too: it stops with `lost the connection ... the agent keeps running`, and `defenseclaw substrate connect NAME` takes you back once the gateway is up. `defenseclaw substrate status --cluster` shows how many replicas are ready. Keep at least two gateway replicas (the chart's default, with a PodDisruptionBudget) so a node drain or a roll never takes them all (substrate-1:GAP-0464).
+
+### A request to a site that needs approval is refused before I answer
+
+DefenseClaw holds a request that needs your approval for about a second and a half: Substrate's egress gateway gives it 2 seconds to answer each request. If nobody has answered by then, the request is refused with `ask_pending`, and the agent is told to retry once you approve. The ask stays open on your terminal's last line and in `defenseclaw substrate approvals`. After you approve once, the agent's next try goes through and the one after it asks again; approve always to let every later try through. If a retry after your approval is still refused, run `defenseclaw substrate policy explain NAME` and check that your profile lets you approve (`allow_unblock`).
 
 ### "could not read the template's attestation", "not attested" or "names no agent connector" when I start an agent
 
@@ -74,12 +88,17 @@ An actor with no allow list has no network. The usual causes:
 - **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match, or its signing key was revoked. The controller's events say `untrusted_signer` or `no_attestation`, and the create path refuses with `sandbox.template_unverified`. Rebuild it with `defenseclaw substrate template build`, or `template verify`.
 - **The template is attested but its registry is private.** The controller and the gateway read the attestation from the registry and get HTTP 401, so the template is refused as `sandbox.template_unverified`. Give them a registry login: see [Attested templates in a private registry](/docs/substrate/eks#attested-templates-in-a-private-registry).
 - **The controller is down.** Existing actors keep their policy; new ones have none. Check `kubectl -n defenseclaw-system get deploy defenseclaw-controller`.
-- **The profile has no matching assignment.** You get `default_profile`. `policy explain NAME` shows which one.
+- **The profile has no matching assignment.** You get `default_profile`. `policy explain` (with no name) shows the profile you get, that it comes from `default_profile`, and which assignments did not select you and on which selector (`groups`, `users`, `connectors`, `workloads`, `agent`). An administrator also sees the profile of each of those assignments.
 - **Someone else made the actor.** An actor in a launcher atespace that DefenseClaw didn't create is removed from policy (`sandbox.foreign_actor`, `sandbox.policy.removed`).
+- **An allowed in-cluster service doesn't resolve or fails TLS.** Name it by its full name (`web.team.svc.cluster.local`, not `web.team.svc`) in the allow list and in the request: the actor's resolver does not use the cluster's search path. Over `https`, Substrate 1.0.0's egress verifies the service's certificate against public certificate authorities only, so a service with a private CA answers `503` `CERTIFICATE_VERIFY_FAILED`. Give it a publicly trusted certificate, serve it over `http`, or list it in `allow_passthrough_for` (no inspection there).
 
 ### An unattended run stopped on an ask
 
 Unattended runs deny asks by default. Either allow the site in the profile, or set `unattended_asks: queue` to hold the ask for up to `ask_timeout`, and answer with `defenseclaw substrate approvals`. When nobody answers, the agent is told: "Nobody answered the approval this host needs in time." If a person rejects it: "The owner denied the approval this host needs."
+
+### A secret I added is not used (Preview)
+
+If `secrets add` said the host is not covered by the template, an administrator must approve it first; see `defenseclaw substrate approvals`. `defenseclaw substrate secrets test NAME` checks that the value is stored, and `--agent AGENT` adds whether that agent's network policy carries it; the status and reason it prints say why a secret is not used (waiting on an administrator, denied, the ask expired, the binding expired, or the template no longer covers the host). If `secrets add` was refused with `secret_bindings_locked` or `secret_bindings_off`, your administrator set `substrate.self_service_secrets.mode` to `values_only` or `off`. For a `Basic` template, store only the token, not `user:token`: the cluster adds the user name.
 
 ### An actor is marked `policy_conflict`
 
@@ -91,11 +110,22 @@ Substrate's egress gateway caches an actor's identity token by the actor's name.
 
 ### A request is refused with `chain_unchecked`
 
-The callout checks each request against the actor's earlier tool calls (a secret read, then a send). If the check can't answer (the gateway leader is down or slow), the answer depends on the request and the policy: an unattended actor, and any actor on a managed install, is refused with "DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress." and the request can be retried. On other installs a GET or HEAD request goes through and an alert records `chain_unchecked`, but a request that can carry data out (one with a body, or any method other than GET and HEAD) is refused in every mode, retryable, with a message that names the cause, for example "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached or failed the check, so DefenseClaw can't tell whether it read a secret earlier." A laptop's chain check needs no cluster, so it never lets such a request through unchecked, and neither does the callout. A check whose miss would refuse the request waits up to `substrate.extproc.chain.send_budget` (250 ms by default): such a request, any request of an unattended actor, on a managed install or with `failure_mode: closed`, and a request that reuses the actor's cached registration, which only the leader's answer confirms. Only an attended GET or HEAD whose miss goes through with an alert waits `check_budget` (20 ms). So a slow but healthy leader still answers HTTPS `git clone`, `git fetch` and `git push` (a GET of `info/refs`, then a POST to `git-upload-pack` or `git-receive-pack`). They are refused only when the leader is down or slower than that (an actor's checks wait for one of 8 slots within the same budget, so many parallel requests on a slow leader can miss it too), and git doesn't retry them: retry by hand, and if checks often miss the budget, raise `send_budget` (at most 500 ms; an ask on a slow leader then gets less of its `ask.hold`, since both fit in the callout's 1.8 s). Data an agent puts in a GET's URL or headers is alerted, not refused, while the check is missing. For 15 seconds after a new gateway leader answers its first check, the check counts as missing too, so that a tool call a gateway could not record during the outage (a secret read) reaches the leader before a send is let through. The reason `unrecorded_step` means something else: one of the actor's earlier tool calls could not be recorded in its chain window (the hook finding `SUBSTRATE-CHAIN-UNRECORDED` says why), so the check would see an incomplete window; it lasts for the chain's window (30 minutes of the actor's running time). While it lasts, sends (a body, or any method but GET and HEAD) are refused in every mode, and GET and HEAD follow the policy above. Retry first. If it keeps happening, check that the gateway leader is up (`kubectl -n defenseclaw-system get deploy defenseclaw-gateway-leader`) and not overloaded; `substrate.extproc.chain.check_budget` and `.send_budget` bound the wait.
+The callout checks each request against the actor's earlier tool calls (a secret read, then a send). If the check can't answer (the gateway leader is down or slow), the answer depends on the request and the policy: an unattended actor, and any actor on a managed install, is refused with "DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress." and the request can be retried. On other installs a GET or HEAD request goes through and an alert records `chain_unchecked`, but a request that can carry data out (one with a body, or any method other than GET and HEAD) is refused in every mode, retryable, with a message that names the cause, for example "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached or failed the check, so DefenseClaw can't tell whether it read a secret earlier." A laptop's chain check needs no cluster, so it never lets such a request through unchecked, and neither does the callout. A check whose miss would refuse the request waits up to `substrate.extproc.chain.send_budget` (250 ms by default): such a request, any request of an unattended actor, on a managed install or with `failure_mode: closed`, and a request that reuses the actor's cached registration, which only the leader's answer confirms. Only an attended GET or HEAD whose miss goes through with an alert waits `check_budget` (20 ms). So a slow but healthy leader still answers HTTPS `git clone`, `git fetch` and `git push` (a GET of `info/refs`, then a POST to `git-upload-pack` or `git-receive-pack`). They are refused only when the leader is down or slower than that (an actor's checks wait for one of 8 slots within the same budget, so many parallel requests on a slow leader can miss it too), and git doesn't retry them: retry by hand, and if checks often miss the budget, raise `send_budget` (at most 500 ms; an ask on a slow leader then gets less of its `ask.hold`, since both fit in the callout's 1.8 s). Data an agent puts in a GET's URL or headers is alerted, not refused, while the check is missing. For 15 seconds after a new gateway leader answers its first check, and never later than 30 seconds after it became the leader, the check counts as missing too, so that a tool call a gateway could not record during the outage (a secret read) reaches the leader before a send is let through. The reason `unrecorded_step` means something else: one of the actor's earlier tool calls could not be recorded in its chain window (the hook finding `SUBSTRATE-CHAIN-UNRECORDED` says why), so the check would see an incomplete window; it lasts for the chain's window (30 minutes of the actor's running time). While it lasts, sends (a body, or any method but GET and HEAD) are refused in every mode, and GET and HEAD follow the policy above. Retry first. If it keeps happening, check that the gateway leader is up (`kubectl -n defenseclaw-system get deploy defenseclaw-gateway-leader`) and not overloaded; `substrate.extproc.chain.check_budget` and `.send_budget` bound the wait.
 
 ### `setup` says another callout is registered
 
 Substrate has one slot for an egress callout. DefenseClaw refuses to replace another, because that would turn off someone's checks. Chain them on the other callout's side, or remove it deliberately. `setup --dry-run` shows what is registered.
+
+The slot can also change after DefenseClaw is set up, for example when someone runs `ate-setup deploy` with a file that names another callout. The controller reads the slot from the live atenet-egress config every 5 seconds (the chart lets its ServiceAccount, and no other, get that one ConfigMap in the Substrate namespace), so a stale install file doesn't hide it. The gateway gets the controller's result through the leader. When the slot isn't DefenseClaw's:
+
+- The controller logs one `sandbox.callout_replaced` alert that names what holds the slot, and `sandbox.callout_restored` when the DefenseClaw callout is back.
+- With the default fail mode (closed, and always on a managed install and for `--task` and `--batch` runs), every managed agent keeps only the DefenseClaw rule: hooks and model calls still work, every other host is refused. Each agent's policy record says `deny-only (callout_replaced: ...)`. The full policy comes back on the first pass after the DefenseClaw callout is registered again.
+- With `substrate.extproc.failure_mode: open`, interactive agents keep their egress policies and the alert lists the checks that don't run: ask hosts, URL rules, egress feeds, secret and DLP scans, body and MCP inspection, and tool chains at egress.
+- With `substrate.extproc.enabled: false`, policies don't change; the record is a warning.
+
+People see it too. `defenseclaw substrate doctor` fails its `egress_callout` row, and `defenseclaw substrate status`, for the account and for one agent, prints an `Egress:` line. Both say that another egress callout is in place, which protections are off (ask hosts, URL rules, egress feeds, secret and DLP scans, body and MCP inspection, tool chains at egress), and what the fail mode does. DefenseClaw's hooks and Substrate's default-deny egress still apply. The gateway's `/api/v1/substrate/info` carries it as `egress_callout` without naming the other callout; the administrators' gateway doctor row `substrate.egress_callout` names it.
+
+To fix it, register the DefenseClaw callout again: `defenseclaw substrate setup --install-file FILE`, then `ate-setup deploy` with that file. If the slot can't be read (for example a chart older than 1.0.10 without the grant, or the get is forbidden), the controller warns once, a replacement it already saw stays in force, and doctor says it cannot verify the egress callout; it never reports the DefenseClaw callout without reading it. The gateway says the same when the controller's last result is more than 15 seconds old. Administrators can still check the slot with their own kubeconfig: `defenseclaw substrate doctor --cluster --install-file FILE`.
 
 ### `verify` says the Substrate version is outside the tested range
 
@@ -197,6 +227,18 @@ The cluster gateway did not answer some hook calls of a `--task` run, so those c
 
 A worker pool roll is in progress: some workers are draining and actors still run on them. The controller suspends the actors DefenseClaw manages and resumes them on another worker (the controller log has `sandbox.worker_drain.suspend` and `sandbox.worker_drain.resume`); if no worker has room yet it says so and tries again on each pass, and `connect` also resumes the actor. Suspend other actors yourself before the old workers stop. An actor that crashed anyway needs `kubectl ate revert actor NAME -a ATESPACE` (an administrator), then `connect`. If the controller says it cannot list Substrate workers, it needs the global viewer grant that the chart bootstrap gives it.
 
+### Attach fails after a relay restart: `reissue_refused` (Preview)
+
+The gateway refused a new serving certificate for the agent's relay: the relay asked without proof of the key of its live certificate, and `substrate.relay_cert_reissue` is `refuse` (the default in managed enterprise installs). Each refusal writes a HIGH audit row `substrate.relay.cert_refused` with reason `reissue_refused`. A relay asks this way when it restarted inside a running agent and lost its key, and so does someone who took the agent's credential. If you know the relay restarted, the owner or an administrator runs `defenseclaw substrate recover NAME`: it clears the record, also for an agent that is running, writes a HIGH audit row `substrate.relay.cert_record_cleared`, and the relay's next request gets a certificate. No certificate issued before the recover renews or is accepted at attach. The first connect after the recover can still fail while the relay serves its old certificate: that refusal makes it ask for a new one, so connect again (a relay asks at most once a minute). For a crashed agent the same command also brings it back to its last snapshot, as `defenseclaw substrate undo` does.
+
+The same refusal follows an emergency relay CA rotation (the old CA dropped from `ca.pem`): the row then says `previous_ca: dropped`, and the relay's renewal before it was refused with reason `renewal_ca_dropped`. Run `defenseclaw substrate recover NAME` for each running agent (`defenseclaw substrate list` shows them), or suspend and resume them. Under `flag` the relay gets a certificate from the new CA by itself, with a HIGH audit row.
+
+A renewal refused with reason `renewal_not_live` proved a certificate that is not the agent's live one: someone else got a certificate for that agent, or it is one from before a recover. The relay then asks without proof, as above. A relay whose renewal reply was lost (a timeout, or a leader change) asks again with the same proof: that is accepted, with `retry: true` in the audit row, and attach takes the old certificate until the relay serves the new one or the old one expires. One retry is normal. A second and later retry with the same proof while the old certificate is still taken is still accepted, but writes a HIGH audit row `substrate.relay.cert_retry_repeated`: look for a second holder of that relay's key. Under `flag`, attach takes a certificate that is not the live one with a HIGH audit row `substrate.relay.cert_not_live`; when the gateway cannot reach the leader's record, it takes any certificate the relay CA signed and writes a WARN audit row `substrate.relay.cert_record_unavailable`. A request that answers `relay_cert_record_unavailable` means the gateway could not reach the leader's record; the relay asks again after a minute at the earliest. Deleting the agent and creating a new one also works: a new agent starts with no certificate.
+
+### `verify` reports `relay_tls` (Preview)
+
+The check reads `substrate.relay_tls` and whether the relay CA Secret exists (the name the gateway mounts, `defenseclaw-relay-ca` unless `gateway.relayCASecret` sets another). It warns when the Secret is missing: relays on templates built with DefenseClaw 1.0.11 or later then get no serving certificate, and attaching to them fails with `relay_ca_missing`. With `relay_tls: required` the same state fails, because nothing can be attached. Run `setup` again (its relay-session step creates the Secret), then restart the gateway. With `relay_tls: off` the check passes without reading the Secret.
+
 ### Hooks fail with "gateway unreachable"
 
 The hook retries once, then follows the fail mode. Check that the `defenseclaw-actor` Service has ready endpoints, that the NetworkPolicy admits Substrate's egress gateway, and that the agent's settings use the full Service name (`defenseclaw-actor.defenseclaw-system.svc.cluster.local`): an actor resolves only the names in its allow list. Some CNIs apply a NetworkPolicy a moment after a pod starts.
@@ -231,7 +273,7 @@ The callout's refusal is a JSON body with `error: egress_blocked`, a `message` t
 
 The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it.
 
-If a tool's output shows the real value instead, the secret is bound to a host that echoes requests (for example `httpbin.org` or `postman-echo.com`): egress swapped it in and the service sent it back. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `inject.hosts` ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)) and rotate the value; the gateway's start-up warning names every secret bound to a well-known echo host. See [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
+If a tool's output shows the real value instead, the secret is bound to a host that echoes requests (for example `httpbin.org` or `postman-echo.com`): egress swapped it in and the service sent it back. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `inject.hosts` ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)) and rotate the value; on a well-known echo host or one in `substrate.egress.no_swap_hosts` the cluster adds no secret at all unless the entry sets `inject.allow_echo: true`, and `substrate doctor --cluster` names those entries. See [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
 
 ### Credential injection returns 403 "atespace not permitted"
 
@@ -267,7 +309,7 @@ The gateway logs `substrate: skill scanner is not running` at start, and `defens
 
 ### Pull says there is no record of the folder
 
-`pull` compares the agent's work with the folder you sent. It can only do that from the computer you ran `run` on. From another computer, `connect` to the agent and `git push` from inside it.
+On a computer that did not run `run`, `pull` compares the agent's work with the last commit of the git checkout it runs in. This message means the folder is not a git checkout with a commit, or the agent has no folder of the same name. Run `pull` in a checkout of the folder you sent, or on the computer you ran `run` on. You can also `connect` to the agent, commit its work and `git push` it from inside the agent, then `git pull` it where you are. A copy of the folder inside the agent can't stand in for the record: the agent can rewrite it.
 
 ### The gateway pods restart with `observability v8 bootstrap failed`
 
@@ -286,6 +328,67 @@ This section is for a coding agent, or an LLM working for one, that hits a Defen
 - **Your terminal is detached.** That is normal. The run continues. Write results to the repository or the task's output, not to your terminal.
 - **You were suspended and resumed.** Your clock may have jumped and your connections may have been reset. Check the time, reopen connections, and don't assume a long-running command is still running.
 - **Never** try to read or change the hook settings, the root-owned managed settings or the kit. They are outside your user, and changes are reported.
+
+
+## Upload exceeds the workspace limit (Preview)
+
+The launcher shows the staged size and the largest top-level directories before it creates an actor.
+Use `--exclude 'data/**'` to omit a large directory, or `--clone REPO_URL` to start from Git.
+Administrators set the cap with `substrate.workspace_max_bytes`. A run can lower it with
+`--max-upload-mb`. Rebuild an older actor template to use a cluster limit over 1 GiB.
+
+## Push sends nothing (Preview)
+
+`The agent also changed 2 of these files since your last send` means both of you edited those files. Nothing was sent.
+Run `push` again with `--mine` to send your version (the agent's stays in the restore point the push saves),
+`--theirs` to keep the agent's and send the rest, or `--patch-out FILE` to keep the agent's and get your change as a patch.
+The same edit on both sides is not a conflict.
+A listed file with a note such as `the agent has a file or link at out; sending yours removes it` means your version needs that agent file or folder gone.
+`--mine` then sends nothing and says so; add `--replace` to send yours anyway (the agent's stays in the restore point).
+
+`another push or sync is writing into this agent` means another push or sync was writing at the same time; try again.
+A push that was interrupted while writing can leave its lock behind; it clears after 15 minutes.
+
+`your administrator turned off sending more files into a running agent` means `substrate.files.push` is `false`.
+`the copy in the agent moved` means another computer sent to it or the copy was replaced: pull first, or run again.
+An agent started from Windows has no push or sync yet; run it again to send a new copy.
+
+## Sync skips a file or stops (Preview)
+
+`The agent also changed FILE; not synced` means the agent edited that file too. Sync keeps the agent's version and goes on with the rest; send yours with `push NAME --mine FILE` (or `--mine --replace FILE` when the message says yours removes an agent file or folder).
+`Held back: FILE (looks like a secret)` means the file matches the secret rules; send it once with `push NAME --unmask FILE`.
+`The agent is suspended; changes wait` means nothing is sent until the agent is back; sync does not wake it.
+`Sync paused: ... sent in the last hour` means sync sent four times the upload limit in an hour; changes wait. The check runs before each batch, so the last batch of the hour can go past it by up to one upload limit.
+`your administrator turned off syncing into a running agent` means `substrate.files.sync` or `substrate.files.push` is `false`.
+`The agent is gone; sync stopped` means the agent was deleted.
+On a very large folder each batch takes longer, because sync reads the whole folder again for each batch.
+`Sync no longer sees new folders` (macOS) means the folder now has more files to watch than macOS allows sync to hold open; changes in new folders go with the next batch something else starts. Restart sync, or ignore build output in `.gitignore`.
+Sync reads `.gitignore` when it starts; restart it after you change `.gitignore`.
+
+## Keys typed while disconnected (Preview)
+
+If the connection drops while you type, the launcher keeps those keys in memory and never sends them to a screen you cannot see.
+When it reconnects, the last line shows them, for example `7 keys typed while disconnected: "git sta". Enter sends them, Esc drops them.`
+Control keys show as `^X`. Any other key drops them and goes to the agent.
+
+Nothing is replayed after more than 4 KiB of input, an outage longer than 60 seconds, or `Ctrl-\` (the key that answers a DefenseClaw ask).
+The launcher then says how many characters to type again. Keys sent just before the connection dropped may already have reached the agent,
+so they are never replayed; the launcher says how many to check.
+
+Use `--key-replay on` to send them without asking, or `--key-replay off` to drop them. Administrators set `substrate.launcher.key_replay`;
+the flag can only tighten it.
+
+### `pull --push-branch` is refused (Preview)
+
+- **"branch ... already exists on origin"** or **"has commits the agent's work does not have"**: the push never forces. Only a branch you pushed from this computer with `--push-branch` moves forward. Pick a new branch name.
+- **"this computer has no record of the agent's origin"**: `--push-branch` pushes only to the origin recorded on the computer that ran `run` (the `--clone` address or your folder's origin). Run it there, or bring the work home with `--branch NAME` and push from your computer.
+- **"branch ... on origin changed after the review"**: someone created, moved or deleted the branch between the review and the push, so nothing was pushed. Run the same `pull --push-branch` again to review the branch as it is now.
+- **"the agent's checkout borrows objects from another store"**: the checkout uses `objects/info/alternates`, and the push carries only what the checkout holds itself. Bring the work home with `pull NAME --branch BRANCH` and push from your computer.
+- **"could not read the cluster's settings"**: the launcher could not read the cluster's settings, so it did not push. Check that you can reach the cluster, then run again.
+- **"your profile turned off pull --push-branch"** or **"this cluster turned off pull --push-branch"**: `git_push: deny` or `substrate.git.push_branch: deny`. They turn off this command only; an agent's own `git push` follows the egress rules. Bring the work home with `pull NAME --branch BRANCH` and push from your computer.
+- **"replaced your credentials with placeholders"** or **"credential placeholders (`DC_SECRET_<n>`)"**: a tracked file in the folder was sent with credentials replaced, or the agent's commits add a placeholder, so a push would put the placeholders upstream in place of your lines. Run `pull NAME --branch BRANCH` on the computer you sent it from, then push from there.
+- **"... refused the push"**: the credential the cluster binds to that host cannot write to the repository. Ask your administrator for one with write access, or push from your computer.
+- **"not pushed: the review flagged files"**: look at the flagged files, then run again with `--allow-flagged`.
 
 ## Usage and budgets (Preview)
 

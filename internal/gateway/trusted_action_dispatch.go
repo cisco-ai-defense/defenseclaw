@@ -311,6 +311,11 @@ type trustedActionRequest struct {
 	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
 	// that proof (loginGuessProvedFinding), so no other rule needs to run.
 	stateProofOnly bool
+	// unplacedStatement marks a simple command of a sandbox call that the
+	// walk placed in no folder (SimpleCommand.UnresolvedFolder): it is judged
+	// unplaced, as on the laptop, so the guest placement of the call alone
+	// reads it in the guest's directories (sandboxGuestPlacedInput).
+	unplacedStatement bool
 	// sendDestination marks the routing values of a message call, where its
 	// text is sent (ToolInspectRequest.sendDestination): the call is a send
 	// whatever the tool is named (trustedActionSendsMessage).
@@ -366,6 +371,32 @@ type trustedActionRequest struct {
 	// the authorized-keys proofs and the guest reading
 	// (sandboxGuestPlacedInput) read it, and only to add findings.
 	SandboxGuestCWD string
+	// guestKeyReadCommand is the shell command a Substrate actor's kit
+	// proved reads the actor's SSH private key in the actor's file system
+	// (substrateGuestClaims): the private-key read proof of a request that
+	// judges exactly that command holds (substrate-1 GAP-0471).
+	guestKeyReadCommand string
+	// guestProtectedWriteCommand is the shell command the kit's run of the
+	// laptop's protected-target decision (hookpaths.ActionCommandDecision)
+	// found writes a protected file in the actor's file system
+	// (trustedExistingAuthorizedKeysSymlinkWrite, substrate-1 GAP-0471).
+	guestProtectedWriteCommand string
+	// guestLinkTwin marks the twin of a file-tool call whose path arguments
+	// the kit resolved through a link (substrateGuestLinkTwinRequest).
+	guestLinkTwin bool
+	// guestCommandTwin marks the twin of a shell call whose path words the
+	// kit placed through a link (substrateGuestCommandTwinRequest).
+	guestCommandTwin bool
+	// guestClaimHomePlaces reads, from a Substrate actor's kit facts, which
+	// places of the actor's home only their owner can reach; nil without
+	// such facts. guestHomePlaces is the view the home copy checks read:
+	// nil (this host's file system) except on the command twin and where
+	// only a kit claim holds a finding (homePlaceView, substrate-1
+	// GAP-0549). guestWriteClaimOnly receives whether the kit's protected
+	// write claim alone holds a key write.
+	guestClaimHomePlaces homePlaceView
+	guestHomePlaces      homePlaceView
+	guestWriteClaimOnly  *bool
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
@@ -410,6 +441,10 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// guestMemo keeps the guest placement of the call (guestReadingMemo):
+	// the placed children, the split-gap reading and the sandbox hook-config
+	// guard read the same guest input. A copy of the request shares it.
+	guestMemo *guestReadingMemo
 	// hookCall is the hook call of the dispatch that judges the request
 	// (dispatchTrustedActionOnce), set for the readings it runs on its own
 	// goroutine while the call is open: a nested dispatch and the private-key
@@ -615,6 +650,22 @@ func dispatchTrustedActionOnceIn(
 		}()
 	}
 	request.posixReadingTwin = false
+	if claims := substrateGuestClaimsFrom(parent); claims != nil {
+		// A Substrate actor's kit proved, in the actor's file system, what the
+		// laptop's gateway proves in its own (substrate-1 GAP-0471): a
+		// private-key read of the call's command, the link targets of its
+		// path arguments, and which places of the home are private
+		// (GAP-0549). All only add findings; the command twin is judged in
+		// trustedToolCallFindings (GAP-0546).
+		request.guestKeyReadCommand = claims.keyReadCommand
+		request.guestProtectedWriteCommand = claims.protectedWriteCommand
+		request.guestClaimHomePlaces = claims.homePlaceView()
+		if twin, ok := substrateGuestLinkTwinRequest(parent, request); ok {
+			defer func() {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			}()
+		}
+	}
 	if trustedActionFaultHook != nil {
 		trustedActionFaultHook(request)
 	}
@@ -716,6 +767,9 @@ func dispatchTrustedActionOnceIn(
 	defer func() { findings = sedBackupUnresolvedFindings(request, findings) }()
 	if request.simpleMemo == nil {
 		request.simpleMemo = &trustedSimpleMemo{}
+	}
+	if request.guestMemo == nil {
+		request.guestMemo = &guestReadingMemo{}
 	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	// Only the strict tier judges the body of a function the text never
@@ -993,6 +1047,18 @@ func dispatchTrustedActionOnceIn(
 		defer func() {
 			twinFindings := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
 				return trustedActionFindingKey(f.RuleID) != "PATH-SSH-KEY"
+			})
+			findings = withTwinProvenBlocks(findings, twinFindings)
+		}()
+	}
+	// The same reading judges a write of a shell startup profile spelled
+	// relative to that directory (echo x >> .bashrc in the home, a function
+	// that may return before its cd): only its shell-profile finding counts
+	// (substrate-1:GAP-1090).
+	if twin, ok := protectedHomeShellProfileTwinRequest(request); ok {
+		defer func() {
+			twinFindings := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return trustedActionFindingKey(f.RuleID) != trustedActionFindingKey(shellProfileWriteRule)
 			})
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
@@ -1293,8 +1359,15 @@ func dispatchTrustedActionOnceIn(
 	// needs no second reading.
 	placed := placedReading{}
 	if input, ok := sandboxGuestPlacedInput(request, facts); ok {
-		analyzed := actionfacts.Analyze(input)
-		placed = placedReading{facts: &analyzed, everyOwner: true, children: sandboxGuestPlacedChildren(input, analyzed)}
+		analyzed := request.guestMemo.analyze(input)
+		children, candidates, cut := sandboxGuestPlacedChildren(request.guestMemo, input, analyzed)
+		placed = placedReading{facts: &analyzed, everyOwner: true, children: children, candidates: candidates}
+		if cut.Any() {
+			// More placed commands than the reading takes: the call is
+			// truncated, judged at the unknown tier of the pack, never a
+			// clean allow of what was not read (substrate-1 GAP-0304).
+			defer func() { findings = withBoundedTruncation(findings, cut, request) }()
+		}
 	} else if hasGitHookMutationCandidate(facts) || hasGitReadOutputWrite(facts) {
 		if input, ok := protectedHomeCWDPlacedInput(request); ok {
 			analyzed := actionfacts.Analyze(input)
@@ -1317,6 +1390,7 @@ func dispatchTrustedActionOnceIn(
 	// it may be a protected file there (rel-1-0-10:GAP-0871).
 	defer func() {
 		findings = withUnresolvedFolderTier(findings, request, facts, false)
+		findings = withSandboxGuestFolderTier(findings, request, facts)
 	}()
 	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
 		defer func() {
@@ -1527,6 +1601,7 @@ func dispatchTrustedActionWith(
 						if splitGapUnreadPart(simple) && wholeCommandKnown && !checkedSplitGapEffects {
 							checkedSplitGapEffects = true
 							findings = withSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
+							findings = withSandboxGuestSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
 						}
 						continue
 					}
@@ -1588,6 +1663,15 @@ func dispatchTrustedActionWith(
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
 				child.stateProofOnly = simple.LoginGuess
+				// A statement the walk placed nowhere is judged as the laptop
+				// judges it, in no folder: the guest placement of the call
+				// already reads it in each directory the guest may be in
+				// (sandboxGuestPlacements). Placed in the guest's directory
+				// here, its proof there hid the unknown tier of the folder it
+				// may really run in, which the laptop names
+				// (withUnresolvedFolderTier, rel-1-0-10:GAP-0871; substrate-1
+				// GAP-0377 at FU8: $CMD; cat .ssh/id_ed25519).
+				child.unplacedStatement = simple.UnresolvedFolder && child.SandboxGuestCWD != ""
 				parent := request.Input
 				if wholeCommandKnown {
 					parent.Command = wholeCommand
@@ -1744,123 +1828,6 @@ func dispatchTrustedActionWith(
 		return findings
 	}
 
-	// A partial action whose only uncertainty is a runtime-expanded redirect
-	// target ("> ~/out.txt", "> $HOME/out.txt") still has a static, provable
-	// argv. Semantic rules run on the complete analysis of a static-target
-	// twin without those redirects, but only a match counts there, and only
-	// for a rule that match cannot depend on the dropped redirect and path
-	// facts (redirectReductionCandidate). A code-owned prerequisite is a Go
-	// check written for complete facts, so it must also hold on the twin
-	// with its static targets (staticTargetTwin). A non-match or a skipped
-	// rule never suppresses its legacy fallback, which, like every recovery
-	// lane below, still sees the whole action.
-	//
-	// A partial action with && or || lists is judged as if every command of
-	// each list runs: a block stops the whole call before any of it runs, so
-	// a rule that blocks `a; b` also blocks `a && b` and `a || b`. Semantic
-	// rules that do not read how complete the analysis is
-	// (listReductionCandidate) and the context checks run on the complete
-	// analysis of the list read as a sequence, which has every fact of the
-	// action, so there a non-match counts as it does for `a; b`. A fallback
-	// finding that analysis proves may block too. A list with a
-	// runtime-expanded redirect target is read as a sequence inside the
-	// redirect-target view.
-	semanticFacts := facts
-	// viewCandidate is set when semanticFacts is a view, and reports whether
-	// a rule's result on that view may stand for the whole action.
-	var viewCandidate func(compiledSemanticRule) bool
-	// staticTargetTwin is the complete analysis a redirect-target view was
-	// cut from, with the placeholder targets' redirect and path facts.
-	var staticTargetTwin *actionfacts.Facts
-	// subsetView is set when semanticFacts keeps only the action's static,
-	// certain commands; as on a redirect-target view, only a match counts.
-	subsetView := false
-	// overLimitView is set when semanticFacts is the over-limit view of a
-	// write tool call, the only facts that name the targets of that call.
-	overLimitView := false
-	// powerShellView keeps the independently parsed commands of exact
-	// pwsh -Command / -EncodedCommand bodies next to the action's static
-	// top-level commands. The original action remains partial. The view
-	// never replaces a view chosen below, whose rule classes and non-matches
-	// keep their meaning: it is an extra pass where only a monotone argv
-	// rule's match counts.
-	var powerShellView *actionfacts.Facts
-	if !facts.Authoritative() {
-		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
-			powerShellView = &view
-		}
-		if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
-			// A write tool call whose arguments are limit-exceeded, judged on
-			// the same call with its large text left out: it names the same
-			// targets, so a match counts (GAP-0674).
-			semanticFacts, subsetView, overLimitView = view, true, true
-		} else if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
-			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
-		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
-			semanticFacts, viewCandidate = view, listReductionCandidate
-		} else if view, ok := actionfacts.CompoundCommandReduction(request.Input, facts); ok {
-			// A simple command in a subshell, group, if, loop or case body,
-			// or a negated or background statement, is judged as if it ran
-			// alone: `(rm -rf /)` as `rm -rf /`. The view has every command
-			// of the action, as a list read as a sequence does, but not the
-			// scope of a subshell or the count of a loop, so only a match
-			// counts.
-			semanticFacts, viewCandidate, subsetView = view, listReductionCandidate, true
-		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
-			// pwsh -Command "<body>" without -NoProfile, alone or first in a
-			// list: a profile only runs more commands before the body, so a
-			// match on the body counts.
-			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
-		} else if view, ok := actionfacts.OpaqueCMDWrapperArgvReduction(request.Input, facts); ok {
-			// cmd.exe /c has a complete outer argv even when AutoRun leaves
-			// its child opaque. Only a positive match on that argv counts.
-			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
-		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
-			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
-			if partialArgv {
-				viewCandidate = argvSubsetReductionCandidate
-			}
-		} else if view, ok := actionfacts.UnmodeledProgramArgvReduction(request.Input, facts); ok {
-			// A program with no modeled operand grammar (hostname) left the
-			// action partial, so a custom argv rule about it never ran
-			// (GAP-0912). Only a monotone argv rule's match counts.
-			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
-		} else if view, ok := actionfacts.SourcedFileReduction(request.Input, facts); ok {
-			// A file sourced by a static name (source .env && aws ...) is
-			// opaque, so no rule ran on the commands after it and a custom
-			// argv rule was only a detection-only regex finding (GAP-0117).
-			// Only a monotone argv rule's match counts.
-			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
-		} else if powerShellView != nil {
-			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
-			powerShellView = nil
-		} else {
-			var fallbackTelemetry trustedActionTelemetry
-			findings, fallbackTelemetry = dispatchTrustedFallback(
-				generation,
-				request,
-				facts,
-				options,
-			)
-			telemetry.merge(fallbackTelemetry)
-			return findings
-		}
-	}
-	// matchOnly is set when only a match on the view counts.
-	matchOnly := staticTargetTwin != nil || subsetView
-	fullProjection, projectionCode := semantic.Project(semanticFacts)
-	if projectionCode != semantic.ProjectionOK {
-		var fallbackTelemetry trustedActionTelemetry
-		findings, fallbackTelemetry = dispatchTrustedFallback(
-			generation,
-			request,
-			facts,
-			options,
-		)
-		telemetry.merge(fallbackTelemetry)
-		return findings
-	}
-
 	excluded := make(map[string]struct{})
 	semanticFindings := make([]RuleFinding, 0, len(generation.semanticRules))
 	matchedSemanticOwnerIDs := make(map[string]struct{})
@@ -1998,6 +1965,153 @@ func dispatchTrustedActionWith(
 		return false
 	}
 
+	// judgePlaced judges the working-directory reading (placedReading). It
+	// shares this dispatch and budget, and it can add only positive semantic
+	// findings, of every owner for a sandbox and of cwdPlacedRule rules for a
+	// managed peer; all other lanes keep the gateway's original facts.
+	judgePlaced := func() {
+		for index, view := range placed.views() {
+			if !view.Authoritative() {
+				continue
+			}
+			if projection, code := semantic.Project(view); code == semantic.ProjectionOK {
+				// Each view has its own pair of budget keys (the view and its
+				// enforcement projection), after the fixed views 0 to 5.
+				evaluateSemanticRules(placedReadingFirstView+2*index, view, projection,
+					func(candidate compiledSemanticRule) bool {
+						return placed.everyOwner || cwdPlacedRule(candidate.rule.ID)
+					}, true, nil)
+			}
+		}
+	}
+	// fallback judges a call no semantic view of the whole call can judge
+	// (dispatchTrustedFallback). A sandbox call's guest placement still
+	// judges it: each simple command a static cd moved is a complete view
+	// of its own, so what one proves there (its semantic findings and the
+	// lexical private-key read proof) counts as it does on the laptop, where
+	// the per-command pass reads each command in its directory. Without it a
+	// heredoc or here-string into a shell, a $CMD, an eval or a long && list
+	// after cd .cache let cat ../.ssh/id_ed25519 or rm
+	// ../.defenseclaw/audit.db through where the laptop blocks
+	// (substrate-1 GAP-0363). The whole-call view stays unjudged.
+	fallback := func() []RuleFinding {
+		out, fallbackTelemetry := dispatchTrustedFallback(generation, request, facts, options)
+		telemetry.merge(fallbackTelemetry)
+		if !placed.everyOwner {
+			return out
+		}
+		judgePlaced()
+		if len(semanticFindings) != 0 {
+			out = withSimpleCommandFindings(out,
+				finalizeTrustedActionFindings(generation, request, facts, append([]RuleFinding(nil), semanticFindings...)))
+		}
+		if !request.stateProofOnly && placed.provesSSHPrivateKeyContentRead() {
+			out = withProvedPrivateKeyRead(out, generation, request)
+		}
+		return out
+	}
+
+	// A partial action whose only uncertainty is a runtime-expanded redirect
+	// target ("> ~/out.txt", "> $HOME/out.txt") still has a static, provable
+	// argv. Semantic rules run on the complete analysis of a static-target
+	// twin without those redirects, but only a match counts there, and only
+	// for a rule that match cannot depend on the dropped redirect and path
+	// facts (redirectReductionCandidate). A code-owned prerequisite is a Go
+	// check written for complete facts, so it must also hold on the twin
+	// with its static targets (staticTargetTwin). A non-match or a skipped
+	// rule never suppresses its legacy fallback, which, like every recovery
+	// lane below, still sees the whole action.
+	//
+	// A partial action with && or || lists is judged as if every command of
+	// each list runs: a block stops the whole call before any of it runs, so
+	// a rule that blocks `a; b` also blocks `a && b` and `a || b`. Semantic
+	// rules that do not read how complete the analysis is
+	// (listReductionCandidate) and the context checks run on the complete
+	// analysis of the list read as a sequence, which has every fact of the
+	// action, so there a non-match counts as it does for `a; b`. A fallback
+	// finding that analysis proves may block too. A list with a
+	// runtime-expanded redirect target is read as a sequence inside the
+	// redirect-target view.
+	semanticFacts := facts
+	// viewCandidate is set when semanticFacts is a view, and reports whether
+	// a rule's result on that view may stand for the whole action.
+	var viewCandidate func(compiledSemanticRule) bool
+	// staticTargetTwin is the complete analysis a redirect-target view was
+	// cut from, with the placeholder targets' redirect and path facts.
+	var staticTargetTwin *actionfacts.Facts
+	// subsetView is set when semanticFacts keeps only the action's static,
+	// certain commands; as on a redirect-target view, only a match counts.
+	subsetView := false
+	// overLimitView is set when semanticFacts is the over-limit view of a
+	// write tool call, the only facts that name the targets of that call.
+	overLimitView := false
+	// powerShellView keeps the independently parsed commands of exact
+	// pwsh -Command / -EncodedCommand bodies next to the action's static
+	// top-level commands. The original action remains partial. The view
+	// never replaces a view chosen below, whose rule classes and non-matches
+	// keep their meaning: it is an extra pass where only a monotone argv
+	// rule's match counts.
+	var powerShellView *actionfacts.Facts
+	if !facts.Authoritative() {
+		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
+			powerShellView = &view
+		}
+		if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+			// A write tool call whose arguments are limit-exceeded, judged on
+			// the same call with its large text left out: it names the same
+			// targets, so a match counts (GAP-0674).
+			semanticFacts, subsetView, overLimitView = view, true, true
+		} else if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
+		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.CompoundCommandReduction(request.Input, facts); ok {
+			// A simple command in a subshell, group, if, loop or case body,
+			// or a negated or background statement, is judged as if it ran
+			// alone: `(rm -rf /)` as `rm -rf /`. The view has every command
+			// of the action, as a list read as a sequence does, but not the
+			// scope of a subshell or the count of a loop, so only a match
+			// counts.
+			semanticFacts, viewCandidate, subsetView = view, listReductionCandidate, true
+		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
+			// pwsh -Command "<body>" without -NoProfile, alone or first in a
+			// list: a profile only runs more commands before the body, so a
+			// match on the body counts.
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+		} else if view, ok := actionfacts.OpaqueCMDWrapperArgvReduction(request.Input, facts); ok {
+			// cmd.exe /c has a complete outer argv even when AutoRun leaves
+			// its child opaque. Only a positive match on that argv counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
+		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+			if partialArgv {
+				viewCandidate = argvSubsetReductionCandidate
+			}
+		} else if view, ok := actionfacts.UnmodeledProgramArgvReduction(request.Input, facts); ok {
+			// A program with no modeled operand grammar (hostname) left the
+			// action partial, so a custom argv rule about it never ran
+			// (GAP-0912). Only a monotone argv rule's match counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
+		} else if view, ok := actionfacts.SourcedFileReduction(request.Input, facts); ok {
+			// A file sourced by a static name (source .env && aws ...) is
+			// opaque, so no rule ran on the commands after it and a custom
+			// argv rule was only a detection-only regex finding (GAP-0117).
+			// Only a monotone argv rule's match counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
+		} else if powerShellView != nil {
+			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
+			powerShellView = nil
+		} else {
+			return fallback()
+		}
+	}
+	// matchOnly is set when only a match on the view counts.
+	matchOnly := staticTargetTwin != nil || subsetView
+	fullProjection, projectionCode := semantic.Project(semanticFacts)
+	if projectionCode != semantic.ProjectionOK {
+		return fallback()
+	}
+
 	if evaluateSemanticRules(
 		0,
 		semanticFacts,
@@ -2009,23 +2123,7 @@ func dispatchTrustedActionWith(
 		clear(excluded)
 		semanticFindings = semanticFindings[:0]
 	}
-	// The working-directory reading (placedReading) shares this dispatch and
-	// budget. It can add only positive semantic findings, of every owner for
-	// a sandbox and of cwdPlacedRule rules for a managed peer; all other
-	// lanes keep the gateway's original facts.
-	for index, view := range placed.views() {
-		if !view.Authoritative() {
-			continue
-		}
-		if projection, code := semantic.Project(view); code == semantic.ProjectionOK {
-			// Each view has its own pair of budget keys (the view and its
-			// enforcement projection), after the fixed views 0 to 5.
-			evaluateSemanticRules(placedReadingFirstView+2*index, view, projection,
-				func(candidate compiledSemanticRule) bool {
-					return placed.everyOwner || cwdPlacedRule(candidate.rule.ID)
-				}, true, nil)
-		}
-	}
+	judgePlaced()
 	// The PowerShell body view adds positive argv matches only. A failed
 	// projection there adds nothing and leaves the result above unchanged.
 	if powerShellView != nil {
@@ -2309,6 +2407,14 @@ func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedA
 // tamper.detector_state_write finding of a proven mutation of the active
 // state: the one finding observe mode still blocks on where the pack blocks
 // it (provenActiveStateMutation).
+// stateCheckUnansweredTitle and stateCheckUnansweredTag name a state-write
+// refusal whose only cause is a local read that did not answer in time
+// (hookpaths.StateCheckUnanswered).
+const (
+	stateCheckUnansweredTitle = "DefenseClaw could not check this write target in time (a local folder read did not answer); retry the command"
+	stateCheckUnansweredTag   = "state-check-unanswered"
+)
+
 func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
 	// This protection belongs to the gateway. A selected pack may omit or
@@ -2349,6 +2455,14 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 	finding.Severity = severity
 	finding.Title = canonical.Title
 	finding.Tags = canonical.Tags
+	if hookpaths.StateCheckUnanswered() {
+		// The target was refused because a local read it needed did not
+		// answer in time, not because it is known to be state: say so, so
+		// the user retries, and tag the row so these refusals can be
+		// counted apart (rel-1-0-10:GAP-1805).
+		finding.Title = stateCheckUnansweredTitle
+		finding.Tags = append(slices.Clone(canonical.Tags), stateCheckUnansweredTag)
+	}
 	finding.Proof = finding.Proof.Record()
 	if request.EnforcementCapable {
 		finding.Proof = finding.Proof.Enforce()
@@ -4710,6 +4824,51 @@ func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedAc
 	return twin, true
 }
 
+// shellProfileWriteRule is the rule of a write of a shell startup profile.
+const shellProfileWriteRule = "persistence.shell_profile_write"
+
+// shellProfileNames are the file names matchesShellProfileCandidate reads
+// as a shell startup profile, in lower case.
+var shellProfileNames = []string{".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc", "config.fish", "profile.ps1"}
+
+// protectedHomeShellProfileTwinRequest returns the call of a managed hook
+// peer placed in the directory the hook client ran it in
+// (protectedHomeClientDirectory), when its text names a shell startup
+// profile. Without a cwd of its own the gateway read `echo x >> .bashrc`
+// and `echo x >> ./.bashrc` from the home as writes of no known file, and
+// the function rows of GAP-0690, 0693, 0694 and 0711 the same, so a managed
+// peer was allowed what a per-user gateway alerts (default) or blocks
+// (strict) as persistence.shell_profile_write (substrate-1:GAP-1090, live
+// on dc-ent-rhel). The placed reading is the per-user one; the caller keeps
+// only its shell-profile finding.
+//
+// The per-user reading includes the cap floor (withCapFloor): a function
+// whose body runs a command the split cannot read (`f(){ $y; }`, `"$@"`,
+// `$r ~`, `eval "$c"`) puts the call at the unknown tier, and the floor
+// judges the piece `echo x >> .bashrc` alone in the folder, where it is the
+// profile write. The twin is built after the call registered its own floor,
+// in no folder, so a twin of the hook call itself gets a floor of its own in
+// the client directory (substrate-1:GAP-1091). A piece twin's profile twin
+// keeps the call's floor: its pieces are already the call's.
+func protectedHomeShellProfileTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
+	if !slices.ContainsFunc(shellProfileNames, func(name string) bool { return strings.Contains(text, name) }) {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.conflictSource = nil
+	twin.Input.CWD = cwd
+	if request.capFloorDepth == 0 {
+		twin.capFloor, twin.capFloorSeen = nil, false
+	}
+	return twin, true
+}
+
 // hasGitHookMutationCandidate avoids a second parse for text mentions and
 // inactive hook names. A CWD changes path placement, not the parsed access
 // or the command's mutation role.
@@ -4784,15 +4943,24 @@ type placedReading struct {
 	facts      *actionfacts.Facts
 	everyOwner bool
 	children   []actionfacts.Facts
+	// candidates are read for the private-key read proof only
+	// (sandboxGuestPlacedChildren).
+	candidates []actionfacts.Facts
 }
 
 // placedReadingFirstView is the budget view number of the first placed view;
 // the dispatch's own views are 0 to 5 (evaluateSemanticRules).
 const placedReadingFirstView = 6
 
-// maxSandboxGuestPlacedChildren bounds the simple-command readings of one
-// sandbox call; they share the call's semantic budget.
-const maxSandboxGuestPlacedChildren = 16
+// maxSandboxGuestPlacedChildren is the call's own statement budget (128, the
+// bound of trustedCallOverStatementBudget) in the guest placement: the
+// distinct simple-command readings of a call the analysis read in full, and
+// the statements of a pass over a call it did not read in full when the call
+// is over that budget (sandboxGuestPlacements); the readings share the call's
+// semantic budget. A cap of 16 gave ACTION-COMPOUND-LIMIT to a cd followed by
+// 17 or more distinct commands, a setup script the laptop allows
+// (substrate-1 GAP-0359).
+const maxSandboxGuestPlacedChildren = 128
 
 // views returns the placed facts, then each child's.
 func (placed placedReading) views() []actionfacts.Facts {
@@ -4808,7 +4976,7 @@ func (placed placedReading) views() []actionfacts.Facts {
 // relative read of the guest home's key (cat .ssh/id_ed25519 from the home,
 // cat ../sandbox/.ssh/id_ed25519 from /work) is then the laptop's block.
 func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
-	for _, view := range placed.views() {
+	for _, view := range slices.Concat(placed.views(), placed.candidates) {
 		if view.Authoritative() && view.EnforcementEligible() &&
 			trustedActionActiveSSHPrivateKeyContentRead(view.EnforcementProjection()) {
 			return true
@@ -4817,28 +4985,47 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 	return false
 }
 
-// sandboxGuestPlacedChildren reads, lexically, each simple command of a
-// sandbox call that a static cd moved out of the guest working directory in
-// the directory it runs in: cd ../sandbox && echo x >> .profile writes the
-// guest home's .profile. The dispatch's own simple-command pass places the
-// command in the request's working directory, which a copy-mode actor does
-// not have, so the cd led nowhere there.
-func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.Facts {
-	var children []actionfacts.Facts
-	for _, simple := range actionfacts.SimpleCommands(input, facts) {
-		if simple.EvaluationFailure != "" || simple.OpaqueValueAssignment || simple.LiteralOutputOnly ||
-			simple.LoginGuess || !path.IsAbs(simple.CWD) || simple.CWD == input.CWD {
-			continue
-		}
-		if len(children) == maxSandboxGuestPlacedChildren {
-			break
-		}
-		child := input
-		child.Command, child.CWD = simple.Text, simple.CWD
-		child.Args, child.Argv = nil, nil
-		children = append(children, actionfacts.Analyze(child))
+// sandboxGuestPlacedChildren reads, lexically, each command of a sandbox
+// call that may run outside the guest working directory in the directory it
+// runs in: cd ../sandbox && echo x >> .profile writes the guest home's
+// .profile. The dispatch's own simple-command pass places the command in the
+// request's working directory, which a copy-mode actor does not have, so the
+// cd led nowhere there. The commands and their directories are
+// sandboxGuestPlacements; a call whose readings stop short reports cut
+// (bounded.Items): the caller adds the evaluation-limit finding, so a padded
+// chain is never a silent allow (substrate-1 GAP-0304).
+//
+// candidates are the readings in a directory the call reaches only as a cd
+// target no command runs in (guestPlacement.candidate): they count only for
+// the private-key read proof, as the laptop's readers judge a candidate
+// directory (substrate-1 GAP-0379).
+func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+	if children, candidates, cut, ok := memo.placedChildren(input, facts); ok {
+		return children, candidates, cut
 	}
-	return children
+	children, candidates, cut = sandboxGuestPlacedChildrenWalk(memo, input, facts)
+	memo.keepPlacedChildren(input, facts, children, candidates, cut)
+	return children, candidates, cut
+}
+
+// sandboxGuestPlacedChildrenWalk reads the placed children of a call
+// (sandboxGuestPlacedChildren) afresh.
+func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+	placements, stopped := memo.plan(input, facts).placements(true)
+	for _, placement := range placements {
+		child := input
+		child.Command, child.CWD = placement.text, placement.cwd
+		child.Args, child.Argv = nil, nil
+		if placement.candidate {
+			candidates = append(candidates, actionfacts.Analyze(child))
+		} else {
+			children = append(children, actionfacts.Analyze(child))
+		}
+	}
+	if stopped {
+		return children, candidates, bounded.Of(bounded.Items)
+	}
+	return children, candidates, bounded.CapSet{}
 }
 
 // sandboxGuestPlacedInput is a sandbox call (every Substrate actor, an
@@ -4860,14 +5047,22 @@ func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts
 // sandbox never reaches (TestSandboxIngressCopyModeNeverTouchesHostFS). The reading only
 // adds findings, so it reaches the verdict a laptop reaches in that directory
 // and never removes one. It is read only when the guest directory may change
-// a judgment: a relative operand, or a Git hook or config candidate the git
-// owners place by the working directory itself.
+// a judgment: a relative operand, a Git hook or config candidate the git
+// owners place by the working directory itself, or a call the analysis did
+// not read in full, whose commands are then read one by one in the guest's
+// directories (a here-string parses invalid and names no path,
+// substrate-1 GAP-0363). A statement of the call the walk placed nowhere
+// (unplacedStatement) has no reading of its own here: the call's reading
+// places it.
+//
+// The exact-target lane reads this placement too (provedHighWriteFindings):
+// its rules match a resolved target, which a copy-mode call names only here.
 func sandboxGuestPlacedInput(request trustedActionRequest, facts actionfacts.Facts) (actionfacts.Input, bool) {
 	guestCWD := request.SandboxGuestCWD
-	if guestCWD == "" || guestCWD == request.Input.CWD {
+	if guestCWD == "" || guestCWD == request.Input.CWD || request.unplacedStatement {
 		return actionfacts.Input{}, false
 	}
-	if !hasRelativePathOperand(facts) && !hasGitHookMutationCandidate(facts) && !hasGitReadOutputWrite(facts) {
+	if facts.Authoritative() && !hasRelativePathOperand(facts) && !hasGitHookMutationCandidate(facts) && !hasGitReadOutputWrite(facts) {
 		return actionfacts.Input{}, false
 	}
 	input := request.Input
@@ -5424,7 +5619,16 @@ func fileToolWriteThroughLinkToState(facts actionfacts.Facts, request trustedAct
 			}
 		}
 		if physical == "" && filepath.IsAbs(candidate.Resolved) && !request.SkipLocalFilesystemResolution {
-			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			var resolved bool
+			physical, resolved = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			if !resolved {
+				// A target whose own local read did not answer is not
+				// proved free of the state, as in linkedActiveStateWrite
+				// (rel-1-0-10:GAP-1804, GAP-1805).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 		}
 		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(candidate.Resolved) {
 			continue

@@ -88,6 +88,11 @@ type profileSubject struct {
 	// tokenGroupsCause says why the enumerator has no current sign-in token
 	// groups for a Windows account, "" when it has them; a refusal names it.
 	tokenGroupsCause string
+	// substrateWorkload is the OIDC subject of the CI workload an Agent
+	// Substrate actor was started by (its registration's person), "" for
+	// any other subject; a match.substrate.workloads entry selects it
+	// (GAP-0540).
+	substrateWorkload string
 	// LookupFailed is set when the directory lookup for this subject failed
 	// and no cached facts within their TTL exist: the account and its groups
 	// are unproven (resolveIdentity), and only a uid or SID entry, an agent
@@ -722,9 +727,11 @@ func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
 	if isSubstrateActorRequest(ctx) {
 		if s, ok := verifiedSubjectFromContext(ctx); ok && isSubstrateSubjectSource(s.Source) {
 			subject := profileSubjectFromVerified(s, identityLookupBlocking.Load())
+			subject.substrateWorkload = substrateWorkloadSubject(ctx)
 			return &subject, profileSubjectVerified
 		}
 		if subject, ok := substrateProfileSubject(ctx); ok {
+			subject.substrateWorkload = substrateWorkloadSubject(ctx)
 			return &subject, profileSubjectVerified
 		}
 		return nil, ""
@@ -1171,6 +1178,21 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 	return set.selectProfile(subject, resolveIdentity(subject, nil), source, connectorName, nil, profilePathAny, agent)
 }
 
+// workloadSelects reports whether m has a substrate selector (applies) and
+// whether that selector is only match.substrate.workloads and names the CI
+// workload behind the request's actor (selects). Atespace and template keys
+// never select on a hook.
+func workloadSelects(m config.ProfileMatch, subject *profileSubject) (applies, selects bool) {
+	s := m.Substrate
+	if s.Empty() {
+		return false, false
+	}
+	if len(s.Atespaces) > 0 || len(s.Templates) > 0 || len(s.Workloads) == 0 || subject == nil || subject.substrateWorkload == "" {
+		return true, false
+	}
+	return true, anyMatches(s.Workloads, func(v string) bool { return substrateWorkloadMatches(v, subject.substrateWorkload) })
+}
+
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
 	decision := profileDecision{Name: name, Match: reason, MatchedGroup: group, SubjectSource: source}
 	if derived, ok := set.derivedProfile(name); ok {
@@ -1183,8 +1205,18 @@ func (set *guardrailProfileSet) decision(name, reason, group, source string) pro
 
 func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *subjectGroups, verified bool, connectorName, agent string) (reason, group string, ok bool) {
 	// A substrate selector names actors only; a host subject has no
-	// atespace, so the AND of the keys never holds for it.
-	if m.Empty() || !m.Substrate.Empty() {
+	// atespace, so the AND of the keys never holds for it. The one that can
+	// hold on a hook is a workloads entry for the CI workload that started
+	// the actor (GAP-0540).
+	if applies, selects := workloadSelects(m, subject); applies {
+		if !selects || !verified {
+			return "", "", false
+		}
+		if m.Empty() {
+			return profileMatchUser, "", true
+		}
+		reason = profileMatchUser
+	} else if m.Empty() || !m.Substrate.Empty() {
 		return "", "", false
 	}
 	if (len(m.Users) > 0 || len(m.Groups) > 0 || len(m.Agents) > 0) && !verified {

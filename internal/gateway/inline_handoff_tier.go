@@ -188,6 +188,11 @@ func withFindChildTwins(ctx context.Context, request trustedActionRequest, findi
 	for _, child := range children[:min(len(children), 4)] {
 		twin := operandBoundReading(request, child)
 		twin.targetMemo, twin.simpleMemo = nil, nil
+		// The twin is a reading of the call, not a call: the call records its
+		// own facts for the tool-call chains. Recording the twin replaced
+		// them, so a find -exec read of a credentials file started no
+		// secret-read chain (substrate-1:GAP-0349 Q23).
+		twin.record = nil
 		got := dispatchTrustedAction(ctx, twin)
 		got = agentHookConfigFindings(ctx, twin, got)
 		for _, found := range got {

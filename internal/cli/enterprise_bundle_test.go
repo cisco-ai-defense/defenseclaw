@@ -58,6 +58,34 @@ type bundleCLIEnv struct {
 	secretFiles      []string
 }
 
+// shortBundleTempDir is the bundle test root: a short temp dir, not
+// t.TempDir(). The bundle fixture's config names paths under the store in
+// this root (ai_discovery.signature_packs allows 256 characters), and
+// t.TempDir() adds up to 63 characters of the test's name and a random
+// suffix of 1 to 10 digits. Under the native Windows runner's long TEMP the
+// longest status test path landed on 256 or 257 characters by those random
+// digits, so it failed now and then with config_invalid (GAP-1102, the
+// shape of GAP-0079).
+func shortBundleTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "dcb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+			if err == nil {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove the bundle test root: %v", err)
+		}
+	})
+	return root
+}
+
 func newBundleCLIEnv(t *testing.T) *bundleCLIEnv {
 	t.Helper()
 	// The test runs in its package folder; a source path compiled into a
@@ -79,7 +107,7 @@ func newBundleCLIEnv(t *testing.T) *bundleCLIEnv {
 	bundleSecureClient = func() bool { return false }
 	appVersion = "1.0.2"
 
-	dir := t.TempDir()
+	dir := shortBundleTempDir(t)
 	env := &bundleCLIEnv{dir: dir, in: filepath.Join(dir, "policy"), anchors: filepath.Join(dir, "anchors.json")}
 	for name, body := range map[string]string{
 		"config.yaml":                         bundleTestConfig + fmt.Sprintf("policy_dir: %q\n", policies),

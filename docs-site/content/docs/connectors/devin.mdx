@@ -194,7 +194,7 @@ The image is **unverified**, so `defenseclaw sandbox run devin` refuses it. Devi
 | Tamper detection | DefenseClaw pairs each `PostToolUse` with its `PreToolUse` by session, tool name and input. A tool that ran although denied, or whose `PreToolUse` never arrived, raises `hook_tamper` and the pack's `hooks.on_tamper` applies ([policy packs](/docs/sandboxes/policy-packs)). On a logged-in CLI 3000.11.3, `PostToolUse` fires only for a tool that ran. |
 | Workspace trust | The launcher always passes `--respect-workspace-trust false` and refuses that flag from you, because a headless run fails in an untrusted folder. A project's own `.devin/hooks.v1.json` then loads beside DefenseClaw's without a prompt. |
 | Sign-in | A login inside the sandbox (`/usr/local/lib/defenseclaw/bin/devin-launch auth login --force-manual-token-flow`) is the only path. The credential stays in `~/.local/share/devin`, where the agent can read it. This sign-in is Preview. |
-| Image | Devin CLI 3000.4.25 from its release archive, checked against the SHA-256 in Devin's manifest. |
+| Image | Devin CLI 3000.14.30821 from its release archive, checked against the SHA-256 in Devin's manifest. |
 
 ## Limits
 

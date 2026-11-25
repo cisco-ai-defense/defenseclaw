@@ -76,6 +76,11 @@ func TestWorkingFolderResolvesRelativeOperandsAfterACD(t *testing.T) {
 		{"function defined in a branch", "if true; then f() { cd /srv; }; fi; f; echo x > g", []string{"/srv/g", "/work/proj/g"}, false},
 		{"function defined in a body called first", "h() { f() { cd /srv; }; }; h; f; echo x > g", []string{"/srv/g", "/work/proj/g"}, false},
 		{"function defined in a subshell: unresolved", "(f() { cd /srv; }); f; echo x > g", []string{"/work/proj/g"}, true},
+		// A function named cd may run instead of the builtin, at the top
+		// level and in a mover body the tracking reads (substrate-1:GAP-0684
+		// on the GAP-1144 body reading).
+		{"function named cd: a top-level cd is unresolved", "cd() { :; }; cd /srv && echo x > g", []string{"/work/proj/g"}, true},
+		{"function named cd: a cd in a mover body is unresolved", "cd() { :; }; f() { cd /srv; }; f; echo x > g", []string{"/work/proj/g"}, true},
 		{"function never called", "f() { cd /srv; }; echo x > g", []string{"/work/proj/g"}, false},
 		{"variable target: unresolved", "cd $X && echo x > pre-push", []string{top}, true},
 		{"command substitution target: unresolved", "cd \"$(cat d)\" && echo x > pre-push", []string{top}, true},

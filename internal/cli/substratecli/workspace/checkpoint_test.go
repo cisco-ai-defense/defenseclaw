@@ -74,6 +74,7 @@ func TestCheckpointAndUndoRefusalsAndFailures(t *testing.T) {
 		{"nothing to go back to", osw.ExecResult{ExitCode: 92}, true, "", ErrNoCheckpoint, "no checkpoint"},
 		{"unknown id", osw.ExecResult{ExitCode: 93, Stdout: []byte("known=1 2 3\n")}, true, "9", nil, "there is no checkpoint 9; the checkpoints are 1, 2, 3"},
 		{"folder missing", osw.ExecResult{ExitCode: 91, Stderr: []byte("/work/proj does not exist in the actor")}, false, "", nil, "does not exist in the actor"},
+		{"folder missing, undo", osw.ExecResult{ExitCode: 91, Stderr: []byte("/work/proj does not exist in the actor")}, true, "", ErrNoFolder, "/work/proj"},
 		{"garbage answer", osw.ExecResult{Stdout: []byte("done\n")}, false, "", nil, "answered the checkpoint with"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

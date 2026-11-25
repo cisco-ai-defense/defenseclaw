@@ -160,11 +160,37 @@ func TestSubstrateManagedAllowsAVendorKeyAndTheGatewayRoute(t *testing.T) {
 	}
 }
 
+// GAP-0482: open source warns first and creates only on the person's yes.
+// A create without acknowledge_signin is answered 428 signin_ack_required
+// with the warning, and no actor or registration exists; the acknowledged
+// create goes on, carries the warning and writes the signin_acknowledged
+// audit row (who, connector, actor). At the base the first create made the
+// actor and nothing recorded the choice.
 func TestSubstrateOpenSourceWarnsAboutASignin(t *testing.T) {
 	f, acts := signinFixture(t, false, "cursor")
-	code, out := create(t, f, `{"profile":"eng","template":"cursor-tpl","connector":"cursor"}`)
+	store, logger := testStoreAndLogger(t)
+	f.api.store, f.api.logger = store, logger
+	for _, body := range []string{
+		`{"profile":"eng","template":"cursor-tpl","connector":"cursor"}`,
+		`{"profile":"eng","template":"cursor-tpl"}`,
+		`{"profile":"eng","template":"cursor-tpl","connector":"cursor","acknowledge_signin":false}`,
+	} {
+		code, out := create(t, f, body)
+		msg, _ := out["message"].(string)
+		if code != http.StatusPreconditionRequired || out["reason"] != "signin_ack_required" || !strings.Contains(msg, "snapshot") || !strings.Contains(msg, "CURSOR_API_KEY") {
+			t.Fatalf("unacknowledged %s: %d %v, want 428 signin_ack_required with the warning", body, code, out)
+		}
+	}
+	if acts.created != 0 || acts.deleted != 0 {
+		t.Fatalf("created %d, deleted %d: an unacknowledged create makes no actor", acts.created, acts.deleted)
+	}
+	if _, ok, _ := f.regs.Get(context.Background(), "eng-web", subUIDOther); ok {
+		t.Fatal("an unacknowledged create left a registration")
+	}
+
+	code, out := create(t, f, `{"profile":"eng","template":"cursor-tpl","connector":"cursor","acknowledge_signin":true}`)
 	if code != http.StatusCreated {
-		t.Fatalf("create cursor in open source: %d %v", code, out)
+		t.Fatalf("acknowledged create cursor in open source: %d %v", code, out)
 	}
 	warnings, _ := out["warnings"].([]any)
 	if len(warnings) != 1 || !strings.Contains(warnings[0].(string), "snapshot") {
@@ -172,6 +198,42 @@ func TestSubstrateOpenSourceWarnsAboutASignin(t *testing.T) {
 	}
 	if acts.created != 1 || acts.deleted != 0 {
 		t.Fatalf("created %d, deleted %d", acts.created, acts.deleted)
+	}
+	events, err := store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := 0
+	for _, e := range events {
+		if !strings.Contains(e.Details, `"event":"signin_acknowledged"`) {
+			continue
+		}
+		rows++
+		for _, want := range []string{`"source":"substrate"`, `"principal":"alice@example.com"`, `"connector":"cursor"`, `"actor":"new-1"`, `"atespace":"eng-web"`, `"acknowledged":true`, "alice@example.com acknowledged the Cursor Agent CLI sign-in warning and started eng-web/new-1"} {
+			if !strings.Contains(e.Details, want) {
+				t.Fatalf("signin_acknowledged row has no %s: %s", want, e.Details)
+			}
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("%d signin_acknowledged rows for one acknowledged create (of %d events), want 1", rows, len(events))
+	}
+
+	// A route with no warning needs no acknowledgement and writes no row.
+	f, acts = signinFixture(t, false, "claudecode")
+	store, logger = testStoreAndLogger(t)
+	f.api.store, f.api.logger = store, logger
+	if code, out := create(t, f, `{"profile":"eng","template":"claude-wave1","connector":"claudecode"}`); code != http.StatusCreated || out["warnings"] != nil {
+		t.Fatalf("claudecode in open source: %d %v", code, out)
+	}
+	events, _ = store.ListEvents(50)
+	for _, e := range events {
+		if strings.Contains(e.Details, "signin_acknowledged") {
+			t.Fatalf("a create with no warning wrote %s", e.Details)
+		}
+	}
+	if acts.created != 1 {
+		t.Fatalf("claudecode: created %d", acts.created)
 	}
 }
 
@@ -248,8 +310,16 @@ func TestSubstrateLauncherSigninBothModes(t *testing.T) {
 			t.Fatal(err)
 		}
 		a, err := c.Create(context.Background(), substrateapi.CreateRequest{Profile: "eng", Template: "devin-tpl", Connector: "devin"})
-		srv.Close()
 		if !managed {
+			// GAP-0482: the warning comes first, through the client's error,
+			// and the create with the person's yes goes on.
+			e, ok := substrateapi.AsError(err)
+			if !ok || e.Status != http.StatusPreconditionRequired || e.Reason != "signin_ack_required" || !strings.Contains(e.Message, "snapshot") || acts.created != 0 {
+				srv.Close()
+				t.Fatalf("open source create devin, no yes: %v (%+v), created %d", err, e, acts.created)
+			}
+			a, err = c.Create(context.Background(), substrateapi.CreateRequest{Profile: "eng", Template: "devin-tpl", Connector: "devin", AcknowledgeSignin: true})
+			srv.Close()
 			if err != nil {
 				t.Fatalf("open source create devin: %v", err)
 			}
@@ -258,6 +328,7 @@ func TestSubstrateLauncherSigninBothModes(t *testing.T) {
 			}
 			continue
 		}
+		srv.Close()
 		e, ok := substrateapi.AsError(err)
 		if !ok || e.Status != http.StatusForbidden || e.Reason != "subscription_signin_refused" || !strings.Contains(e.Message, "managed") {
 			t.Fatalf("managed create devin: %v (%+v)", err, e)

@@ -281,8 +281,8 @@ func TestPassthroughChecksEveryResponseField(t *testing.T) {
 	}
 }
 
-// TestResponseFieldsStayInTheirLane: text of different fields or choices is
-// checked side by side, never run together into one word.
+// TestResponseFieldsStayInTheirLane keeps choices and Responses summaries
+// separate, but checks the same-choice thinking-to-answer boundary.
 func TestResponseFieldsStayInTheirLane(t *testing.T) {
 	half1, half2 := jsonText(respFieldMarker[:9]), jsonText(respFieldMarker[9:])
 	for _, c := range []passthroughFieldCase{
@@ -295,8 +295,9 @@ func TestResponseFieldsStayInTheirLane(t *testing.T) {
 			`{"type":"message","role":"assistant","content":[{"type":"thinking","thinking":` + half1 + `},{"type":"text","text":` + half2 + `}]}`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if saw, _ := runPassthroughFieldCase(t, c); saw {
-				t.Errorf("text of two lanes was joined into one finding")
+			wantSaw := c.name == "anthropic/thinking_then_text"
+			if saw, _ := runPassthroughFieldCase(t, c); saw != wantSaw {
+				t.Errorf("boundary verdict: saw=%v want=%v", saw, wantSaw)
 			}
 		})
 	}

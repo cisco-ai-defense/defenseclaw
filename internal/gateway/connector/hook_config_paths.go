@@ -900,6 +900,10 @@ func hookDocumentEditedEntry(document interface{}, connector, dataDir, scriptNam
 		windowsCurrent = path.Join(posix, "hooks", strings.ToLower(scriptName))
 		windowsHome = strings.TrimSuffix(path.Dir(posix), "/") + "/"
 	}
+	// Setup's hooks dir on a Windows host, as its hooks-dir claim resolves it
+	// (hookCommandInWindowsDir).
+	windowsHooksVolume, windowsHooks, windowsResolved := windowsResolvedPath(dataDir)
+	windowsHooks = path.Join(windowsHooks, "hooks")
 	if connector == "antigravity" {
 		document = antigravityOwnedHookSections(document)
 	}
@@ -909,14 +913,25 @@ func hookDocumentEditedEntry(document interface{}, connector, dataDir, scriptNam
 	}
 	for _, part := range parts {
 		for _, entry := range hookCommandStrings(part.document) {
-			written := strings.TrimSpace(entry)
-			command := claudeCodeUnguardedHookCommand(written)
-			guarded := command != written
-			if editedDefenseClawHookCommand(command, scriptName) {
+			// Claude Code's exact missing-script guard is read off the
+			// command as written, as Setup reads it, and only for Claude
+			// Code, the one Setup that claims a guarded handler: a trailing
+			// space or another connector's entry keeps the guard as text
+			// (GAP-1963).
+			command, guarded := strings.TrimSpace(entry), false
+			if connector == "claudecode" {
+				if unguarded := claudeCodeUnguardedHookCommand(entry); unguarded != entry {
+					command, guarded = strings.TrimSpace(unguarded), true
+				}
+			}
+			// A marker-bearing copy at an edited-shape path with an argument
+			// that binds nothing is a copy too (copiedDefenseClawHookCommand),
+			// as the Python doctor reads it (GAP-1962).
+			copied := copiedDefenseClawHookCommand(command, scriptName)
+			if copied || editedDefenseClawHookCommand(command, scriptName) {
 				word, first, ok := posixHookCommandSplit(command)
 				_, rest, _ := hookScriptWordAfterWrapper(command)
-				if ok && word != current &&
-					(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) &&
+				if ok && word != current && (strings.HasPrefix(word, home) || copied) &&
 					editedHookEntryClaimed(connector, command, current, word, first, rest, guarded, part.unboundEvent) {
 					return entry, true
 				}
@@ -924,9 +939,18 @@ func hookDocumentEditedEntry(document interface{}, connector, dataDir, scriptNam
 			}
 			windows := windowsHookScriptCommandAsPOSIX(command)
 			rest, ok := editedDefenseClawHookScript(windows, scriptName)
-			// No POSIX word: Setup's hooks-dir claim never matches a Windows path.
+			// Setup's hooks-dir claim reads a Windows path in this install's
+			// Windows hooks dir too, on its volume and with . and .. resolved
+			// (hookCommandInWindowsDir, GAP-1981, GAP-2116): such a word is
+			// passed as the same name under current's dir.
+			claimWord := ""
+			if windowsResolved {
+				if name, inDir := windowsHookCommandInDir(command, windowsHooksVolume, windowsHooks); inDir {
+					claimWord = path.Join(path.Dir(current), name)
+				}
+			}
 			if !ok || (rest != "" && !defenseClawHookBinding(rest)) ||
-				!editedHookEntryClaimed(connector, command, current, "", rest, rest, guarded, part.unboundEvent) {
+				!editedHookEntryClaimed(connector, command, current, claimWord, rest, rest, guarded, part.unboundEvent) {
 				continue
 			}
 			if word, _, ok := posixHookCommandSplit(windows); ok && word != windowsCurrent &&

@@ -2087,7 +2087,7 @@ var windowsSetupRelaxByLiveGuardian = func(path string, target *windows.SID) boo
 
 // windowsManagedRuntimeRootsSetupRelaxed reports whether <data dir> or its
 // hooks child is a plain directory owned by target whose DACL is exactly the
-// guardian's setup shape (windowsSetupRelaxedDirectorySDDL).
+// guardian's setup shape (managed.WindowsSetupRelaxedDirectorySDDL).
 func windowsManagedRuntimeRootsSetupRelaxed(dataDir string, target *windows.SID) bool {
 	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
 		if windowsManagedRuntimeDirSetupRelaxed(path, target) {

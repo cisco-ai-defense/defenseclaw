@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -117,5 +119,49 @@ func TestGAP0528RunWaitsForRoomLikeConnect(t *testing.T) {
 	}
 	if creates.Load() != 2 {
 		t.Fatalf("Ctrl-C after the second refusal: %d creates, want 2 (the wait stopped between tries)", creates.Load())
+	}
+}
+
+func TestRunRefusesOversizeBeforeCreate(t *testing.T) {
+	var creates atomic.Int32
+	useFakeAdmin(t, &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
+		"GET launcher": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"workspace_max_bytes":1048576}`))
+		},
+		"POST actors": func(w http.ResponseWriter, _ *http.Request) {
+			creates.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+		},
+	}})
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := os.MkdirTemp(home, "dc-upload-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(project)
+	dir := filepath.Join(project, "assets")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "image"), make([]byte, 2<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := substrateOpen(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := &cobra.Command{}
+	cmd.SetErr(new(strings.Builder))
+	spec, err := sandboxcli.ResolveHarness("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := substrateRunTarget{spec: spec, connName: spec.Name, profile: "eng", template: "claude"}
+	_, err = substrateCreate(t.Context(), cmd, s, target, &substrateRunFlags{}, api.CreateRequest{}, project)
+	if creates.Load() != 0 || err == nil || !strings.Contains(err.Error(), "assets/") || !strings.Contains(err.Error(), "--exclude") {
+		t.Fatalf("creates %d, error %v", creates.Load(), err)
 	}
 }

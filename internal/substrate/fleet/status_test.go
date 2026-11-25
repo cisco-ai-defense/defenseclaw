@@ -61,6 +61,7 @@ func healthyCluster() Observed {
 		Bundles: &Bundles{Stages: []BundleStage{{Stage: "s-eng", Atespaces: []string{"eng-web"}, BundleID: "b-01AAAAAAAAAAAAAAAAAAAAAAAA", Version: 3,
 			KeyID: "acme-2026a", ManifestSHA256: strings.Repeat("ab", 32), AppliedAt: "2026-11-13T15:00:00Z", Source: "admin", ReceiptID: "r-0123456789abcdef",
 			State: BundleVerified}}},
+		RelayCA: &RelayCA{Secret: "defenseclaw-relay-ca", Present: true},
 	}
 }
 

@@ -73,10 +73,13 @@ func fakeKubectl(t *testing.T, fail error) {
 			return []byte(`{"metadata":{"name":"defenseclaw-system","labels":{"ate.dev/api-access":"true"}}}`), nil
 		case strings.HasPrefix(joined, "get deployments,statefulsets -n defenseclaw-system"):
 			return []byte(`{"items":[
-			 {"metadata":{"name":"defenseclaw-gateway"},"spec":{"replicas":2},"status":{"readyReplicas":2}},
+			 {"metadata":{"name":"defenseclaw-gateway"},"spec":{"replicas":2,"template":{"spec":{"volumes":[{"name":"relay-ca","secret":{"secretName":"e1-relay-ca"}}]}}},"status":{"readyReplicas":2}},
 			 {"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
 			 {"metadata":{"name":"defenseclaw-controller"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
 			 {"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":2},"status":{"readyReplicas":2}}]}`), nil
+		// The relay CA Secret the gateway mounts (B3.5): its name only.
+		case joined == "get secret e1-relay-ca -n defenseclaw-system -o name --ignore-not-found":
+			return []byte("secret/e1-relay-ca\n"), nil
 		case strings.HasPrefix(joined, "get leases.coordination.k8s.io"):
 			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"holderIdentity":"pod-1"}}]}`), nil
 		case strings.HasPrefix(joined, "get configmaps -n defenseclaw-system"):

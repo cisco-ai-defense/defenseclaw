@@ -526,9 +526,42 @@ func TestPutAppliesDirectoryModesLast(t *testing.T) {
 	}
 }
 
-func TestPutSizeCap(t *testing.T) {
-	t.Setenv(FilesMaxBytesEnv, "1000")
+func TestUploadCapFollowsCluster(t *testing.T) {
 	e := newFileEnv(t)
+	for _, tc := range []struct {
+		limit string
+		want  int
+	}{
+		{"1048576", http.StatusRequestEntityTooLarge},
+		{"2097152", http.StatusNoContent},
+	} {
+		archive := mkTar(t, ent{name: "file", mode: 0o644, body: strings.Repeat("x", 3<<19)})
+		req, err := http.NewRequest(http.MethodPut, e.srv.URL+"/dcrelay/1/files?dir="+t.TempDir(), bytes.NewReader(archive))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+e.tok)
+		req.Header.Set("X-DefenseClaw-Upload-Max", tc.limit)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tc.want || resp.Header.Get("X-DefenseClaw-Upload-Max") != tc.limit {
+			t.Errorf("cap %s: status %d, reported cap %q; want %d and cap echo", tc.limit, resp.StatusCode, resp.Header.Get("X-DefenseClaw-Upload-Max"), tc.want)
+		}
+	}
+}
+
+func TestPutSizeCap(t *testing.T) {
+	e := newFileEnv(t)
+	// A small explicit cap is valid for an existing cluster config.
+	handler := e.s.Handler()
+	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set(UploadMaxHeader, "1000")
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(e.srv.Close)
 	for _, tc := range []struct {
 		name string
 		ents []ent

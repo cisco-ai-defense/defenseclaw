@@ -52,9 +52,14 @@ func TestGAP2154LaneEnds(t *testing.T) {
 	}
 	r.Add(answerPiece(0, "The answer."))
 	r.Add(messageEndPiece(1))
-	// The answer ends the reasoning's run at once (GAP-2162 round 3).
-	if o := r.OpenSecret(); o.open {
-		t.Fatalf("the reasoning (answer of the same choice started) and choice 1 (ended) still hold: %+v", o)
+	// GAP-2170 parks the reasoning run across an interleaved answer,
+	// while the wire layer masks that run and can release answer events.
+	if o := r.OpenSecret(); !o.open {
+		t.Fatal("short answer did not keep the reasoning run held")
+	}
+	r.Add(answerPiece(0, strings.Repeat("x", 9000)))
+	if o := r.OpenSecret(); !o.reasoningOnly {
+		t.Fatalf("reasoning run was released across the long answer: %+v", o)
 	}
 	r.Add(answerPiece(1, " and 4111"))
 	if !r.OpenSecret().open {

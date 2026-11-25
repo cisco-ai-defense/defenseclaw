@@ -128,9 +128,11 @@ type configMapObject struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 	Metadata   struct {
-		Name            string `json:"name"`
-		Namespace       string `json:"namespace"`
-		ResourceVersion string `json:"resourceVersion,omitempty"`
+		Name            string            `json:"name"`
+		Namespace       string            `json:"namespace"`
+		ResourceVersion string            `json:"resourceVersion,omitempty"`
+		Annotations     map[string]string `json:"annotations,omitempty"`
+		Labels          map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
 	Data map[string]string `json:"data,omitempty"`
 }
@@ -148,7 +150,8 @@ func (k *Kube) GetConfigMap(ctx context.Context, namespace, name string) (*Confi
 		}
 		return nil, err
 	}
-	return &ConfigMap{Namespace: namespace, Name: name, ResourceVersion: obj.Metadata.ResourceVersion, Data: obj.Data}, nil
+	return &ConfigMap{Namespace: namespace, Name: name, ResourceVersion: obj.Metadata.ResourceVersion, Data: obj.Data,
+		Annotations: obj.Metadata.Annotations, Labels: obj.Metadata.Labels}, nil
 }
 
 // UpdateConfigMap implements KubeAPI. The resource version is the
@@ -156,6 +159,7 @@ func (k *Kube) GetConfigMap(ctx context.Context, namespace, name string) (*Confi
 func (k *Kube) UpdateConfigMap(ctx context.Context, cm *ConfigMap) error {
 	obj := configMapObject{APIVersion: "v1", Kind: "ConfigMap", Data: cm.Data}
 	obj.Metadata.Name, obj.Metadata.Namespace, obj.Metadata.ResourceVersion = cm.Name, cm.Namespace, cm.ResourceVersion
+	obj.Metadata.Annotations, obj.Metadata.Labels = cm.Annotations, cm.Labels
 	return k.do(ctx, http.MethodPut, cmPath(cm.Namespace, cm.Name), "application/json", obj, nil)
 }
 
@@ -174,6 +178,20 @@ func (k *Kube) DeleteSecret(ctx context.Context, namespace, name string) error {
 		return err
 	}
 	return nil
+}
+
+// DeleteJob implements KubeAPI. Background propagation deletes the Job's
+// pods too (a bare Job delete would orphan them).
+func (k *Kube) DeleteJob(ctx context.Context, namespace, name string) (bool, error) {
+	path := "/apis/batch/v1/namespaces/" + url.PathEscape(namespace) + "/jobs/" + url.PathEscape(name)
+	body := map[string]any{"kind": "DeleteOptions", "apiVersion": "v1", "propagationPolicy": "Background"}
+	if err := k.do(ctx, http.MethodDelete, path, "application/json", body, nil); err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func deployPath(namespace, name string) string {

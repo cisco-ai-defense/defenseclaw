@@ -74,47 +74,14 @@ func parseCommandVariant(command string, comments bool) (file *syntax.File, ok, 
 	if TooDeep(command) {
 		return nil, false, false
 	}
-	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
+	for at, variant := range parseVariants {
 		workcount.AddLarge(workcount.LargeParse, len(command))
-		file, err := containParse(nil, func() (*syntax.File, error) {
-			return parseKept(variant, comments, command)
-		})
+		file, err := parseWith(at, comments, command)
 		if err == nil {
 			return file, true, variant == syntax.LangBash
 		}
 	}
 	return nil, false, false
-}
-
-// keptParsers keeps the parsers of parseCommandVariant, one pool per grammar
-// and comment setting. A new syntax.Parser is about 2.6 KB (two 1 KB read
-// buffers): the gateway parses small commands this way over a hundred times
-// per hook call, and the new parsers were 8% of the bytes a strict decision
-// allocates (DET111-PERF-A).
-// syntax.Parser.Parse resets every state it reads and builds each tree in new
-// memory, so a parser reused once it is done gives the tree a new one gives
-// ("a Parser can be reused once it is done working"). A parse that panicked
-// (containParse) does not return its parser.
-var keptParsers [2][2]sync.Pool
-
-// parseKept is syntax.NewParser(syntax.Variant(variant),
-// syntax.KeepComments(comments)).Parse(Reader(command), "") on a kept parser.
-func parseKept(variant syntax.LangVariant, comments bool, command string) (*syntax.File, error) {
-	v, c := 0, 0
-	if variant == syntax.LangPOSIX {
-		v = 1
-	}
-	if comments {
-		c = 1
-	}
-	pool := &keptParsers[v][c]
-	parser, _ := pool.Get().(*syntax.Parser)
-	if parser == nil {
-		parser = syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments))
-	}
-	file, err := parser.Parse(Reader(command), "")
-	pool.Put(parser)
-	return file, err
 }
 
 // ParseBash reads command in the Bash grammar alone, without comments: the
@@ -140,4 +107,46 @@ func ParseBash(command string) (*syntax.File, bool) {
 	workcount.AddLarge(workcount.LargeParse, len(command))
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	return file, err == nil
+}
+
+// parseVariants are the grammars Parse tries, in order.
+var parseVariants = [...]syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX}
+
+// parserPools keeps a parser of each grammar, with and without comments, for
+// the next parse: syntax.NewParser allocates two 1 KB buffers a parse, about
+// a fifth of the memory a sandbox hook took on a compound call (substrate-1
+// GAP-0923). A parser is reused only once it is done working, as
+// syntax.Parser.Parse allows: Parse resets its state and allocates every
+// node of the new tree anew, so a tree never shares a node with another.
+var parserPools [len(parseVariants)][2]sync.Pool
+
+func init() {
+	for at, variant := range parseVariants {
+		for kept, comments := range []bool{false, true} {
+			parserPools[at][kept].New = func() any {
+				return syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments))
+			}
+		}
+	}
+}
+
+// parseWith parses command in parseVariants[at] with a pooled parser. A
+// parser whose parse panicked is not reused.
+func parseWith(at int, comments bool, command string) (*syntax.File, error) {
+	kept := 0
+	if comments {
+		kept = 1
+	}
+	pool := &parserPools[at][kept]
+	parser := pool.Get().(*syntax.Parser)
+	done := false
+	file, err := containParse(nil, func() (*syntax.File, error) {
+		file, err := parser.Parse(Reader(command), "")
+		done = true
+		return file, err
+	})
+	if done {
+		pool.Put(parser)
+	}
+	return file, err
 }

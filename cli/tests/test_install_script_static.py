@@ -2232,6 +2232,32 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
+def test_rolled_back_data_note_names_what_the_folder_holds(tmp_path: Path) -> None:
+    # GAP-2053: the note said "the data from before the last rollback", but
+    # previous/data holds what the rolled-back release wrote while it ran, and
+    # the second line spoke of "its audit history".
+    dc_home = tmp_path / "dc"
+    (dc_home / "previous" / "data").mkdir(parents=True)
+    (dc_home / "previous" / "data" / "config.yaml").write_text("x: 1\n", encoding="utf-8")
+    (dc_home / "previous" / "VERSION").write_text("1.0.11\n", encoding="utf-8")
+    (dc_home / "previous" / "ROLLED_BACK").write_text("", encoding="utf-8")
+    script = tmp_path / "keep.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\n'
+        + _install_sh_functions("keep_rolled_back_data")
+        + f'DEFENSECLAW_HOME="{dc_home}" PREVIOUS="{dc_home}/previous"\nkeep_rolled_back_data\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert list((dc_home / "backups").glob("rolled-back-1.0.11-*/config.yaml")), out
+    assert "info: Kept the data written while 1.0.11 ran in" in out
+    assert "before the last rollback" not in out and "audit history" not in out
+    ps1 = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert '"the data written while $version ran"' in ps1 and "before the last rollback" not in ps1
+
+
 def test_upgrade_from_0_8_never_claims_a_uv_as_the_installers() -> None:
     # p0 GAP-1456: the 0.8.x installer ran uv's own installer and kept no
     # record, and a uv the user installed the same way just before is

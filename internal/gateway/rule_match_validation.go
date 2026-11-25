@@ -1235,6 +1235,9 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	if obviousCredentialPlaceholder(candidate) {
 		return false
 	}
+	if ruleID == "SEC-AWS-SECRET" && awsKeyPairMatch(strings.TrimSpace(match)) && !awsSecretKeyShaped(candidate) {
+		return false
+	}
 	// The generic bearer shape has no provider-specific checksum or prefix, so
 	// require a modest entropy floor before elevating arbitrary header examples.
 	//
@@ -1255,7 +1258,9 @@ func credentialCandidate(ruleID, match string) string {
 		if len(trimmed) > 4 {
 			return trimmed[4:]
 		}
-	case "SEC-AWS-SECRET", "SEC-HEX-SECRET":
+	case "SEC-AWS-SECRET":
+		return awsSecretCandidate(trimmed)
+	case "SEC-HEX-SECRET":
 		return assignmentValue(trimmed)
 	case "SEC-ANTHROPIC":
 		return strings.TrimPrefix(trimmed, "sk-ant-")
@@ -1374,6 +1379,45 @@ func sequenceCredentialPlaceholder(normalized string) bool {
 		}
 	}
 	return repeatedShortCredentialUnit(compact)
+}
+
+// awsKeyPairMatch reports a SEC-AWS-SECRET match of the key-pair form: an
+// AKIA or ASIA access key id, then, on the same line, a run of exactly 40
+// secret-key characters (and the one character that ends the run). The
+// assignment form starts with the key name (aws_secret_access_key,
+// SecretAccessKey), never with an upper-case key id (substrate-1:GAP-0532).
+func awsKeyPairMatch(match string) bool {
+	return strings.HasPrefix(match, "AKIA") || strings.HasPrefix(match, "ASIA")
+}
+
+// awsSecretKeyByte reports a character of an AWS secret access key.
+func awsSecretKeyByte(r rune) bool {
+	return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '/' || r == '+'
+}
+
+// awsSecretCandidate returns the secret access key of a SEC-AWS-SECRET match:
+// the 40 characters that end a key-pair match, or the value after the first
+// = or : of an assignment, without the quotes and JSON escapes around it.
+func awsSecretCandidate(match string) string {
+	if awsKeyPairMatch(match) {
+		value := strings.TrimRightFunc(match, func(r rune) bool { return !awsSecretKeyByte(r) })
+		if len(value) < 40 {
+			return ""
+		}
+		return value[len(value)-40:]
+	}
+	if index := strings.IndexAny(match, "=:"); index >= 0 {
+		return strings.Trim(strings.TrimSpace(match[index+1:]), `"'\`)
+	}
+	return ""
+}
+
+// awsSecretKeyShaped reports a 40-character run that can be a secret access
+// key: AWS draws it from upper and lower case letters, digits, / and +, so a
+// real one holds both cases. A run of one case after a key id on the same
+// line is something else: a git commit or a SHA-1 in hex, a constant, a word.
+func awsSecretKeyShaped(value string) bool {
+	return strings.ContainsFunc(value, unicode.IsUpper) && strings.ContainsFunc(value, unicode.IsLower)
 }
 
 // awsDocumentedSecretKey is the example secret access key of the AWS documentation.

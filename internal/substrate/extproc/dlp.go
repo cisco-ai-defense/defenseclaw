@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/exactvalue"
 )
 
@@ -84,10 +85,19 @@ type binding struct {
 	profiles    []string
 }
 
-func compileBindings(in []SecretBinding) []binding {
+// A host that returns the requests it gets is left out of a binding without
+// allow_echo, as the controller leaves it out of the policy
+// (render.ReasonSecretEchoHost), so no log.secret.injected names it.
+func compileBindings(in []SecretBinding, noSwap []string) []binding {
 	out := make([]binding, 0, len(in))
 	for _, s := range in {
-		out = append(out, binding{name: s.Name, hosts: mustHostMatcher(s.Hosts),
+		hosts := s.Hosts
+		if !s.AllowEcho {
+			hosts = slices.DeleteFunc(slices.Clone(hosts), func(h string) bool {
+				return len(egressspec.EchoHostsCoveredWith(h, noSwap)) > 0
+			})
+		}
+		out = append(out, binding{name: s.Name, hosts: mustHostMatcher(hosts),
 			header: strings.ToLower(strings.TrimSpace(s.Header)), placeholder: s.Placeholder, profiles: s.Profiles})
 	}
 	return out

@@ -94,6 +94,9 @@ type Config struct {
 	// secret's value on which hosts, and its placeholder. Values are never
 	// here.
 	Secrets []SecretBinding `yaml:"secrets"`
+	// NoSwapHosts is substrate.egress.no_swap_hosts: with egressspec.EchoHosts
+	// the hosts the controller adds no secret on (secret_echo_host).
+	NoSwapHosts []string `yaml:"no_swap_hosts,omitempty"`
 	// ActorSecretsDir holds the values of the profiles' actor_secrets, one
 	// file per name (a mounted Secret), read again when they change.
 	ActorSecretsDir string `yaml:"actor_secrets_dir"`
@@ -176,6 +179,8 @@ type SecretBinding struct {
 	// Profiles are the profile names or globs the secret is rendered for
 	// (substrate.secrets[].profiles); none means every profile.
 	Profiles []string `yaml:"profiles,omitempty"`
+	// AllowEcho is inject.allow_echo: the binding keeps its echo hosts.
+	AllowEcho bool `yaml:"allow_echo,omitempty"`
 }
 
 // ProfileConfig is the egress part of a profile.

@@ -261,6 +261,10 @@ type workFolderTracker struct {
 	folders map[*syntax.Stmt]workFolders
 	// movers are the functions of the text whose body may move the folder.
 	movers map[string]bool
+	// shadowed: the text defines a function named cd, chdir, pushd, popd,
+	// builtin or command, so a call of that name may run it instead of the
+	// builtin: every move goes to an unresolved folder (substrate-1:GAP-0684).
+	shadowed bool
 	// decls are the definitions of the movers the text defines once (nil
 	// for one defined more than once): a call of one the definition may
 	// have run before (workFolderDefinedAt) leaves the shell in the folders
@@ -361,6 +365,15 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
+			if node.Name != nil {
+				// A function of a move's name may run instead of the
+				// builtin (substrate-1:GAP-0684): every move goes to an
+				// unresolved folder, in the text and in mover bodies.
+				switch node.Name.Value {
+				case "cd", "chdir", "pushd", "popd", "builtin", "command":
+					tracker.shadowed = true
+				}
+			}
 			if node.Name != nil && node.Body != nil {
 				all = append(all, node)
 			}
@@ -583,7 +596,7 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// the folders the call leaves are read here.
 	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, decls: t.decls,
 		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined,
-		firstRun: t.firstRun}
+		firstRun: t.firstRun, shadowed: t.shadowed}
 	ok, after = inner.stmt(decl.Body, in)
 	// `f() { test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc`
 	// may leave the shell where the body returned, with status 0 (the
@@ -723,6 +736,9 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 			}
 		}
 		if target, isCD := staticWorkFolderMove(cmd); isCD {
+			if t.shadowed {
+				target = "\x00"
+			}
 			moved := in.with(target)
 			for _, candidate := range cdPathCandidates(cmd, target) {
 				moved = unionWorkFolders(moved, in.with(candidate))
