@@ -186,6 +186,10 @@ func promotedArtifactFindings(
 			ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,
 			ActiveAgentFilesUncertain:                facts.ActiveAgentFilesUncertain,
 			DialectHint:                              dialect,
+			// The script's walks draw on the request's wait, the artifact's
+			// facts the chain reads (recordArtifactTrustedAction) as the
+			// dispatch's (RV-0674T F4).
+			CredentialWalkBudget: hookWalkBudgetFrom(ctx),
 		}
 		artifactFacts := actionfacts.Analyze(input)
 		bodyFacts := promotedArtifactBodyEnforcementFacts(input, artifactFacts)

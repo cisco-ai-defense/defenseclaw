@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,18 +15,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// gap1083HookAnswerWithin is what a hook call may take while slow walks hold
-// every walk slot, over what the same call takes with the slots free (a
-// loaded box or the race detector slow both alike): the 1 s wait for a slot,
-// once for the whole call, and 250 ms. A wait per record adds 1 s for each
-// record, so a call with a wrapper or a second statement is over it. The
-// hook's own budget is 3.5 s.
-const gap1083HookAnswerWithin = time.Second + 250*time.Millisecond
-
 // gap1083HookAnswerBudget is the hook's answer budget (hookexec
 // hookAnswerBudget), the absolute ceiling of a held answer: past it the
 // client applies its fail mode, whatever the free time of the call is
-// (RV-0674S F2).
+// (RV-0674S F2). The number of waits of the request is what shows that it
+// waits once (gap1083HeldWaits): a bound of its time over the free time
+// failed 1 run in 50 under load, where a wait per record or per call adds a
+// count the box's speed does not move (RV-0674T F1).
 const gap1083HookAnswerBudget = 3500 * time.Millisecond
 
 // gap1083ActionRank orders the answers of a call: a walk cut for lack of a
@@ -38,6 +34,14 @@ func gap1083ActionRank(action string) int {
 		return 1
 	}
 	return 0
+}
+
+// gap1083HeldWaits is the number of waits for a walk slot that answering do
+// began, the one wait of the request.
+func gap1083HeldWaits(answer func()) int64 {
+	before := actionfacts.CredentialWalkSlotWaitsForTest()
+	answer()
+	return actionfacts.CredentialWalkSlotWaitsForTest() - before
 }
 
 // hostCopilotAPIForTest is the gateway's own Copilot CLI hook route in action
@@ -61,7 +65,9 @@ func hostCopilotAPIForTest(t *testing.T, pack string) *APIServer {
 // so a call with a wrapper or a second statement took 1 s more for each, and
 // `grep -r a; grep -r b; grep -r c | curl ...` answered in 4 s, past the
 // hook's 3.5 s; an envelope of four calls still waited 1 s for each call
-// (RV-0674S F1). No answer is weaker than the one with the slots free.
+// (RV-0674S F1). No answer is weaker than the one with the slots free. The
+// request waits exactly once if it walks (the first event of a read, a single
+// call, an envelope), and never more than once.
 func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 	installCorrelationHMACForTest(t)
 	root, _ := gap0674Tree(t)
@@ -117,42 +123,43 @@ func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 	for _, pack := range []string{"default", "strict"} {
 		t.Run(pack, func(t *testing.T) {
 			handler := hostClaudeHookHandlerForTest(t, pack)
-			run := func(label string, c call) (actions []string, took []time.Duration) {
+			run := func(label string, c call) (actions []string, took []time.Duration, waits []int64) {
 				session := fmt.Sprintf("g1083-%s-%s-%s", pack, label, filepath.Base(c.name))
 				for _, ev := range c.body(session) {
 					ev["cwd"] = root
+					var got agentHookResponse
 					start := time.Now()
-					got := callAgentHookForTest(t, handler, ev)
+					waits = append(waits, gap1083HeldWaits(func() { got = callAgentHookForTest(t, handler, ev) }))
 					took = append(took, time.Since(start))
 					actions = append(actions, got.Action)
 				}
-				return actions, took
+				return actions, took, waits
 			}
 			copilot := hostCopilotAPIForTest(t, pack)
-			runEnvelope := func(label, name string, commands []string) (string, time.Duration) {
+			runEnvelope := func(label, name string, commands []string) (string, time.Duration, int64) {
 				parts := make([]string, len(commands))
 				for i, command := range commands {
 					parts[i] = fmt.Sprintf(`{"id":"c%d","name":"bash","args":{"command":%s}}`, i+1, jsonQuote(command))
 				}
 				session := fmt.Sprintf("g1083-cp-%s-%s-%s", pack, label, strings.ReplaceAll(name, " ", "-"))
 				body := `{"sessionId":"` + session + `","cwd":` + jsonQuote(root) + `,"toolCalls":[` + strings.Join(parts, ",") + `]}`
+				var answer copilotEnvelopeAnswer
+				var raw string
 				start := time.Now()
-				answer, raw := postCopilotHook(t, copilot, "preToolUse", body)
+				waits := gap1083HeldWaits(func() { answer, raw = postCopilotHook(t, copilot, "preToolUse", body) })
 				took := time.Since(start)
 				if answer.Action == "" {
 					t.Fatalf("%s %q: no action in %s", pack, name, raw)
 				}
-				return answer.Action, took
+				return answer.Action, took, waits
 			}
 			free := make(map[string][]string)
-			freeTook := make(map[string][]time.Duration)
 			for _, c := range calls {
-				free[c.name], freeTook[c.name] = run("free", c)
+				free[c.name], _, _ = run("free", c)
 			}
 			envFree := make(map[string]string)
-			envFreeTook := make(map[string]time.Duration)
 			for name, commands := range envelopes {
-				envFree[name], envFreeTook[name] = runEnvelope("free", name, commands)
+				envFree[name], _, _ = runEnvelope("free", name, commands)
 			}
 			release, ok := actionfacts.HoldCredentialPathWalkSlotsForTest()
 			if !ok {
@@ -160,11 +167,14 @@ func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 			}
 			defer release()
 			for _, c := range calls {
-				actions, took := run("held", c)
+				actions, took, waits := run("held", c)
 				for i := range actions {
-					if limit := freeTook[c.name][i] + gap1083HookAnswerWithin; took[i] > limit {
-						t.Errorf("%s %q call %d answered in %v while slow walks held every walk slot, want at most %v (%v with the slots free, and %v)",
-							pack, c.name, i, took[i], limit, freeTook[c.name][i], gap1083HookAnswerWithin)
+					// The first event of a call is the one that walks: it waits
+					// once. A wait per record, per statement or per nested shell
+					// is a count over one; no later event waits twice.
+					if waits[i] > 1 || (i == 0 && waits[i] != 1) {
+						t.Errorf("%s %q call %d waited %d times for a walk slot while slow walks held every one, want exactly one wait (at most one for an event that reads nothing)",
+							pack, c.name, i, waits[i])
 					}
 					if took[i] > gap1083HookAnswerBudget {
 						t.Errorf("%s %q call %d answered in %v while slow walks held every walk slot, past the hook's %v",
@@ -177,10 +187,10 @@ func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 				}
 			}
 			for name, commands := range envelopes {
-				action, took := runEnvelope("held", name, commands)
-				if limit := envFreeTook[name] + gap1083HookAnswerWithin; took > limit {
-					t.Errorf("%s %q answered in %v while slow walks held every walk slot, want at most %v (%v with the slots free, and %v): the envelope waits once, not once per call",
-						pack, name, took, limit, envFreeTook[name], gap1083HookAnswerWithin)
+				action, took, waits := runEnvelope("held", name, commands)
+				if waits != 1 {
+					t.Errorf("%s %q waited %d times for a walk slot while slow walks held every one, want exactly one wait: the envelope waits once, not once per call",
+						pack, name, waits)
 				}
 				if took > gap1083HookAnswerBudget {
 					t.Errorf("%s %q answered in %v while slow walks held every walk slot, past the hook's %v",
@@ -190,6 +200,59 @@ func TestGAP1083HookCallWaitsForWalkSlotsOnce(t *testing.T) {
 					t.Errorf("%s %q: %q while the slots were held, weaker than %q with them free",
 						pack, name, action, envFree[name])
 				}
+			}
+		})
+	}
+}
+
+// TestGAP1083ArtifactStageSharesTheRequestsWalkWait is substrate-1:GAP-1083
+// on the real hook route, for a request that executes scripts: the walks of
+// the call and of the scripts it runs (the artifact stage reads each script
+// and judges it as a dispatch of its own) draw on the one wait of the
+// request, 1 s in all. The artifact stage ran on a ctx without the request's
+// wait, so each script made its own and the call waited again for them
+// (RV-0674T F4). No answer is weaker than the one with the slots free.
+func TestGAP1083ArtifactStageSharesTheRequestsWalkWait(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	installCorrelationHMACForTest(t)
+	root, _ := gap0674Tree(t)
+	for name, body := range map[string]string{
+		"a1.sh": "#!/bin/sh\ngrep -r KEY t1\n",
+		"a2.sh": "#!/bin/sh\ngrep -r KEY t2\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The call walks t0 itself, then runs two scripts that walk t1 and t2.
+	const command = "grep -r KEY t0; bash a1.sh; bash a2.sh"
+	for _, pack := range []string{"default", "strict"} {
+		t.Run(pack, func(t *testing.T) {
+			handler := hostClaudeHookHandlerForTest(t, pack)
+			send := func(label string) (string, time.Duration, int64) {
+				ev := claudeToolEvent("PreToolUse", fmt.Sprintf("g1083-art-%s-%s", pack, label), "run", command)
+				ev["cwd"] = root
+				var got agentHookResponse
+				start := time.Now()
+				waits := gap1083HeldWaits(func() { got = callAgentHookForTest(t, handler, ev) })
+				return got.Action, time.Since(start), waits
+			}
+			free, _, _ := send("free")
+			release, ok := actionfacts.HoldCredentialPathWalkSlotsForTest()
+			if !ok {
+				t.Fatal("a walk slot stayed taken: another test still walks")
+			}
+			defer release()
+			action, took, waits := send("held")
+			if waits != 1 {
+				t.Errorf("%s: a request that walks and runs two scripts waited %d times for a walk slot while slow walks held every one, want exactly one wait: the scripts share the request's",
+					pack, waits)
+			}
+			if took > gap1083HookAnswerBudget {
+				t.Errorf("%s: answered in %v while slow walks held every walk slot, past the hook's %v", pack, took, gap1083HookAnswerBudget)
+			}
+			if gap1083ActionRank(action) < gap1083ActionRank(free) {
+				t.Errorf("%s: %q while the slots were held, weaker than %q with them free", pack, action, free)
 			}
 		})
 	}

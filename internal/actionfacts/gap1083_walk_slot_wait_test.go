@@ -116,6 +116,7 @@ func TestGAP1083WalkSlotWaitIsBounded(t *testing.T) {
 	}
 	gap1083HoldWalkSlots(t)
 	const each = 4
+	waitsBefore := credentialPathWalkSlotWaits.Load()
 	answers := make(chan struct {
 		command string
 		gap1083Answer
@@ -134,9 +135,6 @@ func TestGAP1083WalkSlotWaitIsBounded(t *testing.T) {
 	for got := range each * len(commands) {
 		select {
 		case a := <-answers:
-			if limit := 1750 * time.Millisecond; a.took > limit {
-				t.Errorf("%q answered in %v while slow walks held the slots, want at most %v", a.command, a.took, limit)
-			}
 			w := want[a.command]
 			if !reflect.DeepEqual(a.reads, w.reads) || !reflect.DeepEqual(a.caps, w.caps) {
 				t.Errorf("%q without a slot: record %+v caps %v, want the cut walk's %+v caps %v", a.command, a.reads, a.caps, w.reads, w.caps)
@@ -150,6 +148,12 @@ func TestGAP1083WalkSlotWaitIsBounded(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("%d of %d calls answered within the %v hook budget while slow walks held every walk slot", got, each*len(commands), gap1083HookAnswerBudget)
 		}
+	}
+	// Each call waited once, whatever number of folders it searches: the
+	// count of waits is what the bound of its time stood for, and load does
+	// not move it (RV-0674T F1).
+	if waits := credentialPathWalkSlotWaits.Load() - waitsBefore; waits != each*int64(len(commands)) {
+		t.Errorf("%d calls waited %d times for a walk slot while slow walks held every one, want one wait each", each*len(commands), waits)
 	}
 }
 
@@ -214,6 +218,7 @@ func TestGAP1083RecordsOfOneCallShareTheWait(t *testing.T) {
 	root, home := gap1083Tree(t)
 	gap1083HoldWalkSlots(t)
 	budget := NewCredentialWalkBudget(context.Background())
+	waitsBefore := credentialPathWalkSlotWaits.Load()
 	start := time.Now()
 	var tooks []time.Duration
 	for range 4 {
@@ -224,7 +229,13 @@ func TestGAP1083RecordsOfOneCallShareTheWait(t *testing.T) {
 		}
 		tooks = append(tooks, time.Since(at))
 	}
-	if total := time.Since(start); total > 1750*time.Millisecond {
-		t.Errorf("four records of one call took %v (%v) while slow walks held every slot, want at most 1.75 s, one wait of 1 s and 750 ms", total, tooks)
+	// One wait for the four records, not one each (RV-0674T F1: the count,
+	// not a bound of the time, which a loaded box moves). The hook's budget
+	// stays the absolute ceiling.
+	if waits := credentialPathWalkSlotWaits.Load() - waitsBefore; waits != 1 {
+		t.Errorf("four records of one call waited %d times for a walk slot (%v), want one wait", waits, tooks)
+	}
+	if total := time.Since(start); total > gap1083HookAnswerBudget {
+		t.Errorf("four records of one call took %v (%v) while slow walks held every slot, past the hook's %v", total, tooks, gap1083HookAnswerBudget)
 	}
 }

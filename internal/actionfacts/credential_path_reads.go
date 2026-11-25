@@ -96,7 +96,7 @@ var credentialPathWalkSlots = make(chan struct{}, max(2, runtime.GOMAXPROCS(0)/4
 // folder hold them, and returns the function that gives them back. It is the
 // seam of the gateway's hook-route test of the slot wait (substrate-1:GAP-1083);
 // a slot that stays taken for 10 s reports ok false. Only _test.go files call
-// it (TestGAP1083WalkSlotSeamIsCalledOnlyByTests): a production caller that
+// it (TestGAP1083WalkSlotSeamsAreCalledOnlyByTests): a production caller that
 // kept the slots would cut every walk to the unknown tier.
 func HoldCredentialPathWalkSlotsForTest() (release func(), ok bool) {
 	held := 0
@@ -115,6 +115,21 @@ func HoldCredentialPathWalkSlotsForTest() (release func(), ok bool) {
 		}
 	}
 	return release, true
+}
+
+// credentialPathWalkSlotWaits counts the waits for a walk slot that began (a
+// take that found every slot taken, its call with wait left and its context
+// not done). A hook request waits once, whatever number of records and tool
+// calls it resolves, so a test asserts the count of the request, not the time
+// it took, which load moves (substrate-1:GAP-1083, RV-0674T F1).
+var credentialPathWalkSlotWaits atomic.Int64
+
+// CredentialWalkSlotWaitsForTest is the number of waits for a walk slot that
+// began, in all. It is the seam of the gateway's hook-route test of the slot
+// wait, beside HoldCredentialPathWalkSlotsForTest, and only _test.go files
+// call it (TestGAP1083WalkSlotSeamsAreCalledOnlyByTests).
+func CredentialWalkSlotWaitsForTest() int64 {
+	return credentialPathWalkSlotWaits.Load()
 }
 
 // credentialPathWalkSlotWait is the longest one resolve waits for walk slots
@@ -169,6 +184,7 @@ func (w *CredentialWalkBudget) take() bool {
 	if left <= 0 {
 		return false
 	}
+	credentialPathWalkSlotWaits.Add(1)
 	start := time.Now()
 	timer := time.NewTimer(left)
 	defer func() {

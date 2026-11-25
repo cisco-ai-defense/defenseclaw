@@ -44,6 +44,7 @@ func TestGAP1083TopLevelDispatchesOfOneRequestShareTheWalkWait(t *testing.T) {
 	if hookWalkBudgetFrom(ctx) == nil || withHookWalkBudget(ctx) != ctx {
 		t.Fatal("a context with the request's wait must keep it")
 	}
+	waitsBefore := actionfacts.CredentialWalkSlotWaitsForTest()
 	start := time.Now()
 	for i, command := range commands {
 		held := judge(ctx, command)
@@ -51,9 +52,14 @@ func TestGAP1083TopLevelDispatchesOfOneRequestShareTheWalkWait(t *testing.T) {
 			t.Errorf("%q: %v while the slots were held, weaker than %v with them free", command, held, free[i])
 		}
 	}
-	if took, limit := time.Since(start), time.Second+750*time.Millisecond; took > limit {
-		t.Errorf("%d dispatches of one request took %v while slow walks held every walk slot, want at most %v (one wait of 1 s)",
-			len(commands), took, limit)
+	// One wait for the dispatches of the request, not one each (RV-0674T F1:
+	// the count, not a bound of the time, which a loaded box moves). The
+	// hook's 3.5 s stays the absolute ceiling.
+	if waits := actionfacts.CredentialWalkSlotWaitsForTest() - waitsBefore; waits != 1 {
+		t.Errorf("%d dispatches of one request waited %d times for a walk slot while slow walks held every one, want one wait", len(commands), waits)
+	}
+	if took := time.Since(start); took > gap1083HookAnswerBudget {
+		t.Errorf("%d dispatches of one request took %v while slow walks held every walk slot, past the hook's %v", len(commands), took, gap1083HookAnswerBudget)
 	}
 }
 

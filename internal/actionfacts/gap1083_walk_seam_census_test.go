@@ -11,13 +11,20 @@ import (
 	"testing"
 )
 
-// TestGAP1083WalkSlotSeamIsCalledOnlyByTests is the census of the one export
-// that exists only as a test seam: HoldCredentialPathWalkSlotsForTest takes
-// every walk slot. A production caller that kept them would cut every walk to
-// the unknown tier, so only _test.go files may call it, and it keeps the
-// ForTest name of the repo's other seams (RV-0674S F3).
-func TestGAP1083WalkSlotSeamIsCalledOnlyByTests(t *testing.T) {
-	const seam = "HoldCredentialPathWalkSlotsForTest"
+// TestGAP1083WalkSlotSeamsAreCalledOnlyByTests is the census of the exports
+// that exist only as test seams: HoldCredentialPathWalkSlotsForTest takes
+// every walk slot, and CredentialWalkSlotWaitsForTest reads the count of the
+// waits for one. A production caller that kept the slots would cut every walk
+// to the unknown tier, so only _test.go files may call them, and they keep
+// the ForTest name of the repo's other seams (RV-0674S F3, RV-0674T F1).
+func TestGAP1083WalkSlotSeamsAreCalledOnlyByTests(t *testing.T) {
+	for _, seam := range []string{"HoldCredentialPathWalkSlotsForTest", "CredentialWalkSlotWaitsForTest"} {
+		t.Run(seam, func(t *testing.T) { walkSlotSeamIsCalledOnlyByTests(t, seam) })
+	}
+}
+
+func walkSlotSeamIsCalledOnlyByTests(t *testing.T, seam string) {
+	t.Helper()
 	// Split, so this file does not name the old call itself.
 	oldName := "HoldCredentialPathWalk" + "Slots("
 	root := filepath.Join("..", "..")

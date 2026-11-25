@@ -1075,6 +1075,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			(cfg == nil || !cfg.SecureClientIntegration()) {
 			ctx = withShellToolGateBound(ctx, r)
 		}
+		// One wait for walk slots for the whole request: its evaluation, each
+		// call of a Copilot envelope, the members of an artifact and the
+		// tool-chain stage all draw on it (substrate-1:GAP-1083). The artifact
+		// stage runs on ctx, not on evaluationCtx, so the wait is put here,
+		// where both come from (RV-0674T F4).
+		ctx = withHookWalkBudget(ctx)
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		// An argumentless Copilot permission callback is bound to the call of
