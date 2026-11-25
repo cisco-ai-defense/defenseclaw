@@ -8,11 +8,10 @@ package gateway
 
 import (
 	"context"
-	crand "crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 	"math/rand"
 	"reflect"
 	"regexp"
@@ -258,12 +257,27 @@ func TestGAP0515RuleAndPIIMatchesEqualWholeText(t *testing.T) {
 	}
 }
 
+// gap0515RSA8192 is a PKCS #1 RSA private key PEM of the length of an
+// 8192-bit key (GAP-0622: longer than any window), made at run time from
+// fixed pseudo-random integers: the secret rule checks the PEM structure
+// (nine positive integers), not the arithmetic, so no key generation is
+// needed.
 var gap0515RSA8192 = sync.OnceValue(func() string {
-	key, err := rsa.GenerateKey(crand.Reader, 8192)
+	r := rand.New(rand.NewSource(8192))
+	integer := func(n int) *big.Int {
+		b := make([]byte, n)
+		r.Read(b)
+		b[0] |= 0x80
+		return new(big.Int).SetBytes(b)
+	}
+	der, err := asn1.Marshal(struct {
+		Version                     int
+		N, E, D, P, Q, Dp, Dq, QInv *big.Int
+	}{0, integer(1024), big.NewInt(65537), integer(1024), integer(512), integer(512), integer(512), integer(512), integer(512)})
 	if err != nil {
 		panic(err)
 	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE" + " KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	return string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE" + " KEY", Bytes: der}))
 })
 
 // gap0515Verdict is what a mid-stream check decides and reports: every

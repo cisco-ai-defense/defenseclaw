@@ -122,7 +122,7 @@ func gap0515Serve(t *testing.T, route, text string, size int) gap0515Stream {
 	insp := &gap0515TimedInspector{GuardrailInspector: NewGuardrailInspector("local", nil, nil)}
 	deltas := gap0515Deltas(text, size)
 	var body string
-	t0 := time.Now()
+	var t0 time.Time
 	switch route {
 	case "anthropic":
 		var f streamTailFormat

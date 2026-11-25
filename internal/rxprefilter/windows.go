@@ -223,11 +223,11 @@ func (t *Text) FindStringIndex(re *regexp.Regexp) []int {
 		return nil
 	}
 	if t.memo != nil {
-		if all, ok := t.memoMatches(re); ok {
-			if len(all) == 0 {
+		if first, ok := t.memoMatches(re, true); ok {
+			if len(first) == 0 {
 				return nil
 			}
-			return []int{all[0][0], all[0][1]}
+			return first[0]
 		}
 	}
 	if len(t.text) >= WindowMinText {
@@ -250,15 +250,8 @@ func (t *Text) FindAllStringIndex(re *regexp.Regexp) [][]int {
 		return nil
 	}
 	if t.memo != nil {
-		if all, ok := t.memoMatches(re); ok {
-			if len(all) == 0 {
-				return nil
-			}
-			out := make([][]int, len(all))
-			for i, loc := range all {
-				out[i] = []int{loc[0], loc[1]}
-			}
-			return out
+		if all, ok := t.memoMatches(re, false); ok {
+			return all
 		}
 	}
 	if len(t.text) >= WindowMinText {

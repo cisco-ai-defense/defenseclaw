@@ -1971,7 +1971,7 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 // (midStreamScanState, GAP-0515; nil: none).
 func scanUntrustedContentRulesWithState(generation *compiledRulePackCategories, content string, st *midStreamScanState) []RuleFinding {
 	findings := scanContentRulesWithOptions(generation, content, "", ruleContentScopeUntrusted, ruleScanOptions{memo: st, memoRole: "content"})
-	findings = unionRuleFindings(findings, weakPasswordAssignmentFindingsWithState(generation, content, st))
+	findings = unionRuleFindings(findings, weakPasswordAssignmentFindings(generation, content, st))
 	if secureClientGeneration() {
 		return findings
 	}
@@ -2027,21 +2027,17 @@ func withZeroWidthSecretFindingsWithState(generation *compiledRulePackCategories
 // pattern, so a pack that disables or replaces SEC-PASSWORD-ASSIGN turns this
 // off or changes them. The text without its invisible characters
 // (credentialVisibleText) is read too, as rel read its normalized text.
-func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string) []RuleFinding {
-	return weakPasswordAssignmentFindingsWithState(generation, content, nil)
-}
-
-// weakPasswordAssignmentFindingsWithState is weakPasswordAssignmentFindings
-// with the memo of a stream's mid-stream checks (GAP-0515; nil: none): the
+//
+// st is the memo of a stream's mid-stream checks (GAP-0515; nil: none): the
 // literal check of content reads it through the memo.
-func weakPasswordAssignmentFindingsWithState(generation *compiledRulePackCategories, content string, st *midStreamScanState) []RuleFinding {
+func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string, st *midStreamScanState) []RuleFinding {
 	if generation == nil {
 		return nil
 	}
 	if len(generation.members) > 0 {
 		var out []RuleFinding
 		for i, member := range generation.members {
-			findings := weakPasswordAssignmentFindingsWithState(member, content, st)
+			findings := weakPasswordAssignmentFindings(member, content, st)
 			if i < len(generation.memberNames) {
 				for j := range findings {
 					findings[j].profile = generation.memberNames[i]

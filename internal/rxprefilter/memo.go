@@ -352,8 +352,9 @@ type runChain struct {
 	text string
 	done int
 	locs []runMatch
-	// last is the answer for the text of gen.
-	last [][]int
+	// vol is the matches of the text of gen after the settled part, read
+	// again with every text.
+	vol []runMatch
 }
 
 type runMatch struct {
@@ -361,9 +362,10 @@ type runMatch struct {
 	readTo     int // the match was read from text[..readTo): the run and the rune after it
 }
 
-// memoMatches is re.FindAllStringIndex(t.text, -1) by run, from the memo;
-// ok false when re is not searched in runs.
-func (t *Text) memoMatches(re *regexp.Regexp) ([][]int, bool) {
+// memoMatches is re.FindAllStringIndex(t.text, -1) by run, from the memo,
+// or with firstOnly its first match only (re.FindStringIndex), without the
+// list of every match; ok false when re is not searched in runs.
+func (t *Text) memoMatches(re *regexp.Regexp, firstOnly bool) ([][]int, bool) {
 	plan := memoPlanFor(re)
 	if !plan.ok {
 		return nil, false
@@ -383,33 +385,58 @@ func (t *Text) memoMatches(re *regexp.Regexp) ([][]int, bool) {
 	defer c.mu.Unlock()
 	switch {
 	case c.gen == t.memoGen:
-		return c.last, true
 	case c.gen > t.memoGen:
 		// A later text of the role moved the chain on: read this one alone.
 		var fresh runChain
-		return fresh.matches(t.text, re, plan, 0), true
+		fresh.move(t.text, re, plan, 0)
+		return fresh.answer(firstOnly), true
+	default:
+		common := t.memoCommon
+		if c.gen != t.memoGen-1 {
+			common = CommonPrefixLen(t.text, c.text)
+		}
+		c.move(t.text, re, plan, common)
+		c.gen = t.memoGen
 	}
-	common := t.memoCommon
-	if c.gen != t.memoGen-1 {
-		common = CommonPrefixLen(t.text, c.text)
+	return c.answer(firstOnly), true
+}
+
+// answer is the chain's matches in its text, in order, in new slices: all
+// of them, or the first one only.
+func (c *runChain) answer(firstOnly bool) [][]int {
+	n := len(c.locs) + len(c.vol)
+	if n == 0 {
+		return nil
 	}
-	c.last = c.matches(t.text, re, plan, common)
-	c.gen = t.memoGen
-	return c.last, true
+	if firstOnly {
+		first := c.vol
+		if len(c.locs) > 0 {
+			first = c.locs
+		}
+		return [][]int{{first[0].start, first[0].end}}
+	}
+	out := make([][]int, 0, n)
+	for _, l := range c.locs {
+		out = append(out, []int{l.start, l.end})
+	}
+	for _, l := range c.vol {
+		out = append(out, []int{l.start, l.end})
+	}
+	return out
 }
 
 // memoMargin is how far past a rune the decoding of an invalid byte may
 // look: a position is settled only when the text has memoMargin more bytes.
 const memoMargin = utf8.UTFMax - 1
 
-// matches moves the chain to text, whose first common bytes are those of
-// the chain's text, and returns all the matches in text, in order. The
+// move moves the chain to text, whose first common bytes are those of the
+// chain's text: locs and vol are then all the matches in text, in order. The
 // runes are decoded from done, a rune start of the decoding from the start
 // of the text (the one the regexp engine uses), so they stay on it. What
 // the chain keeps is settled: it reads only bytes memoMargin before the end
 // of the text it was read from, so its decoding does not change when bytes
 // are added after them; the rest is read again each time.
-func (c *runChain) matches(text string, re *regexp.Regexp, plan *memoPlan, common int) [][]int {
+func (c *runChain) move(text string, re *regexp.Regexp, plan *memoPlan, common int) {
 	if c.done+memoMargin > common {
 		keep := len(c.locs)
 		for keep > 0 && c.locs[keep-1].readTo+memoMargin > common {
@@ -468,14 +495,7 @@ func (c *runChain) matches(text string, re *regexp.Regexp, plan *memoPlan, commo
 		}
 		pos = end + w
 	}
-	out := make([][]int, 0, len(c.locs)+len(volatile))
-	for _, l := range c.locs {
-		out = append(out, []int{l.start, l.end})
-	}
-	for _, l := range volatile {
-		out = append(out, []int{l.start, l.end})
-	}
-	return out
+	c.vol = volatile
 }
 
 // runMatchesOf is the matches of re in the run text[start:end], read with
