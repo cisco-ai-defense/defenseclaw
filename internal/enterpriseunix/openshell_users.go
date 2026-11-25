@@ -1144,6 +1144,8 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 				status = l.replaceLegacyDaemon(ctx, ops, account, status)
 			}
 			entry.Sandboxes = status.busy()
+			running := status.Running
+			entry.Running = &running
 			state.Pending[key] = entry
 			continue
 		}
