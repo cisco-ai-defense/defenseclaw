@@ -162,8 +162,11 @@ type Record struct {
 	// openingUsage is set when Usage is only the opening count of a stream
 	// that ended before its final usage: what the call cost is unknown.
 	openingUsage bool
-	// answered is set when the upstream answered the gateway's call (its
-	// status and headers reached the usage record), whatever TTFB the clock
+	// answered is set when the provider itself answered the gateway's call
+	// (UpstreamHeader: the provider's status and headers, or on the
+	// translated chat stream the adapter's first chunk or answer), never by
+	// a header the gateway sends of its own before it calls the provider
+	// (GAP-0628, rel-1-0-10:GAP-2233). It holds whatever TTFB the clock
 	// measured: on Windows an answer within one clock tick has a TTFB of 0.
 	answered bool
 }

@@ -3589,6 +3589,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// That header is the gateway's own, sent before the provider is called:
+	// the usage record counts the provider as answered from its first chunk
+	// or its answer, never from this header (rel-1-0-10:GAP-2233).
+	usageAnswer := usageOwnHeader(w)
+	var answerOnce sync.Once
 	w.WriteHeader(http.StatusOK)
 	// The headers carry no model text: the client has them at once, also
 	// while the initial buffer waits (GAP-0628).
@@ -3889,6 +3894,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		defer close(chunks)
 		defer func() { streamPanic = recover() }()
 		usage, err = upstream.ChatCompletionStream(streamCtx, req, func(chunk StreamChunk) {
+			answerOnce.Do(usageAnswer.upstreamAnswered)
 			select {
 			case chunks <- chunk:
 			case <-streamCtx.Done():
@@ -3957,6 +3963,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}
 	if streamPanic != nil {
 		panic(streamPanic)
+	}
+	// An adapter that returned without an error, or with the provider's
+	// usage, had the provider's answer even with no chunk (GAP-2233).
+	if err == nil || usage != nil {
+		answerOnce.Do(usageAnswer.upstreamAnswered)
 	}
 	// Bifrost parsed the usage (it always asks for include_usage): hand it
 	// to the usage record of this call.

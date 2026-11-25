@@ -111,9 +111,17 @@ type usageResponseWriter struct {
 
 	mu     sync.Mutex
 	header bool
-	body   []byte
-	over   bool
-	ended  bool
+	// own is set where the gateway answers the agent with a header of its
+	// own before it calls the provider (the translated chat stream,
+	// GAP-0628). That header and the bytes the gateway writes are not the
+	// provider answering: upstreamAnswered tells the record when the
+	// provider did, with the header the gateway sent (ownHeader).
+	// rel-1-0-10:GAP-2233.
+	own       bool
+	ownHeader http.Header
+	body      []byte
+	over      bool
+	ended     bool
 	// endErr is how the forwarded call broke off, set by the stream code
 	// (setUsageEndErr); end(nil) ends the record with it (GAP-1112).
 	endErr error
@@ -121,7 +129,13 @@ type usageResponseWriter struct {
 
 func (u *usageResponseWriter) WriteHeader(status int) {
 	u.mu.Lock()
-	if !u.header {
+	switch {
+	case u.header:
+	case u.own:
+		if u.ownHeader == nil {
+			u.ownHeader = u.Header().Clone()
+		}
+	default:
 		u.header = true
 		u.call.UpstreamHeader(status, u.Header())
 	}
@@ -131,7 +145,7 @@ func (u *usageResponseWriter) WriteHeader(status int) {
 
 func (u *usageResponseWriter) Write(p []byte) (int, error) {
 	u.mu.Lock()
-	if !u.header {
+	if !u.header && !u.own {
 		u.header = true
 		u.call.UpstreamHeader(http.StatusOK, u.Header())
 	}
@@ -228,6 +242,48 @@ func setUsageUpstreamStatus(w http.ResponseWriter, status int, h http.Header) {
 		uw.call.UpstreamHeader(status, h)
 	}
 	uw.mu.Unlock()
+}
+
+// usageOwnHeader marks the usage record of the call answering through w: the
+// header the gateway sends next is its own, sent before it calls the provider
+// (GAP-0628), not the provider answering. The record learns that the provider
+// answered from upstreamAnswered on the writer it returns (nil when no record
+// is kept; upstreamAnswered on nil does nothing). Without this, a provider
+// call that fails before any answer (a refused connect, a 429 the adapter
+// returns as an error) ends as a call the provider answered and then broke
+// off: of unknown cost, and the actor's next call is denied although the
+// provider billed nothing (rel-1-0-10:GAP-2233).
+func usageOwnHeader(w http.ResponseWriter) *usageResponseWriter {
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return nil
+	}
+	uw.mu.Lock()
+	if !uw.header {
+		uw.own = true
+	}
+	uw.mu.Unlock()
+	return uw
+}
+
+// upstreamAnswered tells the usage record that the provider answered: the
+// adapter delivered its first chunk or returned its answer. The first call
+// counts; later ones and a writer whose upstream header the record already
+// has do nothing.
+func (u *usageResponseWriter) upstreamAnswered() {
+	if u == nil {
+		return
+	}
+	u.mu.Lock()
+	if u.own && !u.header {
+		u.header = true
+		h := u.ownHeader
+		if h == nil {
+			h = u.Header().Clone()
+		}
+		u.call.UpstreamHeader(http.StatusOK, h)
+	}
+	u.mu.Unlock()
 }
 
 // beginUsage starts the usage record of one forwarded call and returns the

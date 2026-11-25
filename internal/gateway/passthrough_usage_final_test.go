@@ -211,6 +211,57 @@ func TestTranslatedChatStreamUsageOutcome(t *testing.T) {
 	}
 }
 
+// noAnswerChatProvider fails before the provider answers: no chunk.
+type noAnswerChatProvider struct{ err error }
+
+func (noAnswerChatProvider) ChatCompletion(context.Context, *ChatRequest) (*ChatResponse, error) {
+	return nil, errors.New("unused")
+}
+
+func (p noAnswerChatProvider) ChatCompletionStream(context.Context, *ChatRequest, func(StreamChunk)) (*ChatUsage, error) {
+	return nil, p.err
+}
+
+// rel-1-0-10:GAP-2233: on the translated chat stream the gateway sends the
+// agent its own 200 and SSE headers before it calls the provider (GAP-0628).
+// That header is not the provider answering: a call that fails before the
+// provider answered (a refused connect, a 429 the adapter returns as an
+// error) is a failed call the provider billed nothing for, never of unknown
+// cost, and the actor's next call is allowed. A stream the provider began
+// and then broke off stays of unknown cost (TestTranslatedChatStreamUsageOutcome).
+func TestTranslatedChatStreamNoAnswerIsNotUnknownCost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"refused", errors.New("dial tcp 127.0.0.1:9: connect: connection refused")},
+		{"429", errors.New("upstream returned status 429: rate limited")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := noAnswerChatProvider{err: tc.err}
+			proxy := newTestProxy(t, prov, newMockInspector(), "observe")
+			rec, next := actorUsageCall(t, chatFacts(), context.Background(), func(w http.ResponseWriter) {
+				chatReq := ChatRequest{Model: "gpt-5-mini", Stream: true, Messages: []ChatMessage{{Role: "user", Content: "hi"}}}
+				httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+				traceResult := proxyV8DefaultResult(true)
+				agentCtx, requestTrace := proxy.startProxyV8RequestTrace(httpReq.Context(), &chatReq, "", "")
+				proxy.handleStreamingRequest(w, httpReq, &chatReq, "openai", "observe", "", prov,
+					agentCtx, "", nil, requestTrace, &traceResult)
+				requestTrace.Finish(traceResult)
+			})
+			if rec.Outcome != "failed" || rec.ErrorType != "upstream_error" {
+				t.Errorf("outcome %q error %q, want failed upstream_error", rec.Outcome, rec.ErrorType)
+			}
+			if next.Deny != nil {
+				t.Errorf("next call after a call the provider never answered: %+v", next.Deny)
+			}
+			if rec.Status == http.StatusOK {
+				t.Errorf("the gateway's own 200 reached the record as the provider's status")
+			}
+		})
+	}
+}
+
 // The raw (OpenAI-compatible body kept) chat stream ends its usage record
 // with the upstream read error too.
 func TestRawChatStreamReadErrorIsUnknownCost(t *testing.T) {
