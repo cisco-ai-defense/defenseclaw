@@ -131,6 +131,15 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	// static ($C), every later statement is read anew; an 8 KB loop of $C and
 	// : statements parsed and analyzed each again (FIX-F3PERF).
 	readings := map[shellDirectoryReadingKey]shellDirectoryReading{}
+	// The walk runs in one goroutine, so in one hook call (none: a fixed
+	// state): it looks the call up once, not twice per statement.
+	call := currentHookCall()
+	callState := func() CallState {
+		if call == nil {
+			return CallState{}
+		}
+		return call.state()
+	}
 	var walkList func([]*syntax.Stmt, *shellDirectoryState)
 	var walk func(*syntax.Stmt, *shellDirectoryState)
 	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
@@ -188,12 +197,12 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			redirectIndex += len(redirects)
 			return
 		}
-		key := shellDirectoryReadingKey{statement: statement, logical: s.logical, call: HookCallState()}
+		key := shellDirectoryReadingKey{statement: statement, logical: s.logical, call: callState()}
 		reading, read := readings[key]
 		if !read {
 			reading.literals, reading.copies = LiteralWriteOperandsWithCopies(statement, s.logical, home)
 			reading.facts = analyzeAtHookFolder(actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home})
-			if HookCallState() == key.call {
+			if callState() == key.call {
 				readings[key] = reading
 			}
 		}
