@@ -309,7 +309,7 @@ The gateway logs `substrate: skill scanner is not running` at start, and `defens
 
 ### Pull says there is no record of the folder
 
-`pull` compares the agent's work with the folder you sent, and only the computer you ran `run` on keeps a record of that folder. Run `pull` there, with any of `--apply`, `--branch NAME` or `--patch-out FILE`. From another computer, `connect` to the agent, commit its work and `git push` it from inside the agent, then `git pull` it where you are. A copy of the folder inside the agent can't stand in for the record: the agent can rewrite it, and only the first computer knows which files were held back as secrets.
+On a computer that did not run `run`, `pull` compares the agent's work with the last commit of the git checkout it runs in. This message means the folder is not a git checkout with a commit, or the agent has no folder of the same name. Run `pull` in a checkout of the folder you sent, or on the computer you ran `run` on. You can also `connect` to the agent, commit its work and `git push` it from inside the agent, then `git pull` it where you are. A copy of the folder inside the agent can't stand in for the record: the agent can rewrite it.
 
 ### The gateway pods restart with `observability v8 bootstrap failed`
 

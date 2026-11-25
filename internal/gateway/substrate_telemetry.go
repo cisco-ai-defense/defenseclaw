@@ -80,12 +80,16 @@ func substrateHookAuditExtra(ctx context.Context) map[string]string {
 		// The actor the gateway verified names itself: atespace, name and
 		// UID are the token's claims it already checked (no new input). The
 		// person and run mode need the registration.
-		return map[string]string{
+		extra := map[string]string{
 			"sandbox_runtime":     "substrate",
 			"substrate_atespace":  actor.Atespace,
 			"substrate_actor":     actor.Name,
 			"substrate_actor_uid": actor.UID,
 		}
+		if firstHookAfterResume(ctx) {
+			extra["substrate_first_hook_after_resume"] = "true"
+		}
+		return extra
 	}
 	extra := map[string]string{
 		"sandbox_runtime":       "substrate",
@@ -107,6 +111,10 @@ func substrateHookAuditExtra(ctx context.Context) map[string]string {
 	}
 	if reg.Attributed {
 		extra["substrate_person"], extra["substrate_person_kind"] = "", "atespace"
+	}
+	if firstHookAfterResume(ctx) {
+		// The actor's first hook call after a resume (GAP-0486).
+		extra["substrate_first_hook_after_resume"] = "true"
 	}
 	for k, v := range substrateFactsAuditExtra(ctx) {
 		extra[k] = v

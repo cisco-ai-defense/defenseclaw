@@ -910,7 +910,7 @@
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",
-    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch. --push-branch NAME (Preview) pushes the agent's work from inside the\nagent to its checkout's origin as a new branch, with the credential the cluster adds for that host; it\nasks first unless your profile allows it, and never forces.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.\n\nRun it on the computer you started the agent from: it compares the changes with the folder you\nsent, and only that computer keeps a record of it. From another computer, connect to the agent and\ngit push its work from inside it.",
+    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch. --push-branch NAME (Preview) pushes the agent's work from inside the\nagent to its checkout's origin as a new branch, with the credential the cluster adds for that host; it\nasks first unless your profile allows it, and never forces.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.\n\nOn the computer you started the agent from, it compares the changes with the folder you sent. On\nanother computer, run it in a git checkout of that folder: it compares the agent's work with the\ncheckout's last commit, so files sent that were not committed show as added. That computer cannot know\nwhat run left out with --exclude, so repeat it (--exclude GLOB, once for each) or say there was none\n(--no-exclude) before --apply or --branch; until then they refuse, and --patch-out still works.",
     "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests\ndefenseclaw substrate pull fix-tests-7f3a --push-branch agent/fix-tests",
     "args": [
       {
@@ -950,10 +950,23 @@
         "usage": "print the full diff"
       },
       {
+        "name": "exclude",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "on another computer: a path or glob run was given with --exclude, held back on both sides (repeatable)",
+        "metavar": "GLOB"
+      },
+      {
         "name": "json",
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
+      },
+      {
+        "name": "no-exclude",
+        "type": "bool",
+        "default": "false",
+        "usage": "on another computer: run was given no --exclude"
       },
       {
         "name": "output",

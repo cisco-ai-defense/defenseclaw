@@ -191,6 +191,11 @@ type Store struct {
 	Registrations registry.Store
 	// MaxHostUses bounds the host-use map (DefaultMaxHostUses when 0).
 	MaxHostUses int
+	// ResumeWarmup is how long a leader that just started marks no first
+	// hook call after a resume (GAP-0486): it knows a replica only once
+	// that replica synced with it. ResumeReplicaTTL when 0; below 0, no
+	// wait (tests).
+	ResumeWarmup time.Duration
 
 	mu sync.Mutex
 	// uses is the newest allowed request of each actor to each host
@@ -206,6 +211,8 @@ type Store struct {
 	dropped      int64
 	// taken is the newest takes' answers by request id, oldest first.
 	taken []takenAnswer
+	// resumes is the first-hook-after-resume state (GAP-0486, resume.go).
+	resumes resumeLeader
 }
 
 type takenAnswer struct {
@@ -380,7 +387,9 @@ func (s *Store) Add(recs ...Record) {
 			if !validMetric(r.Kind, r.Metric) || r.Value <= 0 {
 				continue
 			}
-		case KindLifecycle, KindAskClosed:
+		case KindLifecycle:
+			s.resumes.lifecycle(r)
+		case KindAskClosed:
 		case KindEgress:
 			q = &s.egress
 		default:
@@ -567,6 +576,11 @@ func Serve(srv *leader.Server, s *Store) {
 	srv.Handle(MethodPostEgress, postHandler(s.PostEgress))
 	srv.HandleRead(MethodTake, leader.Typed(s.Take))
 	srv.HandleRead(MethodHostUses, leader.Typed(s.HostUses))
+	// A resume sync is safe to repeat (its sequence numbers make a retry
+	// count once) and its answer can be large, so it is not kept for
+	// replay; a claim's answer is small and must be the same on a retry.
+	srv.HandleRead(MethodResumeSync, leader.Typed(s.ResumeSync))
+	srv.Handle(MethodResumeClaim, leader.Typed(s.ResumeClaim))
 }
 
 // ErrRefused reports a batch the leader refused as a bad request (too
@@ -663,9 +677,22 @@ type Taker struct {
 	Interval time.Duration
 	// Record is called with each batch the replica now owns.
 	Record func(context.Context, TakeResponse)
+
+	resumes Resumes
 }
 
-// TakeOnce takes and records one batch.
+// Resumes is the replica's first-hook-after-resume state (GAP-0486).
+func (t *Taker) Resumes() *Resumes { return &t.resumes }
+
+// Join syncs the first-hook-after-resume state once, before the replica
+// serves a hook call, so the leader knows it and a claim on another replica
+// waits for its acknowledgement (GAP-0486). An error only means no marks
+// until a sync works.
+func (t *Taker) Join(ctx context.Context) error { return t.resumes.Sync(ctx, t.Leader) }
+
+// TakeOnce takes and records one batch, then syncs the first-hook-after-
+// resume state. A failed sync (a leader without the method in a rolling
+// upgrade) only means no marks until it works.
 func (t *Taker) TakeOnce(ctx context.Context) error {
 	var out TakeResponse
 	if err := t.Leader.Call(ctx, MethodTake, leader.NewRequestID(), TakeRequest{Max: DefaultTakeMax}, &out); err != nil {
@@ -674,6 +701,7 @@ func (t *Taker) TakeOnce(ctx context.Context) error {
 	if t.Record != nil {
 		t.Record(ctx, out)
 	}
+	_ = t.resumes.Sync(ctx, t.Leader)
 	return nil
 }
 

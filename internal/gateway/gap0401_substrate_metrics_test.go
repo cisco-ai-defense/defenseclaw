@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
@@ -63,6 +64,19 @@ func TestGAP0401DocumentedSubstrateMetricsAreRecorded(t *testing.T) {
 	f.api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 	f.api.substrateState().cfg.Actions = &fakeActions{f: f}
 
+	// first_hook_after_resume: the controller saw the actor suspended, so
+	// its next hook call is its first after the resume (GAP-0486).
+	// The leader decides it once this replica synced twice (GAP-0486).
+	relayStore, relayClient := substrateRelayLeader(t)
+	relayTaker := &telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}
+	f.api.substrateState().cfg.Relay = relayTaker
+	relayStore.Add(telemetryrelay.Record{Kind: telemetryrelay.KindLifecycle, Lifecycle: chainstate.LifecycleSuspended, At: time.Now().Add(-time.Second),
+		Atespace: "eng-web", Actor: "alice-1", UID: subUID1, Connector: "claudecode"})
+	for range 2 {
+		if err := relayTaker.TakeOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// A hook call, then one over the actor's budget.
 	f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice",
 		envelope("claudecode", map[string]any{"hook_event_name": "UserPromptSubmit", "prompt": "list the files", "session_id": "m1", "cwd": "/work/app"}))
@@ -76,13 +90,12 @@ func TestGAP0401DocumentedSubstrateMetricsAreRecorded(t *testing.T) {
 	}
 	_, _ = b.Observe(context.Background(), audit.ToolChainObserveInput{})
 	// The controller's counts and gauge, through the leader (GAP-0450).
-	relayStore, relayClient := substrateRelayLeader(t)
 	relayStore.Add(
 		telemetryrelay.Record{Kind: telemetryrelay.KindCount, Metric: telemetryrelay.MetricIdleSuspends, Value: 1},
 		telemetryrelay.Record{Kind: telemetryrelay.KindCount, Metric: telemetryrelay.MetricPolicyConflicts, Value: 1},
 		telemetryrelay.Record{Kind: telemetryrelay.KindGauge, Metric: telemetryrelay.MetricUnattestedTemplates, Value: 0},
 	)
-	if err := (&telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}).TakeOnce(context.Background()); err != nil {
+	if err := relayTaker.TakeOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// A launcher create.

@@ -29,6 +29,7 @@ func TestRunRestartRefusesCorruptConfigBeforeStoppingGateway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start CLI restart probe: %v", err)
 	}
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() { _ = d.Stop(3 * time.Second) })
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {

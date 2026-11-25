@@ -104,6 +104,16 @@ type hostRecord struct {
 	// folder pull runs in as the project, on any OS.
 	CloneURL string `json:"clone_url,omitempty"`
 	CloneRef string `json:"clone_ref,omitempty"`
+	// LocalHead is set on a computer that did not run run (GAP-0489): the
+	// baseline is this commit of Project, and the record serves pull and
+	// apply only (push, sync, checkpoint and undo still refuse here).
+	LocalHead string `json:"local_head,omitempty"`
+	// Masks are the --exclude globs the person repeated for such a record,
+	// held back on both sides as run held them; ExcludesStated says they
+	// said what run left out (--exclude or --no-exclude). Without it, apply
+	// and branch refuse (ExcludesUnknownError).
+	Masks          []string `json:"masks,omitempty"`
+	ExcludesStated bool     `json:"excludes_stated,omitempty"`
 }
 
 func hostDir(dataDir string) string { return filepath.Join(dataDir, "substrate", "hostcopies") }
@@ -149,7 +159,7 @@ func RemoteDirOf(dataDir, name string) string {
 	if rec, err := osw.LoadCopy(dataDir, name); err == nil && rec != nil && rec.RemoteDir != "" {
 		return rec.RemoteDir
 	}
-	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.RemoteDir != "" {
+	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.RemoteDir != "" && rec.LocalHead == "" {
 		return rec.RemoteDir
 	}
 	return ""
@@ -159,31 +169,50 @@ func RemoteDirOf(dataDir, name string) string {
 // copy: on Windows, and for a clone everywhere.
 func usesHostCopy(dataDir, name string) bool {
 	rec, err := loadHostRecord(dataDir, name)
-	return err == nil && (hostCopy || rec.CloneURL != "")
+	return err == nil && (hostCopy || rec.CloneURL != "" || rec.LocalHead != "")
 }
 
-// HasCopy reports whether this computer has a copy record for name that
-// pull can read.
+// HasCopy reports whether this computer has the record of a copy it sent
+// (run or run --clone) for name. A baseline pull took from a checkout on
+// another computer (GAP-0489) is not one.
 func HasCopy(dataDir, name string) bool {
 	if _, err := osw.LoadCopy(dataDir, name); err == nil {
 		return true
 	}
-	_, err := loadHostRecord(dataDir, name)
-	return err == nil
+	rec, err := loadHostRecord(dataDir, name)
+	return err == nil && rec.LocalHead == ""
 }
 
 // --- git on this computer ---------------------------------------------------
 
-// hostGit runs git with a private configuration: no system or user config,
-// no hooks, no filters, no line-ending conversion, no prompts.
+// hostGit runs git with a private configuration: no system config, no hooks,
+// no line-ending conversion, no prompts.
 func hostGit(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
-	base := []string{"-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.hooksPath=" + os.DevNull,
+	return runHostGit(ctx, dir, true, env, stdin, args...)
+}
+
+// hostCheckoutGit runs git with this computer's own configuration (system,
+// user and repository: core.autocrlf, core.eol, filter drivers), still with
+// no hooks and no prompts, to write files as a checkout here writes them
+// (GAP-0489).
+func hostCheckoutGit(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
+	return runHostGit(ctx, dir, false, env, stdin, args...)
+}
+
+func runHostGit(ctx context.Context, dir string, private bool, env []string, stdin []byte, args ...string) ([]byte, error) {
+	base := []string{"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "core.fsmonitor=false", "-c", "core.quotePath=false", "-c", "commit.gpgSign=false", "-c", "core.longpaths=true"}
+	if private {
+		base = append([]string{"-c", "core.autocrlf=false", "-c", "core.safecrlf=false"}, base...)
+	}
 	cmd := exec.CommandContext(ctx, "git", append(base, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
 		"GIT_AUTHOR_NAME=defenseclaw", "GIT_AUTHOR_EMAIL=defenseclaw@localhost",
 		"GIT_COMMITTER_NAME=defenseclaw", "GIT_COMMITTER_EMAIL=defenseclaw@localhost")
+	if private {
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1")
+	}
 	cmd.Env = append(cmd.Env, env...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -706,7 +735,7 @@ func (c *Client) downloadHostTree(ctx context.Context, rec *hostRecord, dir stri
 		if slices.Contains(rec.Unmasked, rel) {
 			return false
 		}
-		_, h := osw.HeldBack(rel, nil, nil, nil, nil)
+		_, h := osw.HeldBack(rel, rec.Masks, nil, nil, nil)
 		return h
 	})
 }
@@ -797,6 +826,13 @@ func hostPull(ctx context.Context, opts PullOptions, label string) (*Review, err
 		b, err := hostGit(ctx, gitDir, []string{"GIT_DIR=" + gitDir}, nil, "cat-file", "blob", oid)
 		return b, err == nil
 	}
+	if rec.LocalHead != "" {
+		head := []string{elsewhereNote(rec.LocalHead)}
+		if n := elsewhereExcludesNote(rec); n != "" {
+			head = append(head, n)
+		}
+		notes = append(head, notes...)
+	}
 	rep := osw.ReviewReport{Name: opts.Name, Project: rec.Project, Changes: changes, Warnings: notes}
 	rep.Flags = osw.ReviewFlags(changes, content, nil)
 	det := osw.DefaultSecretDetector()
@@ -877,6 +913,9 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 		return nil, errors.New("pull first: there is nothing reviewed to bring back")
 	}
 	pr := rec.Pulled
+	if rec.LocalHead != "" && !rec.ExcludesStated && opts.Mode != ModePatch {
+		return nil, &ExcludesUnknownError{Name: opts.Name}
+	}
 	if needsDecision(pr) && !opts.AcceptSensitive && opts.Mode != ModePatch {
 		if opts.Mode != ModeBranch || len(pr.Review.SecretPaths()) != 0 {
 			return nil, &SensitiveError{Files: flaggedPaths(pr)}

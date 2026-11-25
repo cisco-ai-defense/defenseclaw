@@ -91,6 +91,7 @@ func TestRunStopUsesConfiguredTokenAndOverridePortWithUnsetDestinationSecret(t *
 	if err != nil {
 		t.Fatal(err)
 	}
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() { _ = d.Stop(3 * time.Second) })
 	waitForCLIProbe(t, d, marker)
 	requests := make(chan string, 1)
@@ -157,9 +158,11 @@ func TestRunStopWithMalformedConfigSignalsVerifiedGateway(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "stop-probe-running")
 	t.Setenv(cliRestartProbeEnv, marker)
 	d := daemon.New(config.DefaultDataPath())
-	if _, err := d.Start([]string{"-test.run=^TestCLIRestartProcessProbe$"}); err != nil {
+	pid, err := d.Start([]string{"-test.run=^TestCLIRestartProcessProbe$"})
+	if err != nil {
 		t.Fatal(err)
 	}
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() { _ = d.Stop(3 * time.Second) })
 	waitForCLIProbe(t, d, marker)
 	if err := os.WriteFile(config.ConfigPath(), []byte("config_version: 9\nguardrail: [unclosed\n"), 0o600); err != nil {
