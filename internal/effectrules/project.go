@@ -39,7 +39,8 @@ type Env struct {
 	AgentCreated func(key string) bool
 	// Lstat reads a path the resolver settles: a copy or move destination
 	// that may be a directory (settleDestFile), a find root and the hook
-	// config members below it (findDeletedMembers); nil is os.Lstat.
+	// config members below it (findDeletedMembers); nil is hookpaths.Lstat,
+	// the hook's share-bounded reader.
 	Lstat func(path string) (os.FileInfo, error)
 	// ShortPath expands the 8.3 short components of a Windows path
 	// (settleWindowsShortName); nil is the Windows host's file system
@@ -155,7 +156,7 @@ func settleDestFile(e *effects.Effect, flavor effects.Flavor, rsv resolver, stat
 		return
 	}
 	if stat == nil {
-		stat = os.Lstat
+		stat = hookpaths.Lstat
 	}
 	info, err := stat(resolved)
 	if err != nil || !info.Mode().IsRegular() {
@@ -196,7 +197,7 @@ func findDeletedMembers(e effects.Effect, hook protectedSet, flavor effects.Flav
 		return nil
 	}
 	if lstat == nil {
-		lstat = os.Lstat
+		lstat = hookpaths.Lstat
 	}
 	if t.Physical != "" {
 		if !strings.HasSuffix(t.Spelling, "/") && !strings.HasSuffix(t.Spelling, `\`) {
