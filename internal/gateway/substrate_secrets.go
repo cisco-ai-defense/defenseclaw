@@ -192,7 +192,7 @@ func substrateSecretsAgent(name string, regs []registry.Registration, regsKnown 
 			return &regs[i], 0, ""
 		}
 	}
-	return nil, http.StatusNotFound, "not_found"
+	return nil, http.StatusNotFound, "secret_agent_not_found"
 }
 
 // addSubstrateSecretRegistry says which registry file of the agent's home
