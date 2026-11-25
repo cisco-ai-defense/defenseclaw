@@ -3253,7 +3253,7 @@
       {
         "name": "environment",
         "label": "Environment",
-        "description": "deployment.environment.name of the DefenseClaw gateway (set with defenseclaw setup observability add --environment). Applies to every panel, metric and log. Defaults to All.",
+        "description": "deployment.environment.name of the DefenseClaw gateway (set with defenseclaw setup observability add --environment). Applies to every panel, metric and log. Defaults to All. With no environment set, the gateway reports the platform it runs on (linux, macos, windows or dgx-spark), so those names appear here too.",
         "type": "query",
         "datasource": {
           "type": "loki",

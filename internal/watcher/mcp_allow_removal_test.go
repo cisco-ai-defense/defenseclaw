@@ -78,8 +78,10 @@ func TestRemovedAllowRuleRevokesAnUnscannedMCPAdmissionAtTheNextCall(t *testing.
 	f := newAllowRemovalFixture(t)
 	f.admittedByAllowRule()
 	f.cfg.AssetPolicy.MCP.Allowed = nil
-	if status := f.status(); !status.Pending {
-		t.Fatalf("the call after the rule was removed: %+v, want pending, not the old allow", status)
+	// Not the old allow: the loopback server is failed with the address
+	// cause at once, since its scan can never run (GAP-2045).
+	if status := f.status(); !status.Failed || status.Pending || status.ScanIssue != MCPScanIssueAddress {
+		t.Fatalf("the call after the rule was removed: %+v, want failed (address), not the old allow", status)
 	}
 	f.admitQueued()
 	if status := f.status(); !status.Failed || status.Pending || !f.blocked() {
@@ -107,8 +109,10 @@ func TestRemovedScanOnInstallOffRevokesAnUnscannedMCPAdmission(t *testing.T) {
 		t.Fatalf("admitted without a scan: %+v, %d scans", status, f.scans.calls)
 	}
 	f.cfg.Admission.MCP.ScanOnInstall = nil
-	if status := f.status(); !status.Pending {
-		t.Fatalf("after the setting was turned back on: %+v, want pending", status)
+	// The loopback server can never be scanned: failed with the address
+	// cause, not pending and not the old admission (GAP-2045).
+	if status := f.status(); !status.Failed || status.Pending || status.ScanIssue != MCPScanIssueAddress {
+		t.Fatalf("after the setting was turned back on: %+v, want failed (address)", status)
 	}
 	f.admitQueued()
 	if status := f.status(); !status.Failed || !f.blocked() {

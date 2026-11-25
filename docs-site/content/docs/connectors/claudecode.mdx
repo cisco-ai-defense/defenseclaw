@@ -111,6 +111,8 @@ The administrator manages Claude Code in the managed `config.yaml`. `guardrail.c
 | `claudecode-hooks-v1` | `>=2.1.154, <2.1.219` | `v7` | 28 | 13 | 1 |
 | `claudecode-hooks-v2` | `>=2.1.219` | `v7` | 29 | 14 | 1 |
 
+Claude Code 2.1.154 is the minimum. An older Claude Code has no hook contract, so per-user setup refuses the connector in observe and action mode and changes nothing (see [Version policy](/docs/connectors/compatibility#version-policy)). Managed installs set Claude Code's `requiredMinimumVersion` to 2.1.154, which Claude Code reads only from 2.1.163, so that floor stops no older build; [machine policy](/docs/enterprise/machine-policy) says what older builds do on a managed computer.
+
 | Contract | Events registered | Block events | Ask events |
 | --- | --- | --- | --- |
 | `claudecode-hooks-v1` | `SessionStart`, `UserPromptSubmit`, `UserPromptExpansion`, `MessageDisplay`, `PreToolUse`, `PermissionRequest`, `PermissionDenied`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `SessionEnd`, `InstructionsLoaded`, `ConfigChange`, `CwdChanged`, `FileChanged`, `WorktreeRemove`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `PreCompact`, `PostCompact`, `Elicitation`, `ElicitationResult`, `Notification` | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` |
