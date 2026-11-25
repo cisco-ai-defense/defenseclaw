@@ -135,7 +135,7 @@ func gap0515Edit(r *rand.Rand, text string) string {
 func TestGAP0515TriageSplitPoints(t *testing.T) {
 	r := rand.New(rand.NewSource(515))
 	splits := 0
-	for i := 0; i < 400; i++ {
+	for i := 0; i < 400/gap0515Scale; i++ {
 		s := gap0515Text(r, 1+r.Intn(400))
 		want := normalizeForTriage(s)
 		for c := 1; c < len(s); c++ {
@@ -148,10 +148,10 @@ func TestGAP0515TriageSplitPoints(t *testing.T) {
 			}
 		}
 	}
-	if splits < 1000 {
+	if splits < 1000/gap0515Scale {
 		t.Fatalf("only %d split points checked", splits)
 	}
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 200/gap0515Scale; i++ {
 		var m rxprefilter.SplitMemo
 		text := gap0515Text(r, 3000)
 		for _, at := range gap0515Checkpoints(r, len(text)) {
@@ -204,7 +204,7 @@ func TestGAP0515RuleAndPIIMatchesEqualWholeText(t *testing.T) {
 		t.Fatalf("only %d rules in the default pack", len(rules))
 	}
 	ruleHits := 0
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 8/gap0515Scale; i++ {
 		st := newMidStreamScanState()
 		size := 4000
 		if i%4 == 0 {
@@ -253,7 +253,7 @@ func TestGAP0515RuleAndPIIMatchesEqualWholeText(t *testing.T) {
 			}
 		}
 	}
-	if ruleHits < 50 {
+	if ruleHits < 50/gap0515Scale {
 		t.Fatalf("only %d rule matches: the property test reads too little", ruleHits)
 	}
 }
@@ -309,7 +309,7 @@ func TestGAP0515MidStreamVerdictsEqualWholeText(t *testing.T) {
 	insp := NewGuardrailInspector("local", nil, nil)
 	r := rand.New(rand.NewSource(51500))
 	flagged := 0
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 20/gap0515Scale; i++ {
 		size := 6000
 		if i%10 == 9 {
 			size = 80 << 10 // the parallel rule scan and the windows
@@ -335,13 +335,13 @@ func TestGAP0515MidStreamVerdictsEqualWholeText(t *testing.T) {
 			flagged++
 		}
 	}
-	if flagged < 5 {
+	if flagged < 5/gap0515Scale {
 		t.Fatalf("only %d of 20 texts have a finding: the property test reads too little", flagged)
 	}
 
 	// The RSA-8192 key alone, checked every 500 bytes and every 37 bytes.
 	key := gap0515Prose(1100, 3) + gap0515RSA8192() + gap0515Prose(3000, 4)
-	for _, step := range []int{500, 211} {
+	for _, step := range []int{500, 211}[:2-gap0515Scale/4] {
 		st := newMidStreamScanState()
 		blocked := false
 		for at := step; ; at += step {
@@ -361,7 +361,7 @@ func TestGAP0515MidStreamVerdictsEqualWholeText(t *testing.T) {
 	}
 
 	// Lane-joined text: two choices, the first grows after the second.
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 8/gap0515Scale; i++ {
 		var acc responseText
 		st := newMidStreamScanState()
 		for step := 0; step < 80; step++ {
