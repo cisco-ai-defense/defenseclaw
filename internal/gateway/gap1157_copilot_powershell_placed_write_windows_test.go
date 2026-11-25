@@ -64,6 +64,12 @@ func TestGAP1157CopilotPowerShellPlacedWriteAfterAMoveThatMayFail(t *testing.T) 
 	allow := [5]string{"allow", "allow", "allow", "allow", "allow"}
 	block := [5]string{"block", "block", "block", "block", "block"}
 	stateTier := [5]string{"alert", "block", "alert", "block", "block"}
+	// A Known write to an exact credential file gets the cell of its plain
+	// spelling (type nul >> .aws\credentials) since T23d e7d2c5b031
+	// (GAP-1478/1500/0662; GAP-0701 plain-form parity): block in all five
+	// packs. The state, startup and hook-config rows keep the owner state
+	// tier (GAP-0747, owner 2026-11-19). LEAD ruling 2026-11-25 (T23e f).
+	credentialPlain := block
 	rows := []row{
 		{"benign-append", "project", move + "type nul >> notes.txt", allow},
 		{"benign-after-set-location", "project", "Set-Location " + project + "; " + move + "type nul >> notes.txt", allow},
@@ -73,8 +79,8 @@ func TestGAP1157CopilotPowerShellPlacedWriteAfterAMoveThatMayFail(t *testing.T) 
 		{"keys-in-folder", "ssh", move + "type nul >> authorized_keys", block},
 		{"state", "home", move + `type nul >> .defenseclaw\config.yaml`, stateTier},
 		{"state-in-folder", "state", move + "type nul >> config.yaml", stateTier},
-		{"credential", "home", move + `type nul >> .aws\credentials`, stateTier},
-		{"credential-in-folder", "aws", move + "type nul >> credentials", stateTier},
+		{"credential", "home", move + `type nul >> .aws\credentials`, credentialPlain},
+		{"credential-in-folder", "aws", move + "type nul >> credentials", credentialPlain},
 		{"startup-in-folder", "profile", move + "type nul >> Microsoft.PowerShell_profile.ps1", stateTier},
 		// A target no reading places is allowed at the parent as at 1.0.10;
 		// the fix leaves it there.
