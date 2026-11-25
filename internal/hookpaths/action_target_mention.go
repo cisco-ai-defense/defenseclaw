@@ -91,6 +91,38 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	if !spelledWindows && !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}
+	// inSSHFolder answers actionFolderIsSSHFolder once per folder and hook
+	// call state: it resolved home's SSH folder and the word's folder
+	// again for every unknown word ($C), a fifth of a copy-mode by-name
+	// decision on an 8 KB loop of them (FIX-F3PERF). An answer read while
+	// the call's state changed is not kept.
+	var call *hookCall
+	looked := false
+	callState := func() CallState {
+		if !looked {
+			call, looked = currentHookCall(), true
+		}
+		if call == nil {
+			return CallState{}
+		}
+		return call.state()
+	}
+	type sshFolderKey struct {
+		cwd   string
+		state CallState
+	}
+	sshFolders := map[sshFolderKey]bool{}
+	inSSHFolder := func(folder string) bool {
+		key := sshFolderKey{cwd: folder, state: callState()}
+		if answer, found := sshFolders[key]; found {
+			return answer
+		}
+		answer := actionFolderIsSSHFolder(folder, home)
+		if callState() == key.state {
+			sshFolders[key] = answer
+		}
+		return answer
+	}
 	file, parsed := parseShell(command)
 	if depth == 0 && parsed && (actionKnownReadOnlyShell(file, home) ||
 		!stateOnly && (actionSSHSetupAndReadsOnly(file, cwd, home) ||
@@ -361,7 +393,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				return false
 			}
-			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
+			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKeyIn(word, effectiveCWD, home, inSSHFolder)
 		}
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if found {
