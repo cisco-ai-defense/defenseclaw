@@ -346,13 +346,6 @@ func globReadings(opts shellGlobOptions) []shellGlobOptions {
 	return out
 }
 
-// globOptionsChangeLiterals holds a literal of each alternative of
-// globOptionsChangeText; the "." alternative is a dot before a \s character.
-var globOptionsChangeLiterals = []string{
-	"shopt", "GLOBIGNORE", "BASHOPTS", "SHELLOPTS", "set", "eval", "source", "bash",
-	". ", ".\t", ".\n", ".\f", ".\r",
-}
-
 // globOptionsChangeTextMatches is the text gate of globOptionsInCall: the
 // call as written, or as the shell reads its words, may change the glob
 // options (globOptionsChangeText). The shell removes a line continuation
@@ -363,7 +356,7 @@ var globOptionsChangeLiterals = []string{
 // parse (rel-1-0-10:GAP-1614). The gate is a filter only: the parsed walk
 // decides, and a call with no quote or backslash is scanned once, as before.
 func globOptionsChangeTextMatches(command string) bool {
-	if globOptionsChangeTextMayMatch(command) && globOptionsChangeText.MatchString(command) {
+	if globOptionsChangeScan(command) {
 		return true
 	}
 	if !strings.ContainsAny(command, "\\'\"") {
@@ -376,7 +369,7 @@ func globOptionsChangeTextMatches(command string) bool {
 		read = globOptionsDecodeANSIC(read)
 	}
 	read = globOptionsQuoteRemoval.Replace(read)
-	return globOptionsChangeTextMayMatch(read) && globOptionsChangeText.MatchString(read)
+	return globOptionsChangeScan(read)
 }
 
 // globOptionsDecodeANSIC is text with each closed ANSI-C quote replaced by
@@ -413,16 +406,3 @@ func globOptionsDecodeANSIC(text string) string {
 // globOptionsQuoteRemoval drops the quote and escape characters of a call's
 // text for the gate (the $ of $'...' and $"..." with them).
 var globOptionsQuoteRemoval = strings.NewReplacer("$'", "", "$\"", "", "\\", "", "'", "", "\"", "")
-
-// globOptionsChangeTextMayMatch reports whether command holds one of the
-// literals every match of globOptionsChangeText holds: a command with none
-// of them cannot match, and the scan of the expression over a long call (it
-// has no literal prefix) is left out (rel-1-0-10:GAP-1613).
-func globOptionsChangeTextMayMatch(command string) bool {
-	for _, literal := range globOptionsChangeLiterals {
-		if strings.Contains(command, literal) {
-			return true
-		}
-	}
-	return false
-}

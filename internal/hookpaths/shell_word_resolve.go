@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -78,13 +77,6 @@ func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 	o.globIgnore = getenv("GLOBIGNORE") != ""
 	return o
 }
-
-// globOptionsChangeText is the text that can change the glob options inside
-// one call: shopt, set with an option, an assignment of GLOBIGNORE,
-// BASHOPTS or SHELLOPTS, eval and source (they run text the scan does not
-// read), a nested bash with -O or -o. Read as text on purpose: every later
-// glob word of such a call is uncertain.
-var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+]|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
 
 // shellGlobOptionsForCall is the options a call's glob words are expanded
 // with: the agent's environment (the client's header for a per-user gateway,
