@@ -65,8 +65,10 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 		effs = effs[:semantic.MaxEffects]
 	}
 	out := make([]*semanticpb.EffectFact, 0, len(effs))
+	stepUps := plainStepUpProof{}
 	for i := range effs {
 		e := effs[i]
+		stepUps.promote(&e, flavor)
 		fact := &semanticpb.EffectFact{
 			Index:       int64(i + 1),
 			Kind:        string(e.Kind),

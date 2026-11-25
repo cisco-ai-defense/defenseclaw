@@ -36,6 +36,13 @@ func TestEffectStateFolderWriteTiers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	outside := filepath.Join(t.TempDir(), "elsewhere", "child")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(home, "link")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	useDefaultLaneGeneration(t)
 	rows := []struct {
@@ -45,6 +52,10 @@ func TestEffectStateFolderWriteTiers(t *testing.T) {
 		// the GAP-1261 rows: the contents of a folder merged onto the
 		// state root, the state folder moved away as a source
 		{"cp -rt home", "cp -rt ~ .defenseclaw", "proj", true},
+		{"cp -rt destination dotdot", `cp -r -t "$HOME/.defenseclaw/.." backup/.defenseclaw`, "proj", true},
+		{"cp -rt source dotdot no-op", "cp -rt ~ .defenseclaw/..", ".", false},
+		{"cp -rt link dotdot", `cp -r -t "$HOME/link/.." backup/.defenseclaw`, "proj", false},
+		{"cp -rt missing dotdot", `cp -r -t "$HOME/missing/.." backup/.defenseclaw`, "proj", false},
 		{"cp -rt $HOME", `cp -rt "$HOME" backup/.defenseclaw`, "proj", true},
 		{"cp -rt $HOME/ slash", `cp -rt "$HOME/" "$HOME/proj/backup/.defenseclaw/"`, "proj", true},
 		{"cp -r onto $HOME/", `cp -r backup/.defenseclaw "$HOME/"`, "proj", true},
