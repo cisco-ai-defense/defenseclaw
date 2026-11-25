@@ -74,12 +74,8 @@ func actionPosixAdvanceDirectory(call *syntax.CallExpr, values actionValues, hom
 // An unresolved fragment is target-bearing only when the surrounding syntax
 // or current directory puts its possible expansion in the protected class.
 // This keeps ordinary project variables out of the protected-target rule.
-func actionUnknownWordMayNameKey(word *syntax.Word, cwd, home string) bool {
-	return actionUnknownWordMayNameKeyIn(word, cwd, home, nil)
-}
-
-// actionUnknownWordMayNameKeyIn is actionUnknownWordMayNameKey with inSSH
-// answering actionFolderIsSSHFolder for home (nil: read it each time).
+// inSSH answers actionFolderIsSSHFolder for home (the mention scan's
+// per-folder, per-call-state memo).
 func actionUnknownWordMayNameKeyIn(word *syntax.Word, cwd, home string, inSSH func(cwd string) bool) bool {
 	if word == nil {
 		return false
@@ -98,10 +94,7 @@ func actionUnknownWordMayNameKeyIn(word *syntax.Word, cwd, home string, inSSH fu
 	if actionPosixWindowsHome(home) {
 		return path.Clean(cwd) == path.Join(home, ".ssh")
 	}
-	if inSSH != nil {
-		return inSSH(cwd)
-	}
-	return actionFolderIsSSHFolder(cwd, home)
+	return inSSH(cwd)
 }
 
 // actionFolderIsSSHFolder reports that cwd resolves to home's SSH folder.
