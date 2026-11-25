@@ -127,6 +127,21 @@ func (a *APIServer) emitHookDecisionLogV8(
 		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
+		inputMessages := observability.Absent[observability.TelemetryStructuredGenAIInputMessages]()
+		if resp.InspectedContentPresent {
+			inspectedContent := resp.InspectedContent
+			if resp.RedactionEnabled == nil || *resp.RedactionEnabled {
+				inspectedContent = redactInspectedTelemetryCredentials(inspectedContent)
+			}
+			messages, _, reported, _, contentOK := hookModelV8InputMessages(
+				inspectedContent,
+				int64(len(inspectedContent)),
+				false,
+			)
+			if reported && contentOK {
+				inputMessages = observability.Present(messages)
+			}
+		}
 		// A pending occurrence's decision record has the ID recovery checks;
 		// every other record takes the train's time-ordered IDs.
 		ids := observability.TimeOrderedOccurrenceIDs
@@ -218,9 +233,10 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailEnforced:        env.Enforced,
 			DefenseClawConnectorStepIdx:         hookV8OptionalPositiveInt64(int64(env.StepIdx)),
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
-			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
+			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReasonForSink(ctx, resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawGuardrailRuleNames:       hookDecisionV8RuleNames(resp.RuleNames),
+			GenAIInputMessages:                  inputMessages,
 			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
 			// The connector-hook facts local readers need, now that a benign
 			// per-user allow keeps only this row (#1384, registry v4).

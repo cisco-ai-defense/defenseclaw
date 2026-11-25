@@ -8,7 +8,7 @@ keywords:
   - tool_suppressions
 ---
 
-Suppressions tune the optional LLM judge ([how the judge works](/docs/policies/deterministic-detection#optional-llm-judge)). They never silence a regex or CEL rule finding (such as `SEC-AWS-KEY`), and they never redact the request sent to the model. To quiet a rule, use `defenseclaw guardrail rule disable` or `rule severity` ([rules reference](/docs/policies/rules#command-line-wrappers)).
+Suppressions tune the optional LLM judge ([how the judge works](/docs/guardrail/llm-judge), and the [judge's pack files](/docs/policies/deterministic-detection#optional-llm-judge)). They never silence a regex or CEL rule finding (such as `SEC-AWS-KEY`), and they never redact the request sent to the model. To quiet a rule, use `defenseclaw guardrail rule disable` or `rule severity` ([rules reference](/docs/policies/rules#command-line-wrappers)).
 
 Every rule pack has three lists in `suppressions.yaml`:
 
@@ -17,10 +17,6 @@ Every rule pack has three lists in `suppressions.yaml`:
 | `pre_judge_strips` | Removes text from the judge's input before it reads it | Sender labels or bridge banners keep tripping the PII judge |
 | `finding_suppressions` | Drops one judge finding when its ID and the matched text both match | A finding fires on safe values, such as Unix timestamps or chat IDs |
 | `tool_suppressions` | Drops listed PII-judge findings for tools whose name matches | A status tool returns account metadata the judge calls a user name |
-
-<Callout type="warn" title="Suppressions never silence rule findings">
-They act on the LLM judge only. A regex or CEL rule finding, such as `SEC-AWS-KEY`, is never suppressed, and the request sent to the model is never redacted. To quiet a rule, use `defenseclaw guardrail rule disable` or `rule severity` ([Rules and custom packs](/docs/policies/rules#command-line-wrappers)).
-</Callout>
 
 <Callout title="Don't blanket-match">
 Never use `.*`, `.+` or `^.*$` as a suppression pattern. It silences everything the list would report.
@@ -96,6 +92,6 @@ Scope `tool_pattern` to exact tool names. `^.*$` drops the listed findings for e
 
 ## Next
 
-All shipped entries are in the [recipe catalog](/docs/policies/recipes).
+The [recipe catalog](/docs/policies/recipes) lists the `strict` pack's strips and finding suppressions and the `default` pack's tool suppressions. Read the rest in each pack's `suppressions.yaml`.
 
-Next: [give a group its own policy](/docs/guardrail/user-and-group-policies), [what the judge does](/docs/policies/deterministic-detection).
+Next: [give a group its own policy](/docs/guardrail/user-and-group-policies), [what the judge does](/docs/guardrail/llm-judge).

@@ -76,14 +76,14 @@ Setup installs OpenShell and `e2fsprogs`, switches the gateway to MicroVMs (a ba
 
 You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**) or the macOS app (**Setup**, **Sandbox**). The app never installs OpenShell: run `defenseclaw sandbox setup --install-openshell` in a terminal first.
 
-![DefenseClaw TUI Setup, Sandboxes (OpenShell) form on a Mac: Docker, Landlock through MicroVMs, OpenShell 0.1.5 and the MicroVM driver ticked, the MicroVM settings, OpenShell telemetry off, shell wrappers and build images now](/images/sandboxes/screens/tui-setup.png)
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) form on a Mac: Docker, Landlock through MicroVMs, OpenShell and the MicroVM driver ticked, the MicroVM settings, OpenShell telemetry off, shell wrappers and build images now](/images/sandboxes/screens/tui-setup.png)
 
 <TerminalAnimation
   cwd="~/code/myapp"
   speed={1.6}
   height={620}
   ariaLabel="Animated terminal replay of defenseclaw sandbox setup on an Apple-silicon Mac whose shared Homebrew belongs to another account: setup stops and names the owner, then a Homebrew of the user's own installs OpenShell 0.1.6, setup switches the gateway to MicroVMs, and the Claude Code image is built."
-  caption="Bonus replay, recorded on DefenseClaw 1.0.4 on a Mac (the OpenShell version in the text is updated to the 1.0.10 pin; Docker Desktop running in the account's session). First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
+  caption="Replay recorded on DefenseClaw 1.0.4 on a Mac, with the OpenShell version updated to the 1.0.10 pin; Docker Desktop was running in the account's session. It shows MicroVMs as the default; as the setup output above says, MicroVMs do not currently start on a Mac, and Docker Desktop 29.8 or newer runs sandboxes on the docker driver. First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
   frames={[
     { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
     { type: "out", text: "DefenseClaw sandbox setup" },

@@ -634,6 +634,10 @@ type AIDiscoveryConfig struct {
 	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
 	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
 	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	// IncludeSkillContentHashes controls reading skill-folder contents for
+	// content fingerprints and facts. Nil preserves the default of true;
+	// false keeps skill discovery without content reads or attached facts.
+	IncludeSkillContentHashes *bool `mapstructure:"include_skill_content_hashes" yaml:"include_skill_content_hashes,omitempty"`
 	// IncludeUserEmail adds the signed-in email address DefenseClaw can read
 	// from a connector's own account file to identity telemetry: the per-user
 	// inventory rows and the hook lifecycle records. Off by default. The uid
@@ -662,6 +666,10 @@ type AIDiscoveryConfig struct {
 	// Off by default for the same reason as IncludeUserEmail: the principal
 	// identifies a person across systems.
 	IncludeUserPrincipal bool `mapstructure:"include_user_principal" yaml:"include_user_principal,omitempty"`
+	// IncludeSkillManifests sends the text of each skill's SKILL.md with the
+	// managed skill inventory, once per file version. Off by default: it is
+	// file content from the endpoint.
+	IncludeSkillManifests bool `mapstructure:"include_skill_manifests" yaml:"include_skill_manifests,omitempty"`
 	// TrustedADChildDomains lists the child domains of the joined Active
 	// Directory realm whose SSSD accounts DefenseClaw verifies on Linux
 	// (emea.corp.example.com on a host joined to corp.example.com). An
@@ -685,6 +693,12 @@ type AIDiscoveryConfig struct {
 	// (restoreSignaturePackDigests).
 	SignaturePackDigests   map[string]string `mapstructure:"-"                        yaml:"signature_pack_digests,omitempty"`
 	ConfidencePolicyDigest string            `mapstructure:"confidence_policy_digest" yaml:"confidence_policy_digest,omitempty"`
+}
+
+// EffectiveIncludeSkillContentHashes preserves content fingerprinting when
+// the setting is absent, including for zero-value programmatic configs.
+func (a AIDiscoveryConfig) EffectiveIncludeSkillContentHashes() bool {
+	return a.IncludeSkillContentHashes == nil || *a.IncludeSkillContentHashes
 }
 
 // ValidateTrustedADChildDomains refuses an entry of
@@ -4234,6 +4248,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("ai_discovery.include_package_manifests", true)
 	viper.SetDefault("ai_discovery.include_env_var_names", true)
 	viper.SetDefault("ai_discovery.include_network_domains", true)
+	viper.SetDefault("ai_discovery.include_skill_content_hashes", true)
 	viper.SetDefault("ai_discovery.lookup_model_provenance_online", false)
 	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
 	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)

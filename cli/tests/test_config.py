@@ -322,6 +322,11 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertTrue(cfg.ai_discovery.enabled)
         self.assertEqual(cfg.ai_discovery.mode, "enhanced")
         self.assertTrue(cfg.ai_discovery.include_shell_history)
+        self.assertTrue(cfg.ai_discovery.include_skill_content_hashes)
+        self.assertIs(
+            config_mod._config_to_dict(cfg)["ai_discovery"]["include_skill_content_hashes"],
+            True,
+        )
         self.assertFalse(cfg.ai_discovery.lookup_model_provenance_online)
         self.assertEqual(
             cfg.ai_discovery.confidence_policy_path,
@@ -340,6 +345,21 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
         )
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
+
+    def test_merge_skill_content_hashes_defaults_to_enabled(self):
+        for raw in (None, {}, {"enabled": True}):
+            with self.subTest(raw=raw):
+                self.assertTrue(
+                    config_mod._merge_ai_discovery(raw).include_skill_content_hashes
+                )
+
+    def test_merge_skill_content_hashes_preserves_explicit_values(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                cfg = config_mod._merge_ai_discovery(
+                    {"include_skill_content_hashes": value}
+                )
+                self.assertIs(cfg.include_skill_content_hashes, value)
 
     def test_merge_online_model_provenance_is_explicit_opt_in(self):
         disabled = config_mod._merge_ai_discovery({"enabled": True})
@@ -1106,6 +1126,42 @@ class TestConfigLoadSave(unittest.TestCase):
             loaded.save()
             with open(config_file) as f:
                 self.assertEqual(config_mod.parse_config_yaml(f.read())["ai_discovery"]["ide_inventory"], "off")
+
+    def test_skill_manifest_opt_in_roundtrip_keeps_collection_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=str(root / "audit.db"),
+                quarantine_dir=str(root / "quarantine"),
+                plugin_dir=str(root / "plugins"),
+                policy_dir=str(root / "policies"),
+                environment="linux",
+            )
+            cfg.ai_discovery.enabled = True
+            cfg.ai_discovery.ide_inventory = "ai_only"
+            cfg.save()
+            raw = config_mod.parse_config_yaml(config_path.read_text())
+            self.assertNotIn("include_skill_manifests", raw["ai_discovery"])
+
+            cfg.ai_discovery.include_skill_manifests = True
+            cfg.save()
+            raw = config_mod.parse_config_yaml(config_path.read_text())
+            self.assertTrue(raw["ai_discovery"]["include_skill_manifests"])
+            with patch("defenseclaw.config.default_data_path", return_value=root):
+                loaded = load()
+                self.assertTrue(loaded.ai_discovery.include_skill_manifests)
+                enabled_before = loaded.ai_discovery.enabled
+                scope_before = loaded.ai_discovery.ide_inventory
+                loaded.ai_discovery.include_skill_manifests = False
+                loaded.save()
+                saved = load()
+            raw = config_mod.parse_config_yaml(config_path.read_text())
+            self.assertNotIn("include_skill_manifests", raw["ai_discovery"])
+            self.assertFalse(saved.ai_discovery.include_skill_manifests)
+            self.assertEqual(saved.ai_discovery.enabled, enabled_before)
+            self.assertEqual(saved.ai_discovery.ide_inventory, scope_before)
 
     def test_global_only_asset_policy_omits_connectors_key(self):
         # An enabled-but-global-only config must NOT emit `connectors:` so it

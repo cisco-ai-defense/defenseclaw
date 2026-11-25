@@ -74,7 +74,7 @@ defenseclaw policy test --verbose
 defenseclaw policy edit actions --severity high --runtime disable --policy-name my-policy
 ```
 
-Without `--policy-name`, `policy edit` changes the live policy in `config.yaml`. With it, it saves a named preset; the first edit of a built-in saves your copy in `~/.defenseclaw/policies/<name>.yaml`, and `policy delete` restores the built-in. `policy validate` compiles the Rego modules; `defenseclaw config validate` checks `config.yaml`.
+Without `--policy-name`, `policy edit` changes the live policy in `config.yaml`. With it, it saves a named preset; the first edit of a built-in saves your copy in `~/.defenseclaw/policies/<name>.yaml`, and `policy delete` restores the built-in. `policy validate` checks the policy rule files and compiles the Rego modules; `defenseclaw config validate` checks `config.yaml`.
 
 ```text
 Available policies:
@@ -96,61 +96,24 @@ Available policies:
 
 A scope that sets neither `guardrail.block_at` nor `alert_at` takes its rule pack's default:
 
-| Rule pack | Blocks | Alerts |
-| --- | --- | --- |
-| `permissive` | CRITICAL | HIGH and above |
-| `default` | CRITICAL | MEDIUM and above |
-| `strict` | MEDIUM and above | LOW and above |
-
-Scopes and precedence are in [thresholds](/docs/policies/thresholds).
+The pack's levels (`permissive` blocks CRITICAL and alerts from HIGH, `default` blocks CRITICAL and alerts from MEDIUM, `strict` blocks from MEDIUM and alerts from LOW) are listed in [Thresholds](/docs/policies/thresholds#rule-pack-default-posture), together with the scopes and precedence.
 
 ## Guardrail rule pack — what each profile ships
 
 | Pack | Enabled rules | Judge prompts | `suppressions.yaml` |
 | --- | --- | --- | --- |
-| `permissive` | 238 of 246 | `pii` and `tool-injection` with higher thresholds; `injection` is present, and `guardrail.judge.injection` alone turns it on or off (the `enabled` key in the judge file is not read) | 12 entries, including all IP findings and selected file-inspection PII |
-| `default` | 242 of 246 | `injection`, `pii`, `tool-injection` | 9 entries: private and loopback IPs, platform IDs, expected system metadata |
-| `strict` | 258 of 258 | the same three, lower thresholds | 4 entries, minimal; no tool suppressions |
+| `permissive` | 279 of 287 | `pii` and `tool-injection` with higher thresholds; `injection` is present, and `guardrail.judge.injection` alone turns it on or off (the `enabled` key in the judge file is not read) | 12 entries, including all IP findings and selected file-inspection PII |
+| `default` | 283 of 287 | `injection`, `pii`, `tool-injection` | 9 entries: private and loopback IPs, platform IDs, expected system metadata |
+| `strict` | 299 of 299 | the same three, lower thresholds | 4 entries, minimal; no tool suppressions |
 
-All three have the same eight rule files (`c2`, `cognitive`, `commands`, `enterprise-data`, `local-patterns`, `secrets`, `sensitive-paths`, `trust-exploit`) and the same six sensitive-tool definitions. The counts are what `defenseclaw guardrail validate-pack` reports for the shipped packs. Switching packs does not turn the LLM judge on; that is `guardrail.judge.enabled` (default `false`).
+All three have the same seven rule files (`c2`, `cognitive`, `commands`, `enterprise-data`, `secrets`, `sensitive-paths`, `trust-exploit`), the same `rules/local-patterns.yaml` file of literal patterns and the same six sensitive-tool definitions. The counts are what `defenseclaw guardrail validate-pack` reports for the shipped packs. Switching packs does not turn the LLM judge on; that is `guardrail.judge.enabled` (default `false`).
 
 Generic `curl` and `wget` pipelines into a shell are off in `default` and
 `permissive`. Both produce a CRITICAL alert without a block in `strict`.
 
-In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs. A plain read of `authorized_keys` (`grep`, `wc`, `ssh-keygen -l`) is allowed; a redirect, a pipe into a writer or an in-place flag makes the use a write. A write to an instruction file the session loaded is CRITICAL: the default and strict packs block it in action mode and the permissive pack reports it ([details](/docs/policies/deterministic-detection#instruction-files)). Computed interpreter paths are outside that proof. A symlink in the gateway's local filesystem is resolved for write targets; sandbox filesystems are evaluated without local symlink resolution.
+In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to `authorized_keys`, private-key reads and writes to instruction files follow the action-mode rules in [deterministic detection](/docs/policies/deterministic-detection#action-mode-rule-details); in short, an instruction-file write is blocked in action mode by `default` and `strict` and reported by `permissive`.
 
-**Known limit.** The rule reads the text of the command. A write made by a program the command starts (a nested shell, a generated script, a build tool, a tool option that runs another command) is not visible in that text, so it is not caught when it goes through an already existing link to the protected file. Rely on the OpenShell sandbox and file permissions for containment.
-
-**Evaluation limit.** DefenseClaw judges each command of a shell call on its own, up to 128 commands
-in one call (commands joined with `;`, `&&`, `||` or `|`, and the commands inside bodies). A call
-with more commands, or one the reader cannot analyse (for example a PowerShell statement it cannot
-parse before the rest), raises rule `ACTION-COMPOUND-LIMIT` ("Shell command exceeds policy
-evaluation limit"), whatever its length, up to the 1 MiB hook payload cap. Such a call proves no
-target. With the `default` and `permissive` packs, per-user and managed, the call runs with a visible
-alert that names the rule, an audit record with `decision=alert`, and the LLM judge decides where it
-is configured. With the `strict` pack, managed strict included, action mode blocks it. A finding that
-proves a protected target in the same call (a DefenseClaw state write, a file the call names) decides
-on its own in every profile; a write the reader resolves into DefenseClaw's own state folder
-(`~/.defenseclaw`) is self-protection (`tamper.detector_state_write`): a block with `strict`, managed strict included, and a HIGH alert with `default` and `permissive`. A call that only mentions the folder name, next to
-a statement the reader cannot analyse, proves no target and is judged like any other limit-only call. **Known limit:** with `default` and `permissive`, a statement the reader
-cannot analyse can hide a write to a protected file in the same call; use `strict` where that
-matters. In observe mode the call raises the alert and runs. Split a long command into several
-calls, or put it in a script file and run the script.
-
-**Operand limit.** DefenseClaw also resolves at most 1024 operands and redirection targets of one command,
-counted over all its statements, with the file system. A command with more operands is unresolved. Every
-word is still matched as text, as the shell decodes it (quotes and backslashes removed): a protected file or
-link that the command names, directly or through a value DefenseClaw knows, or among the first 1024
-operands, is blocked in every profile, and so is a later name that is a link or a second name of a keys
-file. The other plain file names past the bound (a name with no protected part, no variable, glob or
-dot-dot, outside the system folders, that is no link) are not resolved further. The command gets the
-evaluation-limit finding `ACTION-COMPOUND-LIMIT` with the reason `bounded_truncated cap=items`: the `default` and
-`permissive` profiles allow it with that alert, and the `strict` profile (and managed strict) blocks it. Pass such a
-list through a file (`xargs -a list.txt`) or split it. Up to 1.0.9 this alert was the MEDIUM finding
-`ACTION-OPERAND-BOUND`. From 1.0.10 a SIEM filter or audit query should match the rule id `ACTION-COMPOUND-LIMIT` with
-`bounded_truncated cap=items` in the finding title (`defenseclaw.finding.title`). The title is an evidence-class field:
-a destination with the `content` or `strict` redaction profile replaces or removes it, and there only the rule id and
-severity remain. The finding is CRITICAL; its action is the alert above, so a severity-based rule sees it at CRITICAL.
+**Shell evaluation limits.** A shell call with more than 128 commands, or more than 1024 operands and redirection targets across all its commands together, raises the rule `ACTION-COMPOUND-LIMIT`. The `default` and `permissive` packs alert and let the call run; `strict` blocks it in action mode. How the limits work, and how to split a long command, is in [deterministic detection](/docs/policies/deterministic-detection#evaluation-and-operand-limits).
 
 ## What `setup guardrail` actually writes
 

@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -71,10 +72,13 @@ var (
 // resource anchor; body-level device IDs and hostnames are deliberately not
 // duplicated.
 type endpointInventoryComponent struct {
-	id                          string
-	componentType               string
-	signal                      string
-	product                     string
+	id            string
+	componentType string
+	signal        string
+	product       string
+	// vendor is the catalog vendor of the agent whose folder holds a skill or
+	// plugin entry; who published the skill is skillPublisher.
+	vendor                      string
 	active                      bool
 	itemName                    string
 	itemDescription             string
@@ -114,6 +118,30 @@ type endpointInventoryComponent struct {
 	userIDKind string
 	userName   string
 	userEmail  string
+	// Skill rows only (inventory.AISkillFacts).
+	skillContentHash   string
+	skillContentStatus string
+	skillState         string
+	skillFirstSeen     string
+	skillLastSeen      string
+	skillScope         string
+	skillLocation      string
+	skillAgents        []string
+	// skillPublisherSource: vendor_bundled, plugin_manifest, declared, unknown.
+	skillPublisher       string
+	skillPublisherSource string
+	skillPlugin          string
+	skillPluginVersion   string
+	skillPluginEnabled   *bool
+	// skillManifestHash names the skill's SKILL.md; skillManifest carries
+	// part skillManifestPart of skillManifestParts of its text
+	// (managed_skill_manifest.go).
+	skillManifestHash  string
+	skillManifestSize  int64
+	skillVersion       string
+	skillManifest      string
+	skillManifestPart  int
+	skillManifestParts int
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -281,9 +309,26 @@ func emitEndpointInventory(
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		skillEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill")
+		// A failure in another detector does not make the skill collection
+		// partial. An incomplete skill scan stays diagnostic and cannot advance
+		// the endpoint's last successfully published skill state.
+		skillsComplete := skillScanComplete(discoveryReport)
+		skillEntries := publish.cycle.trackSkills(
+			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
+			skillsComplete,
+		)
+		var removalErr error
+		skillEntries, removalErr = prepareManagedSkillSnapshot(ctx, emitter, skillEntries, skillsComplete, publish)
+		if removalErr != nil && firstErr == nil {
+			firstErr = removalErr
+		}
+		// A partial skill list cannot prune saved receipts or advance a manifest.
+		if skillsComplete && managedInventorySnapshotEligible(endpointSkillInventorySource, config.ObservabilityV8ManagedSkillInventoryAction, skillEntries) && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
+			publish.cycle.attachSkillManifests(skillEntries)
+		}
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_skill_inventory", skillEntries, discoveryPartial,
+			ctx, emitter, endpointSkillInventorySource, skillEntries, !skillsComplete,
 			config.ObservabilityV8ManagedSkillInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
@@ -1268,13 +1313,9 @@ func emitInventorySnapshot(
 			active++
 		}
 	}
-	limit := managedInventoryComponentLimit(managedAction, components)
-	carrier, carrierOK := endpointInventoryCarrierFor(managedAction, components)
-	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
-		carrier, carrierOK = endpointInventoryCarrier{}, true
-	}
+	carrier, eligible := managedInventorySnapshotCarrier(source, managedAction, components)
 	action := managedAction
-	if partial || limit == 0 || len(components) > limit || !carrierOK {
+	if partial || !eligible {
 		partial = true
 		carrier = endpointInventoryCarrier{}
 		action = config.ObservabilityV8LocalInventoryDiagnosticAction
@@ -1290,7 +1331,7 @@ func emitInventorySnapshot(
 	switch {
 	case gated:
 		digest = managedInventoryComponentsDigest(source, components)
-		if !publish.cycle.shouldPublish(source, digest) {
+		if !publish.cycle.shouldPublish(source, digest) && !hasRemovedSkill(components) && !hasSkillManifest(components) {
 			// Unchanged since the last successful publish and no bundle due:
 			// emit neither the summary nor any component record.
 			return nil
@@ -1309,10 +1350,18 @@ func emitInventorySnapshot(
 	// digest nor count toward the daily bundle.
 	managedRejected := managedInventoryPublishRejected(summaryOutcome)
 	for _, component := range components {
+		componentContext, current := publish.cycle.manifestEmissionContext(ctx, component)
+		if !current {
+			component.skillManifest = ""
+			managedRejected = true
+		}
 		outcome, err := emitEndpointInventoryComponent(
-			ctx, emitter, source, scanID, component,
+			componentContext, emitter, source, scanID, component,
 			recordSource, action, phase, detector,
 		)
+		if publish.cycle != nil && !managedInventoryPublishRejected(outcome) {
+			publish.cycle.observeManifestProjection(component, outcome)
+		}
 		if managedInventoryPublishRejected(outcome) {
 			managedRejected = true
 		}
@@ -1328,6 +1377,20 @@ func emitInventorySnapshot(
 		}
 	}
 	return firstErr
+}
+
+func managedInventorySnapshotCarrier(source string, action observability.ProducerKey, components []endpointInventoryComponent) (endpointInventoryCarrier, bool) {
+	limit := managedInventoryComponentLimit(action, components)
+	carrier, ok := endpointInventoryCarrierFor(action, components)
+	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
+		carrier, ok = endpointInventoryCarrier{}, true
+	}
+	return carrier, ok && limit > 0 && len(components) <= limit
+}
+
+func managedInventorySnapshotEligible(source string, action observability.ProducerKey, components []endpointInventoryComponent) bool {
+	_, eligible := managedInventorySnapshotCarrier(source, action, components)
+	return eligible
 }
 
 func managedInventoryLimit(action observability.ProducerKey) int {
@@ -1579,6 +1642,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawAIDiscoveryScanID:                    observability.Present(scanID),
 			DefenseClawAIDiscoverySignalID:                  observability.Present(component.id),
 			DefenseClawAIDiscoverySource:                    observability.Present(source),
+			DefenseClawAIComponentVendor:                    aiDiscoveryV8OptionalText(component.vendor),
 			DefenseClawAIComponentProduct:                   aiDiscoveryV8OptionalText(component.product),
 			DefenseClawInventoryItemName:                    aiDiscoveryV8OptionalText(component.itemName),
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
@@ -1613,6 +1677,33 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
+			DefenseClawInventorySkillContentHash:            aiDiscoveryV8OptionalText(component.skillContentHash),
+			DefenseClawInventorySkillContentStatus:          aiDiscoveryV8OptionalText(component.skillContentStatus),
+			DefenseClawInventorySkillState:                  aiDiscoveryV8OptionalText(component.skillState),
+			DefenseClawInventorySkillFirstSeen:              aiDiscoveryV8OptionalText(component.skillFirstSeen),
+			DefenseClawInventorySkillLastSeen:               aiDiscoveryV8OptionalText(component.skillLastSeen),
+			DefenseClawInventorySkillScope:                  aiDiscoveryV8OptionalText(component.skillScope),
+			DefenseClawInventorySkillLocation:               aiDiscoveryV8OptionalText(component.skillLocation),
+			DefenseClawInventorySkillPublisher:              aiDiscoveryV8OptionalText(component.skillPublisher),
+			DefenseClawInventorySkillPublisherSource:        aiDiscoveryV8OptionalText(component.skillPublisherSource),
+			DefenseClawInventorySkillPlugin:                 aiDiscoveryV8OptionalText(component.skillPlugin),
+			DefenseClawInventorySkillPluginVersion:          aiDiscoveryV8OptionalText(component.skillPluginVersion),
+			DefenseClawInventorySkillPluginEnabled:          inventoryOptionalBool(component.skillPluginEnabled),
+		}
+		if len(component.skillAgents) > 0 {
+			input.DefenseClawInventorySkillAgents = observability.Present(component.skillAgents)
+		}
+		if component.skillManifestHash != "" {
+			input.DefenseClawInventorySkillManifestHash = observability.Present(component.skillManifestHash)
+			input.DefenseClawInventorySkillManifestSize = observability.Present(component.skillManifestSize)
+		}
+		if component.skillVersion != "" {
+			input.DefenseClawInventorySkillVersion = observability.Present(component.skillVersion)
+		}
+		if component.skillManifest != "" {
+			input.DefenseClawInventorySkillManifest = observability.Present(component.skillManifest)
+			input.DefenseClawInventorySkillManifestPart = observability.Present(int64(component.skillManifestPart))
+			input.DefenseClawInventorySkillManifestParts = observability.Present(int64(component.skillManifestParts))
 		}
 		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
@@ -1898,8 +1989,11 @@ func discoveredEntriesFromReport(
 	kind string,
 ) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0)
+	shared := map[string][]int{}
 	for _, signal := range report.Signals {
-		if signal.Category != category {
+		// A gone signal is the folder as the previous scan saw it: its
+		// entries are not on the endpoint any more, or not in that form.
+		if signal.Category != category || signal.State == inventory.AIStateGone {
 			continue
 		}
 		connectorSlug := inventoryStableToken(signal.SupportedConnector, 128)
@@ -1928,28 +2022,74 @@ func discoveredEntriesFromReport(
 			// across scans (PathHash of the parent surface is
 			// deterministic within a single walker configuration).
 			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
+			shared[scope+"/"+name] = append(shared[scope+"/"+name], len(components))
 			components = append(components, endpointInventoryComponent{
-				id:              endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
-				componentType:   kind,
-				signal:          inventoryStableToken(signal.SignatureID, 128),
-				product:         inventoryStableToken(signal.Product, 128),
-				active:          true,
-				itemName:        name,
-				itemDescription: "",
-				agentConnector:  connectorSlug,
-				agentInstalled:  &installed,
-				userID:          signal.UserID,
-				userIDKind:      discoveryUserIDKind(signal.UserID),
-				userName:        signal.UserName,
-				userEmail:       discoveryUserEmail(signal),
+				id:             endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
+				componentType:  kind,
+				signal:         inventoryStableToken(signal.SignatureID, 128),
+				product:        inventoryStableToken(signal.Product, 128),
+				vendor:         inventorySafeBounded(signal.Vendor, 256),
+				active:         true,
+				itemName:       name,
+				agentConnector: connectorSlug,
+				agentInstalled: &installed,
+				userID:         signal.UserID,
+				userIDKind:     discoveryUserIDKind(signal.UserID),
+				userName:       signal.UserName,
+				userEmail:      discoveryUserEmail(signal),
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
 				// build.
 			})
+			if facts := evidence.Skill; facts != nil {
+				row := &components[len(components)-1]
+				row.skillContentHash, row.skillContentStatus = facts.ContentHash, facts.ContentStatus
+				row.skillScope, row.skillLocation = facts.Scope, facts.Location
+				row.skillManifestHash = facts.ManifestHash
+				if facts.ManifestHash != "" {
+					row.skillManifestSize = facts.ManifestSize
+				}
+				row.itemDescription = inventorySafeBounded(facts.Description, 512)
+				row.skillVersion = inventorySafeBounded(facts.Version, 64)
+				applySkillPublisher(row, signal.Vendor, *facts)
+			}
+		}
+	}
+	if kind == "skill" {
+		// One folder several agents read (~/.agents/skills) lists them all.
+		for _, rows := range shared {
+			var agents []string
+			for _, row := range rows {
+				if agent := components[row].agentConnector; agent != "" && !slices.Contains(agents, agent) {
+					agents = append(agents, agent)
+				}
+			}
+			sort.Strings(agents)
+			for _, row := range rows {
+				components[row].skillAgents = agents[:min(len(agents), 16)]
+			}
 		}
 	}
 	return components
+}
+
+// applySkillPublisher names the best publisher evidence the endpoint has: the
+// agent vendor for a skill it ships, the plugin manifest author for a plugin
+// skill, else the skill's own SKILL.md claim.
+func applySkillPublisher(row *endpointInventoryComponent, vendor string, facts inventory.AISkillFacts) {
+	row.skillPublisherSource = "unknown"
+	if plugin := facts.Plugin; plugin != nil {
+		row.skillPlugin, row.skillPluginVersion, row.skillPluginEnabled = plugin.ID, plugin.Version, plugin.Enabled
+	}
+	switch {
+	case facts.Scope == inventory.SkillScopeBundled && vendor != "":
+		row.skillPublisher, row.skillPublisherSource = inventorySafeBounded(vendor, 128), "vendor_bundled"
+	case facts.Plugin != nil && facts.Plugin.Author != "":
+		row.skillPublisher, row.skillPublisherSource = facts.Plugin.Author, "plugin_manifest"
+	case facts.Author != "":
+		row.skillPublisher, row.skillPublisherSource = facts.Author, "declared"
+	}
 }
 
 // discoveredMCPEntriesFromReport enumerates per-server MCP inventory
