@@ -403,6 +403,9 @@ type substrateState struct {
 	tokens actorTokenHealth
 	// signIn is the last check of the OIDC sign-in server (GAP-0262).
 	signIn signInHealth
+	// calloutView is the hook path's last read of the egress callout slot
+	// (GAP-0505, substrate_callout_note.go).
+	calloutView substrateCalloutView
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler

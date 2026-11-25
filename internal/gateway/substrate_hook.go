@@ -245,6 +245,10 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 			sk := st.substrateSkills(ctx, env.Connector, env.Facts)
+			if reg, ok := substrateRegistrationFrom(ctx); ok {
+				cs, known := st.calloutStatus()
+				sk.calloutNote = substrateCalloutNote(cs, known, reg)
+			}
 			if msg := st.substrateSkillUseGate(ctx, env, &sk); msg != "" {
 				st.logRefusal("%s", msg)
 				writeSubstrateSkillRefusal(w, msg, sk.held)
