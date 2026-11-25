@@ -439,6 +439,8 @@ const (
 func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResult {
 	e.ensureInspector()
 	ctx = withPinnedGeneration(ctx, e.sc.Generation())
+	// The mid-stream checks share what they read, as the proxy's do (GAP-0515).
+	midCtx := withMidStreamScanState(ctx, newMidStreamScanState())
 	res := S7StreamResult{Action: "allow", Severity: "NONE", BlockedAt: -1}
 	var acc strings.Builder
 	lastScan := 0
@@ -457,7 +459,7 @@ func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResul
 	}
 	scan := func() bool {
 		res.Scans++
-		return note(e.insp.InspectMidStream(ctx, "completion", acc.String(), []ChatMessage{{Role: "assistant", Content: acc.String()}}, "s7bench", "action"))
+		return note(e.insp.InspectMidStream(midCtx, "completion", acc.String(), []ChatMessage{{Role: "assistant", Content: acc.String()}}, "s7bench", "action"))
 	}
 	cut := false
 	for off := 0; off < len(text) && !cut; {

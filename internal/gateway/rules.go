@@ -938,6 +938,20 @@ type ruleScanOptions struct {
 	onlyRule     func(ruleID string) bool
 	contentScope ruleContentScope
 	onlyCategory string
+	// memo and memoRole: the scan is a mid-stream check of a stream, and
+	// the texts it reads keep their answers in memo under memoRole
+	// (midStreamScanState, GAP-0515). Nil: none.
+	memo     *midStreamScanState
+	memoRole string
+}
+
+// scanTexts is the two views a rule scan reads text through: the memo's,
+// for a mid-stream check (suffix names the text of the scan), or new ones.
+func (o ruleScanOptions) scanTexts(text, suffix string) (*ruleScanText, *rxprefilter.Text) {
+	if o.memo != nil {
+		return o.memo.scanTexts(o.memoRole+suffix, text)
+	}
+	return &ruleScanText{text: text}, rxprefilter.NewText(text)
 }
 
 func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
@@ -1119,8 +1133,7 @@ func scanRuleCategoriesWithOptions(
 	// Scan raw text first. A rule is skipped when the text lacks the
 	// literals every match holds (ruleScanText, GAP-1230) or its required
 	// literals (rxprefilter, GAP-2279); both checks never skip a match.
-	raw := &ruleScanText{text: text}
-	rawScan := rxprefilter.NewText(text)
+	raw, rawScan := options.scanTexts(text, "")
 	rawMatches := scanRuleMatchesInParallel(generation, options, seen, raw, rawScan)
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
@@ -1162,8 +1175,7 @@ func scanRuleCategoriesWithOptions(
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
-		normalizedText := &ruleScanText{text: normalized}
-		normalizedScan := rxprefilter.NewText(normalized)
+		normalizedText, normalizedScan := options.scanTexts(normalized, "/shell")
 		normalizedMatches := scanRuleMatchesInParallel(generation, options, seen, normalizedText, normalizedScan)
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
