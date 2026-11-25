@@ -119,13 +119,7 @@ func TestRecursiveModelArtifactEgressCatalogAnchor(t *testing.T) {
 // CRITICAL on two+ categories. Action mapping (block/alert/allow) is
 // the profile-scoped knob and lives in decision.go.
 func TestProfilePosture_InjectionJudge(t *testing.T) {
-	_, selfPath, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve caller path")
-	}
-	// .../internal/gateway/rulepack_posture_test.go -> repo root
-	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
-	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+	policiesRoot := guardrailPoliciesRoot(t)
 
 	cases := []struct {
 		profile                   string
@@ -168,12 +162,7 @@ func TestProfilePosture_InjectionJudge(t *testing.T) {
 }
 
 func TestGuardrailPolicyProfilesHaveGoCompatibleRegexes(t *testing.T) {
-	_, selfPath, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve caller path")
-	}
-	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
-	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+	policiesRoot := guardrailPoliciesRoot(t)
 
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile
@@ -235,9 +224,7 @@ func TestProfilePosture_AGENTSMDRequiresSemanticMutation(t *testing.T) {
 // HIGH everywhere; two+ categories is CRITICAL everywhere. Posture
 // differences live in decision.go (block/alert thresholds).
 func TestProfilePosture_InjectionLabelingIsUnified(t *testing.T) {
-	_, selfPath, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
-	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+	policiesRoot := guardrailPoliciesRoot(t)
 
 	profiles := []string{"strict", "default", "permissive"}
 	var first *guardrail.JudgeYAML
@@ -261,9 +248,7 @@ func TestProfilePosture_InjectionLabelingIsUnified(t *testing.T) {
 }
 
 func TestProfilePosture_SSNIsCriticalOnlyInStrict(t *testing.T) {
-	_, selfPath, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
-	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+	policiesRoot := guardrailPoliciesRoot(t)
 
 	cases := []struct {
 		profile string
@@ -298,9 +283,7 @@ func TestProfilePosture_SSNIsCriticalOnlyInStrict(t *testing.T) {
 }
 
 func TestProfilePosture_ExactCredentialAndRegistryPersistenceSeverities(t *testing.T) {
-	_, selfPath, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
-	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+	policiesRoot := guardrailPoliciesRoot(t)
 
 	criticalIDs := map[string]bool{
 		"SEC-GOOGLE":          true,
@@ -358,9 +341,7 @@ func TestProfilePosture_ExactCredentialAndRegistryPersistenceSeverities(t *testi
 }
 
 func TestProfilePosture_InjectionJudgeDocumentsFPExclusions(t *testing.T) {
-	_, selfPath, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
-	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+	policiesRoot := guardrailPoliciesRoot(t)
 
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile

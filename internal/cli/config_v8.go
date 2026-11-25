@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
@@ -180,7 +181,7 @@ func configV8ResolvedPath(path string) string {
 	if err != nil {
 		return ""
 	}
-	if real, err := filepath.EvalSymlinks(absolute); err == nil {
+	if real, err := winpath.EvalLinks(absolute); err == nil {
 		return real
 	}
 	return filepath.Clean(absolute)

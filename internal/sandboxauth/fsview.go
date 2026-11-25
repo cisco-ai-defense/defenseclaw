@@ -27,6 +27,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var (
@@ -67,7 +69,7 @@ type OSFS struct{}
 func (OSFS) Lstat(name string) (fs.FileInfo, error) { return os.Lstat(name) }
 
 // EvalSymlinks implements FS.
-func (OSFS) EvalSymlinks(name string) (string, error) { return filepath.EvalSymlinks(name) }
+func (OSFS) EvalSymlinks(name string) (string, error) { return winpath.EvalLinks(name) }
 
 // OpenInRoot implements FS with os.Root, which confines every path
 // component, symlink target and ".." to root even if the tree changes

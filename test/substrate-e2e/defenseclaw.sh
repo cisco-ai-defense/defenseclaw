@@ -210,7 +210,7 @@ metadata:
   labels:
     workload: $la
 spec:
-  replicas: $E2E_POOL_REPLICAS
+  replicas: $E2E_LAUNCH_POOL_REPLICAS
   sandboxClasses:
   - name: gvisor
   workerImage: ghcr.io/agent-substrate/substrate/ateworker-gvisor:$E2E_SUBSTRATE_VERSION
@@ -221,7 +221,11 @@ spec:
 YAML
   sed -e "s/atespace: $E2E_ATESPACE/atespace: $la/" -e "s/workload: $E2E_ATESPACE/workload: $la/" "$E2E_WORKDIR/stub-template.yaml" >"$tpl"
   check "actor template stub created in the launcher atespace" ATE create actor-template -f "$tpl"
-  retry 300 5 bash -c "kubectl $(kctx) -n $E2E_NAMESPACE get workerpool lp -o jsonpath='{.status.readyReplicas}' | grep -qx $E2E_POOL_REPLICAS" || { fail "launcher worker pool is ready"; return 1; }
+  if ! retry 300 5 bash -c "kubectl $(kctx) -n $E2E_NAMESPACE get workerpool lp -o jsonpath='{.status.readyReplicas}' | grep -qx $E2E_LAUNCH_POOL_REPLICAS"; then
+    # A worker that never schedules is most often a node without the CPU or memory its request asks; say so.
+    K -n "$E2E_NAMESPACE" get events --field-selector reason=FailedScheduling -o custom-columns=POD:.involvedObject.name,MESSAGE:.message --no-headers 2>/dev/null | grep '^lp-' | sort -u | head -n 5 | while IFS= read -r l; do info "$l"; done
+    fail "launcher worker pool is ready ($E2E_LAUNCH_POOL_REPLICAS workers)"; return 1
+  fi
 
   (umask 077; printf 'Authorization: Bearer %s\n' "$E2E_KUBE_TOKEN" >"$hdr")
   # shellcheck disable=SC2046

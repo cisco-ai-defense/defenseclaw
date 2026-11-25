@@ -38,7 +38,7 @@ func TestGAP0624GuestPlacementListStaysAtTheBound(t *testing.T) {
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		placements, cut := sandboxGuestPlacements(input, facts, statementBudget)
+		placements, cut := new(guestReadingMemo).plan(input, facts).placements(statementBudget)
 		runtime.ReadMemStats(&after)
 		allocated := after.TotalAlloc - before.TotalAlloc
 		t.Logf("GAP0624 bytes=%d budget=%v placements=%d cut=%v allocated=%d KiB", len(command), statementBudget, len(placements), cut, allocated>>10)

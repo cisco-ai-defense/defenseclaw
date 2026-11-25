@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A Windows UNC path (\\server\share\..., //server/share/...) names a file
@@ -341,6 +342,11 @@ func memoHookCall() *hookCall {
 // (rel-1-0-10:GAP-1476). The goroutine of a call is already locked to its
 // thread; the lock nests, so its reads are unchanged.
 func currentHookCall() *hookCall {
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system keeps nothing in the call's
+		// memory and reads none of it: its answers are not the host's.
+		return nil
+	}
 	unlock := lockHookCallKey()
 	defer unlock()
 	id := hookCallKey()
@@ -435,6 +441,10 @@ type shareGate struct {
 func networkPathGate(path string, followLast bool) (gate shareGate) {
 	name := path
 	gate.read = name
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system asks no share (Unread).
+		return gate
+	}
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
@@ -672,6 +682,11 @@ func readGated[T any](op, name string, read func(path string) (T, error), discar
 		return none, gate.cut, networkShareError(op, name)
 	}
 	path := fixturefs.Map(gate.read)
+	if path == "" && name != "" {
+		// Inside fixturefs.Unread nothing is read: the name does not exist
+		// (filepath.EvalSymlinks of the empty name would answer itself).
+		return none, shareReadFinal, &fs.PathError{Op: op, Path: name, Err: fs.ErrNotExist}
+	}
 	if !gate.proved {
 		value, err := read(path)
 		return value, shareReadFinal, err
@@ -882,7 +897,7 @@ func pathReadlink(name string) (string, error) {
 }
 
 func pathEvalSymlinks(name string) (string, error) {
-	resolved, _, err := readGated("evalsymlinks", name, filepath.EvalSymlinks, nil)
+	resolved, _, err := readGated("evalsymlinks", name, winpath.EvalLinks, nil)
 	return fixturefs.Unmap(resolved), err
 }
 
@@ -923,8 +938,10 @@ func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
 // Stat is os.Stat for a path a hook call names, read as pathStat reads it.
 func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
 
-// EvalSymlinks is filepath.EvalSymlinks bounded like the other readers: the
-// gateway reads a link chain of a path a hook call names through it.
+// EvalSymlinks is winpath.EvalLinks bounded like the other readers: the
+// gateway reads a link chain of a path a hook call names through it. On
+// Windows it follows a junction as it follows a symbolic link, which
+// filepath.EvalSymlinks does not (rel-1-0-9:GAP-0621, rel-1-0-10:GAP-2182).
 func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
 
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.

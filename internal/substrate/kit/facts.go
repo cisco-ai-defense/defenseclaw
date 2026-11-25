@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const (
@@ -31,11 +32,13 @@ const (
 	maxProjectHookBytes    = 1 << 20
 	maxProjectHookEvents   = 32
 	maxProjectHookEventLen = 64
-	// maxCommandWordWalks bounds the distinct command words one shell call
-	// walks in the actor's file system (addShellCommandFacts): the 64 words
-	// hookpaths.CommandPathWords returned when the kit's link proofs came in
-	// (substrate-1 GAP-0546); it now returns every word.
-	maxCommandWordWalks = 64
+	// maxCommandWordChecks bounds the (word, folder) places of one shell
+	// command the kit resolves (PlacedCommandPathWords); past it the claims
+	// are cut (substrate-1 GAP-0622).
+	maxCommandWordChecks = 2048
+	// maxDroppedPathChecks bounds the path arguments past maxPathFacts the
+	// kit still checks for a link; past it the claims are cut.
+	maxDroppedPathChecks = 4 * maxPathFacts
 )
 
 // projectHookFiles are, per connector, the project settings files (relative
@@ -106,6 +109,7 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		_ = json.Unmarshal(args, &input)
 	}
 	seen := map[string]bool{}
+	dropped := 0
 	add := func(field, p string) {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[field+"\x00"+p] {
@@ -114,6 +118,13 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		seen[field+"\x00"+p] = true
 		if len(f.Paths) >= maxPathFacts {
 			f.Truncated = true
+			// A dropped plain file is no lost claim (a patch of 40 files);
+			// a dropped link is (substrate-1 GAP-0622).
+			if dropped++; dropped > maxDroppedPathChecks {
+				f.claimsCut = true
+			} else if pf := inspectPath(field, p, cwd); pf.Resolved != "" && pf.Resolved != pf.Abs {
+				f.claimsCut = true
+			}
 			return
 		}
 		f.Paths = append(f.Paths, inspectPath(field, p, cwd))
@@ -163,6 +174,9 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	_ = budget
 	if event == "SessionStart" || event == "sessionStart" {
 		f.ProjectHooks = collectProjectHooks(connector, cwd)
+	}
+	if f.claimsCut {
+		f.Proofs = append(f.Proofs, ProofClaimsCut)
 	}
 	if len(f.Paths) == 0 && len(f.Files) == 0 && len(f.ProjectHooks) == 0 && len(f.Proofs) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
@@ -314,12 +328,11 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	if !ok {
 		return
 	}
-	if workdir != "" {
-		if !filepath.IsAbs(workdir) {
-			workdir = filepath.Join(cwd, workdir)
-		}
-		cwd = filepath.Clean(workdir)
-	}
+	// The guest gateway cannot place an explicit tilde workdir. A decision
+	// made in a guessed folder must not become a protected-write claim for
+	// that call; the private-key reader below still protects real key reads.
+	unresolvedToolWorkdir := strings.HasPrefix(strings.TrimSpace(workdir), "~")
+	cwd = shellWorkdir(cwd, workdir)
 	home, err := os.UserHomeDir()
 	if err != nil || !filepath.IsAbs(home) {
 		return
@@ -328,45 +341,57 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 		hookpaths.ActionMakePrivateKeyRead(command, cwd, home) {
 		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
 	}
-	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
-		hookpaths.ProtectedTargetDecision {
+	if !unresolvedToolWorkdir &&
+		hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
+			hookpaths.ProtectedTargetDecision {
 		f.Proofs = append(f.Proofs, ProofProtectedWrite)
 	}
 	// Which places are private matters only to a call the kit proved reads
 	// or writes the actor's keys: an own SSH folder copy alerts where the
 	// copy stays private (substrate-1 GAP-0549).
 	privacy := len(f.Proofs) > 0
-	seen := map[string]bool{}
-	for _, word := range hookpaths.CommandPathWords(command, home) {
-		if seen[word.Text] {
-			continue
+	// Each word is placed in every folder the laptop's statement reader
+	// gives it (cd sub && echo x >> dc-link writes sub/dc-link), one fact per
+	// place, so one spelling read in two folders has two (substrate-1
+	// GAP-0623). An unplaced word keeps the call's folder.
+	type placed struct{ text, dir string }
+	seen := map[placed]bool{}
+	for _, word := range hookpaths.PlacedCommandPathWords(command, cwd, home) {
+		dirs := word.Dirs
+		if len(dirs) == 0 || strings.HasPrefix(word.Value, "/") {
+			dirs = []string{cwd}
 		}
-		if len(seen) == maxCommandWordWalks {
-			f.Truncated = true
-			return
-		}
-		seen[word.Text] = true
-		if fact, listed := commandWordFact(word, cwd, home, privacy); listed {
-			if len(f.Paths) >= maxPathFacts {
-				f.Truncated = true
+		for _, dir := range dirs {
+			if seen[placed{word.Text, dir}] {
+				continue
+			}
+			if len(seen) == maxCommandWordChecks {
+				f.Truncated, f.claimsCut = true, true
 				return
 			}
-			f.Paths = append(f.Paths, fact)
+			seen[placed{word.Text, dir}] = true
+			if fact, listed := commandWordFact(word, dir, home, privacy); listed {
+				if len(f.Paths) >= maxPathFacts {
+					f.Truncated, f.claimsCut = true, true
+					return
+				}
+				f.Paths = append(f.Paths, fact)
+			}
 		}
 	}
 }
 
 // commandWordFact is the CommandWordField fact of one command word: its place
 // with every link followed and with its last name kept, each as the kernel
-// walks it from cwd (hookpaths.ResolveWriteTarget), and, when privacy is
+// walks it from dir (hookpaths.ResolveWriteTarget), and, when privacy is
 // asked, whether it is a private place of home. listed is false when both
 // places are the one the word spells and it is no private place.
-func commandWordFact(word hookpaths.CommandPathWord, cwd, home string, privacy bool) (PathFact, bool) {
+func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy bool) (PathFact, bool) {
 	full := word.Value
 	if !strings.HasPrefix(full, "/") {
-		full = strings.TrimRight(cwd, "/") + "/" + full
+		full = strings.TrimRight(dir, "/") + "/" + full
 	}
-	lexical := filepath.Clean(full)
+	lexical := hookpaths.CommandWordAbs(word, dir)
 	fact := PathFact{Field: CommandWordField, Path: word.Text, Abs: lexical, UID: -1, GID: -1, Type: "missing"}
 	if followed, ok := hookpaths.ResolveWriteTarget(full); ok && followed != lexical {
 		fact.Resolved = followed
@@ -480,7 +505,7 @@ func inspectPath(field, p, cwd string) PathFact {
 			break
 		}
 		if !filepath.IsAbs(target) {
-			if dir, err := filepath.EvalSymlinks(filepath.Dir(cur)); err == nil {
+			if dir, err := winpath.EvalLinks(filepath.Dir(cur)); err == nil {
 				target = filepath.Join(dir, target)
 			} else {
 				target = filepath.Join(filepath.Dir(cur), target)
@@ -490,7 +515,7 @@ func inspectPath(field, p, cwd string) PathFact {
 		pf.LinkChain = append(pf.LinkChain, target)
 		cur = target
 	}
-	if resolved, err := filepath.EvalSymlinks(walk); err == nil {
+	if resolved, err := winpath.EvalLinks(walk); err == nil {
 		pf.Resolved = resolved
 	}
 	info, err := os.Stat(walk)
@@ -666,7 +691,7 @@ func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
 				found := false
 				for _, c := range moduleCandidates(s.Args[i+1]) {
 					p := filepath.Join(cwd, filepath.FromSlash(c))
-					if resolved, err := filepath.EvalSymlinks(p); err == nil && within(resolved, cwd) {
+					if resolved, err := winpath.EvalLinks(p); err == nil && within(resolved, cwd) {
 						budget = attach(f, "mcp_server", p, resolved, budget)
 						found = true
 					}
@@ -684,7 +709,7 @@ func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
 					p = filepath.Join(cwd, p)
 				}
 				p = filepath.Clean(p)
-				resolved, err := filepath.EvalSymlinks(p)
+				resolved, err := winpath.EvalLinks(p)
 				if err != nil || !within(resolved, cwd) {
 					continue
 				}
@@ -719,14 +744,14 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		target = filepath.Join(cwd, target)
 	}
 	target = filepath.Clean(target)
-	resolvedTarget, terr := filepath.EvalSymlinks(target)
+	resolvedTarget, terr := winpath.EvalLinks(target)
 	match := false
 	for _, p := range mcpConfigPaths(connectorName, cwd) {
 		if p == target {
 			match = true
 			break
 		}
-		if rp, err := filepath.EvalSymlinks(p); terr == nil && err == nil && rp == resolvedTarget {
+		if rp, err := winpath.EvalLinks(p); terr == nil && err == nil && rp == resolvedTarget {
 			match = true
 			break
 		}
@@ -738,7 +763,7 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		// kit sends them (GAP-0643). A partial edit gives the gateway no
 		// server; it needs none.
 		if _, whole := in["content"].(string); whole && mcpConfigWriteNames[filepath.Base(target)] {
-			budget = attachFetchFacts(f, cwd, budget)
+			budget = attachFetchFacts(f, MCPConfigProject(target, cwd), budget)
 		}
 		return budget
 	}
@@ -752,7 +777,30 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		f.Truncated = true
 	}
 	f.Files = append(f.Files, a)
-	return attachFetchFacts(f, cwd, budget-int64(len(content)))
+	return attachFetchFacts(f, MCPConfigProject(target, cwd), budget-int64(len(content)))
+}
+
+// MCPConfigProject is the folder the servers of an MCP config written at
+// target run in, as the gateway judges them: the config's folder (the folder
+// above a config folder such as .cursor or .claude) when it lies below cwd,
+// else cwd. A whole write of sub/.mcp.json from /work is checked for what a
+// fetcher resolves in /work/sub, where the agent loads it (substrate-1
+// GAP-0646); a home config stays in cwd. Both paths are absolute or the
+// result is cwd.
+func MCPConfigProject(target, cwd string) string {
+	if !filepath.IsAbs(target) || !filepath.IsAbs(cwd) {
+		return cwd
+	}
+	cwd = filepath.Clean(cwd)
+	folder := filepath.Dir(filepath.Clean(target))
+	if strings.HasPrefix(filepath.Base(folder), ".") && folder != cwd {
+		folder = filepath.Dir(folder)
+	}
+	if rel, err := filepath.Rel(cwd, folder); err == nil && rel != "." && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return folder
+	}
+	return cwd
 }
 
 // mcpConfigWriteNames are the file names whose write the gateway reads for

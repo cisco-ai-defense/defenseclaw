@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestR107WindowsManagedLinkFormsCorpus: the vsweep8 managed Windows forms
@@ -37,15 +37,16 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(ext, "y")); err != nil {
-		t.Fatal(err)
+	// A Limited token cannot make symbolic links: a row that needs one skips
+	// there (the elevated run keeps it), every other row runs, and the state
+	// rows also run through a junction to the state folder, on every token
+	// (GAP-2158).
+	links := map[string]testenv.LinkFixture{
+		"y":       testenv.TrySymlink(t, state, filepath.Join(ext, "y")),
+		"keylink": testenv.TrySymlink(t, keys, filepath.Join(project, "keylink")),
+		"dclink":  testenv.TrySymlink(t, state, filepath.Join(project, "dclink")),
 	}
-	if out, err := exec.Command("cmd", "/c", "mklink", filepath.Join(project, "keylink"), keys).CombinedOutput(); err != nil {
-		t.Fatalf("keylink: %v %s", err, out)
-	}
-	if err := os.Symlink(state, filepath.Join(project, "dclink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Junction(t, state, filepath.Join(ext, "yj"))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	okWin := strings.ReplaceAll(ok, `\`, `\\`)
@@ -62,14 +63,15 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 	// absolute .ssh folder.
 	sshBody := strings.ReplaceAll(filepath.Dir(keys), `\`, `\\\\`)
 	yConfig := filepath.Join(ext, "y", "config.yaml")
-	rows := []struct {
+	type r107Row struct {
 		id, cwd, command string
 		block            bool
 		connectors       []string
 		// perUser: the state rows run per user only; the managed state
 		// reading is the service's and is checked live (IN-bd-cparchive.md).
 		perUser bool
-	}{
+	}
+	rows := []r107Row{
 		// GAP-0284: a junction made inside bash -lc. Git Bash drops the
 		// unquoted backslashes of the body, so mklink gets C:dir, a
 		// drive-relative target it resolves from the working directory.
@@ -104,48 +106,85 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 		{"B11-cd", project, `cd ~ && cp -r project project-bak`, false, []string{"claudecode"}, false},
 		{"B11-write", project, `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, true, []string{"claudecode"}, false},
 	}
+	// needs: the link fixtures a row reads. The S rows write through the
+	// state link y; their junction twins (S...J) through yj. The B11 rows
+	// copy the project with its keys and state links.
+	needs := map[string][]string{}
+	yjConfig := filepath.Join(ext, "yj", "config.yaml")
 	for _, row := range rows {
-		connectors := row.connectors
-		if connectors == nil {
-			connectors = []string{"claudecode", "codex"}
+		switch {
+		case strings.HasPrefix(row.id, "S"):
+			needs[row.id] = []string{"y"}
+			twin := row
+			twin.id += "J"
+			twin.command = strings.NewReplacer(filepath.ToSlash(yConfig), filepath.ToSlash(yjConfig),
+				r107GitBashDrive(yConfig), r107GitBashDrive(yjConfig),
+				strings.ReplaceAll(yConfig, `\`, `\\`), strings.ReplaceAll(yjConfig, `\`, `\\`)).Replace(row.command)
+			if twin.command == row.command {
+				t.Fatalf("%s: the junction twin names the same path", row.id)
+			}
+			rows = append(rows, twin)
+		case strings.HasPrefix(row.id, "B11"):
+			needs[row.id] = []string{"keylink", "dclink"}
 		}
-		for _, connector := range connectors {
-			installDefaultProfileConnector(t, connector)
-			for _, managed := range []bool{false, true} {
-				if managed && row.perUser {
-					continue
-				}
-				event := map[string]any{"session_id": "r107-win", "hook_event_name": "PreToolUse", "cwd": row.cwd,
-					"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_r107win",
-					"tool_input": map[string]any{"command": row.command, "description": "d"}}
-				if connector == "codex" {
-					event["turn_id"] = "t1"
-				}
-				payload := mustJSON(t, event)
-				cfg := &config.Config{}
-				cfg.Guardrail.Mode = "action"
-				cfg.Guardrail.Connector = connector
-				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-				req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connector+"/hook", strings.NewReader(string(payload)))
-				req.Header.Set("Content-Type", "application/json")
-				if header := hookpaths.ResolveConnector(connector, "", "PreToolUse", payload); header != "" {
-					req.Header.Set(hookpaths.Header, header)
-				}
-				if connector == "codex" {
-					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
-				}
-				if managed {
-					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
-				}
-				recorder := httptest.NewRecorder()
-				api.handleAgentHook(connector).ServeHTTP(recorder, req)
-				body := recorder.Body.String()
-				// A proven state write alone is the HIGH alert of the default
-				// pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
-				blocked := gap0747BodyBlocked(body, row.block, false)
-				if blocked != row.block {
-					t.Errorf("%s %s managed=%v %q: block=%v, want %v: %.500s", row.id, connector, managed, row.command, blocked, row.block, body)
-				}
+	}
+	for _, row := range rows {
+		t.Run(row.id, func(t *testing.T) {
+			for _, need := range needs[row.id] {
+				links[need].Require(t)
+			}
+			checkR107Row(t, home, row.id, row.cwd, row.command, row.block, row.connectors, row.perUser)
+		})
+	}
+}
+
+// checkR107Row judges one row of TestR107WindowsManagedLinkFormsCorpus.
+func checkR107Row(t *testing.T, home, id, cwd, command string, block bool, rowConnectors []string, perUser bool) {
+	t.Helper()
+	row := struct {
+		id, cwd, command string
+		block, perUser   bool
+	}{id, cwd, command, block, perUser}
+	connectors := rowConnectors
+	if connectors == nil {
+		connectors = []string{"claudecode", "codex"}
+	}
+	for _, connector := range connectors {
+		installDefaultProfileConnector(t, connector)
+		for _, managed := range []bool{false, true} {
+			if managed && row.perUser {
+				continue
+			}
+			event := map[string]any{"session_id": "r107-win", "hook_event_name": "PreToolUse", "cwd": row.cwd,
+				"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_r107win",
+				"tool_input": map[string]any{"command": row.command, "description": "d"}}
+			if connector == "codex" {
+				event["turn_id"] = "t1"
+			}
+			payload := mustJSON(t, event)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = connector
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connector+"/hook", strings.NewReader(string(payload)))
+			req.Header.Set("Content-Type", "application/json")
+			if header := hookpaths.ResolveConnector(connector, "", "PreToolUse", payload); header != "" {
+				req.Header.Set(hookpaths.Header, header)
+			}
+			if connector == "codex" {
+				setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+			}
+			if managed {
+				req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+			}
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook(connector).ServeHTTP(recorder, req)
+			body := recorder.Body.String()
+			// A proven state write alone is the HIGH alert of the default
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			blocked := gap0747BodyBlocked(body, row.block, false)
+			if blocked != row.block {
+				t.Errorf("%s %s managed=%v %q: block=%v, want %v: %.500s", row.id, connector, managed, row.command, blocked, row.block, body)
 			}
 		}
 	}

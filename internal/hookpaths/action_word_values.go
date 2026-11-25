@@ -1189,10 +1189,58 @@ func actionAppendValueCandidates(candidates, more []actionValues) []actionValues
 }
 
 func actionKeptStatements(statements []*syntax.Stmt, candidates []actionValues, cwd, home string, steps *int) []actionValues {
-	for _, stmt := range statements {
-		candidates = actionUpdateValuesKept(stmt, candidates, cwd, home, steps)
+	for at := 0; at < len(statements); at++ {
+		if next, end := actionKeptDeclarations(statements, at, candidates, cwd, home, steps, true); end > at {
+			candidates, at = next, end-1
+			continue
+		}
+		candidates = actionUpdateValuesKept(statements[at], candidates, cwd, home, steps)
 	}
 	return candidates
+}
+
+// actionKeptDeclarations reads a run of two or more function declarations
+// at statements[at:] for one candidate as actionUpdateValuesKept reads them
+// one by one, which copied the values once per declaration: a loop of 600
+// declarations copied a map that grew to 600 entries 512 times, a quarter of
+// a copy-mode by-name decision (FIX-F3PERF). Each declaration only adds its
+// function to a copy of the one candidate, so the run updates one copy in
+// order. It reads the run only where the one-by-one reading makes no other
+// change: one candidate, and only the declarations before the one that
+// crosses the step budget (saturated values take no steps; saturated is
+// false for a loop body, which stops at saturated values). end is at when
+// it reads nothing.
+func actionKeptDeclarations(statements []*syntax.Stmt, at int, candidates []actionValues, cwd, home string, steps *int, saturated bool) (next []actionValues, end int) {
+	end = at
+	for end < len(statements) && statements[end] != nil && !statements[end].Background {
+		if _, declaration := statements[end].Cmd.(*syntax.FuncDecl); !declaration {
+			break
+		}
+		end++
+	}
+	if len(candidates) != 1 {
+		return nil, at
+	}
+	kept := actionKeptSaturated(candidates)
+	if kept && !saturated {
+		return nil, at
+	}
+	if !kept {
+		// Only the declarations that take a step within the budget: the one
+		// that crosses it saturates the values, one by one as before.
+		end = min(end, at+max(actionMaxValueSteps-*steps, 0))
+	}
+	if end-at < 2 {
+		return nil, at
+	}
+	values := maps.Clone(candidates[0])
+	for _, stmt := range statements[at:end] {
+		actionUpdateValuesAs(stmt, values, cwd, home, false)
+	}
+	if !kept {
+		*steps += end - at
+	}
+	return []actionValues{values}, end
 }
 
 func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home string, steps *int) []actionValues {
@@ -1583,9 +1631,16 @@ func (flow actionLoopFlow) saturatedStates() ([]actionValues, bool) {
 // conditions the value tracker already uses.
 func actionKeptLoopBody(statements []*syntax.Stmt, states []actionValues, cwd, home string, steps *int) actionLoopFlow {
 	var flow actionLoopFlow
-	for _, stmt := range statements {
+	for at := 0; at < len(statements); at++ {
+		stmt := statements[at]
 		if len(states) == 0 {
 			break
+		}
+		// A run of declarations runs no loop control and only adds its
+		// functions (actionKeptDeclarations).
+		if next, end := actionKeptDeclarations(statements, at, states, cwd, home, steps, false); end > at {
+			states, at = next, end-1
+			continue
 		}
 		part := actionKeptLoopStatement(stmt, states, cwd, home, steps)
 		if _, saturated := part.saturatedStates(); saturated {

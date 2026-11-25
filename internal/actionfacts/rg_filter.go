@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // rgFilter is which files and folders ripgrep 14.1 searches under a folder
@@ -202,7 +204,7 @@ func rgPhysicalFolder(cwd string) string {
 	if cwd == "" {
 		return cwd
 	}
-	if physical, err := filepath.EvalSymlinks(filepath.FromSlash(cwd)); err == nil {
+	if physical, err := winpath.EvalLinks(filepath.FromSlash(cwd)); err == nil {
 		return filepath.ToSlash(physical)
 	}
 	return cwd
@@ -263,7 +265,7 @@ func (r *credentialPathResolver) rgWorkingFolder(command CommandFact) string {
 	if !ok || !r.lookups.Take() {
 		return ""
 	}
-	physical, err := filepath.EvalSymlinks(filepath.FromSlash(logical))
+	physical, err := winpath.EvalLinks(filepath.FromSlash(logical))
 	if err != nil {
 		return ""
 	}
@@ -273,7 +275,7 @@ func (r *credentialPathResolver) rgWorkingFolder(command CommandFact) string {
 		if !r.lookups.Take() {
 			return ""
 		}
-		if other, err := filepath.EvalSymlinks(filepath.FromSlash(raw)); err != nil || other != physical {
+		if other, err := winpath.EvalLinks(filepath.FromSlash(raw)); err != nil || other != physical {
 			return ""
 		}
 	}

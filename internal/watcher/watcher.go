@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // InstallType distinguishes between skill and MCP install events.
@@ -4332,10 +4333,7 @@ func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string
 // the root. False for a plain root, an unsafe link or another account's
 // folder.
 func (w *InstallWatcher) resolvedRootOf(root string) (string, bool) {
-	resolved, err := filepath.EvalSymlinks(root)
-	if !w.secureClientActive() {
-		resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
-	}
+	resolved, err := skillrootsafe.Resolve(root, watcherEvalSymlinks)
 	if err != nil || sameWatcherPath(resolved, root) {
 		return "", false
 	}
@@ -4490,10 +4488,10 @@ func (w *InstallWatcher) admitsLinkedAsset(path string) bool {
 // allowed (GAP-0394). An unresolvable link keeps its own path, whose scan
 // then fails closed.
 func linkedAssetTarget(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != filepath.Clean(path) {
+	if resolved, err := winpath.EvalLinks(path); err == nil && resolved != filepath.Clean(path) {
 		return resolved
 	}
-	target, err := os.Readlink(path) // a Windows junction
+	target, err := os.Readlink(path) // a link whose target is missing
 	if err != nil || strings.TrimSpace(target) == "" {
 		return path
 	}
@@ -5175,7 +5173,7 @@ func isBundledSkillWatchPath(path string) bool {
 	if enforce.IsBundledSkillPath(path) {
 		return true
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	return err == nil && enforce.IsBundledSkillPath(resolved)
 }
 

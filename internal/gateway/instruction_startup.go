@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A session's instruction-file snapshot records, per directory, the
@@ -282,7 +283,7 @@ func withPhysicalDirectorySpellings(retained map[string]string, keys *[]string, 
 		return
 	}
 	for _, key := range slices.Clone(*keys) {
-		physical, err := filepath.EvalSymlinks(filepath.FromSlash(key))
+		physical, err := winpath.EvalLinks(filepath.FromSlash(key))
 		if err != nil {
 			continue
 		}

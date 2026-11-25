@@ -11,8 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +25,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
@@ -36,7 +41,15 @@ import (
 // judged by substrateMCPVerdict, the same verdict the in-cluster MCP hook
 // path and the callout route use, so a tool the guard blocks there is
 // refused here too and never reaches the laptop. The agent gets a JSON-RPC
-// error mcp_call_denied instead.
+// error mcp_call_denied instead. The other methods that bring laptop data
+// back (resources/read, prompts/get, completion/complete,
+// resources/subscribe) get the same verdict as tool names resources_read and
+// so on, with their arguments read as a tools/call's are, and a method or
+// notification off the bridge allow list is refused with method-not-found
+// (GAP-0841, substrateMCPJudgedMethods, substrateMCPMethodArgs,
+// substrateMCPPassMethods, substrateMCPPassNotifications). Arguments past the
+// bounds of the rules' reading are judged on bounded projections as well and
+// are at least the unknown tier (substrateMCPBoundedVerdict, GAP-1094).
 //
 // What the laptop server receives is the gateway's own re-encoding of the
 // message it judged (numbers kept), and the parse is strict: a message with
@@ -56,6 +69,9 @@ const (
 	substrateMCPControlMax   = 512
 	substrateMCPMaxHeldAsks  = 8
 	substrateMCPWriteTimeout = 30 * time.Second
+	// Over-reader-limit frames may use more CPU. Only one such call per
+	// actor runs at once; another gets a short bounded wait.
+	substrateMCPOverCapWait = 100 * time.Millisecond
 )
 
 // substrateMCPAskPoll is how often a held tools/call checks its ask.
@@ -194,56 +210,368 @@ func (b *substrateMCPBridge) fromAgent(ctx context.Context, raw []byte) {
 	}
 	m, ok := v.(map[string]any)
 	if !ok {
-		b.refuse(ctx, true, nil, "invalid_message", "JSON-RPC batches are not bridged")
+		why := "the MCP message is not one JSON-RPC object"
+		if _, batch := v.([]any); batch {
+			why = "JSON-RPC batches are not bridged"
+		}
+		b.refuse(ctx, true, nil, "invalid_message", why)
 		return
 	}
 	id := substrateMCPID(m)
 	method, isString := m["method"].(string)
-	if _, has := m["method"]; has && !isString {
+	_, hasMethod := m["method"]
+	if hasMethod && !isString {
 		b.refuse(ctx, true, id, "invalid_message", "the JSON-RPC method is not a string")
 		return
 	}
-	if method != "tools/call" {
-		if strings.EqualFold(strings.TrimSpace(method), "tools/call") {
-			b.refuse(ctx, true, id, "invalid_message", "the JSON-RPC method is not exactly tools/call")
+	if !hasMethod {
+		// The agent's answer to a laptop request (sampling, roots,
+		// elicitation) goes back as it is.
+		if _, result := m["result"]; result {
+			b.write(false, websocket.BinaryMessage, canon)
 			return
 		}
-		b.write(false, websocket.BinaryMessage, canon)
+		if _, e := m["error"]; e {
+			b.write(false, websocket.BinaryMessage, canon)
+			return
+		}
+		b.refuse(ctx, true, id, "invalid_message", "the JSON-RPC message is neither a request nor a response")
 		return
 	}
-	tool, args, why := substrateMCPCall(m)
-	if why != "" {
-		b.refuse(ctx, true, id, "invalid_message", why)
+	judgedAs, judged := substrateMCPJudgedMethods[method]
+	if !judged {
+		_, hasID := m["id"]
+		switch {
+		case substrateMCPPassMethods[method]:
+			b.write(false, websocket.BinaryMessage, canon)
+		case substrateMCPPassNotifications[method] && !hasID:
+			b.write(false, websocket.BinaryMessage, canon)
+		case strings.HasPrefix(method, "notifications/") && hasID:
+			b.refuse(ctx, true, id, "invalid_message", "a JSON-RPC notification carries no id")
+		default:
+			if exact := substrateMCPAllowedFold[substrateMCPFold(strings.TrimSpace(method))]; exact != "" {
+				b.refuse(ctx, true, id, "invalid_message", "the JSON-RPC method is not exactly "+exact)
+				return
+			}
+			b.notBridged(ctx, id, method)
+		}
 		return
 	}
-	req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: tool, Transport: "stdio", Method: method}, Args: args}
-	req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
-	verdict := substrateMCPJudge(b.a, ctx, b.reg, req)
+	var c substrateMCPJudgedCall
+	if method == "tools/call" {
+		var args json.RawMessage
+		c.tool, args, c.why = substrateMCPCall(m)
+		c.args = []json.RawMessage{args}
+	} else {
+		c = substrateMCPMethodArgs(m, method)
+		c.tool = judgedAs
+	}
+	if c.why != "" {
+		b.refuse(ctx, true, id, "invalid_message", c.why)
+		return
+	}
+	tool, ref := c.tool, c.ref
+	verdict := b.judge(ctx, method, c)
 	switch verdict.Verdict {
 	case "allow":
+		if len(verdict.Findings) > 0 {
+			// Allowed with a finding (arguments past the reading's bounds,
+			// GAP-1094): the row says so, never a silent allow.
+			row := map[string]any{"tool": tool, "method": method, "source": verdict.Source, "reason": verdict.Reason,
+				"findings": verdict.Findings}
+			if ref != "" {
+				row["ref"] = ref
+			}
+			b.s.audit(context.WithoutCancel(ctx), "alert", row)
+		}
 		b.write(false, websocket.BinaryMessage, canon)
 	case "ask":
 		if b.st.cfg.Asks == nil || b.held.Add(1) > substrateMCPMaxHeldAsks {
 			if b.st.cfg.Asks != nil {
 				b.held.Add(-1)
 			}
-			b.deny(ctx, id, tool, verdict.Source, "the call needs an approval that cannot be asked now")
+			b.deny(ctx, id, method, tool, ref, verdict.Source, "the call needs an approval that cannot be asked now")
 			return
 		}
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
 			defer b.held.Add(-1)
-			b.hold(ctx, id, tool, canon, verdict)
+			b.hold(ctx, id, method, tool, ref, canon, verdict)
 		}()
 	default:
-		b.deny(ctx, id, tool, verdict.Source, verdict.Reason)
+		b.deny(ctx, id, method, tool, ref, verdict.Source, verdict.Reason)
 	}
 }
 
-// hold keeps an asked tools/call until the owner decides or the ask limit
-// passes; only an approval forwards it.
-func (b *substrateMCPBridge) hold(ctx context.Context, id any, tool string, canon []byte, v SubstrateCalloutVerdict) {
+// substrateMCPJudgedMethods are the agent methods that bring laptop data
+// back, so each one gets the tools/call verdict before it reaches the laptop
+// (GAP-0841): the value is the tool name the verdict reads, with the
+// method's arguments (substrateMCPMethodArgs); a tools/call reads its own
+// name and arguments.
+var substrateMCPJudgedMethods = map[string]string{
+	"tools/call":          "",
+	"resources/read":      "resources_read",
+	"resources/subscribe": "resources_subscribe",
+	"prompts/get":         "prompts_get",
+	"completion/complete": "completion_complete",
+}
+
+// substrateMCPPassMethods are the other agent requests the bridge carries
+// unjudged: the handshake, ping, logging level, unsubscribe, the four list
+// methods (what the server offers, not its data) and the task methods (MCP
+// 2025-11-25), which only reach tasks a judged tools/call created. Any other
+// method is refused (notBridged).
+var substrateMCPPassMethods = map[string]bool{
+	"initialize": true, "ping": true, "logging/setLevel": true, "resources/unsubscribe": true,
+	"tools/list": true, "resources/list": true, "resources/templates/list": true, "prompts/list": true,
+	"tasks/get": true, "tasks/result": true, "tasks/list": true, "tasks/cancel": true,
+}
+
+// substrateMCPPassNotifications are the client notifications of the MCP
+// spec, carried without an id. Any other notifications/* method is refused
+// like an unlisted method, so a name such as notifications/x/../../resources/read
+// never reaches a laptop server that routes on a prefix (RV-0841 F3).
+var substrateMCPPassNotifications = map[string]bool{
+	"notifications/initialized": true, "notifications/cancelled": true, "notifications/progress": true,
+	"notifications/roots/list_changed": true, "notifications/tasks/status": true,
+}
+
+// substrateMCPAllowedFold maps the folded form of each carried method to its
+// only accepted spelling: "Tools/Call" or "resources/read " is refused as an
+// invalid message, never read as the method by a lenient laptop server.
+var substrateMCPAllowedFold = func() map[string]string {
+	m := map[string]string{}
+	for _, set := range []map[string]bool{substrateMCPPassMethods, substrateMCPPassNotifications} {
+		for k := range set {
+			m[substrateMCPFold(k)] = k
+		}
+	}
+	for k := range substrateMCPJudgedMethods {
+		m[substrateMCPFold(k)] = k
+	}
+	return m
+}()
+
+// substrateMCPJudgedCall is what the verdict of one judged message reads.
+type substrateMCPJudgedCall struct {
+	tool string
+	args []json.RawMessage // each is judged; the strictest verdict holds
+	// params, when set, is the whole params of a call whose args are parts
+	// of them: judged as well, and the reading the LLM judge and AID read.
+	params json.RawMessage
+	ref    string // the prompt or reference it names, for its rows
+	why    string // why it is refused, when it is
+}
+
+// substrateMCPMethodArgs is the arguments a judged method other than
+// tools/call is judged on. resources/read and resources/subscribe carry
+// them as their params. prompts/get is judged on params.arguments and
+// completion/complete on the argument it completes ({argument.name:
+// argument.value}) beside the context.arguments, as a tools/call's
+// arguments are (RV-0841 F1); where the completed argument has the same
+// name as a context argument with another value, both readings are judged.
+// Both are judged on their whole params as well, so a rule that reads the
+// prompt name, the completion ref or _meta holds them as before
+// (RV-0841b F1). A null field carries nothing and is absent (RV-0841b F5);
+// a field of another shape than the spec gives is refused, never judged as
+// none.
+func substrateMCPMethodArgs(m map[string]any, method string) substrateMCPJudgedCall {
+	refuse := func(what string) substrateMCPJudgedCall {
+		return substrateMCPJudgedCall{why: "the " + method + " " + what}
+	}
+	p, has := m["params"]
+	if !has {
+		return substrateMCPJudgedCall{args: []json.RawMessage{nil}}
+	}
+	params, ok := p.(map[string]any)
+	if !ok {
+		return refuse("params are not an object")
+	}
+	whole, err := substrateMCPEncode(params)
+	if err != nil {
+		return refuse("params do not encode")
+	}
+	var c substrateMCPJudgedCall
+	var readings []map[string]any
+	switch method {
+	case "prompts/get":
+		c.ref, _ = params["name"].(string)
+		a, ok := substrateMCPObjectField(params, "arguments")
+		if !ok {
+			return refuse("arguments are not an object")
+		}
+		if a != nil {
+			readings = append(readings, a)
+		}
+	case "completion/complete":
+		arg, ok := substrateMCPObjectField(params, "argument")
+		if !ok {
+			return refuse("argument is not an object")
+		}
+		cx, ok := substrateMCPObjectField(params, "context")
+		if !ok {
+			return refuse("context is not an object")
+		}
+		others, ok := substrateMCPObjectField(cx, "arguments")
+		if !ok {
+			return refuse("context arguments are not an object")
+		}
+		merged := maps.Clone(others)
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		if arg != nil {
+			name, named := substrateMCPArgName(arg["name"])
+			value, hasValue := arg["value"]
+			if !named || !hasValue {
+				return refuse("argument has no name or value")
+			}
+			if prev, clash := merged[name]; clash && !reflect.DeepEqual(prev, value) {
+				readings = append(readings, maps.Clone(merged))
+			}
+			merged[name] = value
+		}
+		if len(merged) > 0 {
+			readings = append([]map[string]any{merged}, readings...)
+		}
+		ref, _ := params["ref"].(map[string]any)
+		if c.ref, _ = ref["name"].(string); c.ref == "" {
+			c.ref, _ = ref["uri"].(string)
+		}
+	default:
+		return substrateMCPJudgedCall{args: []json.RawMessage{whole}}
+	}
+	for _, r := range readings {
+		args, err := substrateMCPEncode(r)
+		if err != nil {
+			return refuse("arguments do not encode")
+		}
+		c.args = append(c.args, args)
+	}
+	c.params = whole
+	if len(c.ref) > 256 {
+		c.ref = strings.ToValidUTF8(c.ref[:256], "")
+	}
+	return c
+}
+
+// substrateMCPObjectField is obj[key] when it is an object, nil when it is
+// absent or null, and not ok when it is anything else.
+func substrateMCPObjectField(obj map[string]any, key string) (map[string]any, bool) {
+	switch v := obj[key].(type) {
+	case nil:
+		return nil, true
+	case map[string]any:
+		return v, true
+	}
+	return nil, false
+}
+
+// substrateMCPArgName is a completion argument's name: a non-empty string,
+// or a number read as its text (a lenient server keys on it the same way).
+func substrateMCPArgName(v any) (string, bool) {
+	switch n := v.(type) {
+	case string:
+		return n, n != ""
+	case json.Number:
+		return n.String(), true
+	case float64:
+		return strconv.FormatFloat(n, 'g', -1, 64), true
+	}
+	return "", false
+}
+
+// judge is the strictest verdict of the call's readings; a deny ends it.
+// The argument readings come first and, when the whole params are read
+// too, go to the rules alone. An argument denial ends evaluation: no whole
+// params reading reaches AID or the LLM judge for that denied attempt.
+// Otherwise params go to every lane, as the single reading did before.
+// AID and the judge may only make a verdict stricter (RV-0841c F2).
+// A call judges at most substrateMCPReadingsPerArgs readings per argument
+// reading, including projections and distinct alias values (RV-0841b F6).
+func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substrateMCPJudgedCall) SubstrateCalloutVerdict {
+	if b.st != nil && substrateMCPOverCap(c) {
+		key := "mcp-judge:" + b.reg.Atespace + "/" + b.reg.UID
+		release, ok := b.st.streams.take(key, 1)
+		if !ok {
+			timer := time.NewTimer(substrateMCPOverCapWait)
+			tick := time.NewTicker(10 * time.Millisecond)
+			defer timer.Stop()
+			defer tick.Stop()
+			for !ok {
+				select {
+				case <-ctx.Done():
+					return substrateMCPBusyVerdict()
+				case <-timer.C:
+					return substrateMCPBusyVerdict()
+				case <-tick.C:
+					release, ok = b.st.streams.take(key, 1)
+				}
+			}
+		}
+		defer release()
+	}
+	readings := c.args
+	if c.params != nil {
+		readings = append(slices.Clip(c.args), c.params)
+	}
+	left := substrateMCPReadingsPerArgs*max(len(c.args), 1) - len(readings)
+	extraBytes := substrateMCPExtraBytesPerCall
+	var out SubstrateCalloutVerdict
+	for i, args := range readings {
+		req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: c.tool, Transport: "stdio", Method: method}, Args: args}
+		req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
+		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left, extraBytes: &extraBytes}
+		v := substrateMCPJudge(b.a, withSubstrateMCPReading(ctx, rd), b.reg, req)
+		if i == 0 {
+			out = v
+		} else {
+			out = substrateMCPStricter(out, v)
+		}
+		if out.Verdict == "deny" {
+			break
+		}
+	}
+	return out
+}
+
+// substrateMCPOverCap admits any call that reaches a shared reader limit
+// through the one-active-call actor budget. Ordinary calls do not wait.
+func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
+	if actionfacts.ArgsLimitIssue(c.params) != "" {
+		return true
+	}
+	for _, args := range c.args {
+		if actionfacts.ArgsLimitIssue(args) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func substrateMCPBusyVerdict() SubstrateCalloutVerdict {
+	return SubstrateCalloutVerdict{V: "1", Verdict: "deny", Source: "tool_rules",
+		Reason: boundedTruncatedTitle + " (over-cap actor budget)", Severity: "HIGH",
+		Findings: []string{evaluationLimitRuleID}}
+}
+
+// notBridged refuses a method that is not on the bridge allow list with a
+// JSON-RPC method-not-found error (none for a notification) and a denied row.
+func (b *substrateMCPBridge) notBridged(ctx context.Context, id any, method string) {
+	const code = "mcp_method_not_bridged"
+	if len(method) > 128 {
+		method = strings.ToValidUTF8(method[:128], "")
+	}
+	b.s.audit(context.WithoutCancel(ctx), "denied", map[string]any{"reason": code, "method": method})
+	if id != nil {
+		b.writeErr(true, id, -32601, code, "the MCP bridge does not carry method "+method)
+	}
+}
+
+// hold keeps an asked call until the owner decides or the ask limit passes;
+// only an approval forwards it.
+func (b *substrateMCPBridge) hold(ctx context.Context, id any, method, tool, ref string, canon []byte, v SubstrateCalloutVerdict) {
 	reg := b.reg
 	ask := asks.Ask{
 		Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Profile: reg.Profile,
@@ -252,7 +580,7 @@ func (b *substrateMCPBridge) hold(ctx context.Context, id any, tool string, cano
 	}
 	got, err := b.st.cfg.Asks.OpenAsk(ctx, ask)
 	if err != nil {
-		b.deny(ctx, id, tool, v.Source, "the approval could not be asked")
+		b.deny(ctx, id, method, tool, ref, v.Source, "the approval could not be asked")
 		return
 	}
 	b.a.emitSubstrateApprovalV8(ctx, got, true, "")
@@ -271,7 +599,7 @@ func (b *substrateMCPBridge) hold(ctx context.Context, id any, tool string, cano
 		case <-ctx.Done():
 			return
 		case <-deadline.C:
-			b.deny(ctx, id, tool, v.Source, "the approval was not given in time")
+			b.deny(ctx, id, method, tool, ref, v.Source, "the approval was not given in time")
 			return
 		case <-tick.C:
 			list, err := b.st.cfg.Asks.List(ctx, asks.ListRequest{All: true, Atespace: reg.Atespace, Actor: reg.Name})
@@ -284,12 +612,16 @@ func (b *substrateMCPBridge) hold(ctx context.Context, id any, tool string, cano
 				}
 				switch a.State {
 				case asks.StateApproved:
-					b.s.audit(ctx, "approved", map[string]any{"tool": tool, "ask_id": a.ID})
+					row := map[string]any{"tool": tool, "method": method, "ask_id": a.ID}
+					if ref != "" {
+						row["ref"] = ref
+					}
+					b.s.audit(ctx, "approved", row)
 					b.write(false, websocket.BinaryMessage, canon)
 					return
 				case asks.StatePending:
 				default:
-					b.deny(ctx, id, tool, v.Source, "the approval was "+a.State)
+					b.deny(ctx, id, method, tool, ref, v.Source, "the approval was "+a.State)
 					return
 				}
 			}
@@ -297,8 +629,12 @@ func (b *substrateMCPBridge) hold(ctx context.Context, id any, tool string, cano
 	}
 }
 
-func (b *substrateMCPBridge) deny(ctx context.Context, id any, tool, source, reason string) {
-	b.s.audit(context.WithoutCancel(ctx), "denied", map[string]any{"tool": tool, "source": source, "reason": reason})
+func (b *substrateMCPBridge) deny(ctx context.Context, id any, method, tool, ref, source, reason string) {
+	row := map[string]any{"tool": tool, "method": method, "source": source, "reason": reason}
+	if ref != "" {
+		row["ref"] = ref
+	}
+	b.s.audit(context.WithoutCancel(ctx), "denied", row)
 	if id == nil {
 		return // a notification gets no answer, only the denied row
 	}
@@ -412,42 +748,54 @@ func substrateMCPCanonical(raw []byte) ([]byte, any, error) {
 // could read differently from the bridge.
 var errSubstrateMCPAmbiguous = errors.New("ambiguous JSON-RPC keys")
 
-// substrateMCPJudgedKeys maps the folded form of each key the verdict reads
-// to its only accepted spelling.
+// substrateMCPJudgedKeys maps the folded form of each key the verdict or
+// the routing reads (the id, result and error that make a message a request,
+// a notification or an answer, RV-0841 F3) to its only accepted spelling.
 var substrateMCPJudgedKeys = func() map[string]string {
 	m := map[string]string{}
-	for _, k := range []string{"method", "params", "name", "arguments"} {
+	for _, k := range []string{"method", "params", "name", "arguments", "argument", "value", "context", "id", "result", "error"} {
 		m[substrateMCPFold(k)] = k
 	}
 	return m
 }()
 
-// substrateMCPStrictKeys refuses an envelope or params object that a laptop
-// parser could read differently from the bridge (GAP-0838). Go's
-// encoding/json, and so mark3labs/mcp-go, matches struct keys with simple
-// Unicode case folding and keeps the last duplicate. So at those two levels
-// it refuses any two keys equal under strings.EqualFold (exact duplicates
-// too), and any key that folds to method, params, name or arguments but is
-// not byte-exact: Method, paramſ (U+017F), a Kelvin sign (U+212A) and so on.
-// Keys deeper down, inside arguments, are part of the arguments the verdict
-// reads, so they need no rule here.
+// substrateMCPStrictKeys refuses an envelope, params object, or a
+// completion/complete argument or context object that a laptop parser could
+// read differently from the bridge (GAP-0838). Go's encoding/json, and so
+// mark3labs/mcp-go, matches struct keys with simple Unicode case folding and
+// keeps the last duplicate. So at those levels it refuses any two keys equal
+// under strings.EqualFold (exact duplicates too), and any key that folds to
+// one the bridge reads (substrateMCPJudgedKeys) but is not byte-exact:
+// Method, paramſ (U+017F), a Kelvin sign (U+212A) and so on. Keys deeper
+// down, inside arguments, are part of the arguments the verdict reads, so
+// they need no rule here.
 func substrateMCPStrictKeys(raw []byte) error {
-	params, err := substrateMCPCheckKeys(raw)
-	if err != nil || params == nil {
+	env, err := substrateMCPCheckKeys(raw, "params")
+	if err != nil || env["params"] == nil {
 		return err
 	}
-	_, err = substrateMCPCheckKeys(params)
-	return err
+	params, err := substrateMCPCheckKeys(env["params"], "argument", "context")
+	if err != nil {
+		return err
+	}
+	for _, k := range []string{"argument", "context"} {
+		if params[k] != nil {
+			if _, err := substrateMCPCheckKeys(params[k]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-// substrateMCPCheckKeys checks one object's keys and returns its params
-// value. A value that is not an object has no keys to check.
-func substrateMCPCheckKeys(raw []byte) (json.RawMessage, error) {
+// substrateMCPCheckKeys checks one object's keys and returns the values of
+// the named children. A value that is not an object has no keys to check.
+func substrateMCPCheckKeys(raw []byte, children ...string) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return nil, nil
 	}
-	var params json.RawMessage
+	out := map[string]json.RawMessage{}
 	seen := map[string]bool{}
 	for dec.More() {
 		t, err := dec.Token()
@@ -467,11 +815,11 @@ func substrateMCPCheckKeys(raw []byte) (json.RawMessage, error) {
 		if err := dec.Decode(&val); err != nil {
 			return nil, err
 		}
-		if k == "params" {
-			params = val
+		if slices.Contains(children, k) {
+			out[k] = val
 		}
 	}
-	return params, nil
+	return out, nil
 }
 
 // substrateMCPFold gives one spelling per strings.EqualFold class: each rune

@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const (
@@ -196,7 +197,7 @@ func exactActiveAgentFile(filePath string) (string, bool, bool) {
 		!os.SameFile(info, canonicalInfo) {
 		return "", false, false
 	}
-	resolved, err := filepath.EvalSymlinks(canonicalPath)
+	resolved, err := winpath.EvalLinks(canonicalPath)
 	if err != nil || resolved != canonicalPath {
 		return "", false, false
 	}

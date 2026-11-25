@@ -6,6 +6,7 @@ package kit
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -23,6 +24,34 @@ import (
 // call names for the command, "" for the session's. ok is false for a call
 // that runs no shell command. The kit makes its shell proofs for this command
 // and the gateway binds them to the same command (substrate-1 GAP-0545).
+// ShellCommandDir is the folder the kit places the event's shell command
+// words from (CollectFacts): the payload's cwd, or the shell tool's workdir
+// read from it. ok is false when the payload's cwd is not absolute (the kit
+// then starts from its own working folder) or the event has no shell
+// command.
+func ShellCommandDir(connectorName, event string, payload []byte) (string, bool) {
+	var view payloadView
+	if json.Unmarshal(payload, &view) != nil || !filepath.IsAbs(view.CWD) {
+		return "", false
+	}
+	_, workdir, ok := ShellCommandOf(connectorName, event, payload)
+	if !ok {
+		return "", false
+	}
+	return shellWorkdir(filepath.Clean(view.CWD), workdir), true
+}
+
+// shellWorkdir is the folder a shell tool with workdir runs in from cwd.
+func shellWorkdir(cwd, workdir string) string {
+	if workdir == "" {
+		return cwd
+	}
+	if !filepath.IsAbs(workdir) {
+		workdir = filepath.Join(cwd, workdir)
+	}
+	return filepath.Clean(workdir)
+}
+
 func ShellCommandOf(connectorName, event string, payload []byte) (command, workdir string, ok bool) {
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(payload, &envelope) != nil {
