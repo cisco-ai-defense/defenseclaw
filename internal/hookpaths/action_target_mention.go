@@ -2611,8 +2611,8 @@ func actionExpandGlobWalk(pattern, literal string, hidden, userView bool, dots f
 // a link that does not resolve, is joined by name as before.
 func actionGlobJoin(dir, component string) string {
 	if component == ".." {
-		if info, err := os.Lstat(dir); err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-			if physical, err := filepath.EvalSymlinks(dir); err == nil {
+		if info, err := pathLstat(dir); err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			if physical, err := pathEvalSymlinks(dir); err == nil {
 				return filepath.Dir(physical)
 			}
 		}
