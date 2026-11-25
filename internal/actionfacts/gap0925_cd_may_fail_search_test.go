@@ -6,6 +6,7 @@
 package actionfacts
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,7 +43,7 @@ func TestP2HookFSearchAfterACdThatMayFail(t *testing.T) {
 		t.Helper()
 		out := parsePOSIX(command, 1, 0)
 		classifyOutput(&out)
-		rec := resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, cwd, home, out.commands, out.paths)
+		rec := resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), defaultCredentialPathLimits, out.credentialWords, cwd, home, out.commands, out.paths)
 		var got []string
 		if rec == nil {
 			return nil
