@@ -67,7 +67,7 @@ var Table = []Reason{
 	{"value_required", 400, API, "The value is empty, over 56 KiB or not UTF-8.", "Give the value again.", Person},
 	{"secret_not_managed_by_defenseclaw", 409, API, "That Kubernetes Secret exists but DefenseClaw did not create it (it is not labelled as managed by DefenseClaw), and DefenseClaw changes only Secrets it created.", "Ask your administrator.", Admin},
 	{"secret_store_unavailable", 503, API, "The gateway cannot reach the Kubernetes secret store.", "Try again in a minute; an administrator can check it with: defenseclaw-gateway substrate doctor --cluster", Admin},
-	{"registrations_unavailable", 503, API, "The gateway cannot read the cluster's agent registrations right now.", "Try again in a minute; if it stays, run defenseclaw substrate doctor.", Person},
+	{"registrations_unavailable", 503, API, "The gateway cannot read the cluster's agent registrations right now.", "This is usually brief: try again in a minute, and if it stays, run defenseclaw substrate doctor.", Person},
 	{"secret_not_stored", 502, API, "The secret store refused the write.", "Try again in a minute.", Person},
 	{"secret_not_removed", 502, API, "The secret store refused the removal.", "Try again in a minute.", Person},
 	{"secret_binding_outside_templates", 202, API, "No approved template covers that host, so an administrator was asked; your value is stored and is not used until then.", "See the ask with: defenseclaw substrate approvals", Person},
