@@ -27,6 +27,10 @@ type gap0377Row struct {
 	name, command string
 	benign        bool
 	stricter      string
+	// unnamed is a laptop rule the actor need not name: a laptop-side gap
+	// (substrate-1 GAP-0503: persistence.ssh_authorized_keys_command on a
+	// read in ~/.ssh).
+	unnamed string
 }
 
 // gap0377Shapes are the review's nearby shapes (RKGUEST3, substrate-1
@@ -237,7 +241,7 @@ func gap0377S7Rows() []gap0377Row {
 
 // TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates: the copy-mode
 // actor's guest placement of a call the analysis did not read in full
-// (sandboxGuestPlacements).
+// (guestPlacementPlan).
 //   - substrate-1 GAP-0377: it counts statements, not the places of each
 //     statement, so a script under the laptop's statement budget is read in
 //     full and never cut with ACTION-COMPOUND-LIMIT where the laptop blocks
@@ -365,7 +369,7 @@ func gap0377Check(t *testing.T, rows []gap0377Row, packs ...string) {
 					t.Errorf("%s: copy-mode actor %s %v is weaker than the laptop's %s %v", row.name, ca, cr, la, lr)
 				}
 				for _, rule := range lr {
-					if !slices.Contains(cr, rule) {
+					if rule != row.unnamed && !slices.Contains(cr, rule) {
 						t.Errorf("%s: copy-mode actor %s %v does not name the laptop's %s (%s %v)", row.name, ca, cr, rule, la, lr)
 					}
 				}

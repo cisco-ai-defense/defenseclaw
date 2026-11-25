@@ -627,7 +627,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 					gateway.SubstrateSecretEchoHostCheck(live().Substrate.Secrets, live().Substrate.Egress.NoSwapHosts),
 					gateway.SubstrateSecretBindingStoreCheck(bindingStore),
 					gateway.SubstrateRevocationCheck(revs.snap, time.Now()),
-					gateway.SubstrateRelayCertReissueCheck(c.Substrate.EffectiveRelayCertReissue(), c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode)))}
+					gateway.SubstrateRelayCertReissueCheck(c.Substrate.EffectiveRelayCertReissue(), c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode))),
+					gateway.SubstrateSecretBindingFormCheck(bindingStore, live().Substrate.SecretTemplates)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.

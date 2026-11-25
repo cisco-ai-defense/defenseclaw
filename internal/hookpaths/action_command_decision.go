@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -72,6 +73,65 @@ func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]st
 // the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
 	return actionTargetDecision(command, cwd, home, "", posixShell, facts, m)
+}
+
+// unreadDecisionKey is the input of one UnreadCommandDecision.
+type unreadDecisionKey struct {
+	command, cwd, home string
+	dialect            actionfacts.Dialect
+	posixShell         bool
+	startup            *ShellStartup
+}
+
+// UnreadCommandDecision is the decision of command in cwd by its words
+// alone, for a caller inside fixturefs.Unread (the by-name reading of a
+// copy-mode Substrate actor's call, substrate-1 GAP-0922):
+// ActionCommandDecisionInShell, then with a dialect hint
+// ActionCommandDecisionWithDialectAndGlobFacts, with the shell startup of m.
+// Inside Unread no read reaches the file system or the hook call's memory,
+// so the answer depends on the inputs alone: the evaluation m answers a
+// repeat from the first answer, and all these decisions share one memo,
+// kept apart from m's own answers (the host's). A copy-mode call over the
+// compound limit asked the same by-name decision for each statement the cap
+// floor judged, each with a new memo that read the home's key files again
+// (FIX-F3PERF). With no m, glob facts, or outside Unread, every decision is
+// read on its own, as before.
+func (m *TargetMemo) UnreadCommandDecision(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string, posixShell bool) string {
+	startup := m.ShellStartup()
+	if m == nil || len(facts) != 0 || !fixturefs.Unreadable() {
+		return unreadCommandDecisionWith(NewTargetMemo().WithShellStartup(startup), command, cwd, home, dialect, facts, posixShell)
+	}
+	key := unreadDecisionKey{command: command, cwd: cwd, home: home, dialect: dialect, posixShell: posixShell, startup: startup}
+	m.mu.Lock()
+	decision, known := m.unreadDecisions[key]
+	if m.unread == nil || m.unread.startup != startup {
+		m.unread = newTargetMemo().WithShellStartup(startup)
+	}
+	memo := m.unread
+	m.mu.Unlock()
+	if known {
+		return decision
+	}
+	decision = unreadCommandDecisionWith(memo, command, cwd, home, dialect, facts, posixShell)
+	m.mu.Lock()
+	if m.unreadDecisions == nil {
+		m.unreadDecisions = make(map[unreadDecisionKey]string)
+	}
+	if len(m.unreadDecisions) < maxTargetMemoEntries {
+		m.unreadDecisions[key] = decision
+	}
+	m.mu.Unlock()
+	return decision
+}
+
+// unreadCommandDecisionWith is the decision UnreadCommandDecision reads, in
+// memo.
+func unreadCommandDecisionWith(memo *TargetMemo, command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string, posixShell bool) string {
+	decision := memo.ActionCommandDecisionInShell(command, cwd, home, facts, posixShell)
+	if dialect != "" {
+		decision = memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts)
+	}
+	return decision
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
@@ -140,7 +200,7 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 			return "protected-target"
 		}
 	}
-	if actionPureMake(command, home) {
+	if actionPureMake(command, home, memo) {
 		if actionMakeProtectedRecipe(command, cwd, home) {
 			return "protected-target"
 		}
@@ -933,7 +993,8 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		actionPrivateKeyReadWords(shell, cwd, home, mode, depth+1) {
 		return true // A command an awk program starts reads the key.
 	}
-	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
+	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) ||
+		!windows && actionFindPrivateKeyRead(words, cwd, home) {
 		return true
 	}
 	switch program {

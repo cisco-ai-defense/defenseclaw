@@ -11,8 +11,8 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-func actionPureMake(command, home string) bool {
-	file, ok := parseShell(command)
+func actionPureMake(command, home string, memo *TargetMemo) bool {
+	file, ok := memo.parsedShell(command) // read only
 	if !ok || len(file.Stmts) != 1 {
 		return false
 	}

@@ -1225,13 +1225,23 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// (rel-1-0-10:GAP-0999), and it only adds findings.
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
-	if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok {
+	claims := substrateGuestClaimsFrom(ctx)
+	twins, twinsCut := substrateGuestCommandTwinRequests(action, claims)
+	for _, twin := range twins {
 		// A Substrate actor's shell call as it reads once the actor's file
 		// system has followed its links (cd -P a/b/ssh, eval "cat key-link",
-		// echo x > claude-dir/settings.json): every reading of the call,
-		// the hook config guard included, judges it too, and it only adds
-		// findings (substrate-1 GAP-0546, GAP-0547).
+		// echo x > claude-dir/settings.json, cd sub && echo x >> dc-link):
+		// every reading of the call, the hook config guard included, judges
+		// it too, and it only adds findings (substrate-1 GAP-0546, GAP-0547,
+		// GAP-0623).
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
+	}
+	if claims != nil && (claims.cut || twinsCut) {
+		// Its kit claims were cut: a word or argument past the cut may
+		// write through a link the laptop follows and blocks, so the call
+		// gets the unknown tier of the pack, never a clean allow
+		// (substrate-1 GAP-0622).
+		findings = withUnknownFinding(findings, boundedTruncatedFinding(bounded.Of(bounded.Paths), action.EnforcementCapable))
 	}
 	return findings
 }
@@ -1331,10 +1341,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		}
 		// Nor is a Substrate actor's shell call that writes one through a
 		// link (substrate-1 GAP-0547).
-		if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok && allowed &&
-			(cfg == nil || !cfg.SecureClientIntegration()) &&
-			(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
-			allowed = false
+		twins, _ := substrateGuestCommandTwinRequests(action, substrateGuestClaimsFrom(ctx))
+		for _, twin := range twins {
+			if allowed && (cfg == nil || !cfg.SecureClientIntegration()) &&
+				(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
+				allowed = false
+			}
 		}
 		// An allowed tool name does not authorize turning DefenseClaw off.
 		if len(defenseClawControlFindings(ctx, action, nil)) != 0 {

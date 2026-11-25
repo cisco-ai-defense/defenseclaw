@@ -147,6 +147,21 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	// so nested fan-out stays linear; past either bound a body that may write
 	// or change directory is unknown.
 	functionDepth, functionStatements := 0, 0
+	// The statement readings of the walk (write): the same statement text
+	// read in the same folder, while the hook call's state is as it was, has
+	// the same literal writes and facts. After a program word that is not
+	// static ($C), every later statement is read anew; an 8 KB loop of $C and
+	// : statements parsed and analyzed each again (FIX-F3PERF).
+	readings := map[shellDirectoryReadingKey]shellDirectoryReading{}
+	// The walk runs in one goroutine, so in one hook call (none: a fixed
+	// state): it looks the call up once, not twice per statement.
+	call := currentHookCall()
+	callState := func() CallState {
+		if call == nil {
+			return CallState{}
+		}
+		return call.state()
+	}
 	var walkList func([]*syntax.Stmt, *shellDirectoryState)
 	var walk func(*syntax.Stmt, *shellDirectoryState)
 	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
@@ -204,13 +219,20 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			redirectIndex += len(redirects)
 			return
 		}
-		literals, literalCopies := LiteralWriteOperandsWithCopies(statement, s.logical, home)
+		key := shellDirectoryReadingKey{statement: statement, logical: s.logical, call: callState()}
+		reading, read := readings[key]
+		if !read {
+			reading.literals, reading.copies = LiteralWriteOperandsWithCopies(statement, s.logical, home)
+			reading.facts = analyzeAtHookFolder(actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home})
+			if callState() == key.call {
+				readings[key] = reading
+			}
+		}
+		literals, literalCopies, facts := reading.literals, reading.copies, reading.facts
 		ownCopies := make(map[string]int, len(literalCopies))
 		for _, literal := range literalCopies {
 			ownCopies[literal]++
 		}
-		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
-		facts := analyzeAtHookFolder(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
 		for i, redirect := range redirects {
 			occurrence := RedirectOccurrence{Path: redirect}
@@ -611,6 +633,21 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	}
 	walkList(file.Stmts, &state)
 	return operands, unknown
+}
+
+// shellDirectoryReadingKey is one statement reading of the directory walk:
+// the statement's text, the folder it is read in, and the hook call's state
+// when it was read (a reading that changed that state is not kept).
+type shellDirectoryReadingKey struct {
+	statement, logical string
+	call               CallState
+}
+
+// shellDirectoryReading is what the walk reads of one statement: its literal
+// writes, the copies among them, and its facts. The walk only reads them.
+type shellDirectoryReading struct {
+	literals, copies []string
+	facts            actionfacts.Facts
 }
 
 // maxFunctionStatements bounds the statements read inside function bodies

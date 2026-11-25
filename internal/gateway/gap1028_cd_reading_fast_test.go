@@ -6,6 +6,8 @@ package gateway
 import (
 	"strconv"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // TestGAP1028CDReadingSkipsTheParseOfOtherPrograms: the guest placement
@@ -24,7 +26,7 @@ func TestGAP1028CDReadingSkipsTheParseOfOtherPrograms(t *testing.T) {
 	}
 	for _, text := range texts {
 		want := gap1028ParsedCDReading(text, home)
-		if got := gap1028CDMemo(home).reading(text); got != want {
+		if got := newGuestCDMemo(home).reading(text); got != want {
 			t.Errorf("%q reads %+v, its parse %+v", text, got, want)
 		}
 	}
@@ -33,7 +35,7 @@ func TestGAP1028CDReadingSkipsTheParseOfOtherPrograms(t *testing.T) {
 		calls[i] = "f" + strconv.Itoa(i) + " out" + strconv.Itoa(i)
 	}
 	if allocs := testing.AllocsPerRun(5, func() {
-		memo := gap1028CDMemo(home)
+		memo := newGuestCDMemo(home)
 		for _, text := range calls {
 			memo.reading(text)
 		}
@@ -43,11 +45,11 @@ func TestGAP1028CDReadingSkipsTheParseOfOtherPrograms(t *testing.T) {
 }
 
 // gap1028ParsedCDReading is the reading of text by its parse.
-func gap1028ParsedCDReading(text, home string) guestCDReading {
-	return readGuestCD(text, home)
-}
-
-// gap1028CDMemo is a guest placement's cd memo in home.
-func gap1028CDMemo(home string) *guestCDMemo {
-	return &guestCDMemo{home: home, texts: map[string]guestCDReading{}}
+func gap1028ParsedCDReading(text, home string) (reading guestCDReading) {
+	if call, ok := guestCall(text); ok {
+		program, static := hookpaths.StaticWord(call.Args[0], home)
+		reading.changes = static && (program == "cd" || program == "pushd" || program == "popd")
+		reading.operand, reading.moves = guestCallCDOperand(call, home)
+	}
+	return reading
 }

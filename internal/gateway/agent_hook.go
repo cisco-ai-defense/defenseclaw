@@ -4388,6 +4388,7 @@ func (a *APIServer) inspectAgentHookToolCall(
 		// carried them and projects each candidate as above (GAP-0678).
 		conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 	}
+	guestCWD := sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD)
 	action := trustedActionRequest{
 		Input:                   actionInput,
 		LegacyText:              string(req.ToolArgs),
@@ -4402,7 +4403,8 @@ func (a *APIServer) inspectAgentHookToolCall(
 		ShellStartup:            shellStartupFromContext(ctx),
 		patchTarget:             hermesV4APatch,
 		strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+		SandboxGuestCWD:         guestCWD,
+		guestToolCWDUnresolved:  isSandboxHookRequest(ctx) && filepath.IsAbs(req.ReportedCWD) && strings.TrimSpace(toolCWD) != "" && guestCWD == "",
 		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 	}
 	withWindowsShellDialect(&action, dialectHint)
