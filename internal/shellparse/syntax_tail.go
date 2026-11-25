@@ -62,7 +62,7 @@ type SyntaxTail struct {
 	HereDocs []SyntaxTailHereDoc
 	// Truncated holds the caps the reading stopped at: bounded.Items for the
 	// statements or pieces, bounded.Bytes for the parse budget, of the window
-	// reading or of the longer reading (each has its own).
+	// reading, the longer reading, or the cut-back (each has its own).
 	Truncated bounded.CapSet
 }
 
@@ -225,6 +225,11 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	var longTrunc bounded.Truncated
 	longBudget := bounded.NewCounter(&longTrunc, bounded.Bytes, 4*len(command)+(64<<10))
 	longStatements := bounded.NewCounter(&longTrunc, bounded.Items, MaxSyntaxTailStatements)
+	// Every cut-back parse, including its first 16 word steps, has its own
+	// bound. An expensive failed statement cannot spend the window budget
+	// before the window reads the statements after it (GAP-2081).
+	var cutTrunc bounded.Truncated
+	cutBudget := bounded.NewCounter(&cutTrunc, bounded.Bytes, 4*len(command)+(64<<10))
 	add := func(statement string, doc int) {
 		if !statements.Take() {
 			return
@@ -252,23 +257,16 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	// up to it, cut back word by word, is the longest prefix that parses.
 	// Past the word steps a cut whose parse failed at a token before its end
 	// jumps back over that token (every cut that still holds it fails too),
-	// so the cut-back has no bound of its own: the word steps are charged to
-	// the parse budget, and the tries past them, the longer reading, to the
-	// budget of that reading, which reports TRUNCATED (the bound rule,
-	// rel-1-0-10:GAP-0745) without starving the window reading after it. It
-	// stopped silently after 16 tries before, and the part of the statement
-	// before the error went unread.
+	// so the cut-back has no fixed step limit: its own parse budget reports
+	// TRUNCATED without starving the 1.0.10 window reading. It stopped
+	// silently after 16 tries before, leaving the earlier text unread.
 	complete, pastSteps := end, false
-	for at, tries := errorAt, 0; at > end && !trunc.Set().Any() && !longTrunc.Set().Any(); tries++ {
+	for at, tries := errorAt, 0; at > end && !cutTrunc.Set().Any(); tries++ {
 		prefix := trimSeparators(command[:at])
 		if prefix == "" {
 			break
 		}
-		cost := &budget
-		if tries >= 2*syntaxTailRunWindow {
-			cost = &longBudget
-		}
-		failedAt, _, parsed := parseAlone(prefix, cost)
+		failedAt, _, parsed := parseAlone(prefix, &cutBudget)
 		if parsed {
 			end, pastSteps = at, tries >= 2*syntaxTailRunWindow
 			break
@@ -284,7 +282,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 			if parsesAlone(prefix, &budget) {
 				add(prefix, -1)
 			}
-		} else if parsesAlone(prefix, &longBudget) {
+		} else if parsesAlone(prefix, &cutBudget) {
 			extend(prefix, -1, complete-strings.Index(command[:end], prefix))
 		}
 	}
@@ -363,7 +361,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 		}
 	}
 	tail.Truncated = trunc.Set(&budget, &statements).Union(openerTrunc.Set(&openers)).
-		Union(longTrunc.Set(&longBudget, &longStatements))
+		Union(longTrunc.Set(&longBudget, &longStatements)).Union(cutTrunc.Set(&cutBudget))
 	return tail, true
 }
 

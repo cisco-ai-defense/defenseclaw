@@ -25,7 +25,7 @@ const (
 )
 
 type effectAliasKey struct {
-	connector, session, home, cwd string
+	connector, session, home string
 }
 type effectAliasEntry struct {
 	proof decide.Proof
@@ -51,17 +51,50 @@ type effectAliasMemo struct {
 
 var sessionEffectAliases effectAliasMemo
 
+// effectAliasPending holds a call's memo change until the hook decides
+// whether the tool will run. A blocked call must not create or erase aliases.
+type effectAliasPending struct {
+	request trustedActionRequest
+	result  effects.Result
+	facts   []*semanticpb.EffectFact
+	flavor  effects.Flavor
+	ready   bool
+}
+
+func (p *effectAliasPending) set(request trustedActionRequest, result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor) {
+	request.aliasPending = nil
+	p.request, p.result, p.facts, p.flavor, p.ready = request, result, facts, flavor, true
+}
+
+// An approval request is not evidence that the tool ran. Observe-mode
+// downgrades are already reflected in Action at the final commit point.
+func aliasVerdictCanRun(v *ToolInspectVerdict) bool {
+	return v != nil && (v.Action == guardrailActionAllow || v.Action == guardrailActionAlert)
+}
+
+func (p *effectAliasPending) commit() {
+	if p != nil && p.ready {
+		sessionEffectAliases.remember(p.request, p.result, p.facts, p.flavor)
+	}
+}
+
+// Only calls with bounded alias-key fields need a pending recorder. The
+// storage path validates their contents after the verdict.
+func deferEffectAlias(request trustedActionRequest) bool {
+	return request.Connector != "" && len(request.Connector) <= 64 &&
+		request.sessionID != "" && len(request.sessionID) <= effectAliasMaxSessionBytes &&
+		request.Input.ActiveHome != "" && len(request.Input.ActiveHome) <= effectAliasMaxPathBytes
+}
+
 func aliasKey(request trustedActionRequest) (effectAliasKey, bool) {
 	key := effectAliasKey{
 		connector: strings.TrimSpace(request.Connector),
 		session:   strings.TrimSpace(request.sessionID),
 		home:      request.Input.ActiveHome,
-		cwd:       request.Input.CWD,
 	}
 	return key, key.connector != "" && len(key.connector) <= 64 &&
 		key.session != "" && len(key.session) <= effectAliasMaxSessionBytes &&
-		key.home != "" && len(key.home) <= effectAliasMaxPathBytes &&
-		key.cwd != "" && len(key.cwd) <= effectAliasMaxPathBytes
+		key.home != "" && len(key.home) <= effectAliasMaxPathBytes
 }
 
 func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Result) []effectAliasUse {
@@ -107,6 +140,9 @@ func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Resu
 			delete(session.aliases, e.Target.Path)
 			continue
 		}
+		entry.at = now
+		session.aliases[e.Target.Path] = entry
+		session.at = now
 		p := entry.proof
 		p.Kind = kind
 		uses = append(uses, effectAliasUse{proof: p, effect: i})
@@ -121,7 +157,7 @@ func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.
 	}
 	relevant, hasLink := false, false
 	for _, e := range result.Effects {
-		if e.Kind == effects.KindDelete {
+		if e.Kind == effects.KindDelete || aliasReplacedByWrite(e) {
 			relevant = true
 		}
 		if e.Kind == effects.KindLink && e.LinkTarget {
@@ -152,7 +188,7 @@ func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.
 	session = m.sessions[key]
 	if session != nil {
 		for _, e := range result.Effects {
-			if e.Kind == effects.KindDelete && e.Target.Path != "" {
+			if (e.Kind == effects.KindDelete || aliasReplacedByWrite(e)) && e.Target.Path != "" {
 				delete(session.aliases, e.Target.Path)
 			}
 		}
@@ -189,6 +225,12 @@ func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.
 		}
 		session.at = now
 	}
+}
+
+// A rename replaces the alias directory entry. An ordinary cp or shell
+// redirect follows a destination symlink and leaves the alias in place.
+func aliasReplacedByWrite(e effects.Effect) bool {
+	return e.Kind == effects.KindWrite && e.Origin.Program == "mv"
 }
 
 func knownAliasCredential(f *semanticpb.EffectFact) (decide.Proof, bool) {

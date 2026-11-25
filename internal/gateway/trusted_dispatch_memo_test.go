@@ -29,6 +29,7 @@ func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 		"overBudgetOmission":         "out", "unresolvedTarget": "out", "resolvedTarget": "out",
 		"nonWriteMention": "out", "unprovenTarget": "out", "unknownMention": "out",
 		"record": "recorder", "recordTelemetry": "recorder", "recordEffectShadow": "recorder",
+		"aliasPending": "recorder",
 	}
 	rt := reflect.TypeOf(trustedActionRequest{})
 	for i := range rt.NumField() {
@@ -170,5 +171,29 @@ func TestTrustedDispatchMemoChargesTheBudget(t *testing.T) {
 	}
 	if onCost != offCost || onReached != offReached || on != off {
 		t.Fatalf("budget %d: memo on: cost %d reached %v %s\nmemo off: cost %d reached %v %s", limit, onCost, onReached, on, offCost, offReached, off)
+	}
+}
+
+// TestTrustedDispatchMemoAliasPendingReevaluates keeps a pending cross-call
+// alias write from being lost when the same call is judged twice.
+func TestTrustedDispatchMemoAliasPendingReevaluates(t *testing.T) {
+	previous := trustedDispatchRunHook
+	t.Cleanup(func() { trustedDispatchRunHook = previous })
+	runs := 0
+	trustedDispatchRunHook = func(request trustedActionRequest) {
+		if request.aliasPending != nil {
+			runs++
+		}
+	}
+	ctx := context.WithValue(t.Context(), trustedDispatchMemoKey{}, &trustedDispatchMemo{})
+	request := trustedActionRequest{
+		Input:     actionfacts.Input{Tool: "Bash", Command: "echo constant"},
+		Connector: "claudecode", aliasPending: &effectAliasPending{},
+	}
+	dispatchTrustedAction(ctx, request)
+	request.aliasPending = &effectAliasPending{}
+	dispatchTrustedAction(ctx, request)
+	if runs != 2 {
+		t.Fatalf("pending alias recorder saw %d dispatches, want both calls", runs)
 	}
 }

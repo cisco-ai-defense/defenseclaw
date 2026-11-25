@@ -53,6 +53,9 @@ type packTableNote struct {
 var (
 	// packTableNotes maps weak.Pointer[guardrail.RulePack] to packTableNote.
 	packTableNotes sync.Map
+	// A profile loaded outside a generation build still uses the table
+	// checked at load. Entries disappear with their packs.
+	latePackTables sync.Map // directory -> *latePackTable
 	// livePackTables is the directory -> table map of the published
 	// generation's packs; replaced whole, never written in place.
 	livePackTables atomic.Pointer[map[string]*decide.Table]
@@ -68,6 +71,30 @@ func notePackTable(pack *guardrail.RulePack, dir string, col *decide.Column) {
 	key := weak.Make(pack)
 	packTableNotes.Store(key, packTableNote{dir: dir, table: decide.Builtin().WithColumn(col)})
 	runtime.AddCleanup(pack, func(key weak.Pointer[guardrail.RulePack]) { packTableNotes.Delete(key) }, key)
+}
+
+type latePackTable struct {
+	dir   string
+	pack  weak.Pointer[guardrail.RulePack]
+	table *decide.Table
+}
+
+// publishLatePackTable makes a successfully loaded profile pack's checked
+// table available without publishing an unrelated generation candidate.
+func publishLatePackTable(pack *guardrail.RulePack) {
+	if pack == nil {
+		return
+	}
+	v, ok := packTableNotes.Load(weak.Make(pack))
+	if !ok {
+		return
+	}
+	note := v.(packTableNote)
+	entry := &latePackTable{dir: note.dir, pack: weak.Make(pack), table: note.table}
+	latePackTables.Store(note.dir, entry)
+	runtime.AddCleanup(pack, func(e *latePackTable) {
+		latePackTables.CompareAndDelete(e.dir, e)
+	}, entry)
 }
 
 // publishPackTables makes the tables noted on g's packs the live ones and
@@ -97,6 +124,13 @@ func packTable(dir string) *decide.Table {
 		if table, ok := (*live)[dir]; ok {
 			return table
 		}
+	}
+	if v, ok := latePackTables.Load(dir); ok {
+		entry := v.(*latePackTable)
+		if entry.pack.Value() != nil {
+			return entry.table
+		}
+		latePackTables.CompareAndDelete(dir, entry)
 	}
 	if v, ok := packTableFallback.Load(dir); ok {
 		return v.(*decide.Table)

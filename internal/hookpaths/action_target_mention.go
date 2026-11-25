@@ -2924,7 +2924,10 @@ func activeStateIdentities(activeRoot string) (files []activeStateIdentity, unan
 	if walk.unanswered {
 		return files, true
 	}
-	if len(walk.watches) <= activeStateViewWatches && walk.settledBefore(settleLimit) {
+	// The identity walk is capped at activeStateIndexEntries; keeping all of
+	// its fingerprints costs fewer stats than walking the same over-limit
+	// directory tree on every call, and still invalidates on any change.
+	if walk.settledBefore(settleLimit) {
 		if activeStateIndex.byRoot == nil || len(activeStateIndex.byRoot) >= 4 {
 			activeStateIndex.byRoot = make(map[string]activeStateView)
 		}

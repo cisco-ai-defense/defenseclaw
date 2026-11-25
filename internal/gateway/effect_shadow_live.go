@@ -221,8 +221,12 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	if effectExtractCut(result) || hasAlt && effectExtractCut(altResult) {
 		return finish(effectShadowReasonCut, len(result.Effects))
 	}
-	if len(result.Unknowns) == 0 {
-		sessionEffectAliases.remember(request, result, facts, opts.Flavor)
+	if len(result.Unknowns) == 0 && mode == effectRulesOn {
+		if request.aliasPending != nil {
+			request.aliasPending.set(request, result, facts, opts.Flavor)
+		} else {
+			sessionEffectAliases.remember(request, result, facts, opts.Flavor)
+		}
 	}
 	if mode == effectRulesOn && request.preservedHookConfigTargets != nil {
 		request.preservedHookConfigTargets.paths = preservedHookConfigPaths

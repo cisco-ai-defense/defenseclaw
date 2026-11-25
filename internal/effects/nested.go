@@ -208,6 +208,39 @@ func stdoutRedirected(redirs []Redir) bool {
 	return false
 }
 
+// stdoutToAgentStderr reports a final stdout duplicate to the call's
+// visible stderr. It is separate from stdoutRedirected: a pipe no longer
+// receives these bytes, but the agent still sees them.
+func stdoutToAgentStderr(redirs []Redir) bool {
+	// 0 is an output sink, 1 and 2 are the agent-visible original streams.
+	// Duplications take the destination as it stands at that point in order.
+	stdout, stderr := 1, 2
+	for _, r := range redirs {
+		fd := r.FD
+		if fd < 0 {
+			fd = 1
+		}
+		dest := 0
+		if r.Op == RedirDup && r.Target.Static {
+			switch r.Target.Value {
+			case "1":
+				dest = stdout
+			case "2":
+				dest = stderr
+			}
+		}
+		switch r.Op {
+		case RedirWrite, RedirAppend, RedirClobber, RedirDup:
+			if fd == 1 {
+				stdout = dest
+			} else if fd == 2 {
+				stderr = dest
+			}
+		}
+	}
+	return stdout == 2
+}
+
 // exactOutput is the exact text a command prints on stdout when it is a
 // printer whose output does not depend on anything the call does not show:
 // echo with no -e and no backslash (dash's echo reads escapes), printf with

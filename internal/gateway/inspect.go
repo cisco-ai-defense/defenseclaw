@@ -99,6 +99,9 @@ type ToolInspectRequest struct {
 	// unknown tier of the policy, any other tool is blocked as an oversize call
 	// is (rel-1-0-10:GAP-0356). It can only make a verdict stricter.
 	ArgsPartial bool `json:"args_partial,omitempty"`
+	// aliasPending is held by the HTTP route until all final policy steps
+	// have decided whether the tool will run. Never from the wire.
+	aliasPending *effectAliasPending
 	// toolUseID is set by a connector adapter, never from the wire (see
 	// contentScope below).
 	toolUseID string
@@ -959,6 +962,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		EnforcementCapable: true,
 		sessionID:          req.SessionID,
 		sendDestination:    req.sendDestination,
+		aliasPending:       req.aliasPending,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
 	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
@@ -1326,6 +1330,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		waitCodeGuard = a.startCodeGuardOnArgs(ctx, cgReq)
 	}
 	cfg := a.decisionConfig(ctx)
+	aliasPending := action.aliasPending
+	ownAliasPending := aliasPending == nil && deferEffectAlias(action)
+	if ownAliasPending {
+		aliasPending = &effectAliasPending{}
+	}
+	action.aliasPending = aliasPending
 	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
@@ -1439,7 +1449,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	} else if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
-	return a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	verdict = a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	if ownAliasPending && aliasVerdictCanRun(verdict) {
+		aliasPending.commit()
+	}
+	return verdict
 }
 
 // highestInspectConfidence keeps verdict confidence aligned with the visible
@@ -2934,6 +2948,17 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
+	// The scanner may finish before the HTTP route applies cascade, mode,
+	// approval and install-window policy. Only session-scoped calls need a
+	// recorder: a needless one bypasses the trusted dispatch memo.
+	var aliasPending *effectAliasPending
+	if req.SessionID != "" && deferEffectAlias(trustedActionRequest{
+		Connector: serverConnector, sessionID: req.SessionID,
+		Input: actionfacts.Input{ActiveHome: hookActiveHome(r.Context())},
+	}) {
+		aliasPending = &effectAliasPending{}
+		req.aliasPending = aliasPending
+	}
 	// The judge keeps the session's task and calls under the connector the
 	// call is scoped to (judgeSessionKeyFor), the one the OpenClaw event
 	// router names for its own turns (GAP-0152).
@@ -3053,6 +3078,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 		// A lock that appeared during the scan still decides this request.
 		a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
+	}
+
+	if aliasVerdictCanRun(verdict) {
+		aliasPending.commit()
 	}
 
 	// Count the check against the authenticated connector so /health (and the
