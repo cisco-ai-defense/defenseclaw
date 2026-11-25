@@ -6,6 +6,8 @@ package actionfacts
 import (
 	"context"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -14,6 +16,39 @@ import (
 // that held the call's context.
 func gap1110IsWaitState(typ reflect.Type) bool {
 	return typ.PkgPath() == reflect.TypeFor[Facts]().PkgPath() && typ.Name() == "credentialWalkWait"
+}
+
+// gap1110SyncKind names the kind of a type that must not be reachable from
+// Facts or Input by reflection, by type: a sync primitive (Mutex, RWMutex,
+// Once, WaitGroup, Cond, Map, Pool, and the rest of package sync), an atomic
+// value (sync/atomic), or a channel other than the walk budget's (substrate-1:
+// GAP-1115). A reflection walk over Facts that meets one reads it (DeepEqual
+// compares a lock's state, a Once's counter) while another goroutine may hold
+// it, the race GAP-1110 had with a context. "" when typ is none of them.
+func gap1110SyncKind(typ reflect.Type) string {
+	switch typ.PkgPath() {
+	case "sync":
+		return "a sync primitive"
+	case "sync/atomic":
+		return "an atomic value"
+	}
+	if typ.Kind() == reflect.Chan && typ != reflect.TypeFor[CredentialWalkBudget]() {
+		return "a channel that is not the walk budget"
+	}
+	return ""
+}
+
+// gap1110SyncAllowed lists the two sync primitives that are reachable from
+// Facts on purpose: credentialPathResult.once and .mu. Both are touched only
+// by the request's own goroutine (RV-0674U section C): the resolve, the thin
+// (ThinCredentialPathReads) and every reflection walk over Facts run on it,
+// and no Facts value crosses goroutines (toolChainHookCapture is per request);
+// the artifact file read, the one other goroutine on the path, carries no
+// Facts. So they stay as they are, and the guard allows them by name, not by
+// type: a new primitive, or a use of one of these in a new place, turns the
+// test red (substrate-1:GAP-1115, test-only, as the finding allowed).
+func gap1110SyncAllowed(owner reflect.Type, field string) bool {
+	return owner == reflect.TypeFor[credentialPathResult]() && (field == "once" || field == "mu")
 }
 
 // gap1110LiveReach is the path to the first value reachable from value, by
@@ -34,6 +69,9 @@ func gap1110LiveReach(value reflect.Value, path string, seen map[uintptr]bool, d
 	if gap1110IsWaitState(typ) {
 		return path + " (the wait's state)"
 	}
+	if kind := gap1110SyncKind(typ); kind != "" {
+		return path + " (" + typ.String() + ", " + kind + ")"
+	}
 	switch value.Kind() {
 	case reflect.Pointer:
 		if value.IsNil() || seen[value.Pointer()] {
@@ -48,6 +86,9 @@ func gap1110LiveReach(value reflect.Value, path string, seen map[uintptr]bool, d
 		return gap1110LiveReach(value.Elem(), path, seen, depth+1)
 	case reflect.Struct:
 		for index := range value.NumField() {
+			if gap1110SyncAllowed(typ, typ.Field(index).Name) {
+				continue
+			}
 			if found := gap1110LiveReach(value.Field(index), path+"."+typ.Field(index).Name, seen, depth+1); found != "" {
 				return found
 			}
@@ -86,6 +127,9 @@ func gap1110LiveType(typ reflect.Type, path string, seen map[reflect.Type]bool) 
 	if gap1110IsWaitState(typ) {
 		return path + " (the wait's state)"
 	}
+	if kind := gap1110SyncKind(typ); kind != "" {
+		return path + " (" + typ.String() + ", " + kind + ")"
+	}
 	switch typ.Kind() {
 	case reflect.Pointer, reflect.Slice, reflect.Array:
 		return gap1110LiveType(typ.Elem(), path+"[]", seen)
@@ -96,6 +140,9 @@ func gap1110LiveType(typ reflect.Type, path string, seen map[reflect.Type]bool) 
 		return gap1110LiveType(typ.Elem(), path+"{v}", seen)
 	case reflect.Struct:
 		for index := range typ.NumField() {
+			if gap1110SyncAllowed(typ, typ.Field(index).Name) {
+				continue
+			}
 			if found := gap1110LiveType(typ.Field(index).Type, path+"."+typ.Field(index).Name, seen); found != "" {
 				return found
 			}
@@ -144,5 +191,58 @@ func TestGAP1110NoContextReachableFromFactsByReflection(t *testing.T) {
 		if found := gap1110LiveType(typ, typ.Name(), map[reflect.Type]bool{}); found != "" {
 			t.Errorf("the type %s holds %s", typ.Name(), found)
 		}
+	}
+}
+
+// TestGAP1115AllowedSyncFieldsAreTheOnesTheGuardNames keeps the allow-list
+// honest: both fields exist and are the primitives the comment says, so a
+// removal or a change of type of either shows here, not as a silent hole.
+func TestGAP1115AllowedSyncFieldsAreTheOnesTheGuardNames(t *testing.T) {
+	owner := reflect.TypeFor[credentialPathResult]()
+	for name, want := range map[string]reflect.Type{"once": reflect.TypeFor[sync.Once](), "mu": reflect.TypeFor[sync.Mutex]()} {
+		field, ok := owner.FieldByName(name)
+		if !ok || field.Type != want {
+			t.Errorf("credentialPathResult.%s is %v (found %v), want %v: update gap1110SyncAllowed", name, field.Type, ok, want)
+		}
+		if !gap1110SyncAllowed(owner, name) {
+			t.Errorf("%s is not allowed by gap1110SyncAllowed", name)
+		}
+	}
+	if gap1110SyncAllowed(owner, "budget") || gap1110SyncAllowed(reflect.TypeFor[Facts](), "once") {
+		t.Error("the allow-list is wider than the two fields of credentialPathResult")
+	}
+}
+
+// TestGAP1115GuardNamesEverySyncKind: the predicate the guard uses names each
+// primitive GAP-1115 lists, an atomic value and a channel other than the walk
+// budget, and not the walk budget.
+func TestGAP1115GuardNamesEverySyncKind(t *testing.T) {
+	for _, typ := range []reflect.Type{
+		reflect.TypeFor[sync.Mutex](), reflect.TypeFor[sync.RWMutex](), reflect.TypeFor[sync.Once](),
+		reflect.TypeFor[sync.WaitGroup](), reflect.TypeFor[sync.Cond](), reflect.TypeFor[sync.Map](),
+		reflect.TypeFor[atomic.Int64](), reflect.TypeFor[atomic.Bool](), reflect.TypeFor[atomic.Pointer[int]](), reflect.TypeFor[atomic.Value](),
+		reflect.TypeFor[chan struct{}](), reflect.TypeFor[<-chan struct{}](), reflect.TypeFor[chan credentialWalkWait](),
+	} {
+		if gap1110SyncKind(typ) == "" {
+			t.Errorf("%v is not named as a sync primitive", typ)
+		}
+	}
+	if kind := gap1110SyncKind(reflect.TypeFor[CredentialWalkBudget]()); kind != "" {
+		t.Errorf("the walk budget channel is named as %s", kind)
+	}
+	// And the type walk finds one inside a struct, a slice, a map and a
+	// pointer, as the walk over Facts would.
+	type holder struct {
+		list []struct{ lock sync.RWMutex }
+		byID map[string]*struct{ n atomic.Int64 }
+		c    chan int
+	}
+	if found := gap1110LiveType(reflect.TypeFor[holder](), "holder", map[reflect.Type]bool{}); found == "" {
+		t.Error("the type walk found no sync primitive in a struct that holds three")
+	}
+	value := holder{byID: map[string]*struct{ n atomic.Int64 }{"k": {}}}
+	_, _, _ = value.list, value.byID, value.c // read, so the linter sees the fields used
+	if found := gap1110LiveReach(reflect.ValueOf(value), "holder", map[uintptr]bool{}, 0); found == "" {
+		t.Error("the value walk found no sync primitive in a struct that holds one")
 	}
 }

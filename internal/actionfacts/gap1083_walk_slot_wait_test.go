@@ -168,18 +168,24 @@ func TestGAP1083WalkSlotWaitEndsWithTheCall(t *testing.T) {
 	want := gap1083SpentRecord(t, command, root, home)
 	release := gap1083HoldWalkSlots(t)
 
+	// The count of waits is what the wall-time bounds stood for, and load does
+	// not move it (substrate-1:GAP-1113, as RV-0674T F1 did for the others).
+	// The hook's answer budget stays the absolute ceiling: a wait that did not
+	// end with the call would run its 1 s and show as a wait too.
 	done, cancel := context.WithCancel(context.Background())
 	cancel()
+	waitsBefore := credentialPathWalkSlotWaits.Load()
 	a := gap1083Resolve(done, command, root, home)
-	if a.took > 250*time.Millisecond || !reflect.DeepEqual(a.reads, want.reads) {
-		t.Errorf("a call whose context was done waited %v with record %+v, want no wait and %+v", a.took, a.reads, want.reads)
+	if waits := credentialPathWalkSlotWaits.Load() - waitsBefore; waits != 0 || a.took > gap1083HookAnswerBudget || !reflect.DeepEqual(a.reads, want.reads) {
+		t.Errorf("a call whose context was done waited %d times (%v) with record %+v, want no wait and %+v", waits, a.took, a.reads, want.reads)
 	}
 
 	leaving, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
+	waitsBefore = credentialPathWalkSlotWaits.Load()
 	a = gap1083Resolve(leaving, command, root, home)
-	if a.took > 500*time.Millisecond || !reflect.DeepEqual(a.reads, want.reads) {
-		t.Errorf("a call whose context ended at 100 ms waited %v with record %+v, want about 100 ms and %+v", a.took, a.reads, want.reads)
+	if waits := credentialPathWalkSlotWaits.Load() - waitsBefore; waits != 1 || a.took > gap1083HookAnswerBudget || !reflect.DeepEqual(a.reads, want.reads) {
+		t.Errorf("a call whose context ended at 100 ms waited %d times (%v) with record %+v, want one wait and %+v", waits, a.took, a.reads, want.reads)
 	}
 
 	release()

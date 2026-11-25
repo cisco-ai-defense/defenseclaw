@@ -20,6 +20,16 @@ type hookWalkBudgetKey struct{}
 // RV-0674S F1). A ctx that already has one keeps it. The dispatch makes its
 // own wait only for a call that comes with none (an ACP frame, a direct
 // evaluation).
+//
+// The wait ends with ctx, the request's: a stage that runs on a shorter ctx
+// derived from it, the artifact stage's 750 ms artifactCtx, does not end a
+// walk's wait, since the budget's done is ctx's and getWithin ignores the ctx
+// it is read with when a budget is set. A walk in that stage can wait up to
+// the request's budget of about 1 s, past the stage's 750 ms. The whole
+// request waits at most about 1.0 s for walk slots (before, the evaluation
+// and the stage waited apart: about 1.75 s), and no verdict changes, because
+// the rule loop stops on the stage ctx's Err() at 750 ms either way
+// (substrate-1:GAP-1114).
 func withHookWalkBudget(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()

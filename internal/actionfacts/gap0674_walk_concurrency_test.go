@@ -9,11 +9,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // TestGAP0674WalksRunAtMostSlotsAtOnce is substrate-1:GAP-0674: the walks of
-// a recursive search run at most max(2, GOMAXPROCS/4) at a time, each with its
+// a recursive search run at most max(2, GOMAXPROCS/4) at a time (GOMAXPROCS as
+// the package started with, the cap of credentialPathWalkSlots), each with its
 // credentialPathWalkWorkers readers. Before it, every hook call walked at
 // once: on dc-win2, 2,048 calls of grep -r KEY mNNNN (each name a junction to
 // one 2,047-folder tree under 2,000-character paths) put 72 to 179 walks in
@@ -34,7 +34,10 @@ func TestGAP0674WalksRunAtMostSlotsAtOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "d3", "e4", ".env"), []byte("KEY=1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	slots := max(2, runtime.GOMAXPROCS(0)/4)
+	// The cap is fixed when the package starts, from GOMAXPROCS then. Read it
+	// from the channel, not from GOMAXPROCS now: under go test -cpu N the two
+	// differ (substrate-1:GAP-1113).
+	slots := cap(credentialPathWalkSlots)
 	walkers := 8 * slots
 	var peak atomic.Int64
 	stop := make(chan struct{})
@@ -46,8 +49,13 @@ func TestGAP0674WalksRunAtMostSlotsAtOnce(t *testing.T) {
 			select {
 			case <-stop:
 				return
-			case <-time.After(time.Millisecond):
+			default:
 			}
+			// Yield, not a 1 ms timer: with one P (go test -cpu 1) the timer
+			// goroutine waits behind the walkers' time slices and sees no
+			// reader at all (substrate-1:GAP-1113). Between two samples the
+			// readers run, or wait in a system call that frees the P.
+			runtime.Gosched()
 			n := runtime.Stack(buf, true)
 			readers := int64(0)
 			for _, one := range strings.Split(string(buf[:n]), "\n\n") {
@@ -79,6 +87,12 @@ func TestGAP0674WalksRunAtMostSlotsAtOnce(t *testing.T) {
 		t.Fatalf("%d walkers had %d folder readers at once, want at most %d (%d walks of %d readers)", walkers, peak.Load(), limit, slots, credentialPathWalkWorkers)
 	}
 	if peak.Load() == 0 {
+		if runtime.GOMAXPROCS(0) == 1 {
+			// With one P (go test -cpu 1) the walks run one after the other
+			// between two samples: the sampler sees no reader, and a count
+			// of none says nothing of the limit (substrate-1:GAP-1113).
+			t.Skip("with GOMAXPROCS 1 the sampler saw no folder reader: nothing to measure")
+		}
 		t.Fatal("the sampler saw no folder reader: the test measured nothing")
 	}
 }
