@@ -50,6 +50,7 @@ func setWindowsRelaxWaitForTest(t *testing.T, wait time.Duration) {
 // a setup shape that does not return to canonical within the bound is
 // refused too. None of these ever resolves.
 func TestWindowsManagedRuntimeResolveRefusesNonSetupRootsWithoutWaiting(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	setWindowsRelaxWaitForTest(t, 5*time.Second)
 	for _, tc := range []struct {
 		name  string
@@ -87,6 +88,7 @@ func TestWindowsManagedRuntimeResolveRefusesNonSetupRootsWithoutWaiting(t *testi
 }
 
 func TestWindowsManagedRuntimeResolveFailsClosedWhenSetupRelaxPersists(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	setWindowsRelaxWaitForTest(t, 200*time.Millisecond)
 	fixture := newWindowsRelaxResolveFixture(t)
 	setWindowsRelaxTestDACL(t, fixture.hookDir, managed.WindowsSetupRelaxedDirectorySDDL)

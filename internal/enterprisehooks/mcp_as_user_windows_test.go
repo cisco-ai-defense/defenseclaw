@@ -191,6 +191,7 @@ func TestWindowsMCPAsUserHelperChild(t *testing.T) {
 // CreateProcessWithTokenW contract the enumerator relies on (the services
 // session for the enumerator, this session here).
 func TestStartWindowsMCPAsUserProcessRunsOnItsOwnDesktop(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	if os.Getenv(windowsMCPAsUserHelperEnv) == "1" {
 		t.Skip("helper process")
 	}

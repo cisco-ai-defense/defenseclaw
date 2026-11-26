@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // hookAnswerWithHeldAuditLock bounds the answer to a benign hook call while
@@ -29,6 +30,24 @@ import (
 // 4-vCPU host (GAP-1021 red: every call refused "the gateway is running but
 // did not answer").
 const hookAnswerWithHeldAuditLock = time.Second
+
+// The first locked call pays the audit store's busy timeout (750 ms), then the
+// store answers degraded at once (a later locked call takes about 24 ms), so
+// the bound leaves the call 250 ms of its own work and of host scheduling.
+// On a native Windows box that runs a second test process, one such call took
+// 1.10 s (GAP-2209). A call is judged against the bound stretched by the host
+// slowdown, read before the lock and again after a call that ran over (the
+// larger reading counts); a product that waits longer than its busy timeout
+// (a second busy wait is 1.5 s, the lock itself 5 s) is over the stretched bound at
+// any slowdown the host reports, because the stretch is capped at
+// hookAnswerHostStretch. The cap leaves only 100 ms under a second busy wait:
+// do not raise it without checking that margin.
+const hookAnswerHostStretch = 1.4
+
+// hookAnswerWindow is the bound on a locked call at a host slowdown.
+func hookAnswerWindow(slowdown float64) time.Duration {
+	return testenv.Scale(hookAnswerWithHeldAuditLock, min(max(1, slowdown), hookAnswerHostStretch))
+}
 
 // TestBenignHookAnswersWhileAnotherProcessHoldsTheAuditLock: with audit.db
 // write-locked by another connection (sqlite3, a CLI or backup tool in a
@@ -98,8 +117,12 @@ func TestBenignHookAnswersWhileAnotherProcessHoldsTheAuditLock(t *testing.T) {
 			// Bound a run without the fix: the lock goes after 5 s.
 			releaseLater := time.AfterFunc(5*time.Second, release)
 			defer releaseLater.Stop()
+			slowdown := testenv.HostSlowdown()
 			for index := 10; index < 14; index++ {
 				recorder, took := call(index)
+				if took > hookAnswerWithHeldAuditLock {
+					slowdown = max(slowdown, testenv.HostSlowdown())
+				}
 				if recorder.Code != http.StatusOK {
 					t.Fatalf("locked call %d: status %d body %s", index, recorder.Code, recorder.Body.String())
 				}
@@ -113,8 +136,8 @@ func TestBenignHookAnswersWhileAnotherProcessHoldsTheAuditLock(t *testing.T) {
 				if !strings.Contains(recorder.Body.String(), "audit is degraded") {
 					t.Errorf("locked call %d: no audit-degraded notice: %s", index, recorder.Body.String())
 				}
-				if took > hookAnswerWithHeldAuditLock {
-					t.Errorf("locked call %d answered after %v; the hook gives up first (bound %v)", index, took, hookAnswerWithHeldAuditLock)
+				if window := hookAnswerWindow(slowdown); took > window {
+					t.Errorf("locked call %d answered after %v; the hook gives up first (bound %v, %v at host slowdown x%.1f)", index, took, hookAnswerWithHeldAuditLock, window, slowdown)
 				}
 				t.Logf("locked call %d: %v", index, took)
 			}

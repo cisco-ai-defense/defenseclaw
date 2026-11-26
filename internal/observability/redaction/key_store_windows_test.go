@@ -853,6 +853,7 @@ func TestWindowsCorrelationKeyRequiresServicePinInManagedMode(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMaterial(t *testing.T) {
+	requireCorrelationKeyTamperAccess(t)
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	created, err := LoadOrCreateCorrelationKey(dir)
@@ -897,6 +898,7 @@ func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMateria
 }
 
 func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
+	requireCorrelationKeyTamperAccess(t)
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	created, err := LoadOrCreateCorrelationKey(dir)
@@ -948,6 +950,7 @@ func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyFreshProcessRestartRepairsTrustedDACL(t *testing.T) {
+	requireCorrelationKeyTamperAccess(t)
 	skipCorrelationKeyAsLocalSystem(t)
 	const (
 		dirEnv = "DEFENSECLAW_TEST_CORRELATION_RESTART_DIR"
@@ -1032,6 +1035,7 @@ func setWindowsCorrelationTrustedUnprotectedDACL(t *testing.T, path string) {
 }
 
 func TestWindowsCorrelationKeyAcceptsUnprotectedReadOnlyDriftWithoutRepair(t *testing.T) {
+	requireCorrelationKeyTamperAccess(t)
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1110,6 +1114,7 @@ func TestWindowsCorrelationKeyAcceptsUnprotectedReadOnlyDriftWithoutRepair(t *te
 }
 
 func TestWindowsCorrelationKeyAcceptsReadACLButRejectsWriteACL(t *testing.T) {
+	requireCorrelationKeyTamperAccess(t)
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1235,6 +1240,7 @@ func windowsCorrelationKeyUntrustedWritersAt(t *testing.T, path string) []string
 }
 
 func TestWindowsCorrelationKeyRejectsInvalidLength(t *testing.T) {
+	requireCorrelationKeyTamperAccess(t)
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1287,6 +1293,7 @@ func TestWindowsCorrelationKeyRejectsReparsePoint(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyRejectsHardLinkedLeaf(t *testing.T) {
+	requireCorrelationKeyTamperAccess(t)
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1591,6 +1598,21 @@ func assertNoWindowsCorrelationTemps(t *testing.T, dir string) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary key files remain: %v", matches)
+	}
+}
+
+// requireCorrelationKeyTamperAccess skips a test that rewrites the key file or
+// its DACL behind the store's back. The canonical DACL gives the owner read
+// access only and OWNER RIGHTS just READ_CONTROL (the hardening the other tests
+// pin), so a standard-user token cannot open the file it owns for writing or
+// re-stamp its DACL: the product refuses it, as designed (GAP-2179). Only an
+// Administrators token can, so these tests run in the elevated native leg (the
+// Windows CI runners and the native test hosts run elevated); the tests that
+// create, load and judge the key as the owner run in both legs.
+func requireCorrelationKeyTamperAccess(t *testing.T) {
+	t.Helper()
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated token: the key's DACL lets its owner read it only, so a standard user cannot rewrite it or its DACL")
 	}
 }
 

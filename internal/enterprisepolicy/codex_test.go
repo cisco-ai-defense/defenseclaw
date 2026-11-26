@@ -34,6 +34,7 @@ func codexPath(t *testing.T, opts Options) string {
 }
 
 func TestCodexReconcileFreshIsCoveredAndIdempotent(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	state, err := codexTarget{}.Reconcile(opts)
 	if err != nil {
@@ -62,6 +63,7 @@ func TestCodexReconcileFreshIsCoveredAndIdempotent(t *testing.T) {
 // hook contract (live on RHEL every prompt was blocked), so each managed
 // group binds its own event and a contract that registers it.
 func TestCodexManagedCommandsBindEventAndContract(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)
@@ -120,6 +122,7 @@ timeout = 5
 `
 
 func TestCodexReconcilePreservesAdministratorBytes(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path := codexPath(t, opts)
 	writeFile(t, path, adminCodexRequirements)
@@ -174,6 +177,7 @@ func TestCodexReconcilePreservesAdministratorBytes(t *testing.T) {
 // is read and merged as Codex reads it: DefenseClaw refused it, so Codex ran
 // without DefenseClaw's hooks (GAP-0917).
 func TestCodexMergesARequirementsFileWithBOMAndCRLF(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path := codexPath(t, opts)
 	company := "\ufeff# Company requirements\r\nallowed_approval_policies = [\"on-request\"]\r\n\r\n[features]\r\nweb_search = false\r\n"
@@ -193,6 +197,7 @@ func TestCodexMergesARequirementsFileWithBOMAndCRLF(t *testing.T) {
 }
 
 func TestCodexConflictsAreReportedNotRewritten(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path := codexPath(t, opts)
 	admin := "allow_managed_hooks_only = false\n"
@@ -220,6 +225,7 @@ func TestCodexConflictsAreReportedNotRewritten(t *testing.T) {
 }
 
 func TestCodexPreserveLeavesLockToAdministrator(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := withPolicy(testOptions(t), "codex", func(p *config.EnterpriseConnectorPolicy) { p.ManagedHooksOnly = "preserve" })
 	state, err := codexTarget{}.Reconcile(opts)
 	if err != nil {
@@ -235,6 +241,7 @@ func TestCodexPreserveLeavesLockToAdministrator(t *testing.T) {
 }
 
 func TestCodexRemoveRestoresPreimageOrStripsOwned(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path := codexPath(t, opts)
 	writeFile(t, path, adminCodexRequirements)
@@ -279,6 +286,7 @@ func TestCodexRemoveRestoresPreimageOrStripsOwned(t *testing.T) {
 // entries in place, but the connector is no longer in place: ensure sees the
 // drift and republishes (GAP-0077).
 func TestCodexTamperedEntryIsNotInPlaceUntilRepublished(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)
@@ -366,6 +374,7 @@ func TestCodexVerifyNamesAnEmptyRequirementsFile(t *testing.T) {
 // unguarded; a parse error is named with its line; and the inspection that the
 // publish gate uses finds the missing entries.
 func TestCodexVerifyNamesAValidFileWithoutTheManagedHook(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path := codexPath(t, opts)
 	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
@@ -443,6 +452,7 @@ func TestCodexMissingHookConflictsFindsWhatTheGateRefuses(t *testing.T) {
 }
 
 func TestCodexFlappingSecondWriterIsReported(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path := codexPath(t, opts)
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
@@ -518,6 +528,7 @@ func withCodexHigherSources(t *testing.T, sources map[string][]byte) {
 }
 
 func TestCodexMDMRequirementsOutrankTheSystemFile(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	withCodexHigherSources(t, map[string][]byte{"MDM com.openai.codex": []byte("allowed_approval_policies = [\"never\"]\n")})
 	state, err := codexTarget{}.Reconcile(opts)
@@ -580,6 +591,7 @@ func plistJSONForTest(t *testing.T, plist []byte) []byte {
 }
 
 func TestCodexPinsFeaturesHooksInEveryLockMode(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, mode := range []string{config.ManagedHooksOnlyEnforce, config.ManagedHooksOnlyPreserve} {
 		opts := withPolicy(testOptions(t), "codex", func(p *config.EnterpriseConnectorPolicy) { p.ManagedHooksOnly = mode })
 		if _, err := (codexTarget{}).Reconcile(opts); err != nil {

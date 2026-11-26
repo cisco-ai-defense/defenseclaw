@@ -61,6 +61,7 @@ func TestOpenCodeManagedPluginIsHostIndependent(t *testing.T) {
 // status and verify show a stale or edited artifact instead of calling
 // OpenCode covered.
 func TestOpenCodeManagedPluginDriftIsAConflict(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	file := installTestOpenCodePlugin(t, &opts)
 	state, err := opencodeTarget{}.Reconcile(opts)
@@ -154,6 +155,7 @@ func TestOpenCodeManagedPluginMustBeTrusted(t *testing.T) {
 // override do not exist in OpenCode 2.2.5 (GAP-0053), so the text must not
 // tell administrators they skip the plugin.
 func TestOpenCodeMachinePolicyStateNamesTheVendorLimit(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	installTestOpenCodePlugin(t, &opts)
 	for _, step := range []struct {
@@ -264,6 +266,7 @@ func TestInstallOpenCodeManagedPlugin(t *testing.T) {
 }
 
 func TestOpenCodeManagedPluginRoute(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	if route := opts.Route("opencode"); route != RoutePerUser {
 		t.Fatalf("without an artifact OpenCode stays per-user, got %s", route)

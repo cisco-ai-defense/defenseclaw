@@ -48,6 +48,7 @@ func higherSource(t *testing.T, name, raw string) higherClaudeSource {
 }
 
 func TestClaudeReconcilePublishesLockedDropIn(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	adminSettings := `{"permissions": {"deny": ["Bash(rm -rf /)"]}}` + "\n"
@@ -131,6 +132,7 @@ func TestClaudeVerifyRequiresCurrentManagedHandler(t *testing.T) {
 }
 
 func TestClaudeDetectsLaterDropInAndDisableAllHooks(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	writeFile(t, filepath.Join(claudeDir(t, opts), "managed-settings.d", "99-late.json"), `{"allowManagedHooksOnly": false}`)
@@ -155,6 +157,7 @@ func TestClaudeDetectsLaterDropInAndDisableAllHooks(t *testing.T) {
 // Claude Code reads it: it was refused, verify failed for every user and the
 // error said Claude Code would not start (GAP-0914).
 func TestClaudeReadsACompanyDropInWithBOMAndCRLF(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	company := "\ufeff{\r\n  \"permissions\": {\"ask\": [\"Bash(curl:*)\"]}\r\n}\r\n"
@@ -173,6 +176,7 @@ func TestClaudeReadsACompanyDropInWithBOMAndCRLF(t *testing.T) {
 }
 
 func TestClaudeHigherPrecedenceSources(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	withHigherSources(t, higherSource(t, `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`, `{"model": "opus"}`))
 	state, err := claudeTarget{}.Reconcile(opts)
@@ -260,6 +264,7 @@ func TestClaudeExportFormats(t *testing.T) {
 // holds, with or without a repair in between; the administrator's own
 // drop-in stays. Codex marks its blocks, so an edited command there goes too.
 func TestClaudeRemoveDeletesOnlyTheDropIn(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	for _, tc := range []struct {
 		name, from, to string
@@ -370,6 +375,7 @@ func TestClaudeDropInUsesExecFormOutsideWindows(t *testing.T) {
 // An earlier managed prefix is overridden by the drop-in, while an unrelated
 // shell option remains visible to the administrator.
 func TestClaudeManagedSettingsPrefixIsPinned(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	dir := claudeDir(t, opts)
@@ -448,6 +454,7 @@ func TestClaudeManagedExecFormAndProjectPrefixPin(t *testing.T) {
 }
 
 func TestClaudeHigherSourceUsesEffectiveMergedPrefix(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range []struct {
 		name      string
 		prefix    any
@@ -510,6 +517,7 @@ func TestClaudeHigherSourceUsesEffectiveMergedPrefix(t *testing.T) {
 }
 
 func TestClaudeHigherSourcePrefixWithoutFileMerge(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.GOOS = "darwin"
 	dir := claudeDir(t, opts)
@@ -529,6 +537,7 @@ func TestClaudeHigherSourcePrefixWithoutFileMerge(t *testing.T) {
 }
 
 func TestClaudeHigherSourcePolicyHelperNeedsReview(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.GOOS = "darwin"
 	opts.AgentVersions = map[string]string{"claudecode": "2.1.286"}
@@ -558,6 +567,7 @@ func TestClaudeHigherSourcePolicyHelperNeedsReview(t *testing.T) {
 }
 
 func TestClaudeFilePrefixRequiresTextValue(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	dir := claudeDir(t, opts)
@@ -626,6 +636,7 @@ var claudeHookRunCases = []struct {
 // would not run for PreToolUse, or would run in the background, does not
 // count as the managed hook. Match-all matcher spellings still do.
 func TestClaudeVerifyRequiresRunnableDropInHook(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range claudeHookRunCases {
 		t.Run(tc.name, func(t *testing.T) {
 			withHigherSources(t)
@@ -653,6 +664,7 @@ func TestClaudeVerifyRequiresRunnableDropInHook(t *testing.T) {
 // rel-1-0-6:GAP-0322 review 3 item 2: the same rule for a selected
 // higher-precedence source, which shadows the file drop-in.
 func TestClaudeHigherSelectedHookMustRun(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range claudeHookRunCases {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions(t)
@@ -681,6 +693,7 @@ func TestClaudeHigherSelectedHookMustRun(t *testing.T) {
 // is not selected, so the file sources stay effective and a later drop-in
 // that sets a shell prefix makes the policy uncovered.
 func TestClaudeControlOnlyHigherSourceKeepsFilePrefixCheck(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range []struct {
 		name     string
 		behavior string
@@ -720,6 +733,7 @@ func TestClaudeControlOnlyHigherSourceKeepsFilePrefixCheck(t *testing.T) {
 }
 
 func TestClaudeNullOnlyHigherSourceKeepsFilePolicy(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, raw := range []string{
 		`{"hooks":null}`,
 		`{"hooks":null,"env":null,"managedSourcesBehavior":"first-wins"}`,
@@ -743,6 +757,7 @@ func TestClaudeNullOnlyHigherSourceKeepsFilePolicy(t *testing.T) {
 // An env-only higher source has a policy key, so Claude Code selects it; its
 // empty prefix outranks a later file value under every env rule.
 func TestClaudeEnvOnlyHigherSourcePrefixWins(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, version := range []string{"", "2.1.222", "2.1.286"} {
 		t.Run("version "+version, func(t *testing.T) {
 			opts := testOptions(t)

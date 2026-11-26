@@ -156,6 +156,7 @@ func TestPurgeWindowsUserStateKeepsEveryConnectorBackup(t *testing.T) {
 // A purge removes managed entries as LocalSystem while retaining account
 // entries, moved-aside originals and links in the same folder.
 func TestPurgeWindowsUserStateKeepsAccountEntries(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	original := windowsEnterpriseMutationIdentityCheck
 	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = original })
 	windowsEnterpriseMutationIdentityCheck = func() error { return errors.New("not LocalSystem") }

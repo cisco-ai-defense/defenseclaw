@@ -118,6 +118,7 @@ func namespacePurgeHandle(t *testing.T, path string) windows.Handle {
 // or by Administrators (an elevated Setup), with any primary group. Nothing
 // looser matches, and the Secure Client set has no inherited shape.
 func TestWindowsNamespacePurgeInheritedShapeOwnerAndDACLOnly(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	standalone, err := windowsNamespacePurgeCanonicalDescriptors(windowsNamespacePurgeTestGatewaySID)
 	if err != nil {
 		t.Fatal(err)
@@ -205,6 +206,7 @@ func newInheritedNamespacePurgeRequest(t *testing.T, root, profile string) Windo
 // SYSTEM-owned and admin-created inherited children included; the Secure
 // Client purge of the same tree still refuses it, as on base.
 func TestPurgeWindowsNamespaceRootRemovesInheritedChildrenOfAKilledInstall(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	root, _ := newInheritedNamespacePurgeTree(t)
 	secureClient := newInheritedNamespacePurgeRequest(t, root, "")
 	report, err := PurgeWindowsNamespaceRoot(secureClient)
