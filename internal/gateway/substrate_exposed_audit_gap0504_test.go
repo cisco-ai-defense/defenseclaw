@@ -60,7 +60,7 @@ func TestExposedActorSecretNeverReachesTheHookRowsGAP0504(t *testing.T) {
 		if strings.Contains(got, value) || strings.Contains(got, base64.StdEncoding.EncodeToString([]byte(value))) {
 			t.Errorf("%s: the hook saw the exposed value: %s", name, got)
 		}
-		if !strings.Contains(got, "[actor_secret:j45-exposed]") {
+		if !strings.Contains(got, "[actor_secret j45-exposed]") {
 			t.Errorf("%s: no marker in %s", name, got)
 		}
 	}

@@ -240,7 +240,7 @@ func (e *CloneError) Error() string {
 	case strings.Contains(low, "could not resolve host") || strings.Contains(low, "connection refused"):
 		msg += ". The agent's network rules may not allow this host; ask your administrator"
 	case strings.Contains(low, "returned error: 503") || strings.Contains(low, "returned error: 502"):
-		msg += ". The cluster's network guard refused the request or could not check it; ask your administrator to look at the DefenseClaw egress log for this agent"
+		msg += ". The cluster's network guard could not check the request, or refused it. Try again in a moment (it can still be starting); if it keeps failing, ask your administrator to look at the DefenseClaw egress log for this agent"
 	}
 	return msg
 }

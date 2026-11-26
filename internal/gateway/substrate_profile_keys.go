@@ -17,7 +17,9 @@
 package gateway
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -28,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/exactvalue"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
 // The profile runtime keys the cluster gateway reads (PLAN §7.3): an
@@ -128,10 +131,16 @@ func (st *substrateState) exposedValues(profile string) map[string]string {
 	return nil
 }
 
+// substrateExposedMarker is what replaces an exposed value: [actor_secret
+// NAME]. A space, not a colon, follows actor_secret: the audit redactor
+// reads "secret:" as a credential assignment and took the name for its
+// value (GAP-1144). It is plain ASCII with no quote or backslash, so a JSON
+// payload stays valid.
+func substrateExposedMarker(name string) string { return "[actor_secret " + name + "]" }
+
 // substrateMaskExposed replaces every form of every exposed value in a JSON
 // payload (as is, JSON-escaped, base64, URL-encoded) with the marker
-// [actor_secret:NAME], and returns the names it replaced. The marker is
-// plain ASCII with no quote or backslash, so the payload stays valid JSON.
+// (substrateExposedMarker), and returns the names it replaced.
 func substrateMaskExposed(payload []byte, values map[string]string) ([]byte, []string) {
 	text := string(payload)
 	var names []string
@@ -139,7 +148,7 @@ func substrateMaskExposed(payload []byte, values map[string]string) ([]byte, []s
 		hit := false
 		for _, form := range exactvalue.Forms(values[name]) {
 			if form != "" && strings.Contains(text, form) {
-				text, hit = strings.ReplaceAll(text, form, "[actor_secret:"+name+"]"), true
+				text, hit = strings.ReplaceAll(text, form, substrateExposedMarker(name)), true
 			}
 		}
 		if hit {
@@ -150,6 +159,29 @@ func substrateMaskExposed(payload []byte, values map[string]string) ([]byte, []s
 		return payload, nil
 	}
 	return []byte(text), names
+}
+
+// auditExposedMasked writes the audit row of a hook payload that carried
+// exposed values (GAP-1144, the name clause of GAP-0504): the secrets'
+// names, the hook event, the actor and the person; never a value. The
+// marker keeps the name readable in most text, but the redactor replaces
+// any value in a quoted or header credential position (marker included), so
+// the names have this row of their own.
+func (st *substrateState) auditExposedMasked(ctx context.Context, reg registry.Registration, event string, names []string) {
+	if st == nil || st.audit == nil || len(names) == 0 {
+		return
+	}
+	who := reg.Person.Principal
+	if who == "" {
+		who = "an unnamed person"
+	}
+	summary := fmt.Sprintf("the %s hook call of %s/%s (%s) carried the exposed value of the actor secret %s; DefenseClaw replaced it before evaluation and audit",
+		event, reg.Atespace, reg.Name, who, strings.Join(names, ", "))
+	st.audit(context.WithoutCancel(ctx), "MEDIUM", summary, map[string]any{
+		"event": "substrate.exposed_secret_masked", "names": names, "hook_event": event,
+		"atespace": reg.Atespace, "actor": reg.Name, "actor_uid": reg.UID, "connector": reg.Connector,
+		"profile": reg.Profile, "principal": reg.Person.Principal, "person_id": reg.Person.ID(),
+	})
 }
 
 // substrateExposedValueIn returns the name of the first exposed value found
