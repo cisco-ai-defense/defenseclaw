@@ -75,3 +75,51 @@ func TestGAP2224ServerToolResultsExpireTheThinkingPark(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP2224ResponsesImageAfterSummaryNumberIsSent: on the OpenAI Responses
+// passthrough, in every tier, a benign reply whose reasoning summary ends in
+// a number, then an image_generation_call whose image (more than
+// streamSecretMaxHeld of base64) only its output_item.done carries, goes out
+// whole with no TRUNCATED verdict, as on rel. The image is media the walker
+// skips, and output_item.done is a snapshot: the snapshot spends the parked
+// run by the media it carries first, never by repeated text
+// (CHK-T23E2224B N1; red at 517024b369: 3 TRUNCATED, strict and
+// managed-strict cut).
+func TestGAP2224ResponsesImageAfterSummaryNumberIsSent(t *testing.T) {
+	const end = "GAP2224-IMAGE-END-MARK"
+	path := gap0429PathsNamed(t, "passthrough/openai-responses")[0]
+	img := streamTailImage()
+	ev := func(typ string, part int, extra map[string]any) string {
+		f := map[string]any{"item_id": "rs_1", "output_index": 0, "summary_index": part}
+		for k, v := range extra {
+			f[k] = v
+		}
+		return gap2162Event(typ, f)
+	}
+	sum := "Let me count the rows: step 3"
+	pieces := []string{
+		ev("response.reasoning_summary_part.added", 0, map[string]any{"part": map[string]any{"type": "summary_text", "text": ""}}),
+		ev("response.reasoning_summary_text.delta", 0, map[string]any{"delta": sum}),
+		ev("response.reasoning_summary_text.done", 0, map[string]any{"text": sum}),
+		ev("response.reasoning_summary_part.done", 0, map[string]any{"part": map[string]any{"type": "summary_text", "text": sum}}),
+		gap2162Event("response.output_item.added", map[string]any{"output_index": 1, "item": map[string]any{"type": "image_generation_call", "id": "ig_1", "status": "in_progress"}}),
+		gap2162Event("response.image_generation_call.generating", map[string]any{"output_index": 1, "item_id": "ig_1"}),
+		gap2162Event("response.image_generation_call.completed", map[string]any{"output_index": 1, "item_id": "ig_1"}),
+		gap2162Event("response.output_item.done", map[string]any{"output_index": 1, "item": map[string]any{"type": "image_generation_call", "id": "ig_1", "status": "completed", "result": img}}),
+		"The image is ready. " + end + "\n",
+	}
+	var rows []gap1265Row
+	for _, tier := range streamTailTiers {
+		rows = append(rows, gap1265Row{name: "image-after-summary-number", tier: tier.name, pack: tier.pack, managed: tier.managed, pieces: pieces})
+	}
+	results, log := gap1265Serve(t, path, rows)
+	if n := strings.Count(log, "STREAM-TRUNCATED"); n != 0 {
+		t.Errorf("%d TRUNCATED line(s) for a benign image reply, want 0: %s", n, gap1265LogLine(log, "TRUNCATED"))
+	}
+	for i, row := range rows {
+		res := results[i]
+		if res.blocked || !strings.Contains(res.got, end) {
+			t.Errorf("%s/%s: a benign image reply was cut or blocked (blocked=%v, %d bytes)", path.name, row.tier, res.blocked, len(res.got))
+		}
+	}
+}

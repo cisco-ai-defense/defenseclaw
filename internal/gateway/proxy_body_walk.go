@@ -507,6 +507,10 @@ type textWalker struct {
 	cur     *jnode
 	curKey  string
 	payload int
+	// media is the bytes of the strings skipped as binary media
+	// (mediaValue): what a stream snapshot carries that no earlier event
+	// did, so it spends a parked run (rel-1-0-10:GAP-2224).
+	media int
 }
 
 // callHolderKeys are the fields whose object is a tool call or a tool
@@ -597,6 +601,7 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 			return
 		}
 		if w.mediaValue(key, n.s) {
+			w.media += len(n.s)
 			return
 		}
 		if seg := w.add(n.s); seg != "" && w.redact != nil && w.turn >= 0 {
@@ -1093,6 +1098,9 @@ type replyScan struct {
 	// Ambiguous is why the reply can be read two ways ("" when it cannot):
 	// the reply takes the fail mode, as an ambiguous request does.
 	Ambiguous string
+	// Media is the bytes of the strings skipped as binary media (an image
+	// result, a base64 document).
+	Media int
 }
 
 // scanReplyJSON reads one JSON reply or stream event. With stream set, the
@@ -1110,7 +1118,7 @@ func scanReplyJSON(data []byte, stream bool, max int) (replyScan, error) {
 	}
 	w := &textWalker{reply: true, stream: stream}
 	w.walk(root, "", 0)
-	return replyScan{Type: root.str("type"), Segments: w.segs, Calls: w.calls, Ambiguous: w.ambiguous}, nil
+	return replyScan{Type: root.str("type"), Segments: w.segs, Calls: w.calls, Ambiguous: w.ambiguous, Media: w.media}, nil
 }
 
 // scanReplyBody reads a buffered reply: one JSON value, or newline-delimited

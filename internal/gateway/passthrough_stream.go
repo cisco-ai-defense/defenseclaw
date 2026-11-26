@@ -105,10 +105,12 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	segs := sc.Segments
 	wire := len(data)
 	if snapshotEvent(sc.Type) {
-		// A snapshot repeats what earlier events carried, so its bytes do
-		// not spend a parked run's budget either: an OpenAI .done event
-		// repeats the very part text that is parked (rel-1-0-10:GAP-2224).
-		wire = 0
+		// A snapshot repeats what earlier events carried, so its repeated
+		// text does not spend a parked run's budget: an OpenAI .done event
+		// repeats the very part text that is parked. The binary media it
+		// carries first (an image_generation_call result, which only
+		// output_item.done carries) does (rel-1-0-10:GAP-2224).
+		wire = sc.Media
 		kept := segs[:0:0]
 		for _, seg := range segs {
 			if !strings.Contains(acc.String(), seg) {
