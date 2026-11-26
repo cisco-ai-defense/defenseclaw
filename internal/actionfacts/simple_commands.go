@@ -3430,6 +3430,25 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 			if parsed.workDir != "" {
 				folder, changed = filepath.Clean(parsed.workDir), true
 			}
+		case "env":
+			dir, chdir, known := simpleEnvChdir(words, static)
+			if !chdir {
+				child = WrapperChildIndex(words, static)
+				break
+			}
+			if !known {
+				return "", true, true
+			}
+			switch {
+			case simplePathAbs(dir):
+				folder = simplePathClean(dir)
+			case folder != "":
+				folder = path.Join(folder, dir)
+			default:
+				return "", true, true
+			}
+			changed = true
+			child = simpleEnvChildIndex(words)
 		default:
 			child = WrapperChildIndex(words, static)
 		}
@@ -3439,6 +3458,42 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 		words, static = words[child:], static[child:]
 	}
 	return folder, changed, false
+}
+
+// simpleEnvChdir is the folder an env call (words after the walk expanded
+// them) runs its program in: the value of its last -C DIR, -CDIR,
+// --chdir DIR or --chdir=DIR before the program, as GNU env reads it
+// (substrate-1:GAP-0685). chdir is false when env changes no folder; known
+// is false when the folder word is made at run time or empty.
+func simpleEnvChdir(words []string, static []bool) (dir string, chdir, known bool) {
+	known = true
+	for index := 1; index < len(words); index++ {
+		arg := words[index]
+		if !static[index] {
+			return dir, chdir, false
+		}
+		switch {
+		case arg == "--":
+			return dir, chdir, known
+		case arg == "--chdir" || arg == "-C":
+			index++
+			if index >= len(words) {
+				return "", true, false
+			}
+			dir, chdir, known = words[index], true, static[index] && words[index] != ""
+		case len(arg) > len("--chdir=") && strings.HasPrefix(arg, "--chdir="):
+			dir, chdir, known = strings.TrimPrefix(arg, "--chdir="), true, true
+		case len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			dir, chdir, known = strings.TrimPrefix(arg, "-C"), true, true
+		case arg == "-u" || arg == "--unset":
+			index++
+		case strings.HasPrefix(arg, "-") || isStaticEnvironmentAssignment(arg):
+			continue
+		default:
+			return dir, chdir, known
+		}
+	}
+	return dir, chdir, known
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
@@ -3754,10 +3809,15 @@ func simpleNestedWrapper(program string) bool {
 	}
 }
 
-// An env assignment changes the child's environment but leaves a following
-// static shell -c body executable. Directory changes are accepted here only
-// when they preserve the caller's directory; other forms stay whole-action
-// only until the simple-command walker can carry their new CWD.
+// An env assignment changes the environment of the child but leaves a
+// following static shell -c body executable. A change of folder (-C DIR,
+// -CDIR, --chdir DIR, --chdir=DIR) runs the child in DIR, as (cd DIR &&
+// child) does: the walk starts a nested body there (simpleNestedChildFolder)
+// and Analyze reads the child there (posixEnvChdir, substrate-1:GAP-0685),
+// so the call is no gap of the split. Before GAP-0685 the walk stopped at
+// such an env (a parse gap); once Analyze read the child, that gap added the
+// unknown tier (ACTION-COMPOUND-LIMIT) to every protected path the child
+// touches, which its cd spelling does not get.
 func simpleEnvChildIndex(argv []string) int {
 	for index := 1; index < len(argv); index++ {
 		arg := argv[index]
@@ -3777,13 +3837,14 @@ func simpleEnvChildIndex(argv []string) int {
 			}
 		case strings.HasPrefix(arg, "--unset="):
 			continue
-		case arg == "--chdir=." || arg == "-C.":
-			continue
 		case arg == "--chdir" || arg == "-C":
 			index++
-			if index >= len(argv) || argv[index] != "." {
+			if index >= len(argv) {
 				return -1
 			}
+		case len(arg) > len("--chdir=") && strings.HasPrefix(arg, "--chdir="),
+			len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			continue
 		case strings.HasPrefix(arg, "-"):
 			return -1
 		case isStaticEnvironmentAssignment(arg):
