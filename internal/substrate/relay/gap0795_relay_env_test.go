@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
 // plant puts programs in a folder the agent's user owns. Each one adds its
@@ -87,10 +88,11 @@ func TestGAP0795RelayRootRunsNoAgentPathProgram(t *testing.T) {
 }
 
 // GAP-0795 H1: a program the relay runs as root must be root's alone, even
-// in a root-only folder. A git the image gave the agent's user is never run
-// as root: the relay answers ExitGitNoRootGit and the review runs as the
-// agent with the warning, as on a relay without separation (never less
-// than rel, where every review ran as the agent).
+// in a root-only folder. A git the image gave the agent's user (here in a
+// system folder the relay looks programs up in) is never run as root: the
+// relay answers ExitGitNoRootGit and the review runs as the agent with the
+// warning, as on a relay without separation (never less than rel, where
+// every review ran as the agent).
 func TestGAP0795RelayNeverRunsAProgramTheAgentOwns(t *testing.T) {
 	g := newGAP0795(t)
 	g.write("app.txt", "work\n")
@@ -101,10 +103,9 @@ func TestGAP0795RelayNeverRunsAProgramTheAgentOwns(t *testing.T) {
 	if err := os.Lchown(bin, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	defer relay.SetGitSystemPathForTest(bin)()
 	ctx := context.Background()
 	p, err := workspace.PrepareBranchPush(ctx, g.run, filepath.Join(g.base, "work"), "a1", gap0795Origin, nil)
-	os.Setenv("PATH", strings.TrimPrefix(os.Getenv("PATH"), bin+":"))
 	if _, rerr := os.Stat(mark); rerr == nil {
 		t.Fatal("the separated relay ran a git the agent's user owns as root")
 	}
@@ -117,6 +118,76 @@ func TestGAP0795RelayNeverRunsAProgramTheAgentOwns(t *testing.T) {
 	}
 	if p.Commits != 1 || len(p.Files) != 1 || p.Files[0] != "app.txt" {
 		t.Fatalf("review: %d commits, files %v", p.Commits, p.Files)
+	}
+}
+
+// GAP-0795 H3 (CHK-T6-0795B): the root runs took their PATH from the image
+// PATH and resolved each folder's links before checking only the folder
+// they led to. A PATH entry the agent controls, made a link (the agent's
+// own) to a root-only folder, let the agent refuse the separated review
+// ("refused": that folder holds a folder named git, so the relay found no
+// root-only git and the review ran as the agent with a warning) or choose
+// the git root runs ("chosen": a root-owned git there, which marks each run
+// as root). The root runs now look programs up in the system folders only,
+// and follow a link only when the folder that holds it is root's alone.
+func TestGAP0795AgentPathLinkKeepsTheRelayReview(t *testing.T) {
+	for _, name := range []string{"refused", "chosen"} {
+		t.Run(name, func(t *testing.T) {
+			g := newGAP0795(t)
+			g.write("app.txt", "work\n")
+			g.git(g.repo, "add", ".")
+			g.git(g.repo, "commit", "-qm", "work")
+			g.handOver()
+			only, mark := filepath.Join(g.base, "rootonly"), filepath.Join(g.base, "root-ran")
+			if err := os.Mkdir(only, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if name == "refused" {
+				if err := os.Mkdir(filepath.Join(only, "git"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				real, err := exec.LookPath("git")
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := fmt.Sprintf("#!/bin/sh\necho git 2>/dev/null >> %s\nexec %s \"$@\"\n", mark, real)
+				if err := os.WriteFile(filepath.Join(only, "git"), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			home := filepath.Join(g.base, "home")
+			if err := os.Mkdir(home, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			entry := filepath.Join(home, "bin")
+			if err := os.Symlink(only, entry); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range []string{entry, home} {
+				if err := os.Lchown(p, gap0795UID, gap0795UID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := os.Getenv("PATH")
+			t.Setenv("PATH", entry+":"+path)
+			ctx := context.Background()
+			p, err := workspace.PrepareBranchPush(ctx, g.run, filepath.Join(g.base, "work"), "a1", gap0795Origin, nil)
+			os.Setenv("PATH", path)
+			if _, rerr := os.Stat(mark); rerr == nil {
+				t.Fatal("the separated relay ran as root the git an agent PATH link chose")
+			}
+			if err != nil {
+				t.Fatalf("review: %v", err)
+			}
+			defer p.Discard(ctx, g.run)
+			if p.Warning != "" {
+				t.Fatalf("warning %q: an agent PATH link made the separated relay give up its own review (downgraded-in-actor)", p.Warning)
+			}
+			if p.Commits != 1 || len(p.Files) != 1 || p.Files[0] != "app.txt" {
+				t.Fatalf("review: %d commits, files %v", p.Commits, p.Files)
+			}
+		})
 	}
 }
 

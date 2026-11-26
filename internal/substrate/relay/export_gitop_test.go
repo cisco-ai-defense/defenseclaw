@@ -21,3 +21,11 @@ func GitOpForTest(ctx context.Context, argv []string, dir string, env map[string
 	code := runGitOp(ctx, argv, dir, env, sp, &out, &errb)
 	return out.String(), errb.String(), code
 }
+
+// SetGitSystemPathForTest puts dirs before the system folders the relay's
+// own runs look programs up in; the func it returns restores them.
+func SetGitSystemPathForTest(dirs ...string) func() {
+	old := gitSystemPath
+	gitSystemPath = append(append([]string(nil), dirs...), old...)
+	return func() { gitSystemPath = old }
+}

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -244,8 +245,11 @@ var errNoRootGit = errors.New("the relay will not run git as root")
 // the image PATH may name a folder the agent can write (GAP-0795 H1).
 const gitRelayShell = "/bin/sh"
 
-// gitSystemPath are the folders the relay's own runs look programs up in
-// after the image PATH's root-only folders (gitRelayEnv).
+// gitSystemPath are the only folders the relay's own runs look programs up
+// in (gitRelayEnv). The image PATH is never read for them: it may name a
+// folder the agent can write, or replace with a link at run time, and so
+// pick the programs root runs or make the relay give up its own review
+// (GAP-0795 H3). A test sets them.
 var gitSystemPath = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
 
 // gitRelayPrograms are the programs the relay's own scripts (gitpush.go)
@@ -253,19 +257,20 @@ var gitSystemPath = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "
 var gitRelayPrograms = []string{"git", "awk", "cat", "cp", "cut", "env", "mkdir", "mktemp", "rm", "sed", "sort", "tr", "wc"}
 
 // gitRelayEnv is the whole environment of the relay's own runs, as root
-// (GAP-0795 H1, H2): an allow-list, never the relay's environment with names
-// taken out. The image PATH may name a folder the agent can write, so PATH
-// keeps only folders that root alone can write (rootOnlyDir), the image's
-// first, then gitSystemPath; /bin/sh, every program of gitRelayPrograms
-// and git's own exec-path folder must resolve to root's files there, else
-// the operation is refused (errNoRootGit). The agent's HOME and any XDG_* or GIT_* name
-// stay out (git reads attributes and config from them); gitRelayRun sets
-// HOME and TMPDIR to the relay's 0700 folder. Locale C keeps the scripts'
-// sort and awk byte-wise.
+// (GAP-0795 H1, H2, H3): an allow-list, never the relay's environment with
+// names taken out. PATH is the folders of gitSystemPath that root alone can
+// write, reached through links only root can change (rootOnlyDir), by
+// their resolved path; nothing of the image PATH. /bin/sh, every program
+// of gitRelayPrograms and every file of git's own exec-path folder must be
+// root's files there, else the operation is refused (errNoRootGit): that
+// depends only on files root controls, never on anything the agent can
+// write. The agent's HOME and any XDG_* or GIT_* name stay out (git reads
+// attributes and config from them); gitRelayRun sets HOME and TMPDIR to the
+// relay's 0700 folder. Locale C keeps the scripts' sort and awk byte-wise.
 func gitRelayEnv(ctx context.Context) ([]string, error) {
 	var dirs []string
 	seen := map[string]bool{}
-	for _, d := range append(filepath.SplitList(os.Getenv("PATH")), gitSystemPath...) {
+	for _, d := range gitSystemPath {
 		if r, ok := rootOnlyDir(d); ok && !seen[r] {
 			seen[r] = true
 			dirs = append(dirs, r)
@@ -291,21 +296,87 @@ func gitRelayEnv(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the relay will not run git as root: %s --exec-path: %v", git, err)
 	}
-	if xp := strings.TrimSpace(string(out)); xp == "" || !isRootOnlyDir(xp) {
-		return nil, fmt.Errorf("%w: its program folder %q is not one only root can write", errNoRootGit, xp)
+	xp := strings.TrimSpace(string(out))
+	if bad := rootOnlyTree(xp); bad != "" {
+		return nil, fmt.Errorf("%w: its program folder %q holds %s, not a file only root can change", errNoRootGit, xp, bad)
 	}
 	return env, nil
 }
 
-// rootOnlyDir is d with its links resolved when that folder and every one
-// above it are root's (rootOwnedChain) and d itself is writable by root
-// alone (a sticky folder such as /tmp lets anyone add a program).
-func rootOnlyDir(d string) (string, bool) {
-	if !filepath.IsAbs(d) {
+// maxLinkHops bounds the links rootResolve follows, as the kernel does.
+const maxLinkHops = 40
+
+// rootResolve is p with every link resolved hop by hop, when no hop is one
+// another user can change (GAP-0795 H3, N1): every folder on the way is
+// root's and writable by no one else (or sticky, as in rootOwnedChain), and
+// a link is followed only when the folder that holds it is root's and
+// writable by root alone. Else false: the path is refused, never followed.
+// (filepath.EvalSymlinks follows a link the agent owns, or one in a folder
+// it can write, to any folder it names, and such a hop can change after
+// the check.)
+func rootResolve(p string) (string, bool) {
+	if !filepath.IsAbs(p) || !rootDirAt("/", true) {
 		return "", false
 	}
-	r, err := filepath.EvalSymlinks(d)
-	if err != nil || !isRootOnlyDir(r) {
+	cur, rest, hops := "/", strings.Split(filepath.Clean(p), "/"), 0
+	for len(rest) > 0 {
+		name := rest[0]
+		rest = rest[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, name)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			return "", false
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			t, err := os.Readlink(next)
+			if hops++; err != nil || t == "" || hops > maxLinkHops || !rootDirAt(cur, false) {
+				return "", false
+			}
+			if filepath.IsAbs(t) {
+				cur = "/"
+			}
+			rest = append(strings.Split(t, "/"), rest...)
+			continue
+		}
+		if fi.IsDir() {
+			if !rootOwnedInfo(fi, true) {
+				return "", false
+			}
+		} else if len(rest) > 0 {
+			return "", false
+		}
+		cur = next
+	}
+	return cur, true
+}
+
+// rootDirAt reports d (not a link) as a folder of root's that no one else
+// can write (or sticky, when sticky is true).
+func rootDirAt(d string, sticky bool) bool {
+	fi, err := os.Lstat(d)
+	return err == nil && fi.IsDir() && rootOwnedInfo(fi, sticky)
+}
+
+// rootOwnedInfo reports fi as root's and writable by no one else (or a
+// sticky folder, when sticky is true).
+func rootOwnedInfo(fi fs.FileInfo, sticky bool) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == 0 && (fi.Mode().Perm()&0o022 == 0 || sticky && fi.Mode()&fs.ModeSticky != 0)
+}
+
+// rootOnlyDir is d resolved hop by hop (rootResolve) when that folder is
+// writable by root alone (a sticky folder such as /tmp lets anyone add a
+// program).
+func rootOnlyDir(d string) (string, bool) {
+	r, ok := rootResolve(d)
+	if !ok || !isRootOnlyDir(r) {
 		return "", false
 	}
 	return r, true
@@ -321,11 +392,11 @@ func isRootOnlyDir(r string) bool {
 	return err == nil && fi.Mode().Perm()&0o022 == 0
 }
 
-// rootOnlyFile reports p, links resolved, as a regular file of root's,
-// writable by root alone, in a folder only root can write.
+// rootOnlyFile reports p, resolved hop by hop (rootResolve), as a regular
+// file of root's, writable by root alone, in a folder only root can write.
 func rootOnlyFile(p string) bool {
-	r, err := filepath.EvalSymlinks(p)
-	if err != nil {
+	r, ok := rootResolve(p)
+	if !ok {
 		return false
 	}
 	fi, err := os.Lstat(r)
@@ -334,6 +405,43 @@ func rootOnlyFile(p string) bool {
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	return ok && st.Uid == 0 && isRootOnlyDir(filepath.Dir(r))
+}
+
+// maxExecPathEntries bounds the entries rootOnlyTree checks.
+const maxExecPathEntries = 1 << 14
+
+// rootOnlyTree checks git's exec-path folder file by file (GAP-0795 N2):
+// git runs its helpers (git-remote-https) from it as root, so the folder
+// and every folder and file in it must be root's and writable by root
+// alone, and a link in it must lead, hop by hop (rootResolve), to such a
+// file or folder. It names the first entry that is not ("" when every one
+// is).
+func rootOnlyTree(xp string) string {
+	r, ok := rootResolve(xp)
+	if !ok || !isRootOnlyDir(r) {
+		return "the folder itself"
+	}
+	bad, n := "", 0
+	_ = filepath.WalkDir(r, func(p string, e fs.DirEntry, err error) error {
+		if n++; err != nil || n > maxExecPathEntries {
+			bad = p
+			return fs.SkipAll
+		}
+		t := p
+		if e.Type()&fs.ModeSymlink != 0 {
+			if t, ok = rootResolve(p); !ok {
+				bad = p
+				return fs.SkipAll
+			}
+		}
+		fi, err := os.Lstat(t)
+		if err != nil || !fi.Mode().IsRegular() && !fi.IsDir() || !rootOwnedInfo(fi, false) {
+			bad = p
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return bad
 }
 
 // rootOnlyProgram is the file the shell runs for name, the first one in
