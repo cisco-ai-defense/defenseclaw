@@ -40,6 +40,7 @@ func gap2243ShortPath(t *testing.T, path string) string {
 // does for the long name, not fail closed with
 // enterprise_managed_runtime_drift on every tool call.
 func TestGAP2243ClaudeManagedRuntimeAcceptsTheInstalledHookByItsShortName(t *testing.T) {
+	requireGAP633Elevated(t) // the managed policy install refuses a standard-user token (GAP-2263)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
 		t.Fatal(err)
@@ -71,6 +72,7 @@ func TestGAP2243ClaudeManagedRuntimeAcceptsTheInstalledHookByItsShortName(t *tes
 // hook. A copy elsewhere, another file in the hook folder and a hard link in
 // another folder stay refused as a boundary, by long name and by 8.3 alias.
 func TestGAP2243ClaudeManagedRuntimeRefusesOtherFilesByAnySpelling(t *testing.T) {
+	requireGAP633Elevated(t) // the managed policy install refuses a standard-user token (GAP-2263)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
 		t.Fatal(err)
