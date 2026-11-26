@@ -1705,13 +1705,45 @@ func guestCDJoinClean(operand string, bases []string, home string) []string {
 		strings.ContainsRune(operand, '/') || operand == "." || operand == ".." {
 		return guestCDJoin(operand, bases, home)
 	}
-	var targets []string
+	// The targets are cut from one string: an 8 KB cd chain joins each of
+	// its 1,100 cds to up to 128 folders, and a string each was most of
+	// guestKnownFolders' allocations (rel-1-0-10:GAP-2249).
+	size, count := 0, 0
 	for _, base := range bases {
 		switch {
 		case base == "/":
-			targets = append(targets, "/"+operand)
+			size, count = size+1+len(operand), count+1
 		case path.IsAbs(base):
-			targets = append(targets, base+"/"+operand)
+			size, count = size+len(base)+1+len(operand), count+1
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	var joined strings.Builder
+	joined.Grow(size)
+	for _, base := range bases {
+		if base == "/" || path.IsAbs(base) {
+			if base != "/" {
+				joined.WriteString(base)
+			}
+			joined.WriteByte('/')
+			joined.WriteString(operand)
+		}
+	}
+	all := joined.String()
+	targets := make([]string, 0, count)
+	for _, base := range bases {
+		size := 0
+		switch {
+		case base == "/":
+			size = 1 + len(operand)
+		case path.IsAbs(base):
+			size = len(base) + 1 + len(operand)
+		}
+		if size != 0 {
+			targets = append(targets, all[:size])
+			all = all[size:]
 		}
 	}
 	return targets
