@@ -83,8 +83,9 @@ func substrateMCPAskSummary(target, tool string, c substrateMCPJudgedCall) strin
 }
 
 // substrateMCPArgsPreview renders the top level of an arguments object as
-// key=value pairs in key order, bounded. A value under a secret-named key
-// or carrying a known credential prefix shows only its length; a nested
+// key=value pairs in key order, bounded. A value of any type under a
+// secret-named key, or a string carrying a known credential prefix, is
+// hidden (a string shows only its length); a nested
 // object or array shows only its size, so nothing below the top level is
 // printed.
 func substrateMCPArgsPreview(raw json.RawMessage) string {
@@ -125,6 +126,14 @@ func substrateMCPArgsPreview(raw json.RawMessage) string {
 }
 
 func substrateMCPPreviewValue(key string, v any) string {
+	// The key decides before the type does: a number, bool, object or array
+	// under a secret-named key is hidden as well as a string.
+	if key != "" && substrateMCPAskSecretKey(key) {
+		if x, ok := v.(string); ok {
+			return "<hidden len=" + strconv.Itoa(len(x)) + ">"
+		}
+		return "<hidden>"
+	}
 	switch x := v.(type) {
 	case nil:
 		return "null"
@@ -133,7 +142,7 @@ func substrateMCPPreviewValue(key string, v any) string {
 	case json.Number:
 		return substrateMCPPreviewText(x.String(), substrateMCPAskPreviewValue)
 	case string:
-		if (key != "" && substrateMCPAskSecretKey(key)) || redaction.AssertNoCredentials(x) != nil {
+		if redaction.AssertNoCredentials(x) != nil {
 			return "<hidden len=" + strconv.Itoa(len(x)) + ">"
 		}
 		return strconv.Quote(substrateMCPPreviewText(x, substrateMCPAskPreviewValue))
@@ -146,12 +155,21 @@ func substrateMCPPreviewValue(key string, v any) string {
 }
 
 // substrateMCPAskSecretKey is a key whose value an ask never shows: the
-// secret-named keys of the tool value lineage, and the request
-// authentication keys.
+// secret-named keys of the tool value lineage, the request authentication
+// keys, and any key that names a token, secret, password, passphrase,
+// credential or key, in any case and with any separators (accessToken,
+// Client-Secret and client_secret are the same key).
 func substrateMCPAskSecretKey(key string) bool {
-	switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
-	case "authorization", "auth", "cookie", "bearer", "apikey", "session", "session_id":
+	folded := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(key))
+	switch folded {
+	case "authorization", "auth", "cookie", "bearer", "session", "sessionid":
 		return true
+	}
+	for _, part := range []string{"token", "secret", "password", "passwd", "passphrase",
+		"credential", "apikey", "privatekey", "accesskey", "secretkey", "signingkey"} {
+		if strings.Contains(folded, part) {
+			return true
+		}
 	}
 	return toolValueLineageSensitiveJSONKey(key)
 }
