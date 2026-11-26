@@ -209,25 +209,8 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 		}
 		return keepClean(list, path.Clean(dir))
 	}
-	keepClean = func(list []string, dir string) []string {
-		// A full list keeps no plain folder, listed or not, so it is not
-		// searched for one: guestKnownFolders offers every cd target of an
-		// 8 KB call to a full list (rel-1-0-10:GAP-2226).
-		first := len(list) < maxSandboxGuestCandidateDirs || guestDirFirst(dir, input.ActiveHome)
-		if !first || slices.Contains(list, dir) {
-			return list
-		}
-		if len(list) < maxSandboxGuestCandidateDirs {
-			return append(list, dir)
-		}
-		for at := len(list) - 1; at > 0; at-- {
-			if !guestDirFirst(list[at], input.ActiveHome) {
-				list[at] = dir
-				return list
-			}
-		}
-		return list
-	}
+	first := func(dir string) bool { return guestDirFirst(dir, input.ActiveHome) }
+	keepClean = func(list []string, dir string) []string { return guestKeepFolder(list, dir, first) }
 	var dirs, targets []string
 	dirs = keep(dirs, input.CWD)
 	targets = keep(targets, input.CWD)
@@ -412,7 +395,7 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	// own place. Its cd targets are still kept.
 	scriptCalls, cdpath := guestScriptCalls(command, input.ActiveHome)
 	var known map[string]int
-	targets, known = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keepClean, cdMemo)
+	targets, known = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, cdMemo)
 	for _, call := range scriptCalls {
 		if !splitRead[call.text] {
 			plan.calls = append(plan.calls, call)
@@ -998,6 +981,31 @@ func guestReadingFirst(text string) bool {
 	return false
 }
 
+// guestKeepFolder keeps dir, a clean absolute folder, in list, the walks'
+// list of at most maxSandboxGuestCandidateDirs folders
+// (newGuestPlacementPlan): it is added once while there is room; past the
+// bound a folder that may hold protected files (first, guestDirFirst) takes
+// the place of the last plain one kept, never the first folder. A full list
+// keeps no plain folder, listed or not, so it is not searched for one:
+// guestKnownFolders offers every cd target of an 8 KB call to a full list
+// (rel-1-0-10:GAP-2226). The string walks and guestKnownFolders' folder ids
+// keep by this one rule.
+func guestKeepFolder[F comparable](list []F, dir F, first func(F) bool) []F {
+	if len(list) >= maxSandboxGuestCandidateDirs && !first(dir) || slices.Contains(list, dir) {
+		return list
+	}
+	if len(list) < maxSandboxGuestCandidateDirs {
+		return append(list, dir)
+	}
+	for at := len(list) - 1; at > 0; at-- {
+		if !first(list[at]) {
+			list[at] = dir
+			return list
+		}
+	}
+	return list
+}
+
 // guestDirFirst reports a folder kept before plain ones past the guest
 // placement's folder bound: the home, or a folder whose name starts with a
 // dot (~/.ssh, ~/.aws, ~/.defenseclaw, a project's .git or .claude).
@@ -1280,13 +1288,25 @@ const (
 )
 
 func newGuestFolderTree() *guestFolderTree {
+	return newGuestFolderTreeSized(1)
+}
+
+// newGuestFolderTreeSized is a tree made at the size of about size
+// folders: one that grew from nothing to guestKnownFolders' 140,000 made
+// each of its arrays and its map several times over.
+func newGuestFolderTreeSized(size int) *guestFolderTree {
 	root := guestFolderHashOffset
 	root = (root ^ '/') * guestFolderHashPrime
-	return &guestFolderTree{
-		nodes:  []guestFolderNode{{parent: -1}},
-		hashes: []uint64{root},
-		byHash: map[uint64]int32{root: 0},
+	size = max(size, 1)
+	tree := &guestFolderTree{
+		nodes:  make([]guestFolderNode, 1, size),
+		hashes: make([]uint64, 1, size),
+		byHash: make(map[uint64]int32, size),
 	}
+	tree.nodes[0] = guestFolderNode{parent: -1}
+	tree.hashes[0] = root
+	tree.byHash[root] = 0
+	return tree
 }
 
 // child is the folder name in folder parent: the parent's string, a slash
@@ -1407,6 +1427,13 @@ func (tree *guestFolderTree) cdTargets(text string, bases []int32, home string) 
 	if !ok {
 		return nil
 	}
+	return tree.cdJoin(operand, bases, home)
+}
+
+// cdJoin is guestCDJoin(operand, bases, home) as ids, for bases that are
+// folders of the tree: a plain name is the child of each base, any other
+// operand is joined to the bases' strings (cdTargets).
+func (tree *guestFolderTree) cdJoin(operand string, bases []int32, home string) []int32 {
 	if guestCDPlainOperand(operand) {
 		if len(bases) == 0 {
 			return nil
@@ -1952,61 +1979,6 @@ func guestCDJoinReadsBases(operand, home string) bool {
 	return operand != "" && operand != "~" && !(strings.HasPrefix(operand, "~/") && path.IsAbs(home)) && !path.IsAbs(operand)
 }
 
-// guestCDJoinClean is guestCDJoin for bases that are each clean
-// (path.Clean's answer), as the walks' own folder lists are. A plain name
-// (cd d5) joined to a clean folder is that folder, a slash and the name,
-// path.Join's answer without its clean, and the targets are clean too: a
-// long call joins each of its cds to up to 128 folders, and cleaning each
-// join rescanned folders that grow with the chain (rel-1-0-10:GAP-2226,
-// GAP-2249).
-func guestCDJoinClean(operand string, bases []string, home string) []string {
-	if !guestCDPlainOperand(operand) {
-		return guestCDJoin(operand, bases, home)
-	}
-	// The targets are cut from one string: an 8 KB cd chain joins each of
-	// its 1,100 cds to up to 128 folders, and a string each was most of
-	// guestKnownFolders' allocations (rel-1-0-10:GAP-2249).
-	size, count := 0, 0
-	for _, base := range bases {
-		switch {
-		case base == "/":
-			size, count = size+1+len(operand), count+1
-		case path.IsAbs(base):
-			size, count = size+len(base)+1+len(operand), count+1
-		}
-	}
-	if count == 0 {
-		return nil
-	}
-	var joined strings.Builder
-	joined.Grow(size)
-	for _, base := range bases {
-		if base == "/" || path.IsAbs(base) {
-			if base != "/" {
-				joined.WriteString(base)
-			}
-			joined.WriteByte('/')
-			joined.WriteString(operand)
-		}
-	}
-	all := joined.String()
-	targets := make([]string, 0, count)
-	for _, base := range bases {
-		size := 0
-		switch {
-		case base == "/":
-			size = 1 + len(operand)
-		case path.IsAbs(base):
-			size = len(base) + 1 + len(operand)
-		}
-		if size != 0 {
-			targets = append(targets, all[:size])
-			all = all[size:]
-		}
-	}
-	return targets
-}
-
 // guestKnownFolders gives each folder of the guest placement's lists the
 // first place in the text from which a call may stand in it (known), and
 // returns the cd targets list grown by the static cd and pushd calls of the
@@ -2029,9 +2001,21 @@ func guestCDJoinClean(operand string, bases []string, home string) []string {
 // call the split may follow a value in (guestScriptCall.dynamic), or from
 // the start. The walk runs again while a round knows a folder earlier, at
 // most four rounds; past them every folder is known from the start. It
-// returns the grown targets and known.
+// returns the grown targets and known, for the folders of dirs and of the
+// grown targets, the ones the placement reads.
+//
+// The walk keeps its folders as ids of one folder tree (guestFolderTree), as
+// the own-shell walk does: a plain cd's target is the child of its base, and
+// a folder's place is read from an array by id. An 8 KB cd chain joins each
+// of its 1,100 cds to up to 128 folders, every round: keyed by their
+// strings, the look-ups of each base and target and the joined strings
+// were most of the copy-mode actor's time over 1.0.10 on dyn-cd-each
+// (rel-1-0-10:GAP-2226). A folder is one id and an id one folder
+// (guestFolderTree), so every place, comparison and keep reads as it did
+// on the strings, a target no list keeps included: its place still decides
+// whether a round changed anything.
 func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath int,
-	keep func([]string, string) []string, cdMemo *guestCDMemo) ([]string, map[string]int) {
+	cdMemo *guestCDMemo) ([]string, map[string]int) {
 	type move struct {
 		operand string
 		at      int
@@ -2050,8 +2034,7 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 	// to at most every listed folder, an absolute or ~ one names one. An
 	// 8 KB cd chain grew it to 140,000 folders a split at a time
 	// (rel-1-0-10:GAP-2249).
-	listed := slices.Concat(dirs, targets)
-	size := len(listed)
+	size := len(dirs) + len(targets)
 	for _, move := range moves {
 		if path.IsAbs(move.operand) || move.operand == "~" || strings.HasPrefix(move.operand, "~/") {
 			size++
@@ -2059,18 +2042,93 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 			size += len(dirs) + maxSandboxGuestCandidateDirs
 		}
 	}
-	known := make(map[string]int, min(size, guestKnownFoldersSizeMax))
-	// dirs and targets are clean (newGuestPlacementPlan's keep cleans each),
-	// so every target guestCDJoinClean makes from them is clean, and keep
-	// takes it as it is.
-	for _, dir := range listed {
-		if cdpath < 0 || dir == path.Clean(cwd) {
-			known[dir] = -1
+	// dirs and targets are clean and absolute (newGuestPlacementPlan's keep
+	// cleans each), and so is every target the tree makes from them
+	// (cdJoin).
+	size = min(size, guestKnownFoldersSizeMax)
+	tree := newGuestFolderTreeSized(size)
+	ids := func(list []string) []int32 {
+		out := make([]int32, len(list))
+		for at, dir := range list {
+			out[at] = tree.folder(dir)
+		}
+		return out
+	}
+	dirIDs, targetIDs := ids(dirs), ids(targets)
+	listed := slices.Concat(dirIDs, targetIDs)
+	// first is guestDirFirst by id: the home, or a folder whose name
+	// starts with a dot.
+	homeID := int32(-1)
+	if path.IsAbs(home) {
+		homeID = tree.folder(path.Clean(home))
+	}
+	first := func(id int32) bool {
+		return id == homeID || id != 0 && strings.HasPrefix(tree.nodes[id].name, ".")
+	}
+	// known holds each folder's place plus two by id; 0 is a folder not
+	// known yet (a place is -1 or more, and less than the command's
+	// agentHookConfigMaxPlacedBytes).
+	known := make([]int32, 0, size)
+	placeOf := func(id int32) (int, bool) {
+		if int(id) < len(known) && known[id] != 0 {
+			return int(known[id]) - 2, true
+		}
+		return 0, false
+	}
+	setPlace := func(id int32, since int) {
+		for int(id) >= len(known) {
+			known = append(known, 0)
+		}
+		known[id] = int32(since + 2)
+	}
+	cwdID := int32(-1)
+	if path.IsAbs(cwd) {
+		cwdID = tree.folder(path.Clean(cwd))
+	}
+	for _, id := range listed {
+		if cdpath < 0 || id == cwdID {
+			setPlace(id, -1)
 		}
 	}
-	grown := targets
-	var bases []string
-	reached := map[string]int{}
+	// followed counts clean absolute folders (the split's cd targets); a
+	// folder of the lists is one, so no other key is ever read.
+	var followedIDs map[int32]int
+	if len(followed) != 0 {
+		followedIDs = make(map[int32]int, len(followed))
+		for dir, count := range followed {
+			if path.IsAbs(dir) && dir == path.Clean(dir) {
+				followedIDs[tree.folder(dir)] = count
+			}
+		}
+	}
+	// names keeps the string of a listed or grown folder that a CDPATH
+	// look-up reads.
+	names := map[int32]string{}
+	nameOf := func(id int32) string {
+		name, ok := names[id]
+		if !ok {
+			name = tree.path(id)
+			names[id] = name
+		}
+		return name
+	}
+	result := func(grown []int32) ([]string, map[string]int) {
+		out := make([]string, len(grown))
+		for at, id := range grown {
+			out[at] = tree.path(id)
+		}
+		places := make(map[string]int, len(dirs)+len(grown))
+		for at, id := range dirIDs {
+			places[dirs[at]], _ = placeOf(id)
+		}
+		for at, id := range grown {
+			places[out[at]], _ = placeOf(id)
+		}
+		return out, places
+	}
+	grown := targetIDs
+	var bases []int32
+	reached := map[int32]int{}
 	// joins holds, per move, the bases it was joined to in the last round
 	// that changed them, and the targets of that join. A move whose bases
 	// are the same in a later round reaches the same targets, and each of
@@ -2078,26 +2136,26 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 	// only moves earlier), so it is not joined or looked up again: the
 	// round that only confirms the walk redid every join of an 8 KB cd
 	// chain (rel-1-0-10:GAP-2249).
-	type moveJoin struct{ bases, targets []string }
+	type moveJoin struct{ bases, targets []int32 }
 	joins := make([]moveJoin, len(moves))
 	for round := 0; ; round++ {
 		if round == 4 {
-			for _, dir := range slices.Concat(listed, grown) {
-				known[dir] = -1
+			for _, id := range slices.Concat(listed, grown) {
+				setPlace(id, -1)
 			}
-			return grown, known
+			return result(grown)
 		}
 		changed := false
-		grown = slices.Clone(targets)
+		grown = slices.Clone(targetIDs)
 		clear(reached)
-		var pool []string
+		var pool []int32
 		for at, move := range moves {
 			call := calls[move.at]
 			bases = bases[:0]
-			for _, list := range [2][]string{dirs, grown} {
-				for _, dir := range list {
-					if since, ok := known[dir]; ok && since <= call.at {
-						bases = append(bases, dir)
+			for _, list := range [2][]int32{dirIDs, grown} {
+				for _, id := range list {
+					if since, ok := placeOf(id); ok && since <= call.at {
+						bases = append(bases, id)
 					}
 				}
 			}
@@ -2106,52 +2164,52 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 			if !same {
 				start := len(pool)
 				pool = append(pool, bases...)
-				join.bases, join.targets = pool[start:len(pool):len(pool)], guestCDJoinClean(move.operand, bases, home)
+				join.bases, join.targets = pool[start:len(pool):len(pool)], tree.cdJoin(move.operand, bases, home)
 			}
 			for _, target := range join.targets {
 				// reached is read only against followed, which counts no
 				// folder when the split followed no value.
-				if len(followed) != 0 {
+				if followedIDs != nil {
 					reached[target]++
 				}
-				grown = keep(grown, target)
+				grown = guestKeepFolder(grown, target, first)
 				if same {
 					continue
 				}
-				if since, ok := known[target]; !ok || call.first < since {
-					known[target] = call.first
+				if since, ok := placeOf(target); !ok || call.first < since {
+					setPlace(target, call.first)
 					changed = true
 				}
 			}
 			if call.at < cdpath || !guestCDPathLooksUp(move.operand) {
 				continue
 			}
-			for _, dir := range slices.Concat(listed, grown) {
-				if since, ok := known[dir]; guestCDPathMayReach(dir, move.operand) && (!ok || call.first < since) {
-					known[dir] = call.first
+			for _, id := range slices.Concat(listed, grown) {
+				if since, ok := placeOf(id); guestCDPathMayReach(nameOf(id), move.operand) && (!ok || call.first < since) {
+					setPlace(id, call.first)
 					changed = true
 				}
 			}
 		}
-		for _, dir := range slices.Concat(listed, grown) {
-			since, ok := known[dir]
+		for _, id := range slices.Concat(listed, grown) {
+			since, ok := placeOf(id)
 			switch {
 			case !ok:
-				known[dir] = -1
+				setPlace(id, -1)
 				changed = true
-			case followed[dir] > reached[dir] && since > dynamic:
-				known[dir] = dynamic
+			case followedIDs[id] > reached[id] && since > dynamic:
+				setPlace(id, dynamic)
 				changed = true
 			}
 		}
 		if !changed {
-			return grown, known
+			return result(grown)
 		}
 	}
 }
 
-// guestKnownFoldersSizeMax bounds the size guestKnownFolders makes its map
-// at: past it the map grows as it fills.
+// guestKnownFoldersSizeMax bounds the size guestKnownFolders makes its
+// folder tree and places at: past it they grow as they fill.
 const guestKnownFoldersSizeMax = 1 << 17
 
 // guestScriptCall is a simple-command statement of a script
