@@ -96,6 +96,18 @@ class AddrConsistency(unittest.TestCase):
             self.tool("check", self.corpus("ok.jsonl", [NO_PLACEHOLDER, CONSISTENT, NO_ADDRESS])).returncode, 0
         )
 
+    def test_check_takes_several_files_and_is_red_when_any_is(self):
+        red = self.corpus("red.jsonl", [MISMATCH, CONSISTENT])
+        green = self.corpus("green.jsonl", [NO_PLACEHOLDER, NO_ADDRESS])
+        r = self.tool("check", green, red)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("0 of 2 cases", r.stdout)
+        self.assertIn("1 of 2 cases", r.stdout)
+        self.assertEqual(self.tool("check", green, self.corpus("green2.jsonl", [CONSISTENT])).returncode, 0)
+        fixed = self.root / "red.fixed.jsonl"
+        self.assertEqual(self.tool("fix", red, fixed).returncode, 0)
+        self.assertEqual(self.tool("check", green, fixed).returncode, 0, "the new corpus version is green")
+
     def test_fix_writes_a_new_file_and_keeps_untouched_rows_byte_identical(self):
         c = self.corpus("in.jsonl", [MISMATCH, NO_PLACEHOLDER, STATEFUL, CONSISTENT])
         out = self.root / "out.jsonl"

@@ -136,27 +136,16 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	if !json.Valid(payload) {
 		return refuse("DefenseClaw could not read the hook event: it is not JSON")
 	}
-	// A refused skill folder the kit could not take out of reach still loads:
-	// deny the tool call until it is gone (GAP-0039).
-	if preToolEvents[call.Event] {
-		if stuck := stuckSkillsInReach(o.home()); len(stuck) > 0 {
-			call.FailMode = "closed"
-			return refuse("DefenseClaw refused these skill folders and could not take them out of the agent's reach: " + strings.Join(stuck, ", ") + "; remove them")
-		}
+	if msg := stuckSkillRefusal(o.home(), call.Event); msg != "" {
+		call.FailMode = "closed"
+		return refuse(msg)
 	}
 	env := HookEnvelope{
 		V: EnvelopeVersion, Connector: o.Connector, Event: call.Event, HookContract: call.HookContractID,
 		Mode: mode, KitVersion: o.Config.KitVersion, Payload: json.RawMessage(payload),
 		Facts: CollectFacts(o.Connector, call.Event, payload, o.Config.attachCap()),
 	}
-	var skillsSent map[string]string
-	var skillsAttached []string
-	// GAP-0980: while a folder has no verdict yet, every PreToolUse call runs
-	// the pass (any tool, any connector), so the gateway refuses it while held.
-	pending := preToolEvents[call.Event] && len(skillsPendingInReach(o.home())) > 0
-	if pending || skillScanEvents[call.Event] || (env.Facts != nil && env.Facts.readsSkill) {
-		skillsSent, skillsAttached = o.attachSkills(&env, payload)
-	}
+	pass := o.beginSkillPass(&env, payload)
 	body, err := json.Marshal(env)
 	if err != nil {
 		return refuse("DefenseClaw could not encode the hook event: " + err.Error())
@@ -179,28 +168,9 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		send = defaultSend(o.Config)
 	}
 	resp, _, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
-	if skillsSent != nil {
-		answered := err == nil && (resp.Status == 403 || resp.Status >= 200 && resp.Status < 300)
-		left := updateSkillPending(o.home(), resp.Body, answered, skillsSent, skillsAttached, o.Config.Managed)
-		if pending && err != nil && len(left) > 0 {
-			// The pass for a folder with no verdict went unanswered: the
-			// folder may still be unscanned, so this call does not run,
-			// whatever the outage fail mode (GAP-0980).
-			call.FailMode = "closed"
-			return refuse(skillPendingRefusal(left))
-		}
-	}
-	if err == nil && resp.Status >= 200 && resp.Status < 300 && skillsSent != nil {
-		if moved := applySkillAnswer(o.home(), resp.Body, skillsSent, skillsAttached, time.Now()); len(moved) > 0 {
-			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders taken out of the agent's reach: %s\n", strings.Join(moved, ", "))
-		}
-		// A refused folder that could not be taken out of reach is still
-		// loadable and nothing else denies it: refuse this call (GAP-0039).
-		if stuck := skillsStillInReach(resp.Body, skillsSent); len(stuck) > 0 {
-			recordStuckSkills(o.home(), stuck)
-			call.FailMode = "closed"
-			return refuse("DefenseClaw refused skill folders it could not take out of the agent's reach: " + strings.Join(stuck, ", "))
-		}
+	if msg := o.finishSkillPass(pass, resp, err); msg != "" {
+		call.FailMode = "closed"
+		return refuse(msg)
 	}
 	call.FailMode = outageMode(call.FailMode, resp, mode)
 	if err != nil {
@@ -235,6 +205,69 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		fmt.Fprintln(o.Stderr, "defenseclaw:", rerr)
 	}
 	return code
+}
+
+// stuckSkillRefusal is the refusal of a call that can deny a tool (event is
+// one of preToolEvents) while a skill folder the kit refused and could not
+// take out of reach still loads, or "": the call is denied until the folder
+// is gone (GAP-0039). The command hooks and the plugins' hook-post share it.
+func stuckSkillRefusal(home, event string) string {
+	if !preToolEvents[event] {
+		return ""
+	}
+	if stuck := stuckSkillsInReach(home); len(stuck) > 0 {
+		return "DefenseClaw refused these skill folders and could not take them out of the agent's reach: " + strings.Join(stuck, ", ") + "; remove them"
+	}
+	return ""
+}
+
+// skillPass is one call's skill folder pass: the folders listed in the
+// envelope and whether a folder had no verdict yet when the call began.
+type skillPass struct {
+	sent     map[string]string
+	attached []string
+	pending  bool
+}
+
+// beginSkillPass lists the skill folders in env when the event runs the
+// pass: a scan event (skillScanEvent), a read of a skill's files, or any
+// pre-tool call while a folder has no verdict yet (GAP-0980: every such call
+// runs the pass, any tool, any connector, so the gateway refuses it while
+// held).
+func (o HookOptions) beginSkillPass(env *HookEnvelope, payload []byte) skillPass {
+	p := skillPass{pending: preToolEvents[env.Event] && len(skillsPendingInReach(o.home())) > 0}
+	if p.pending || skillScanEvent(env.Connector, env.Event) || (env.Facts != nil && env.Facts.readsSkill) {
+		p.sent, p.attached = o.attachSkills(env, payload)
+	}
+	return p
+}
+
+// finishSkillPass applies the gateway's answer to the pass: it records the
+// folders still held, takes refused folders out of reach and returns the
+// refusal of this call, or "". A held folder whose pass went unanswered may
+// still be unscanned, so the call does not run whatever the outage fail
+// mode (GAP-0980); a refused folder the kit could not move is still loadable
+// and nothing else denies it (GAP-0039).
+func (o HookOptions) finishSkillPass(p skillPass, resp Response, err error) string {
+	if p.sent == nil {
+		return ""
+	}
+	answered := err == nil && (resp.Status == 403 || resp.Status >= 200 && resp.Status < 300)
+	left := updateSkillPending(o.home(), resp.Body, answered, p.sent, p.attached, o.Config.Managed)
+	if p.pending && err != nil && len(left) > 0 {
+		return skillPendingRefusal(left)
+	}
+	if err != nil || resp.Status < 200 || resp.Status >= 300 {
+		return ""
+	}
+	if moved := applySkillAnswer(o.home(), resp.Body, p.sent, p.attached, time.Now()); len(moved) > 0 {
+		fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders taken out of the agent's reach: %s\n", strings.Join(moved, ", "))
+	}
+	if stuck := skillsStillInReach(resp.Body, p.sent); len(stuck) > 0 {
+		recordStuckSkills(o.home(), stuck)
+		return "DefenseClaw refused skill folders it could not take out of the agent's reach: " + strings.Join(stuck, ", ")
+	}
+	return ""
 }
 
 // attachSkills lists every skill folder's fingerprint in env's facts and

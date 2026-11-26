@@ -631,7 +631,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 				return true
 			}
 			if program == "xargs" {
-				if len(literalPipelineOperands(file, called, cwd, home, depth)) == 0 &&
+				if (len(literalPipelineOperands(file, called, cwd, home, depth)) == 0 || xargsPerlChild(words)) &&
 					unprovenWriter.MatchString(command) {
 					set("dynamic-argument", true)
 				}

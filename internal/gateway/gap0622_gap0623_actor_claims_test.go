@@ -107,11 +107,16 @@ func gap0622Rows() []gap0622Row {
 // dc-link) or after more link words than the kit sends was a clean allow
 // where the laptop, which follows the link, blocks or alerts (substrate-1
 // GAP-0622): it is the pack's unknown tier now (ACTION-COMPOUND-LIMIT, an
-// alert in these packs). cd sub && echo x >> dc-link placed the word in the start folder
-// and was allowed, and cd sub && cat notes false-blocked on the start
-// folder's notes link (GAP-0623): the word is read in the folder the cd chain
-// gives now, an eval body's too, and dd of=dc-link is a word. Benign rows get
-// the laptop's exact answer, in every pack, with the kit's honest facts.
+// alert in these packs). cd sub && echo x >> dc-link placed the word in the
+// start folder and was allowed (GAP-0623): the word is read in the folder the
+// cd chain gives now, an eval body's too, and dd of=dc-link is a word. The
+// exact rows get the laptop's exact answer, in every pack, with the kit's
+// honest facts. That answer is not always allow: cd sub && cat notes is a
+// PATH-SSH-KEY block on the laptop too, as at 1.0.10, because the laptop's
+// private-key reader keeps the start folder as a candidate after a relative
+// cd (actionPosixPrivateKeyRead). This layout has dc-link in the start folder
+// as well, so its write rows hold however the word is placed; the start-folder
+// placement shows only in TestGAP0623ActorLiveLayoutKeepsLaptopVerdict.
 func TestGAP0622GAP0623ActorClaimsCutAndFoldersKeepLaptopVerdict(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
@@ -134,31 +139,124 @@ func TestGAP0622GAP0623ActorClaimsCutAndFoldersKeepLaptopVerdict(t *testing.T) {
 				la, lr := gap0545Verdict(t, api, context.Background(), claude, host)
 				facts := gap0545KitFacts(t, "claudecode", "PreToolUse", host, home)
 				ca, cr := gap0545Verdict(t, api, gap0545Actor(actor, "claudecode", "PreToolUse", guest, facts), claude, guest)
-				switch row.want {
-				case "exact":
-					if ca != la || !slices.Equal(cr, lr) {
-						t.Errorf("%s: benign: actor %s %v, laptop %s %v", row.name, ca, cr, la, lr)
+				gap0622Check(t, row, la, lr, ca, cr)
+			}
+		})
+	}
+}
+
+// gap0622Check compares the actor's verdict ca, cr with the laptop's la, lr
+// as row.want asks.
+func gap0622Check(t *testing.T, row gap0622Row, la string, lr []string, ca string, cr []string) {
+	t.Helper()
+	switch row.want {
+	case "exact":
+		if ca != la || !slices.Equal(cr, lr) {
+			t.Errorf("%s: actor %s %v, laptop %s %v, want the laptop's exact answer", row.name, ca, cr, la, lr)
+		}
+	case "laptop":
+		if gap0545Rank(la, lr) < 2 {
+			t.Errorf("%s: laptop %s %v, want an alert or a block (the test layout is wrong)", row.name, la, lr)
+		}
+		if gap0545Rank(ca, cr) < gap0545Rank(la, lr) {
+			t.Errorf("%s: actor %s %v is weaker than the laptop's %s %v", row.name, ca, cr, la, lr)
+		}
+		for _, rule := range lr {
+			if !slices.Contains(cr, rule) {
+				t.Errorf("%s: actor %s %v does not name the laptop's %s", row.name, ca, cr, rule)
+			}
+		}
+	case "floor":
+		if gap0545Rank(la, lr) < 2 {
+			t.Errorf("%s: laptop %s %v, want an alert or a block (the test layout is wrong)", row.name, la, lr)
+		}
+		if gap0545Rank(ca, cr) < gap0545Rank(la, lr) && (gap0545Rank(ca, cr) < 2 || !slices.Contains(cr, evaluationLimitRuleID)) {
+			t.Errorf("%s: actor %s %v, want the laptop's %s %v or the unknown tier", row.name, ca, cr, la, lr)
+		}
+	}
+}
+
+// TestGAP0623ActorLiveLayoutKeepsLaptopVerdict is the live layout of the
+// PREVER-T6A3 rows (substrate-1 GAP-0623): the call starts in a work folder
+// outside the home, /work/w3, whose notes links to the SSH key; its folder
+// sub holds a plain notes file and the only dc-link, a link to DefenseClaw
+// state. No dc-link in the start folder, so a write placed in the start folder
+// misses the link: cd sub && echo x >> dc-link, its eval and -c bodies and dd
+// of=dc-link after the cd were a clean allow in the actor where the laptop
+// alerts or blocks, and eval "cd sub && cat ../notes" an alert where the
+// laptop blocks. A key read through the cd chain stays the laptop's block,
+// and every other row gets the laptop's exact answer, whatever it is:
+// cd sub && cat notes is the laptop's PATH-SSH-KEY block (its private-key
+// reader keeps the start folder as a candidate after a relative cd, as at
+// 1.0.10), cat sub/notes and cd sub && ls -l its allow.
+func TestGAP0623ActorLiveLayoutKeepsLaptopVerdict(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX gateway")
+	}
+	claude := gap0545Shapes()[0]
+	rows := []gap0622Row{
+		{"cd-sub-write", "cd sub && echo x >> dc-link", "laptop"},
+		{"cd-sub-semicolon-write", "cd sub; echo x >> dc-link", "laptop"},
+		{"eval-cd-sub-write", `eval "cd sub && echo x >> dc-link"`, "laptop"},
+		{"bash-c-cd-sub-write", `bash -c 'cd sub && echo x >> dc-link'`, "laptop"},
+		{"cd-sub-dd-of-link", "cd sub && dd if=/dev/zero of=dc-link count=1", "laptop"},
+		{"dd-of-sub-link", "dd if=/dev/zero of=sub/dc-link count=1", "laptop"},
+		{"cat-key-link", "cat notes", "laptop"},
+		{"cd-sub-cat-up-key-link", "cd sub && cat ../notes", "laptop"},
+		{"eval-cd-sub-cat-up-key-link", `eval "cd sub && cat ../notes"`, "laptop"},
+		{"sh-c-cd-sub-cat-up-key-link", `sh -c "cd sub && cat ../notes"`, "laptop"},
+		{"cd-sub-cd-up-cat-key-link", "cd sub && cd .. && cat notes", "laptop"},
+		{"cd-sub-cat-notes", "cd sub && cat notes", "exact"},
+		{"cd-sub-semicolon-cat-notes", "cd sub; cat notes", "exact"},
+		{"sh-c-cd-sub-cat-notes", `sh -c "cd sub && cat notes"`, "exact"},
+		{"eval-cd-sub-cat-notes", `eval "cd sub && cat notes"`, "exact"},
+		{"cat-sub-notes", "cat sub/notes", "exact"},
+		{"cd-sub-ls", "cd sub && ls -l", "exact"},
+		{"cd-sub-wc-notes", "cd sub && wc -l notes", "exact"},
+	}
+	for _, pack := range []string{"default", "permissive", "strict"} {
+		t.Run(pack, func(t *testing.T) {
+			api, actor, home, _ := gap0545API(t, "claudecode", pack)
+			work := filepath.Join(filepath.Dir(filepath.Dir(home)), "work")
+			start := filepath.Join(work, "w3")
+			if err := os.MkdirAll(filepath.Join(start, "sub"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(start, "sub", "notes"), []byte("notes\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for link, target := range map[string]string{
+				"notes":       filepath.Join(home, ".ssh", "id_ed25519"),
+				"sub/dc-link": filepath.Join(home, ".defenseclaw", "config.yaml"),
+			} {
+				if err := os.Symlink(target, filepath.Join(start, link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, row := range rows {
+				body := func(cwd string) []byte {
+					raw, _ := json.Marshal(map[string]any{"session_id": "gap0623", "transcript_path": "", "cwd": cwd,
+						"permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+						"tool_input": map[string]any{"command": row.command}, "tool_use_id": "toolu_gap0623"})
+					return raw
+				}
+				host, guest := body(start), body("/work/w3")
+				la, lr := gap0545Verdict(t, api, context.Background(), claude, host)
+				// The kit runs in the actor, where the work folder is /work
+				// and the home /sandbox.
+				facts := gap0545KitFacts(t, "claudecode", "PreToolUse", host, home)
+				if facts != nil {
+					raw, err := json.Marshal(facts)
+					if err != nil {
+						t.Fatal(err)
 					}
-				case "laptop":
-					if gap0545Rank(la, lr) < 2 {
-						t.Errorf("%s: laptop %s %v, want an alert or a block (the test layout is wrong)", row.name, la, lr)
-					}
-					if gap0545Rank(ca, cr) < gap0545Rank(la, lr) {
-						t.Errorf("%s: actor %s %v is weaker than the laptop's %s %v", row.name, ca, cr, la, lr)
-					}
-					for _, rule := range lr {
-						if !slices.Contains(cr, rule) {
-							t.Errorf("%s: actor %s %v does not name the laptop's %s", row.name, ca, cr, rule)
-						}
-					}
-				case "floor":
-					if gap0545Rank(la, lr) < 2 {
-						t.Errorf("%s: laptop %s %v, want an alert or a block (the test layout is wrong)", row.name, la, lr)
-					}
-					if gap0545Rank(ca, cr) < gap0545Rank(la, lr) && (gap0545Rank(ca, cr) < 2 || !slices.Contains(cr, evaluationLimitRuleID)) {
-						t.Errorf("%s: actor %s %v, want the laptop's %s %v or the unknown tier", row.name, ca, cr, la, lr)
+					facts = &SubstrateFacts{}
+					if err := json.Unmarshal([]byte(strings.ReplaceAll(string(raw), work, "/work")), facts); err != nil {
+						t.Fatal(err)
 					}
 				}
+				ca, cr := gap0545Verdict(t, api, gap0545Actor(actor, "claudecode", "PreToolUse", guest, facts), claude, guest)
+				gap0622Check(t, row, la, lr, ca, cr)
 			}
 		})
 	}

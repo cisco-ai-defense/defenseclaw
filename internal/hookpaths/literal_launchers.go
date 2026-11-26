@@ -406,6 +406,72 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); dest != "" {
 			return []string{dest}
 		}
+	case program == "mv" || program == "gmv":
+		op, ok := parseRename(words[1:], cwd)
+		if !ok || len(op.sources) == 0 {
+			return nil
+		}
+		if op.targetDir != "" {
+			var names []string
+			for _, source := range op.sources {
+				names = append(names, OperandPath(op.targetDir, cwd)+"/"+filepath.Base(source))
+			}
+			return names
+		}
+		if op.dest != "" {
+			return []string{OperandPath(op.dest, cwd)}
+		}
+	case program == "install" || program == "ginstall":
+		if len(words) < 3 {
+			return nil
+		}
+		var destination string
+		var sources []string
+		for i := 1; i < len(words); i++ {
+			word := words[i]
+			switch {
+			case word == "--":
+				sources = append(sources, words[i+1:]...)
+				i = len(words)
+			case word == "-d" || word == "--directory":
+				return nil
+			case word == "-t" || word == "--target-directory":
+				i++
+				if i >= len(words) {
+					return nil
+				}
+				destination = words[i]
+			case strings.HasPrefix(word, "--target-directory="):
+				destination = strings.TrimPrefix(word, "--target-directory=")
+			case strings.HasPrefix(word, "-t") && len(word) > 2:
+				destination = word[2:]
+			case strings.HasPrefix(word, "-"):
+				continue
+			default:
+				sources = append(sources, word)
+			}
+		}
+		if destination != "" {
+			if len(sources) == 0 {
+				return nil
+			}
+			var names []string
+			for _, source := range sources {
+				names = append(names, OperandPath(destination, cwd)+"/"+filepath.Base(source))
+			}
+			return names
+		}
+		if len(sources) >= 2 {
+			return []string{OperandPath(sources[len(sources)-1], cwd)}
+		}
+	case program == "rsync":
+		if len(words) < 3 {
+			return nil
+		}
+		dest := archiveCopyDestination(words[1:], makeStatic(len(words)-1), cwd)
+		if dest != "" {
+			return []string{dest}
+		}
 	case program == "tee" || program == "gtee":
 		var names []string
 		for _, word := range words[1:] {
@@ -594,7 +660,17 @@ func literalInlineProgram(words []string) (code, language string, ok bool) {
 				j++
 				module = words[j]
 			}
-			if name, _, _ := strings.Cut(module, "="); name != "" && !strings.HasPrefix(name, "-") {
+			if name, value, hasValue := strings.Cut(module, "="); name != "" && !strings.HasPrefix(name, "-") {
+				if name == "constant" && hasValue {
+					constantName, constantValue, hasComma := strings.Cut(value, ",")
+					if hasComma && literalPerlConstantName(constantName) {
+						if !literalPerlDecimal(constantValue) {
+							constantValue = "undef"
+						}
+						uses.WriteString("use constant " + constantName + " => " + constantValue + ";\n")
+					}
+					continue
+				}
 				uses.WriteString("use " + name + ";\n")
 			}
 		}
@@ -1027,4 +1103,46 @@ func knownFindChangeOperands(words []string, cwd string) []string {
 		}
 	}
 	return operands
+}
+
+func literalPerlConstantName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' {
+			continue
+		}
+		if i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func literalPerlDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// xargsPerlChild keeps the conservative xargs check when the Perl reader
+// proves only some writes in a child program. A proved path is not a proof
+// that every write in the program has a fixed destination.
+func xargsPerlChild(words []string) bool {
+	for _, word := range words {
+		base := programBase(word)
+		if base == "perl" || strings.HasSuffix(base, ".pl") {
+			return true
+		}
+	}
+	return false
 }

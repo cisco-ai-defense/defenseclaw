@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -146,7 +148,7 @@ func (s *passthroughStream) copyHeaders() {
 
 // copyRest forwards what is left of src without inspection (the fail mode
 // of an OSS install, after the alert).
-func (s *passthroughStream) copyRest(src io.Reader) {
+func (s *passthroughStream) copyRest(src io.Reader, tw *clientWriteErrWriter) {
 	flusher, _ := s.w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {
@@ -158,6 +160,10 @@ func (s *passthroughStream) copyRest(src io.Reader) {
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				// A cut here is of unknown cost like any other (GAP-1112).
+				tw.endUsage(s.r.Context(), err)
+			}
 			return
 		}
 	}
@@ -176,14 +182,46 @@ type streamRead struct {
 // upstream did not fail (GAP-1112).
 type clientWriteErrWriter struct {
 	http.ResponseWriter
+	// final: the stream's final event reached the agent (GAP-1121).
+	final bool
 }
 
 func (c *clientWriteErrWriter) Write(b []byte) (int, error) {
 	n, err := c.ResponseWriter.Write(b)
 	if err != nil {
 		setUsageEndErr(c.ResponseWriter, fmt.Errorf("%w: %v", modelusage.ErrClientGone, err))
+	} else if !c.final && finalStreamEvent(b) {
+		c.final = true
 	}
 	return n, err
+}
+
+// finalStreamEvent reports bytes written to the agent that carry the final
+// event of a stream: the OpenAI [DONE] line, an Anthropic message_stop, an
+// OpenAI Responses response.completed, an Ollama done object. Text inside a
+// JSON string cannot match: its quotes are escaped and its line ends are
+// \n, never a real line end.
+func finalStreamEvent(b []byte) bool {
+	return bytes.HasPrefix(b, []byte("data: [DONE]")) || bytes.Contains(b, []byte("\ndata: [DONE]")) ||
+		bytes.HasPrefix(b, []byte("event: message_stop")) || bytes.Contains(b, []byte("\nevent: message_stop")) ||
+		bytes.Contains(b, []byte(`"type":"message_stop"`)) || bytes.Contains(b, []byte(`"type": "message_stop"`)) ||
+		bytes.Contains(b, []byte(`"type":"response.completed"`)) || bytes.Contains(b, []byte(`"type": "response.completed"`)) ||
+		bytes.Contains(b, []byte(`"done":true`)) || bytes.Contains(b, []byte(`"done": true`))
+}
+
+// endUsage ends the call's usage record with why the stream stopped: the
+// agent's context done is a client gone, anything else the upstream's read
+// error. Once the final event reached the agent the call is whole, and
+// neither marks it cut.
+func (c *clientWriteErrWriter) endUsage(ctx context.Context, readErr error) {
+	if c.final {
+		return
+	}
+	if ctx.Err() != nil {
+		setUsageEndErr(c.ResponseWriter, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
+		return
+	}
+	setUsageEndErr(c.ResponseWriter, readErr)
 }
 
 func (c *clientWriteErrWriter) Flush() {
@@ -199,7 +237,8 @@ func (s *passthroughStream) run() {
 	// agent that fails, the agent's context ending, and an upstream body that
 	// breaks off (below) end the call with that error, so a stream cut after
 	// the provider began answering is of unknown cost.
-	s.w = &clientWriteErrWriter{ResponseWriter: s.w}
+	tw := &clientWriteErrWriter{ResponseWriter: s.w}
+	s.w = tw
 	p, w, r, resp, mode, label := s.p, s.w, s.r, s.resp, s.mode, s.label
 	ctx := r.Context()
 	blockedReply := func(msg string) {
@@ -223,7 +262,7 @@ func (s *passthroughStream) run() {
 				return
 			}
 			s.copyHeaders()
-			s.copyRest(resp.Body)
+			s.copyRest(resp.Body, tw)
 			return
 		}
 		// Deferred first, so it runs after the reader goroutine has ended.
@@ -931,7 +970,7 @@ read:
 			}
 		case <-ctx.Done():
 			// The agent is gone: nothing more is sent.
-			setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
+			tw.endUsage(ctx, nil)
 			stopped = true
 			break read
 		}
@@ -1008,11 +1047,7 @@ read:
 			if readErr != io.EOF {
 				// The upstream body broke off. When the agent's context is
 				// done, that is the cause and the call is cancelled.
-				if ctx.Err() != nil {
-					setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
-				} else {
-					setUsageEndErr(w, readErr)
-				}
+				tw.endUsage(ctx, readErr)
 			}
 			if encoded && readErr != io.EOF && ctx.Err() == nil {
 				// A corrupt or oversized encoded stream cannot be read to its end.

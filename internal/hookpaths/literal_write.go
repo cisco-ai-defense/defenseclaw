@@ -156,6 +156,7 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 	// started in. Where the call runs in no other folder, the starting folder
 	// is the only reading (rel-1-0-9:GAP-1038).
 	placed := newPlacedCalls(file, command, cwd, home)
+	placed.renamed = include != nil
 	programOperands := func(words []string, stmt *syntax.Stmt, call *syntax.CallExpr, environment actionValues) []string {
 		readFiles := len(file.Stmts) == 1
 		dirs := placed.of(call)
@@ -944,6 +945,17 @@ func sedBSDInPlace(words []string) (files []string, suffix string, inPlace bool)
 }
 
 func literalInterpreterWrites(code, language, cwd, home string) []string {
+	if len(code) > 16<<10 {
+		return nil
+	}
+	paths := literalInterpreterWritesBase(code, language, cwd, home)
+	if language == "perl" {
+		paths = append(paths, perlProvenWrites(code, cwd, home)...)
+	}
+	return paths
+}
+
+func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 	if len(code) > 16<<10 {
 		return nil
 	}

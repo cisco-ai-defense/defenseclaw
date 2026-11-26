@@ -71,7 +71,7 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 		if err != nil {
 			os.Exit(5)
 		}
-		for deadline := time.Now().Add(5 * time.Second); os.Getppid() == middle; time.Sleep(10 * time.Millisecond) {
+		for deadline := time.Now().Add(20 * time.Second); os.Getppid() == middle; time.Sleep(10 * time.Millisecond) {
 			if time.Now().After(deadline) {
 				os.Exit(3)
 			}
@@ -79,7 +79,7 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 		if adopter := os.Getppid(); adopter != 1 {
 			// A child subreaper (systemd --user, a container init) adopted
 			// this process, so the parent-PID-1 case cannot be built here.
-			_ = os.WriteFile(marker, []byte("subreaper "+strconv.Itoa(adopter)), 0o600)
+			writeMarker(marker, "subreaper "+strconv.Itoa(adopter))
 			os.Exit(0)
 		}
 		info, err := os.Stat("/etc/passwd")
@@ -87,7 +87,7 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 			os.Exit(4)
 		}
 		owner := hostOwnerUID("/etc/passwd", info, 65534)
-		_ = os.WriteFile(marker, []byte(strconv.FormatUint(uint64(owner), 10)), 0o600)
+		writeMarker(marker, strconv.FormatUint(uint64(owner), 10))
 		os.Exit(0)
 	}
 
@@ -148,7 +148,7 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 			if output, err := middle.CombinedOutput(); err != nil {
 				t.Fatalf("start reparented host helper: %v: %s", err, output)
 			}
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
 			for ; ; time.Sleep(20 * time.Millisecond) {
 				if raw, err := os.ReadFile(marker); err == nil {
 					got := strings.TrimSpace(string(raw))
@@ -169,6 +169,17 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 				t.Fatalf("host process sent a request to an unrelated socket: poll=%d err=%v", n, err)
 			}
 		})
+	}
+}
+
+// writeMarker publishes the helper's result atomically: os.WriteFile creates
+// the file empty before it writes, so a parent polling for the file saw an
+// empty result under load (GAP-1774, GAP-1918). A rename makes the marker
+// appear whole or not at all.
+func writeMarker(marker, content string) {
+	tmp := marker + ".tmp"
+	if os.WriteFile(tmp, []byte(content), 0o600) != nil || os.Rename(tmp, marker) != nil {
+		os.Exit(6)
 	}
 }
 

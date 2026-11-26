@@ -18,7 +18,10 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
@@ -40,6 +43,35 @@ func substrateEgressInfo(ctx context.Context, s *substrateSession) *api.EgressCa
 		return nil
 	}
 	return info.EgressCallout
+}
+
+// substrateEgressLine is the Egress line status prints while the DefenseClaw
+// callout does not hold Substrate's egress slot (GAP-0497), "" while it does
+// or the cluster does not say. run, run --task, --batch and connect print it
+// too (GAP-0505): in closed mode the agent's other hosts are refused and
+// fail to resolve, which a person read as a DNS fault.
+func substrateEgressLine(e *api.EgressCallout) string {
+	if !e.Replaced() {
+		return ""
+	}
+	return "Egress: " + substrateEgressSummary(e)
+}
+
+// substrateEgressAhead reads /info while the launcher does other work (the
+// create, the actor lookup), so the Egress line costs a launch no time. The
+// returned func waits for that read and prints the line on w; it prints at
+// most once.
+func substrateEgressAhead(ctx context.Context, s *substrateSession) func(w io.Writer) {
+	ch := make(chan *api.EgressCallout, 1)
+	go func() { ch <- substrateEgressInfo(ctx, s) }()
+	var once sync.Once
+	return func(w io.Writer) {
+		once.Do(func() {
+			if line := substrateEgressLine(<-ch); line != "" {
+				fmt.Fprintln(w, line)
+			}
+		})
+	}
 }
 
 // substrateEgressSummary says, for a person, that the DefenseClaw callout does

@@ -26,6 +26,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const claudeChainGuardName = "defenseclaw-hook-guard.exe"
@@ -517,6 +518,21 @@ func claudeManagedGuardPath(launcher string) string {
 	return launcher[:last+1] + windowsHookGuardBinaryName
 }
 
+// claudeManagedGuardOfLauncher reports whether guard is the guard image of
+// launcher: the file windowsHookGuardBinaryName in the launcher's folder.
+// Setup renders both by their long names. An administrator's HKLM matrix can
+// spell either by its 8.3 short names; that spelling names the same file by
+// the same names (winpath.SameNamedFile), as the exec form's command does
+// for verify and enrolment (GAP-2244). A copy, a junction or a hard link in
+// another folder is not the guard.
+func claudeManagedGuardOfLauncher(launcher, guard string) bool {
+	want := claudeManagedGuardPath(launcher)
+	if want == "" || guard == "" {
+		return false
+	}
+	return want == guard || winpath.SameNamedFile(guard, want)
+}
+
 // The managed policy keeps cmd.exe as the registered parent. The small
 // installed guard checks whether the full hook starts and preserves its
 // answer. If the guard itself cannot start, cmd.exe gives the same event's
@@ -640,7 +656,7 @@ func claudeManagedGuardWrapperParts(hook map[string]interface{}) (string, []stri
 		launcher, hookArgs, event, wrapped, open, valid := hookguard.ParseInvocationMode(args[i+1 : i+9])
 		if valid && wrapped && !open &&
 			slices.Equal(hookArgs, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) &&
-			claudeManagedGuardPath(launcher) == guard &&
+			claudeManagedGuardOfLauncher(launcher, guard) &&
 			claudeManagedGuardWrapperKnown(args, guard, launcher, event, hookArgs) {
 			return launcher, hookArgs, true
 		}
