@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	toml "github.com/pelletier/go-toml/v2"
 
@@ -329,6 +330,19 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 		hookpaths.ActionMakePrivateKeyRead(command, cwd, home) {
 		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
 	}
+	words := hookpaths.CommandPathWords(command, home)
+	// A call over the statement budget whose words give the gateway no claim
+	// to read gets no protected-target decision (shellDecisionOverBudget):
+	// its facts are the ones the decision would give, less that proof. A
+	// word that a link moves or that is a private place of the home makes
+	// the decision as before.
+	if shellDecisionOverBudget(command) {
+		paths, truncated := len(f.Paths), f.Truncated
+		if !addCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, true) {
+			return
+		}
+		f.Paths, f.Truncated = f.Paths[:paths], truncated
+	}
 	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
 		hookpaths.ProtectedTargetDecision {
 		f.Proofs = append(f.Proofs, ProofProtectedWrite)
@@ -336,25 +350,85 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	// Which places are private matters only to a call the kit proved reads
 	// or writes the actor's keys: an own SSH folder copy alerts where the
 	// copy stays private (substrate-1 GAP-0549).
-	privacy := len(f.Proofs) > 0
+	addCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, false)
+}
+
+// addCommandWordFacts lists the CommandWordField fact of each distinct word
+// (commandWordFact, privacy as asked), at most maxCommandWordWalks words and
+// maxPathFacts facts. With ask set, claimable reports a word it walked whose
+// place a link moves, or that is a private place of home whatever privacy
+// is: a fact the gateway reads as a claim (substrateGuestClaimsOf), or one
+// the decision's proof would list (substrate-1 GAP-1153).
+func addCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd, home string, privacy, ask bool) (claimable bool) {
 	seen := map[string]bool{}
-	for _, word := range hookpaths.CommandPathWords(command, home) {
+	for _, word := range words {
 		if seen[word.Text] {
 			continue
 		}
 		if len(seen) == maxCommandWordWalks {
 			f.Truncated = true
-			return
+			return claimable
 		}
 		seen[word.Text] = true
-		if fact, listed := commandWordFact(word, cwd, home, privacy); listed {
+		fact, listed := commandWordFact(word, cwd, home, privacy)
+		if ask && !claimable {
+			claimable = fact.Resolved != "" || fact.Entry != "" || hookpaths.PrivateHomePlace(commandWordPlace(word, cwd), home)
+		}
+		if listed {
 			if len(f.Paths) >= maxPathFacts {
 				f.Truncated = true
-				return
+				return claimable
 			}
 			f.Paths = append(f.Paths, fact)
 		}
 	}
+	return claimable
+}
+
+// minBudgetCheckBytes is the shortest shell command shellDecisionOverBudget
+// counts. A call over the statement budget has more than 128 statements,
+// each a word and a separator; a shorter call is never counted and gets
+// the decision, as before, so ordinary calls pay nothing for the check.
+const minBudgetCheckBytes = 256
+
+// overBudgetDecisionForTest makes the protected-target decision on every
+// call over the statement budget, as rel/1.0.11 dfb6d9c707 did: only the
+// tests that judge the same calls with both sets of facts set it
+// (SetOverBudgetShellProofsForTest).
+var overBudgetDecisionForTest atomic.Bool
+
+// SetOverBudgetShellProofsForTest makes the kit's protected-target decision
+// on every call over the statement budget, until restore is called. Tests
+// only: they compare the gateway's answers with and without that proof.
+func SetOverBudgetShellProofsForTest(on bool) (restore func()) {
+	was := overBudgetDecisionForTest.Swap(on)
+	return func() { overBudgetDecisionForTest.Store(was) }
+}
+
+// shellDecisionOverBudget reports a POSIX shell command over the statement
+// budget, as the laptop hook client reads a POSIX call
+// (clientStatementBudgetExceeded: actionfacts.ShellStatementsOverBudget,
+// the same function), which describes no such call to its gateway
+// (rel-1-0-2:GAP-0568). The gateway refuses it at the budget before any
+// reader that reads the kit's protected-write proof of the whole command
+// runs (dispatchTrustedAction); the readers its twins and cap-floor pieces
+// run judge other text, and read only the kit's word claims, which the
+// caller keeps the decision for. Run on such a call, the decision re-read
+// each statement alone after a dynamic program and cost the actor's hook
+// 140 to 290 ms on an 8 KB script (substrate-1 GAP-1153).
+func shellDecisionOverBudget(command string) bool {
+	return len(command) >= minBudgetCheckBytes && !overBudgetDecisionForTest.Load() &&
+		actionfacts.ShellStatementsOverBudget(command)
+}
+
+// commandWordPlace is the place of a command word, spelled from cwd and
+// cleaned: what commandWordFact reports as Abs.
+func commandWordPlace(word hookpaths.CommandPathWord, cwd string) string {
+	full := word.Value
+	if !strings.HasPrefix(full, "/") {
+		full = strings.TrimRight(cwd, "/") + "/" + full
+	}
+	return filepath.Clean(full)
 }
 
 // commandWordFact is the CommandWordField fact of one command word: its place
