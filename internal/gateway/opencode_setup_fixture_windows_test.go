@@ -20,6 +20,15 @@ import (
 )
 
 func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connector.SetupOpts {
+	return prepareOpenCodeSetupAuthorityFixtureForVersion(t, dataDir, "2.1.4")
+}
+
+// prepareOpenCodeSetupAuthorityFixtureForVersion publishes the protected
+// selected-executable evidence for an OpenCode that reports rawVersion. A
+// Windows gateway never reads an OpenCode version from its PATH or from
+// agent_discovery.json: the version it admits is the one in this evidence, so
+// a V1 or a git build reaches admission only through it.
+func prepareOpenCodeSetupAuthorityFixtureForVersion(t *testing.T, dataDir, rawVersion string) connector.SetupOpts {
 	t.Helper()
 	if err := safefile.ProtectDirectory(dataDir); err != nil {
 		t.Fatalf("protect OpenCode fixture data directory: %v", err)
@@ -31,7 +40,7 @@ func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connecto
 		t.Fatalf("create OpenCode fixture package folder: %v", err)
 	}
 	executable := filepath.Join(packageDir, "opencode.exe")
-	body := []byte("MZ OpenCode 2.1.4 gateway fixture")
+	body := []byte("MZ OpenCode " + rawVersion + " gateway fixture")
 	if err := os.WriteFile(executable, body, 0o700); err != nil {
 		t.Fatalf("write OpenCode fixture executable: %v", err)
 	}
@@ -45,8 +54,8 @@ func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connecto
 				"connector":          "opencode",
 				"source":             "setup-selected",
 				"executable":         executable,
-				"raw_version":        "2.1.4",
-				"normalized_version": "2.1.4",
+				"raw_version":        rawVersion,
+				"normalized_version": connector.NormalizeAgentVersion("opencode", rawVersion),
 				"sha256":             fmt.Sprintf("%x", digest[:]),
 				"selected_at":        now.Format(time.RFC3339),
 				"expires_at":         now.Add(15 * time.Minute).Format(time.RFC3339),
@@ -65,7 +74,7 @@ func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connecto
 	t.Cleanup(func() { connector.OpenCodeExecutablePathOverride = previous })
 	return connector.SetupOpts{
 		DataDir:         dataDir,
-		AgentVersion:    "2.1.4",
+		AgentVersion:    rawVersion,
 		AgentExecutable: executable,
 		HookContractID:  "opencode-hooks-v2",
 	}

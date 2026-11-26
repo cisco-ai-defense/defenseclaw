@@ -11,10 +11,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-func prepareOpenCodeSetupAuthorityFixture(_ *testing.T, dataDir string) connector.SetupOpts {
+func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connector.SetupOpts {
+	return prepareOpenCodeSetupAuthorityFixtureForVersion(t, dataDir, "2.1.4")
+}
+
+// prepareOpenCodeSetupAuthorityFixtureForVersion is the Unix form: the version
+// comes from agent_discovery.json, so the options carry rawVersion only.
+func prepareOpenCodeSetupAuthorityFixtureForVersion(_ *testing.T, dataDir, rawVersion string) connector.SetupOpts {
 	return connector.SetupOpts{
 		DataDir:        dataDir,
-		AgentVersion:   "2.1.4",
+		AgentVersion:   rawVersion,
 		HookContractID: "opencode-hooks-v2",
 	}
 }

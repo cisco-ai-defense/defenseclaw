@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -33,22 +34,32 @@ func TestSetupConnectorsIsolated_ActiveOpenCodeNotV2StopsOnlyOpenCode(t *testing
 		setupErr      error
 		wantFailStart bool
 		wantReason    []string
+		// Windows: the OpenCode version is the protected selected-executable
+		// evidence's (windowsVersion), never agent_discovery.json or the
+		// gateway PATH; and a removed OpenCode cannot be proven removed (only
+		// an Amp package path can), so it fails the refresh like any other
+		// refusal (windowsRemovedFails).
+		windowsVersion      string
+		windowsRemovedFails bool
 	}{
 		{
-			name:       "V1 first on the gateway PATH",
-			discovery:  `{"agents":{"opencode":{"version":"1.18.34"}}}`,
-			wantReason: []string{"not V2", "V2 is required", "defenseclaw-gateway restart", "defenseclaw setup remove opencode"},
+			name:           "V1 first on the gateway PATH",
+			discovery:      `{"agents":{"opencode":{"version":"1.18.34"}}}`,
+			windowsVersion: "1.18.34",
+			wantReason:     []string{"not V2", "V2 is required", "defenseclaw-gateway restart", "defenseclaw setup remove opencode"},
 		},
 		{
-			name:       "git build with no release version",
-			discovery:  `{"agents":{"opencode":{"version":"0.0.0-main-202607010000"}}}`,
-			wantReason: []string{"not V2", "defenseclaw setup remove opencode"},
+			name:           "git build with no release version",
+			discovery:      `{"agents":{"opencode":{"version":"0.0.0-main-202607010000"}}}`,
+			windowsVersion: "0.0.0-main-202607010000",
+			wantReason:     []string{"not V2", "defenseclaw setup remove opencode"},
 		},
 		{
-			name:       "agent removed",
-			discovery:  `{"agents":{"opencode":{"version":"","binary_path":"","installed":false}}}`,
-			setupErr:   fmt.Errorf("OpenCode is gone: %w", connector.ErrSetupRefusedUnchanged),
-			wantReason: []string{"the agent is not installed for this account", "defenseclaw setup remove opencode"},
+			name:                "agent removed",
+			discovery:           `{"agents":{"opencode":{"version":"","binary_path":"","installed":false}}}`,
+			setupErr:            fmt.Errorf("OpenCode is gone: %w", connector.ErrSetupRefusedUnchanged),
+			windowsRemovedFails: true,
+			wantReason:          []string{"the agent is not installed for this account", "defenseclaw setup remove opencode"},
 		},
 		{
 			// V2 is present and Setup refused it for another reason: the
@@ -76,13 +87,24 @@ func TestSetupConnectorsIsolated_ActiveOpenCodeNotV2StopsOnlyOpenCode(t *testing
 			if err := os.WriteFile(pluginPath, priorPlugin, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			priorOpts := prepareOpenCodeSetupAuthorityFixture(t, s.cfg.DataDir)
+			priorVersion := "2.1.4"
+			if runtime.GOOS == "windows" && tc.windowsVersion != "" {
+				priorVersion = tc.windowsVersion
+			}
+			priorOpts := prepareOpenCodeSetupAuthorityFixtureForVersion(t, s.cfg.DataDir, priorVersion)
+			wantFailStart := tc.wantFailStart || (runtime.GOOS == "windows" && tc.windowsRemovedFails)
 			priorLock := connector.NewHookContractLockEntry(priorOpts, connector.NewOpenCodeConnector(), "prior-test-build")
 			if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, priorLock); err != nil {
 				t.Fatal(err)
 			}
 			if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"opencode"}); err != nil {
 				t.Fatal(err)
+			}
+			if runtime.GOOS == "windows" && tc.windowsRemovedFails {
+				// The agent is removed after its evidence was locked.
+				if err := os.Remove(priorOpts.AgentExecutable); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"), []byte(tc.discovery), 0o600); err != nil {
 				t.Fatal(err)
@@ -103,7 +125,7 @@ func TestSetupConnectorsIsolated_ActiveOpenCodeNotV2StopsOnlyOpenCode(t *testing
 			if active := connector.LoadActiveConnectors(s.cfg.DataDir); !reflect.DeepEqual(active, []string{"opencode"}) {
 				t.Errorf("active connectors = %v, want opencode kept", active)
 			}
-			if tc.wantFailStart {
+			if wantFailStart {
 				if err == nil || !strings.Contains(err.Error(), "connector opencode refresh failed") {
 					t.Fatalf("error = %v, want the refresh failure", err)
 				}
