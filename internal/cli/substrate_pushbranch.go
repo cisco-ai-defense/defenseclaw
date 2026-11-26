@@ -114,13 +114,16 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 			return cliusage.WithExitCode(errors.New("not pushed"), substrateExitRefused)
 		}
 	}
-	if err := substratePushDecide(ctx, cmd, f, s, a, api.PushRequest{
+	d, err := substratePushDecide(ctx, cmd, f, s, a, api.PushRequest{
 		Host: p.Host, Repo: p.Repo, URL: p.PushURL, Branch: branch, Head: p.Commit, Commits: p.Commits, Files: len(p.Files),
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	fmt.Fprintf(errw, "Pushing %s to %s...\n", branch, target)
-	if err := p.Push(ctx, rel.Client.BranchExec, branch, a.Name, workspace.PushedBefore(dataDir, copyName, p.Host, p.Repo, branch)); err != nil {
+	if err := substratePushUnderGrant(ctx, errw, s, a, d, target, func() error {
+		return p.Push(ctx, rel.Client.BranchExec, branch, a.Name, workspace.PushedBefore(dataDir, copyName, p.Host, p.Repo, branch))
+	}); err != nil {
 		var pe *workspace.BranchPushError
 		if errors.As(err, &pe) {
 			return cliusage.WithExitCode(err, substrateExitRefused)
@@ -187,32 +190,66 @@ func substratePushReview(w io.Writer, p *workspace.BranchPush, branch, target st
 	}
 }
 
+// substratePushUnderGrant runs push while the egress push grant of the
+// allow d is open, then closes it (GAP-1073). The grant makes egress, outside
+// the actor, refuse a push of the actor to any other repository, so a push
+// the agent redirects inside the actor fails. A gateway that predates
+// grants, or one that could not open it, gets a warning and today's path
+// (the review's own checks only). The close answer says whether egress saw
+// the push reach target; when it saw none (an older egress callout, or a
+// push that never left the actor), that is said too.
+func substratePushUnderGrant(ctx context.Context, errw io.Writer, s *substrateSession, a api.Actor, d api.PushDecision, target string, push func() error) error {
+	if d.Grant == "" {
+		why := "the cluster's gateway is older and holds no egress grant for the push"
+		if d.GrantError != "" {
+			why = "the cluster could not open the egress grant for the push (" + d.GrantError + ")"
+		}
+		fmt.Fprintf(errw, "warning: %s, so nothing outside the agent checks that the push goes to %s.\n", why, target)
+		return push()
+	}
+	err := push()
+	c, cerr := s.Client.PushGrantClose(context.WithoutCancel(ctx), a.Atespace, a.Name, d.Grant)
+	if err != nil {
+		return err
+	}
+	switch {
+	case cerr != nil:
+		fmt.Fprintf(errw, "warning: could not close the egress grant (%v); until it ends, in 15 minutes, the agent can push only to %s.\n", substrateFail(cerr), target)
+	case !c.Closed:
+		fmt.Fprintf(errw, "warning: the cluster lost the egress grant during the push (it expired, or the gateway leader changed); look at the branch on %s before you rely on it.\n", target)
+	case c.Pushes == 0:
+		fmt.Fprintf(errw, "warning: the cluster's egress saw no push to %s (an older egress callout does not check pushes); look at the branch there before you rely on it.\n", target)
+	}
+	return nil
+}
+
 // substratePushDecide asks the gateway and, for an ask, the person: inline
 // [y/N/a] on a terminal, else it waits for an answer from
-// `substrate approve` (the person's, or an administrator's).
-func substratePushDecide(ctx context.Context, cmd *cobra.Command, f *substratePullFlags, s *substrateSession, a api.Actor, req api.PushRequest) error {
+// `substrate approve` (the person's, or an administrator's). It returns the
+// allow, which names the egress push grant.
+func substratePushDecide(ctx context.Context, cmd *cobra.Command, f *substratePullFlags, s *substrateSession, a api.Actor, req api.PushRequest) (api.PushDecision, error) {
 	errw := cmd.ErrOrStderr()
 	deadline := time.Now().Add(substratePushWait)
 	asked := false
 	for {
 		d, err := s.Client.PushIntent(ctx, a.Atespace, a.Name, req)
 		if err != nil {
-			return substrateFail(err)
+			return api.PushDecision{}, substrateFail(err)
 		}
 		switch d.Decision {
 		case config.SubstrateGitPushAllow:
-			return nil
+			return d, nil
 		case config.SubstrateGitPushAsk:
 		default:
 			msg := "your profile turned off pull --push-branch (git_push: deny)"
 			if d.Reason == "ask_denied" {
 				msg = "the push was denied"
 			}
-			return cliusage.WithExitCode(errors.New(msg+"; bring the work home with --branch NAME and push from your computer"), substrateExitRefused)
+			return api.PushDecision{}, cliusage.WithExitCode(errors.New(msg+"; bring the work home with --branch NAME and push from your computer"), substrateExitRefused)
 		}
 		req.AskID = d.AskID
 		if f.yes {
-			return cliusage.WithExitCode(fmt.Errorf("not pushed: pushing needs an answer (--yes takes no). Answer it with: defenseclaw substrate approve %s", d.AskID), substrateExitRefused)
+			return api.PushDecision{}, cliusage.WithExitCode(fmt.Errorf("not pushed: pushing needs an answer (--yes takes no). Answer it with: defenseclaw substrate approve %s", d.AskID), substrateExitRefused)
 		}
 		if !asked && term.IsTerminal(int(os.Stdin.Fd())) {
 			asked = true
@@ -227,10 +264,10 @@ func substratePushDecide(ctx context.Context, cmd *cobra.Command, f *substratePu
 			default:
 				_, _ = s.Client.Decide(ctx, d.AskID, "deny", false, "")
 				fmt.Fprintln(errw, "Not pushed.")
-				return cliusage.WithExitCode(errors.New("not pushed"), substrateExitRefused)
+				return api.PushDecision{}, cliusage.WithExitCode(errors.New("not pushed"), substrateExitRefused)
 			}
 			if err != nil {
-				return substrateFail(err)
+				return api.PushDecision{}, substrateFail(err)
 			}
 			if note != "" {
 				// The answer is recorded but moved nothing (GAP-0973): say so.
@@ -243,11 +280,11 @@ func substratePushDecide(ctx context.Context, cmd *cobra.Command, f *substratePu
 			fmt.Fprintf(errw, "%s Waiting for an answer: defenseclaw substrate approve %s\n", d.Summary, d.AskID)
 		}
 		if time.Now().After(deadline) {
-			return cliusage.WithExitCode(fmt.Errorf("not pushed: nobody answered ask %s", d.AskID), substrateExitRefused)
+			return api.PushDecision{}, cliusage.WithExitCode(fmt.Errorf("not pushed: nobody answered ask %s", d.AskID), substrateExitRefused)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return api.PushDecision{}, ctx.Err()
 		case <-time.After(substratePushPoll):
 		}
 	}

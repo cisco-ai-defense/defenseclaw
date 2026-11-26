@@ -174,6 +174,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/recover", a.substrateRecoverActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/snapshot", a.substrateSnapshotActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/push", a.substrateGitPush(st))
+	mux.HandleFunc("DELETE /api/v1/substrate/actors/{atespace}/{name}/push/{grant}", a.substrateGitPushClose(st))
 	mux.HandleFunc("POST /api/v1/substrate/session-cert", a.substrateSessionCert(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach", a.substrateAttach(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach/{rest...}", a.substrateAttach(st))
