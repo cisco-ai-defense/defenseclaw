@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -60,8 +61,15 @@ func TestGAP2226HiddenChangesMatchEveryOffset(t *testing.T) {
 }
 
 // TestGAP2226PlacedCallsReadHiddenChangesOnce pins the work: a placed call of
-// a long script no longer walks the whole tree for each call.
+// a long script no longer walks the whole tree for each call. The statement
+// walk places calls only from an absolute directory, and /home/alice is not
+// absolute on Windows, so the home there is a Windows one
+// (rel-1-0-10:GAP-2264).
 func TestGAP2226PlacedCallsReadHiddenChangesOnce(t *testing.T) {
+	home := "/home/alice"
+	if runtime.GOOS == "windows" {
+		home = `C:\Users\alice`
+	}
 	var b strings.Builder
 	b.WriteString("cd .cache\n")
 	for i := range 1500 {
@@ -72,7 +80,7 @@ func TestGAP2226PlacedCallsReadHiddenChangesOnce(t *testing.T) {
 	if !ok {
 		t.Fatal("parse")
 	}
-	placed := newPlacedCalls(file, command, "/home/alice", "/home/alice")
+	placed := newPlacedCalls(file, command, home, home)
 	var calls []*syntax.CallExpr
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, isCall := node.(*syntax.CallExpr); isCall {
@@ -83,12 +91,15 @@ func TestGAP2226PlacedCallsReadHiddenChangesOnce(t *testing.T) {
 	for _, call := range calls {
 		placed.of(call)
 	}
+	if len(placed.dirs) == 0 {
+		t.Fatalf("the statement walk placed no call from %s", home)
+	}
 	// Each call asks for the changes that end before it starts, so the
 	// walk reads every call but the last, once.
 	if placed.hidden == nil || placed.hidden.next != len(calls)-1 {
 		t.Fatalf("hidden changes not read once over the %d calls: %v", len(calls), placed.hidden != nil)
 	}
-	renamed := newPlacedCalls(file, command, "/home/alice", "/home/alice")
+	renamed := newPlacedCalls(file, command, home, home)
 	renamed.renamed = true
 	for _, call := range calls[:3] {
 		renamed.of(call)
