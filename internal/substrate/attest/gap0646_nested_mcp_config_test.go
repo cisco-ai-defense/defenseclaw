@@ -1,6 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// This test writes Linux hook paths (/work/sub/.mcp.json); Agent Substrate pods are Linux, and those paths are not absolute on Windows hosts.
+//go:build !windows
+
 package attest
 
 import (
