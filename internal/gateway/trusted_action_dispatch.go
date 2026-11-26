@@ -1702,6 +1702,11 @@ func dispatchTrustedActionWith(
 	// on view (projection is its projection) and reports whether the view's
 	// enforcement projection failed, in which case no finding was added
 	// after the failure and the caller decides what that means.
+	// done is ctx.Done(): a closed channel is a non-nil ctx.Err(). The rule
+	// loop reads it for every rule of every view, and ctx.Err() walked the
+	// hook's context chain each time: 1.1 million times a call of 8,000
+	// placed views, 6% of a copy-mode actor's time (rel-1-0-10:GAP-2226).
+	done := ctx.Done()
 	evaluateSemanticRules := func(
 		viewID int,
 		view actionfacts.Facts,
@@ -1715,7 +1720,7 @@ func dispatchTrustedActionWith(
 		enforcementProjected := false
 		projectionCode := semantic.ProjectionOK
 		for _, candidate := range generation.semanticRules {
-			if ctx.Err() != nil {
+			if contextDone(done) {
 				break
 			}
 			if request.stateProofOnly && !loginGuessProvesRule(candidate.rule.ID) {
@@ -1838,19 +1843,19 @@ func dispatchTrustedActionWith(
 	// findings, of every owner for a sandbox and of cwdPlacedRule rules for a
 	// managed peer; all other lanes keep the gateway's original facts.
 	judgePlaced := func() {
-		for index, view := range placed.views() {
+		placedRule := func(candidate compiledSemanticRule) bool {
+			return placed.everyOwner || cwdPlacedRule(candidate.rule.ID)
+		}
+		placed.eachView(func(index int, view *actionfacts.Facts) {
 			if !view.Authoritative() {
-				continue
+				return
 			}
-			if projection, code := semantic.Project(view); code == semantic.ProjectionOK {
+			if projection, code := semantic.Project(*view); code == semantic.ProjectionOK {
 				// Each view has its own pair of budget keys (the view and its
 				// enforcement projection), after the fixed views 0 to 5.
-				evaluateSemanticRules(placedReadingFirstView+2*index, view, projection,
-					func(candidate compiledSemanticRule) bool {
-						return placed.everyOwner || cwdPlacedRule(candidate.rule.ID)
-					}, true, nil)
+				evaluateSemanticRules(placedReadingFirstView+2*index, *view, projection, placedRule, true, nil)
 			}
-		}
+		})
 	}
 	// fallback judges a call no semantic view of the whole call can judge
 	// (dispatchTrustedFallback). A sandbox call's guest placement still
@@ -4802,12 +4807,29 @@ const placedReadingFirstView = 6
 // (substrate-1 GAP-0359).
 const maxSandboxGuestPlacedChildren = 128
 
-// views returns the placed facts, then each child's.
-func (placed placedReading) views() []actionfacts.Facts {
+// eachView calls visit with each placed view in order, its index first: the
+// placed facts, then each child's. A call places up to 8,192 children, and
+// copying them into one list for each reading copied megabytes a hook
+// (rel-1-0-10:GAP-2226).
+func (placed placedReading) eachView(visit func(index int, view *actionfacts.Facts)) {
 	if placed.facts == nil {
-		return nil
+		return
 	}
-	return append([]actionfacts.Facts{*placed.facts}, placed.children...)
+	visit(0, placed.facts)
+	for at := range placed.children {
+		visit(at+1, &placed.children[at])
+	}
+}
+
+// contextDone reports a closed done channel (context.Context.Done); a nil
+// channel is never closed.
+func contextDone(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 // provesSSHPrivateKeyContentRead reports a placed view that reads an active
@@ -4816,13 +4838,16 @@ func (placed placedReading) views() []actionfacts.Facts {
 // relative read of the guest home's key (cat .ssh/id_ed25519 from the home,
 // cat ../sandbox/.ssh/id_ed25519 from /work) is then the laptop's block.
 func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
-	for _, view := range slices.Concat(placed.views(), placed.candidates) {
-		if view.Authoritative() && view.EnforcementEligible() &&
-			trustedActionActiveSSHPrivateKeyContentRead(view.EnforcementProjection()) {
-			return true
-		}
+	proves := func(view *actionfacts.Facts) bool {
+		return view.Authoritative() && view.EnforcementEligible() &&
+			trustedActionActiveSSHPrivateKeyContentRead(view.EnforcementProjection())
 	}
-	return false
+	found := false
+	placed.eachView(func(_ int, view *actionfacts.Facts) { found = found || proves(view) })
+	for at := 0; !found && at < len(placed.candidates); at++ {
+		found = proves(&placed.candidates[at])
+	}
+	return found
 }
 
 // sandboxGuestPlacedChildren reads, lexically, each command of a sandbox
@@ -4862,10 +4887,15 @@ func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input,
 }
 
 // sandboxGuestPlacedChildrenWalk reads the placed children of a call
-// (sandboxGuestPlacedChildren) afresh.
+// (sandboxGuestPlacedChildren) afresh. A reading in a candidate folder is
+// kept only when its text may read a key (guestCandidateMayReadKey), the one
+// proof it counts for: a cd in each of 64 folders gave every later command
+// 64 candidate readings, each a full analysis that could prove nothing
+// (touch f1, cd /tmp/x), and the copy-mode actor took 2.6 to 5 times the
+// 1.0.10 actor's time (rel-1-0-10:GAP-2226).
 func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	placements, stopped := memo.plan(input, facts).placements(true)
-	var folders map[guestShellReading]bool
+	var folders *guestShellReadings
 	if slices.ContainsFunc(placements, func(placement guestPlacement) bool { return placement.candidate }) {
 		command := input.Command
 		if command == "" {
@@ -4873,32 +4903,54 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 		}
 		folders = guestOwnShellFolders(command, input.CWD, input.ActiveHome)
 	}
+	// A candidate in a folder the call's own shell may stand in is read as a
+	// child, but a plain reading in a plain folder stays a candidate, as
+	// before the own-shell folders (guestPlainFolder, rel-1-0-10:GAP-2249).
+	// This only takes back own-shell promotions: a placement is a candidate
+	// here only where the plan made it one (placement.candidate), the set the
+	// 1.0.10 line read as candidates, so the candidate set stays a subset of
+	// that line's and no reading it judged as a child becomes a candidate.
+	var plain map[string]bool
 	isCandidate := func(placement guestPlacement) bool {
-		return placement.candidate && !folders[guestShellReading{placement.text, path.Clean(placement.cwd)}]
+		if !placement.candidate {
+			return false
+		}
+		dir := path.Clean(placement.cwd)
+		if !folders.has(placement.text, dir) {
+			return true
+		}
+		if guestReadingFirst(placement.text) {
+			return false
+		}
+		ok, seen := plain[dir]
+		if !seen {
+			if plain == nil {
+				plain = make(map[string]bool)
+			}
+			ok = guestPlainFolder(dir, input.ActiveHome)
+			plain[dir] = ok
+		}
+		return ok
 	}
 	// Each list is made at its size: a long call places thousands of
 	// readings, and growing the lists copied their facts again and again
 	// (substrate-1 GAP-0956).
+	candidate := make([]bool, len(placements))
 	candidateCount := 0
-	for _, placement := range placements {
-		if isCandidate(placement) {
+	for at, placement := range placements {
+		if candidate[at] = isCandidate(placement); candidate[at] {
 			candidateCount++
 		}
 	}
 	if count := len(placements) - candidateCount; count != 0 {
 		children = make([]actionfacts.Facts, 0, count)
 	}
-	if candidateCount != 0 {
-		candidates = make([]actionfacts.Facts, 0, candidateCount)
-	}
-	for _, placement := range placements {
-		child := input
-		child.Command, child.CWD = placement.text, placement.cwd
-		child.Args, child.Argv = nil, nil
-		if isCandidate(placement) {
-			candidates = append(candidates, memo.analyze(child))
-		} else {
-			children = append(children, memo.analyze(child))
+	read := memo.placedReader(input)
+	for at, placement := range placements {
+		if !candidate[at] {
+			children = append(children, read(placement))
+		} else if guestCandidateMayReadKey(placement.text) {
+			candidates = append(candidates, read(placement))
 		}
 	}
 	if stopped {

@@ -1216,7 +1216,11 @@ func copyModeBraceExpansion(text string) bool {
 }
 
 // copyModeNestedShell reports a word of text that runs a shell (sh,
-// /bin/bash, busybox): the words it is given are read again.
+// /bin/bash, busybox): the words it is given are read again. A shell whose
+// statement is only a here-string of one word (bash <<< true) reads that
+// word, which the gate has read in the text already, and nothing else: no
+// file, no other input, no option. It made the by-name reading run on every
+// 8 KB call that opens with bash <<< 'true' (rel-1-0-10:GAP-2249).
 func copyModeNestedShell(text string) bool {
 	for start := 0; start < len(text); {
 		end := start
@@ -1226,7 +1230,7 @@ func copyModeNestedShell(text string) bool {
 		}
 		if end > start {
 			word := text[start:end]
-			if slices.Contains(copyModeShells, word[strings.LastIndexByte(word, '/')+1:]) {
+			if slices.Contains(copyModeShells, word[strings.LastIndexByte(word, '/')+1:]) && !copyModeLiteralHereString(text[end:]) {
 				return true
 			}
 			start = end
@@ -1235,6 +1239,31 @@ func copyModeNestedShell(text string) bool {
 		start++
 	}
 	return false
+}
+
+// copyModeLiteralHereString reports text after a shell word that is only a
+// here-string of one word up to the end of its statement: <<< w and then a
+// newline, ;, &, |, ) or the end. Any other word or redirection (a script
+// file, -s, < file, 0<f) is not. It is sound because the gate drops quotes
+// and backslashes before it reads (copyModeCallMayNameSSHFolder) and reads
+// every later line itself: a change that stops that strip, or a by-name
+// decision that follows fish or pwsh escapes, must read this exception again.
+func copyModeLiteralHereString(text string) bool {
+	text = strings.TrimLeft(text, " \t")
+	rest, ok := strings.CutPrefix(text, "<<<")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	word := 0
+	for word < len(rest) && strings.IndexByte(" \t\n;&|()<>", rest[word]) < 0 {
+		word++
+	}
+	if word == 0 {
+		return false
+	}
+	rest = strings.TrimLeft(rest[word:], " \t")
+	return rest == "" || strings.IndexByte("\n;&|)", rest[0]) >= 0
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
