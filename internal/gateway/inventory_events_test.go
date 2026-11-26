@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -1374,16 +1375,13 @@ func TestPerConnectorMCPInventoryCountsCollisionsAcrossClaudeFiles(t *testing.T)
 }
 
 func TestMCPHomeReaderMarksDanglingConfigSymlinkPartial(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires elevated Windows permissions")
-	}
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, "missing.toml"), filepath.Join(home, ".codex", "config.toml")); err != nil {
-		t.Fatal(err)
-	}
+	// GAP-1533: runs on Windows under an elevated token (the symlink right is
+	// held there); a standard-user token skips with the privilege reason.
+	testenv.Symlink(t, filepath.Join(home, "missing.toml"), filepath.Join(home, ".codex", "config.toml"))
 	_, partial := readMCPServersUnderHomeForOSWithStatus("codex", home, runtime.GOOS)
 	if !partial {
 		t.Fatal("dangling MCP config symlink was treated as an authoritative empty listing")
