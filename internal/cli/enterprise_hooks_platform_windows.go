@@ -442,6 +442,9 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
 			codexOpts.HookBinary,
 		)
+		secureClientFirstPublication := cfg.SecureClientIntegration() &&
+			publishExact && len(desiredCodex) > 0 &&
+			errors.Is(err, connector.ErrWindowsCodexManagedRuntimeStateMissing)
 		// A requirements.toml that ordinary users cannot read is published again
 		// with the read restored by the reconcile below, and that reconcile is
 		// the only step that does it: the target publication after it verifies
@@ -450,19 +453,22 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		// residual: a holder that denied read sharing left the file unreadable
 		// and every later pass stopped here until an administrator granted the
 		// read by hand).
-		if cfg.StandaloneEnterprise() && configured["codex"] &&
-			(err != nil || !currentCodex.Active || enterpriseHookCodexRequirementsUnreadable(codexOpts.RequirementsPath)) {
+		if (cfg.StandaloneEnterprise() && configured["codex"] &&
+			(err != nil || !currentCodex.Active || enterpriseHookCodexRequirementsUnreadable(codexOpts.RequirementsPath))) ||
+			secureClientFirstPublication {
 			// The reconcile validates the machine-policy folder and creates none of
 			// it, so a folder or vendor parent deleted after Setup made every pass
 			// fail the same way and nothing recreated it. A link on the path is
 			// named once and refused, as Install, ensure and repair refuse it.
-			ensured, folderErr := enterpriseHookCodexFolderEnsurer()
-			if folderErr != nil {
-				return fmt.Errorf("ensure configured Codex machine requirements: %w", folderErr)
-			}
-			if len(ensured.Created) != 0 {
-				fmt.Fprintf(os.Stderr, "[hook-guardian] recreated the missing Codex machine-policy folder %s (created: %s)\n",
-					ensured.Folder, strings.Join(ensured.Created, ", "))
+			if cfg.StandaloneEnterprise() {
+				ensured, folderErr := enterpriseHookCodexFolderEnsurer()
+				if folderErr != nil {
+					return fmt.Errorf("ensure configured Codex machine requirements: %w", folderErr)
+				}
+				if len(ensured.Created) != 0 {
+					fmt.Fprintf(os.Stderr, "[hook-guardian] recreated the missing Codex machine-policy folder %s (created: %s)\n",
+						ensured.Folder, strings.Join(ensured.Created, ", "))
+				}
 			}
 			codexOpts.CodexTargetEnabled = true
 			var report connector.WindowsCodexMachineRequirementsReport
@@ -478,7 +484,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				return errors.New("configured Codex machine requirements were not published")
 			}
 			currentCodex, err = enterpriseHookCodexRuntimeRegistryReader(codexOpts.HookBinary)
-			if err == nil && !currentCodex.Active {
+			if err == nil && !currentCodex.Active && currentCodex.AdminConflict == "" {
 				return errors.New("configured Codex machine requirements did not become active")
 			}
 		}

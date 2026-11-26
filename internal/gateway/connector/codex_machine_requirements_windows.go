@@ -52,6 +52,11 @@ type windowsCodexStableFile struct {
 	existed bool
 }
 
+// ErrWindowsCodexManagedRuntimeStateMissing identifies the one incomplete
+// first-publication state the enterprise guardian may repair. Other registry
+// read failures remain fail-closed.
+var ErrWindowsCodexManagedRuntimeStateMissing = errors.New("Codex managed runtime state is missing")
+
 // InspectWindowsCodexMachineRequirements reports protected manifest-derived
 // applicability without reading, creating, or changing any Codex artifact.
 // The hidden lifecycle command performs identity and protected-layout
@@ -1164,7 +1169,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 			return result, markerErr
 		}
 		if contains {
-			return result, errors.New("active Codex machine requirements are missing protected managed runtime state")
+			return result, fmt.Errorf("%w: active Codex machine requirements are missing protected managed runtime state", ErrWindowsCodexManagedRuntimeStateMissing)
 		}
 		return result, nil
 	}
@@ -1178,6 +1183,9 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		"Codex managed runtime state",
 	)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return result, errors.Join(ErrWindowsCodexManagedRuntimeStateMissing, err)
+		}
 		return result, err
 	}
 	state, err := parseWindowsCodexManagedRuntimeState(stateCopy.data)

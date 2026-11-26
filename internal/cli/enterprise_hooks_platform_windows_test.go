@@ -1100,6 +1100,77 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 	}
 }
 
+// Secure Client creates the per-user target before the final exact machine
+// enrollment publication. On a first install, requirements.toml can therefore
+// exist before its adjacent protected managed-state record. That exact missing
+// record is seeded through the trusted reconciler; every other read failure
+// remains fail-closed.
+func TestWindowsGuardianSecureClientSeedsMissingCodexStateBeforeExactPublication(t *testing.T) {
+	previousCfg := cfg
+	previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+	previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+	previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+	previousCodexReconciler, previousCodexPublisher := enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+		enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+		enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+		enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexTargetsPublisher = previousCodexReconciler, previousCodexPublisher
+	})
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+	}
+	enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, false, nil }
+	enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+	enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+		return nil, false, nil
+	}
+	enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+	enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+		return connector.WindowsCodexMachineRequirementsOptions{
+			HookBinary: `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-hook.exe`,
+		}, nil
+	}
+	readCount := 0
+	enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+		readCount++
+		if readCount == 1 {
+			return connector.WindowsCodexManagedRuntimeRegistry{}, fmt.Errorf("inspect Codex managed runtime state: %w", connector.ErrWindowsCodexManagedRuntimeStateMissing)
+		}
+		return connector.WindowsCodexManagedRuntimeRegistry{Active: true}, nil
+	}
+	reconcileCount := 0
+	enterpriseHookCodexRequirementsReconciler = func(opts connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		reconcileCount++
+		if !opts.CodexTargetEnabled {
+			t.Fatal("first exact publication did not enable the manifest's Codex target")
+		}
+		return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+	}
+	publishCount := 0
+	enterpriseHookCodexTargetsPublisher = func(_ connector.WindowsCodexMachineRequirementsOptions, targets []connector.WindowsCodexManagedRuntimeTarget) error {
+		publishCount++
+		if len(targets) != 1 || targets[0].SID != "S-1-5-21-1-2-3-1001" || targets[0].DataDir != `C:\Users\alice\.defenseclaw` {
+			t.Fatalf("published targets = %#v", targets)
+		}
+		return nil
+	}
+	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{{
+		SID:       "S-1-5-21-1-2-3-1001",
+		UserHome:  `C:\Users\alice`,
+		Connector: "codex",
+	}}}
+
+	if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", true); err != nil {
+		t.Fatalf("first Secure Client exact publication failed: %v", err)
+	}
+	if readCount != 2 || reconcileCount != 1 || publishCount != 1 {
+		t.Fatalf("reads=%d reconciles=%d publications=%d, want 2/1/1", readCount, reconcileCount, publishCount)
+	}
+}
+
 // Secure Client, deferred Codex error. A Codex registry that cannot be read is
 // deferred so an independent Cursor step still runs: when Cursor passes, the
 // pass returns the deferred Codex error after it; when Cursor fails, the Cursor
