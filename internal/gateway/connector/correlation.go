@@ -18,6 +18,7 @@ package connector
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -433,6 +434,63 @@ func declaredCorrelationAliases(name string) []CorrelationPathAlias {
 	}
 }
 
+// correlationLifecycleCandidates are every connector's event names for each
+// lifecycle moment; a contract binds the ones it declares
+// (correlationLifecycleForContract). The actor kit reads the same names
+// (CorrelationLifecycleEventNames), so a connector's events cannot be missing
+// from one table and present in the other (substrate-1 GAP-1150).
+var correlationLifecycleCandidates = []CorrelationLifecycleBinding{
+	{Lifecycle: CorrelationLifecycleSessionStart, Events: []string{
+		"SessionStart", "sessionStart", "session_start", "session.start", "session.created", "on_session_start",
+	}},
+	{Lifecycle: CorrelationLifecycleSessionEnd, Events: []string{
+		"SessionEnd", "sessionEnd", "session_end", "session.deleted", "on_session_end", "on_session_finalize",
+	}},
+	{Lifecycle: CorrelationLifecycleTurnStart, Events: []string{
+		"UserPromptSubmit", "userPromptSubmitted", "user_prompt_submit", "beforeSubmitPrompt",
+		"BeforeAgent", "PreInvocation", "pre_llm_call", "agent.start",
+	}},
+	{Lifecycle: CorrelationLifecycleTurnEnd, Events: []string{
+		"Stop", "stop", "agentStop", "AfterAgent", "AfterAgentResponse", "PostInvocation",
+		"afterAgentResponse", "post_llm_call", "agent.end",
+	}},
+	{Lifecycle: CorrelationLifecycleToolStart, Events: []string{
+		"PreToolUse", "preToolUse", "pre_tool_use", "BeforeTool", "pre_tool_call",
+		"beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead",
+		"tool.execute.before", "tool.call",
+	}},
+	{Lifecycle: CorrelationLifecycleToolEnd, Events: []string{
+		"PostToolUse", "postToolUse", "post_tool_use", "PostToolUseFailure", "postToolUseFailure",
+		"PermissionDenied",
+		"AfterTool", "post_tool_call", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
+		"afterTabFileEdit", "tool.execute.after", "tool.result",
+	}},
+	{Lifecycle: CorrelationLifecycleModelStart, Events: []string{
+		"BeforeModel",
+	}},
+	{Lifecycle: CorrelationLifecycleModelEnd, Events: []string{
+		"AfterModel",
+	}},
+	{Lifecycle: CorrelationLifecycleSubagentStart, Events: []string{
+		"SubagentStart", "subagentStart", "subagent_start",
+	}},
+	{Lifecycle: CorrelationLifecycleSubagentEnd, Events: []string{
+		"SubagentStop", "subagentStop", "subagent_stop",
+	}},
+}
+
+// CorrelationLifecycleEventNames are the event names, of every connector, bound
+// to the lifecycles given.
+func CorrelationLifecycleEventNames(lifecycles ...CorrelationLifecycle) []string {
+	var out []string
+	for _, candidate := range correlationLifecycleCandidates {
+		if slices.Contains(lifecycles, candidate.Lifecycle) {
+			out = append(out, candidate.Events...)
+		}
+	}
+	return out
+}
+
 func correlationLifecycleForContract(contract HookContract) []CorrelationLifecycleBinding {
 	if contract.ContractID == "" {
 		return nil
@@ -441,47 +499,8 @@ func correlationLifecycleForContract(contract HookContract) []CorrelationLifecyc
 	for _, event := range contract.Events {
 		declared[event] = true
 	}
-	candidates := []CorrelationLifecycleBinding{
-		{Lifecycle: CorrelationLifecycleSessionStart, Events: []string{
-			"SessionStart", "sessionStart", "session_start", "session.start", "session.created", "on_session_start",
-		}},
-		{Lifecycle: CorrelationLifecycleSessionEnd, Events: []string{
-			"SessionEnd", "sessionEnd", "session_end", "session.deleted", "on_session_end", "on_session_finalize",
-		}},
-		{Lifecycle: CorrelationLifecycleTurnStart, Events: []string{
-			"UserPromptSubmit", "userPromptSubmitted", "user_prompt_submit", "beforeSubmitPrompt",
-			"BeforeAgent", "PreInvocation", "pre_llm_call", "agent.start",
-		}},
-		{Lifecycle: CorrelationLifecycleTurnEnd, Events: []string{
-			"Stop", "stop", "agentStop", "AfterAgent", "AfterAgentResponse", "PostInvocation",
-			"afterAgentResponse", "post_llm_call", "agent.end",
-		}},
-		{Lifecycle: CorrelationLifecycleToolStart, Events: []string{
-			"PreToolUse", "preToolUse", "pre_tool_use", "BeforeTool", "pre_tool_call",
-			"beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead",
-			"tool.execute.before", "tool.call",
-		}},
-		{Lifecycle: CorrelationLifecycleToolEnd, Events: []string{
-			"PostToolUse", "postToolUse", "post_tool_use", "PostToolUseFailure", "postToolUseFailure",
-			"PermissionDenied",
-			"AfterTool", "post_tool_call", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
-			"afterTabFileEdit", "tool.execute.after", "tool.result",
-		}},
-		{Lifecycle: CorrelationLifecycleModelStart, Events: []string{
-			"BeforeModel",
-		}},
-		{Lifecycle: CorrelationLifecycleModelEnd, Events: []string{
-			"AfterModel",
-		}},
-		{Lifecycle: CorrelationLifecycleSubagentStart, Events: []string{
-			"SubagentStart", "subagentStart", "subagent_start",
-		}},
-		{Lifecycle: CorrelationLifecycleSubagentEnd, Events: []string{
-			"SubagentStop", "subagentStop", "subagent_stop",
-		}},
-	}
-	result := make([]CorrelationLifecycleBinding, 0, len(candidates))
-	for _, candidate := range candidates {
+	result := make([]CorrelationLifecycleBinding, 0, len(correlationLifecycleCandidates))
+	for _, candidate := range correlationLifecycleCandidates {
 		filtered := make([]string, 0, len(candidate.Events))
 		for _, event := range candidate.Events {
 			if declared[event] {

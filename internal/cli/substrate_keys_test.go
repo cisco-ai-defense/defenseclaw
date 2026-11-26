@@ -147,7 +147,7 @@ func TestSubstrateTaskReportsATokenRefusal(t *testing.T) {
 	since := start.Add(time.Second).UTC().Format(time.RFC3339)
 	s := f12InfoClient(t, map[string]any{"sign_in": "oidc", "attach": true,
 		"actor_tokens": map[string]string{"state": "refusing", "reason": string(identity.ReasonKeysetFailed), "since": since}})
-	msg, refused := substrateTokenRefusal(context.Background(), s, start)
+	msg, refused := substrateTokenRefusal(substrateTaskEndInfo(context.Background(), s), start)
 	if !refused || !strings.Contains(msg, "did not run") || !strings.Contains(msg, "keyset_unavailable") ||
 		!strings.Contains(msg, "defenseclaw substrate verify") || strings.Contains(msg, "finished") {
 		t.Fatalf("message %q", msg)
@@ -156,13 +156,18 @@ func TestSubstrateTaskReportsATokenRefusal(t *testing.T) {
 	// A refusal from before the task is not this task's.
 	old := f12InfoClient(t, map[string]any{"sign_in": "oidc",
 		"actor_tokens": map[string]string{"state": "refusing", "reason": "issuer", "since": start.Add(-time.Hour).UTC().Format(time.RFC3339)}})
-	if _, refused := substrateTokenRefusal(context.Background(), old, start); refused {
+	if _, refused := substrateTokenRefusal(substrateTaskEndInfo(context.Background(), old), start); refused {
 		t.Fatal("an older refusal was blamed on this task")
 	}
 	// A healthy cluster (or one that does not report it) is quiet.
 	ok := f12InfoClient(t, map[string]any{"sign_in": "oidc", "attach": true})
-	if _, refused := substrateTokenRefusal(context.Background(), ok, start); refused {
+	if _, refused := substrateTokenRefusal(substrateTaskEndInfo(context.Background(), ok), start); refused {
 		t.Fatal("a healthy cluster reported a refusal")
+	}
+	// A failed /info read is no refusal (the read is shared with the
+	// egress line, GAP-0505).
+	if _, refused := substrateTokenRefusal(nil, start); refused {
+		t.Fatal("a failed /info read reported a refusal")
 	}
 }
 

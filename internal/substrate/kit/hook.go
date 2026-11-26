@@ -230,13 +230,13 @@ type skillPass struct {
 }
 
 // beginSkillPass lists the skill folders in env when the event runs the
-// pass: a scan event (skillScanEvents), a read of a skill's files, or any
+// pass: a scan event (skillScanEvent), a read of a skill's files, or any
 // pre-tool call while a folder has no verdict yet (GAP-0980: every such call
 // runs the pass, any tool, any connector, so the gateway refuses it while
 // held).
 func (o HookOptions) beginSkillPass(env *HookEnvelope, payload []byte) skillPass {
 	p := skillPass{pending: preToolEvents[env.Event] && len(skillsPendingInReach(o.home())) > 0}
-	if p.pending || skillScanEvents[env.Event] || (env.Facts != nil && env.Facts.readsSkill) {
+	if p.pending || skillScanEvent(env.Connector, env.Event) || (env.Facts != nil && env.Facts.readsSkill) {
 		p.sent, p.attached = o.attachSkills(env, payload)
 	}
 	return p
