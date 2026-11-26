@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -61,9 +60,6 @@ func TestSetupConnectorsIsolated_ActiveOpenCodeNotV2StopsOnlyOpenCode(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if runtime.GOOS == "windows" {
-				t.Skip("the Windows OpenCode setup authority needs a protected install fixture")
-			}
 			s := multiBootSidecar(t)
 			s.cfg.DataDir = testenv.PrivateTempDir(t)
 			s.health = NewSidecarHealth()

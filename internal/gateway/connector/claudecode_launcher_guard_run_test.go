@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -67,13 +66,9 @@ func TestGatewayPreToolGuardBlocksAMissingLauncherAndAnswersCursorWithNothing(t 
 
 // A launcher that runs keeps its own exit code, stdout and stdin.
 func TestGatewayPreToolGuardPassesTheLauncherThrough(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("cmd/defenseclaw-hook's launcher guard test runs a real launcher on Windows")
-	}
-	launcher := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf '%s|' \"$@\"\ncat\nexit 7\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// The launcher is a shell script off Windows and, on Windows, a copy of
+	// this test binary that answers the same way (writePassthroughLauncher).
+	launcher := writePassthroughLauncher(t, t.TempDir())
 	var stdout, stderr bytes.Buffer
 	args := []string{ClaudeCodeLauncherGuardSubcommand, launcher, "hook", "--connector", "claudecode"}
 	code, handled := ClaudeCodeGatewayPreToolGuard("windows", args, guardStdin(t, "{}"), &stdout, &stderr)

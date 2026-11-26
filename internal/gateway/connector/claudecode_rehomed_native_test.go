@@ -13,6 +13,10 @@ import (
 )
 
 func TestClaudeCodeRehomedNativeHandlersReplaced(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		claudeCodeWindowsRehomedHandlersReplaced(t)
+		return
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("per-user native registration is Linux-only")
 	}

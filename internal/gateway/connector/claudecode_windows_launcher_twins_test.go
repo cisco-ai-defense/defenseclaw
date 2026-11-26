@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -322,5 +323,171 @@ func claudeCodeWindowsEnterpriseContractIgnoresUserSettings(t *testing.T, conn *
 	opts.HookExecutable = filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
 	if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
 		t.Fatalf("Windows enterprise contract = (present=%v, err=%v), want repairable absence: user settings do not satisfy it", present, err)
+	}
+}
+
+// claudeCodeWindowsRegisteredCommandBlocksWhenLauncherMissing runs the command
+// per-user Setup registers for launcher, which does not exist, as Claude Code
+// starts a hook: it blocks (exit 2) and says why.
+func claudeCodeWindowsRegisteredCommandBlocksWhenLauncherMissing(t *testing.T, opts SetupOpts, launcher string) {
+	t.Helper()
+	opts.HookExecutable = launcher
+	command, args := claudeCodeHookInvocation(opts, claudeCodeWindowsScript(opts.DataDir))
+	code, output := gap0322RunRegistered(t, command, args, "{}")
+	if code != 2 || !strings.Contains(output, ClaudeCodeLauncherMissingMessage) {
+		t.Fatalf("registered command with no launcher: exit %d, output %q, want a block (2) that says the launcher is missing", code, output)
+	}
+}
+
+// claudeCodeWindowsPerUserCommandFailsClosedWhenLauncherMissing is the Windows
+// form of "the per-user command fails closed when its script is missing"
+// (GAP-0542): after an account rename or a home move the registered launcher
+// path is gone, and the registered cmd.exe guard blocks (exit 2) with one
+// sentence instead of failing to start, which Claude Code treats as
+// non-blocking. When the launcher runs, its exit code passes through.
+func claudeCodeWindowsPerUserCommandFailsClosedWhenLauncherMissing(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	home := filepath.Join(dir, "Alice Smith")
+	launcherDir := filepath.Join(home, ".local", "bin")
+	opts := SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), HookExecutable: filepath.Join(launcherDir, windowsHookBinaryName)}
+	command, args := claudeCodeHookInvocation(opts, claudeCodeWindowsScript(opts.DataDir))
+	if command != claudeCodeWindowsCommandProcessor() {
+		t.Fatalf("command %q is not the guard's command processor", command)
+	}
+	code, output := gap0322RunRegistered(t, command, args, "{}")
+	if code != 2 || !strings.Contains(output, "Run the DefenseClaw installer again to repair it") {
+		t.Fatalf("missing launcher: exit %d output %q, want a block (2) that names the repair", code, output)
+	}
+	copyTestBinaryAsLauncher(t, launcherDir)
+	for _, want := range []int{0, 2, 3} {
+		t.Setenv(guardLauncherModeEnv, "")
+		t.Setenv(guardLauncherExitEnv, strconv.Itoa(want))
+		code, output := gap0322RunRegistered(t, command, args, "{}")
+		if code != want || strings.Contains(output, ClaudeCodeLauncherMissingMessage) {
+			t.Fatalf("launcher exit %d: command exit %d output %q", want, code, output)
+		}
+	}
+	// An entry that names a launcher of another account's home is not this
+	// install's registration (a guard around another launcher is not claimed).
+	otherCommand, otherArgs := claudeCodeHookInvocation(SetupOpts{
+		DataDir: filepath.Join(dir, "old", ".defenseclaw"), HookExecutable: filepath.Join(dir, "old", ".local", "bin", windowsHookBinaryName),
+	}, claudeCodeWindowsScript(filepath.Join(dir, "old", ".defenseclaw")))
+	if claudeCodeHandlerTargetsCurrentRuntime(claudeCodeWindowsHandler(otherCommand, otherArgs), opts) {
+		t.Fatal("an old-home guard was recognized as this install's registration")
+	}
+}
+
+// claudeCodeWindowsRehomedHandlersReplaced is the Windows form of the rehomed
+// account test: the settings carry an old account's launcher guard next to an
+// operator hook; Setup's reconcile writes the current launcher's complete
+// registration and keeps the operator's hook.
+func claudeCodeWindowsRehomedHandlersReplaced(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	oldHome := filepath.Join(root, "previous")
+	currentHome := filepath.Join(root, "current")
+	t.Setenv("HOME", currentHome)
+	t.Setenv("USERPROFILE", currentHome)
+	dataDir := filepath.Join(currentHome, ".defenseclaw")
+	hooksDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(root, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	oldOpts := SetupOpts{DataDir: filepath.Join(oldHome, ".defenseclaw"),
+		HookExecutable: filepath.Join(oldHome, ".local", "bin", windowsHookBinaryName)}
+	oldCommand, oldArgs := claudeCodeHookInvocation(oldOpts, claudeCodeWindowsScript(oldOpts.DataDir))
+	hooks := map[string]interface{}{}
+	appendClaudeCodeHookMatrix(hooks, oldCommand, oldArgs)
+	foreign := map[string]interface{}{"type": "command", "command": `C:\operator\ordinary-hook.exe`, "timeout": 30}
+	hooks["Stop"] = append(hooks["Stop"].([]interface{}), map[string]interface{}{"hooks": []interface{}{foreign}})
+	data, err := json.Marshal(map[string]interface{}{"hooks": hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := SetupOpts{DataDir: dataDir, HookExecutable: filepath.Join(currentHome, ".local", "bin", windowsHookBinaryName)}
+	if err := NewClaudeCodeConnector().patchClaudeCodeHooks(opts, claudeCodeWindowsScript(dataDir)); err != nil {
+		t.Fatalf("reconcile Claude Code hooks: %v", err)
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(after, &settings); err != nil {
+		t.Fatal(err)
+	}
+	// JSON writes a backslash as two characters: look for the paths decoded.
+	decoded := string(mustMarshalNoEscape(t, settings))
+	if !strings.Contains(decoded, filepath.Join(currentHome, ".local", "bin")) || !strings.Contains(decoded, `C:\operator\ordinary-hook.exe`) {
+		t.Fatalf("current registration or the operator's hook missing: %s", after)
+	}
+	currentCommand, currentArgs := claudeCodeHookInvocation(opts, claudeCodeWindowsScript(dataDir))
+	if err := verifyClaudeCodeHookMatrixForSetup(settings["hooks"].(map[string]interface{}), currentCommand, currentArgs, hooksDir, opts); err != nil {
+		t.Fatalf("current hook matrix: %v", err)
+	}
+	t.Logf("old-home launcher still named after reconcile: %v", strings.Contains(decoded, oldHome))
+}
+
+func mustMarshalNoEscape(t *testing.T, value interface{}) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		t.Fatal(err)
+	}
+	// Decode the escaped backslashes the encoder writes.
+	return []byte(strings.ReplaceAll(out.String(), `\\`, `\`))
+}
+
+// gap0322WindowsRegistrationMatrixRefusesTampering is the Windows form of the
+// missing-guard fallback registration test: the per-user matrix verifies, and
+// a PreToolUse handler that is missing, conditional or run through a shell is
+// refused.
+func gap0322WindowsRegistrationMatrixRefusesTampering(t *testing.T, command string, args []string) {
+	t.Helper()
+	launcher := args[4]
+	dataDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(launcher))), ".defenseclaw")
+	opts := SetupOpts{DataDir: dataDir, HookExecutable: launcher}
+	hooksDir := filepath.Join(dataDir, "hooks")
+	hooks := map[string]interface{}{}
+	if err := appendClaudeCodeHookMatrixForSetup(hooks, command, args, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err != nil {
+		t.Fatalf("registered matrix: %v", err)
+	}
+	groups := hooks["PreToolUse"].([]interface{})
+	handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
+	if len(handlers) == 0 {
+		t.Fatal("PreToolUse has no handler")
+	}
+	guard := handlers[0].(map[string]interface{})
+	groups[0].(map[string]interface{})["hooks"] = handlers[:0]
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err == nil {
+		t.Fatal("a missing PreToolUse handler was accepted")
+	}
+	groups[0].(map[string]interface{})["hooks"] = handlers
+	guard["if"] = "Bash(ls)"
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err == nil {
+		t.Fatal("a conditional PreToolUse handler was accepted")
+	}
+	delete(guard, "if")
+	guard["shell"] = "bash"
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err == nil {
+		t.Fatal("a PreToolUse handler run through a shell was accepted")
+	}
+	delete(guard, "shell")
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err != nil {
+		t.Fatalf("restored matrix: %v", err)
 	}
 }

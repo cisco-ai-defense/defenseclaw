@@ -19,6 +19,7 @@ import (
 // exported failed the Hermes Setup and Verify tests.
 func TestMain(m *testing.M) {
 	answerAsFakeGuard()
+	answerAsGuardPassthroughLauncher()
 	// A copy of this test binary stands in for the packaged Windows hook
 	// launcher in Hermes' execution-probe tests (testHermesProbeLauncherEnv).
 	// "1" answers as the active hook runtime does; any other value is a
