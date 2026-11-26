@@ -139,6 +139,8 @@ func TestGAP0795ReviewIgnoresAgentAttributes(t *testing.T) {
 			body := "//r/:_authToken=" + kit.PlaceholderSecret + "\n"
 			if tc.nul {
 				body = "\x00" + body
+				// A benign binary file stays unflagged.
+				g.write("logo.bin", "\x00\x01plain bytes\n")
 			}
 			g.write("npmrc", body)
 			g.git(g.repo, "add", ".")
@@ -170,7 +172,7 @@ func TestGAP0795ReviewIgnoresAgentAttributes(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer p.Discard(ctx, g.run)
-			if !slices.Contains(p.Placeholder, "npmrc") {
+			if len(p.Placeholder) != 1 || p.Placeholder[0] != "npmrc" {
 				t.Fatalf("placeholder files %d (%v), want npmrc: attributes the agent writes hid the commit from the root review", len(p.Placeholder), p.Placeholder)
 			}
 		})
