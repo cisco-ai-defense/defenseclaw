@@ -1609,12 +1609,32 @@ func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest)
 // none as the shell call (rel-1-0-10:GAP-1635). Only a call whose command
 // text or arguments (the hook routes give the command in the shell tool's
 // arguments) hold an envelope is parsed. partial is true for a document the
-// shell expands.
+// shell expands. A file the call writes with text the reading knows (cat >
+// x.py <<'EOF', tee x.py <<'EOF', echo TEXT > x.py;
+// actionfacts.ShellDocumentFileWrites) is one more added file of the
+// envelope, so its content gets the CodeGuard verdict of a Write of the same
+// content (rel-1-0-10:GAP-1640).
 func codeGuardShellPatchArgs(input actionfacts.Input) (args json.RawMessage, partial, ok bool) {
-	if len(input.Argv) != 0 || !codeGuardMayHoldShellPatch(input.Command) && !codeGuardMayHoldShellPatch(string(input.Args)) {
+	if len(input.Argv) != 0 {
 		return nil, false, false
 	}
-	envelopes, shellView := actionfacts.CommandPatchEnvelopes(actionfacts.Analyze(input))
+	var envelopes []string
+	if codeGuardMayHoldShellPatch(input.Command) || codeGuardMayHoldShellPatch(string(input.Args)) {
+		envelopes, partial = actionfacts.CommandPatchEnvelopes(actionfacts.Analyze(input))
+	}
+	if writes := actionfacts.ShellDocumentFileWrites(codeGuardShellCommand(input)); len(writes) != 0 {
+		var patch strings.Builder
+		patch.WriteString("*** Begin Patch\n")
+		for _, write := range writes {
+			patch.WriteString("*** Add File: " + write.Path + "\n")
+			for _, line := range strings.SplitAfter(strings.TrimSuffix(write.Text, "\n"), "\n") {
+				patch.WriteString("+" + strings.TrimSuffix(line, "\n") + "\n")
+			}
+			partial = partial || write.Expanded
+		}
+		patch.WriteString("*** End Patch")
+		envelopes = append(envelopes, patch.String())
+	}
 	if len(envelopes) == 0 {
 		return nil, false, false
 	}
@@ -1622,7 +1642,19 @@ func codeGuardShellPatchArgs(input actionfacts.Input) (args json.RawMessage, par
 	if err != nil {
 		return nil, false, false
 	}
-	return args, shellView, true
+	return args, partial, true
+}
+
+// codeGuardShellCommand is the POSIX command text of a shell tool call
+// (trustedBashCommandInput); a PowerShell or cmd call, or any other tool
+// (a message whose attachment is megabytes of text), has none.
+func codeGuardShellCommand(input actionfacts.Input) string {
+	if !trustedBashExecutionTool(input.Tool) ||
+		input.DialectHint == actionfacts.DialectPowerShell || input.DialectHint == actionfacts.DialectCMD {
+		return ""
+	}
+	command, _ := trustedBashCommandInput(input)
+	return command
 }
 
 func codeGuardMayHoldShellPatch(text string) bool {

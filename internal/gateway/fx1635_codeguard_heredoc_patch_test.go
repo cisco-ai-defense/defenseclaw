@@ -125,7 +125,9 @@ func TestFX1635ShellPatchArgsView(t *testing.T) {
 		{"quoted", "apply_patch <<'PATCH'\n" + env + "\nPATCH", true, false},
 		{"expanded", "apply_patch <<PATCH\n" + strings.Replace(env, "os.system(cmd)", "os.system(\"$HOME\")", 1) + "\nPATCH", true, true},
 		{"echo-only", "echo 'apply_patch *** Begin Patch'", false, false},
-		{"cat-heredoc", "cat > run.py <<'EOF'\n*** Begin Patch\nimport os\nEOF\n# apply_patch", false, false},
+		// A file written from a literal document is an added file of the
+		// view (rel-1-0-10:GAP-1640).
+		{"cat-heredoc", "cat > /w/run.py <<'EOF'\n*** Begin Patch\nimport os\nEOF\n# apply_patch", true, false},
 		{"argv-free-text", "printf '%s' apply_patch", false, false},
 	} {
 		args, _ := json.Marshal(map[string]string{"command": c.command})
