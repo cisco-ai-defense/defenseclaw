@@ -2274,10 +2274,30 @@ func UseSystemShellProfilesForTests(files []string, dropInDir string) (restore f
 	return func() { systemShellProfiles, systemProfileDropInDir = oldFiles, oldDrop }
 }
 
+// sandboxGuestHome is the fixed HOME of a sandbox guest
+// (sandboxauth.SandboxHome), which the gateway registers at start
+// (RegisterSandboxGuestHome). It is never a folder of this host.
+var sandboxGuestHome string
+
+// RegisterSandboxGuestHome names the sandbox guest's fixed HOME for
+// actionShellProfileMayDotglob. The gateway calls it from an init function,
+// before any decision runs.
+func RegisterSandboxGuestHome(home string) { sandboxGuestHome = home }
+
 // actionShellProfileMayDotglob reports a startup file of the user's or the
 // system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
-// dotglob. A missing home has no startup files; other stat errors are
-// conservative.
+// dotglob, or a home this process cannot read.
+//
+// A home this process cannot stat is one whose startup files it cannot
+// read, missing ones included: a gateway behind ProtectHome, or a hook for
+// an account this host does not have, sees no home at all, and the user's
+// .bashrc there may set dotglob. So rm -rf $HOME/* in such a home may reach
+// ~/.ssh/authorized_keys, as in rel. Only the sandbox guest's fixed HOME
+// (sandboxGuestHome), which is never on this host, is read as a home whose
+// files set no dotglob (substrate-1 GAP-1024: the Codex exec_command actor
+// then answers tar cz ~/* as the laptop does). Reading every missing home
+// that way dropped the persistence block of the home-glob deletes and of
+// cd ~; shopt -s dotglob; rm -rf * (rel-1-0-10:GAP-0879, GAP-1629, BAR-T23E).
 //
 // A decision by name alone (fixturefs.Unread) reads no startup file: the
 // actor's files are not on this host, so it reads the actor's home as the
@@ -2293,7 +2313,7 @@ func actionShellProfileMayDotglob(home string) bool {
 	if fixturefs.Unreadable() {
 		return false
 	}
-	if _, err := pathStat(home); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if _, err := pathStat(home); err != nil && (home == "" || home != sandboxGuestHome || !errors.Is(err, fs.ErrNotExist)) {
 		return true
 	}
 	files := slices.Clone(systemShellProfiles)
