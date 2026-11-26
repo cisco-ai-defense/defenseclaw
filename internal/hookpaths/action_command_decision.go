@@ -101,13 +101,13 @@ type unreadDecisionKey struct {
 func (m *TargetMemo) UnreadCommandDecision(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string, posixShell bool) string {
 	startup := m.ShellStartup()
 	if m == nil || len(facts) != 0 || !fixturefs.Unreadable() {
-		return unreadCommandDecisionWith(NewTargetMemo().WithShellStartup(startup), command, cwd, home, dialect, facts, posixShell)
+		return unreadCommandDecisionWith(NewTargetMemo().WithShellStartup(startup).withCallDotglobOf(m), command, cwd, home, dialect, facts, posixShell)
 	}
 	key := unreadDecisionKey{command: command, cwd: cwd, home: home, dialect: dialect, posixShell: posixShell, startup: startup}
 	m.mu.Lock()
 	decision, known := m.unreadDecisions[key]
-	if m.unread == nil || m.unread.startup != startup {
-		m.unread = newTargetMemo().WithShellStartup(startup)
+	if m.unread == nil || m.unread.startup != startup || m.unread.callMayDotglob() != m.callMayDotglob() {
+		m.unread = newTargetMemo().WithShellStartup(startup).withCallDotglobOf(m)
 	}
 	memo := m.unread
 	m.mu.Unlock()

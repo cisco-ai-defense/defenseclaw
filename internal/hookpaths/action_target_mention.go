@@ -75,6 +75,11 @@ func actionProtectedTargetMentionIn(command, cwd, home string, depth int, stateO
 	if depth == 0 {
 		// globs is this call's own scan state (forCommand).
 		globs.memo = memo
+		// A statement of a call whose words may turn dotglob on is read
+		// as the call is (TargetMemo.WithCallWords, rel-1-0-10:GAP-2267).
+		if memo.callMayDotglob() {
+			globs.dots = true
+		}
 	}
 	if actionWindowsHome(home) {
 		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly, dialect, memo)
