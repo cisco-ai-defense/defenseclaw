@@ -77,6 +77,9 @@ func TestClaudeCodeSettingsKeepsHooks(t *testing.T) {
 			doc["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["matcher"] = "NoSuchTool"
 		},
 		"not a command": func(doc map[string]any) { firstHandler(doc, "PreToolUse")["type"] = "prompt" },
+		// No timeout key on a 90 s event: Claude Code may give it 60 s
+		// (substrate-1 GAP-1161).
+		"Stop timeout left out": func(doc map[string]any) { delete(firstHandler(doc, "Stop"), "timeout") },
 	} {
 		doc := parse(installed)
 		mutate(doc)
@@ -86,6 +89,12 @@ func TestClaudeCodeSettingsKeepsHooks(t *testing.T) {
 	}
 	if got := ClaudeCodeSettingsKeepsHooks(parse(installed)["hooks"], []string{"~", "/sandbox"}); got == "" {
 		t.Error("a command under another home reads as the guest's hook")
+	}
+	// No timeout key where 60 s is not below the timeout Setup sets.
+	omitted := parse(installed)
+	delete(firstHandler(omitted, "PreToolUse"), "timeout")
+	if got := ClaudeCodeSettingsKeepsHooks(omitted["hooks"], []string{"~", home}); got != "" {
+		t.Errorf("a PreToolUse handler with no timeout key misses %s", got)
 	}
 	if got := ClaudeCodeSettingsKeepsHooks(nil, []string{"~", home}); got == "" {
 		t.Error("no hooks member reads as kept")
