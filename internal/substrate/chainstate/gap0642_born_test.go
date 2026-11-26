@@ -22,37 +22,26 @@ import (
 func TestGAP0642ActorBornInTheTermSkipsTheStartGrace(t *testing.T) {
 	ctx := context.Background()
 	get := EgressRequest{Actor: actorB, Name: "b", Host: "github.com", Method: "GET"}
+	type bornFn = func(context.Context, string, string) (bool, string, error)
 	for _, tc := range []struct {
 		name    string
-		born    func(h *harness) func(context.Context, string, string) (time.Time, string, error)
+		born    bornFn
 		answers bool
 	}{
-		{"registered after the term began", func(h *harness) func(context.Context, string, string) (time.Time, string, error) {
-			at := h.now.Add(time.Second)
-			return func(context.Context, string, string) (time.Time, string, error) { return at, "", nil }
-		}, true},
-		{"registered before the term began", func(h *harness) func(context.Context, string, string) (time.Time, string, error) {
-			at := h.now.Add(-time.Minute)
-			return func(context.Context, string, string) (time.Time, string, error) { return at, "", nil }
-		}, false},
-		{"a fork registered in the term", func(h *harness) func(context.Context, string, string) (time.Time, string, error) {
-			at := h.now.Add(time.Second)
-			return func(context.Context, string, string) (time.Time, string, error) { return at, "parent-uid", nil }
-		}, false},
-		{"no registration", func(h *harness) func(context.Context, string, string) (time.Time, string, error) {
-			return func(context.Context, string, string) (time.Time, string, error) { return time.Time{}, "", nil }
-		}, false},
-		{"the registration read fails", func(h *harness) func(context.Context, string, string) (time.Time, string, error) {
-			return func(context.Context, string, string) (time.Time, string, error) {
-				return time.Now(), "", errors.New("store down")
-			}
+		// The leader's own state says it registered the actor in its term
+		// (GAP-1148: no clock of another node is compared).
+		{"registered in this term", func(context.Context, string, string) (bool, string, error) { return true, "", nil }, true},
+		{"registered before this term (loaded at start)", func(context.Context, string, string) (bool, string, error) { return false, "", nil }, false},
+		{"a fork registered in the term", func(context.Context, string, string) (bool, string, error) { return true, "parent-uid", nil }, false},
+		{"the registration read fails", func(context.Context, string, string) (bool, string, error) {
+			return true, "", errors.New("store down")
 		}, false},
 		{"no Born (rel behaviour)", nil, false},
 	} {
 		h := coldLeader(t)
 		h.svc.Leading()
 		if tc.born != nil {
-			h.svc.opts.Born = tc.born(h)
+			h.svc.opts.Born = tc.born
 		}
 		h.advance(2 * time.Second)
 		for _, m := range []string{"GET", "POST"} {
