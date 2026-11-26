@@ -18,6 +18,7 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -66,9 +67,12 @@ var pathKeys = func() map[string]bool {
 }()
 
 // readTools are tools whose PreToolUse target the gateway may want to see:
-// the kit attaches the file it is about to read.
+// the kit attaches the file it is about to read. OpenCode's read tool
+// (filePath, before tool.execute.before) runs the skill folder pass like
+// Claude Code's Read (GAP-1143).
 var readTools = map[string]map[string]bool{
 	"claudecode": {"Read": true, "NotebookRead": true},
+	"opencode":   {"read": true},
 }
 
 // skillTools are the tools that load a skill by name (B5.4 use gate).
@@ -135,13 +139,13 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	if shellProofEvent(connector, event) {
 		addShellCommandFacts(f, connector, event, payload, cwd)
 	}
-	if isPre && readTools[connector][view.ToolName] {
+	if (isPre || event == "tool.execute.before") && readTools[connector][view.ToolName] {
 		for _, pf := range f.Paths {
 			// A read of a skill's files runs the skill folder pass in this
 			// call (one rule for every skill: the folder's content digest,
 			// GAP-0039/0164), so a folder that arrived since the last pass is
 			// decided before its files reach the model.
-			if pf.Type == "file" && (pf.Field == "tool_input.file_path" || pf.Field == "tool_input.notebook_path") &&
+			if pf.Type == "file" && (pf.Field == "tool_input.file_path" || pf.Field == "tool_input.notebook_path" || pf.Field == "tool_input.filePath") &&
 				(inSkillRoot(pf.Abs) || inSkillRoot(pf.Resolved)) {
 				f.readsSkill = true
 			}
@@ -549,16 +553,44 @@ func inspectPath(field, p, cwd string) PathFact {
 	return pf
 }
 
-// inSkillRoot reports a path inside a .claude, .codex or .agents skill
-// folder.
+// inSkillRoot reports whether p is inside a skill root of the connector
+// table (agentpaths, the one skillRoots and quarantine read) or a Claude
+// Code plugin's skills. GAP-1143: it was its own list of .claude, .codex
+// and .agents, so a read in the other connectors' roots (OpenCode's
+// .opencode/skill, Cursor's, Copilot's, ...) did not run the folder pass.
 func inSkillRoot(p string) bool {
 	p = filepath.ToSlash(p)
 	if p == "" {
 		return false
 	}
-	for _, root := range []string{"/.claude/skills/", "/.codex/skills/", "/.agents/skills/"} {
-		if strings.Contains(p, root) {
-			return true
+	under := func(dir string) bool {
+		dir = strings.TrimSuffix(filepath.ToSlash(dir), "/")
+		return dir != "" && strings.HasPrefix(p, dir+"/")
+	}
+	for _, e := range agentpaths.ActorEntries() {
+		if e.Kind != agentpaths.Skills {
+			continue
+		}
+		switch e.Base {
+		case agentpaths.Home, agentpaths.Project:
+			if strings.Contains(p, "/"+e.Rel+"/") {
+				return true
+			}
+		case agentpaths.Config:
+			mark := "/" + e.Rel + "/"
+			if e.ConfigRel != "" {
+				mark = "/" + e.ConfigRel + mark
+			}
+			if strings.Contains(p, mark) {
+				return true
+			}
+			if v := strings.TrimSpace(os.Getenv(e.ConfigEnv)); e.ConfigEnv != "" && filepath.IsAbs(v) && under(filepath.Join(filepath.Clean(v), filepath.FromSlash(e.Rel))) {
+				return true
+			}
+		case agentpaths.Abs:
+			if under(e.Rel) {
+				return true
+			}
 		}
 	}
 	// A Claude Code plugin's skills (skillRoots watches them too).

@@ -1,0 +1,107 @@
+[
+  {
+    "case": "gap0592_perl:E01 variable write mode",
+    "cmd": "perl -e 'my $m=\">\"; open(F,$m,\".claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_perl:E21 append variable mode",
+    "cmd": "perl -e 'my $m=\">>\"; open(F,$m,\".claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_perl:X01 braced scalar alias",
+    "cmd": "perl -e 'my $m=\"<\"; ${m}=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 ${m}= + W4"
+  },
+  {
+    "case": "gap0592_perl:X10 local mode",
+    "cmd": "perl -e 'our $m=\"<\"; { local $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 local + W4"
+  },
+  {
+    "case": "gap0592_perl:X21 scalar name open",
+    "cmd": "perl -e 'my $open=\">\"; open(F,$open,\".claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4 ($open is a scalar)"
+  },
+  {
+    "case": "gap0592_perl:X24 interpolated two-arg mode",
+    "cmd": "perl -e 'my $m=\">\"; open(F,\"$m.claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W3 + S1 interpolated mode"
+  },
+  {
+    "case": "gap0592_cust:variable write mode",
+    "cmd": "perl -e 'my $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_cust:variable append mode",
+    "cmd": "perl -e 'my $m=\">>\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_cust:our scalar",
+    "cmd": "perl -e 'our $O_NOFOLLOW = 1; sysopen(my $f, \".claude/settings.json\", $O_NOFOLLOW)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 flags + W5"
+  },
+  {
+    "case": "gap0592_cust:my scalar",
+    "cmd": "perl -e 'my $O_NOFOLLOW = 1; sysopen(my $f, \".claude/settings.json\", $O_NOFOLLOW)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 flags + W5"
+  },
+  {
+    "case": "gap0592_cust:local scalar",
+    "cmd": "perl -e 'local $O_NOFOLLOW = 1; sysopen(my $f, \".claude/settings.json\", $O_NOFOLLOW)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 flags + W5"
+  },
+  {
+    "case": "gap0592_cust:X01 braced scalar alias",
+    "cmd": "perl -e 'my $m=\"<\"; ${m}=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 ${m}= + W4"
+  },
+  {
+    "case": "gap0592_cust:X10 local mode",
+    "cmd": "perl -e 'our $m=\"<\"; { local $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 local + W4"
+  },
+  {
+    "case": "gap0592_cust:X21 scalar name open",
+    "cmd": "perl -e 'my $open=\">\"; open(F,$open,\".claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4 ($open is a scalar)"
+  },
+  {
+    "case": "gap0592_cust:X24 interpolated two-arg mode",
+    "cmd": "perl -e 'my $m=\">\"; open(F,\"$m.claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W3 + S1 interpolated mode"
+  }
+]

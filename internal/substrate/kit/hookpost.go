@@ -24,6 +24,16 @@ import (
 // ignored.
 func RunHookPost(ctx context.Context, cfg Config, stdin io.Reader, stdout, stderr io.Writer,
 	send func(ctx context.Context, r Request) (Response, string, error)) int {
+	// The plugin posts run the kit's skill folder pass as the command hooks
+	// do (GAP-1143): a refused folder in any skill root is taken out of the
+	// agent's reach after a tool call, at session start and at idle, and a
+	// call the plugin can deny is refused while a refused folder still loads
+	// or a held one has no verdict. A refusal is the gateway's block shape,
+	// which the plugin turns into its own deny.
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	o := HookOptions{Config: cfg, Stderr: stderr}
 	var in struct {
 		Path    string            `json:"path"`
 		Headers map[string]string `json:"headers"`
@@ -54,9 +64,14 @@ func RunHookPost(ctx context.Context, cfg Config, stdin io.Reader, stdout, stder
 	if event == "" {
 		event = view.Alt
 	}
-	body, err := json.Marshal(HookEnvelope{V: EnvelopeVersion, Connector: connectorName, Event: event,
+	if msg := stuckSkillRefusal(o.home(), event); msg != "" {
+		return writeHookPostRefusal(stdout, msg)
+	}
+	env := HookEnvelope{V: EnvelopeVersion, Connector: connectorName, Event: event,
 		HookContract: cfg.HookContracts[connectorName], Mode: mode, KitVersion: cfg.KitVersion,
-		Payload: json.RawMessage(payload), Facts: CollectFacts(connectorName, event, payload, cfg.attachCap())})
+		Payload: json.RawMessage(payload), Facts: CollectFacts(connectorName, event, payload, cfg.attachCap())}
+	pass := o.beginSkillPass(&env, payload)
+	body, err := json.Marshal(env)
 	if err != nil {
 		return 2
 	}
@@ -72,6 +87,9 @@ func RunHookPost(ctx context.Context, cfg Config, stdin io.Reader, stdout, stder
 		send = defaultSend(cfg)
 	}
 	resp, _, err := send(ctx, Request{Path: HookPathPrefix + connectorName, Header: header, Body: body})
+	if msg := o.finishSkillPass(pass, resp, err); msg != "" {
+		return writeHookPostRefusal(stdout, msg)
+	}
 	if err != nil {
 		if errors.Is(err, ErrUnreachable) {
 			fmt.Fprintln(stderr, "defenseclaw-actor-hook: the DefenseClaw gateway in the cluster did not answer")
@@ -81,6 +99,19 @@ func RunHookPost(ctx context.Context, cfg Config, stdin io.Reader, stdout, stder
 		return 1
 	}
 	return writeJSON(stdout, map[string]any{"status": resp.Status, "body": string(resp.Body)})
+}
+
+// writeHookPostRefusal answers the plugin with the kit's own refusal in the
+// gateway's block shape (action block and a deny hook_output): the OpenCode
+// and Amp plugins deny a call they can block with this reason, and the
+// observe-only events ignore it.
+func writeHookPostRefusal(stdout io.Writer, reason string) int {
+	body, err := json.Marshal(map[string]any{"action": "block", "reason": reason,
+		"hook_output": map[string]string{"decision": "deny", "reason": reason}})
+	if err != nil {
+		return 1
+	}
+	return writeJSON(stdout, map[string]any{"status": 200, "body": string(body)})
 }
 
 func writeJSON(w io.Writer, v any) int {

@@ -213,6 +213,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				env.Payload = masked
 				st.logRefusal("hook payload of %s/%s carried the exposed value(s) %s (actor_secrets); replaced before evaluation and audit",
 					reg.Atespace, reg.Name, strings.Join(names, ", "))
+				st.auditExposedMasked(r.Context(), reg, env.Event, names)
 			}
 		}
 		// The facts stay on the envelope (substrateEnvelopeFrom); the skill

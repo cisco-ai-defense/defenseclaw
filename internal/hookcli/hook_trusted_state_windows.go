@@ -127,7 +127,12 @@ func nativeHookExecutable() string {
 		return HookExecutableOverride
 	}
 	executable, _ := os.Executable()
-	return executable
+	// Started by an 8.3 alias of its image (an HKLM Claude matrix can name
+	// the hook so), the process reports the alias. Every hook-side check
+	// (standalone and implicit-managed detection, the managed runtime, the
+	// gateway recovery) compares the long name the install records, so the
+	// hook spells itself by it (GAP-2243). A link or copy keeps its own name.
+	return winpath.LongName(executable)
 }
 
 // NativeHookRuntimeNoop reports whether this process is the canonical stable

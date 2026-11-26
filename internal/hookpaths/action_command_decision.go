@@ -1200,7 +1200,9 @@ func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 						return false
 					}
 				}
-				return true // A fixed producer bound every child operand.
+				if !xargsPerlChild(strings.Fields(command)) {
+					return true // A fixed producer bound every child operand.
+				}
 			}
 		}
 		if reason == "" {
@@ -2303,7 +2305,9 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 					return "dynamic-argument"
 				}
 			}
-			return ""
+			if !xargsPerlChild(words[index:]) {
+				return ""
+			}
 		}
 		if actionProgramMayWrite(programBase(words[index])) {
 			return "dynamic-argument"

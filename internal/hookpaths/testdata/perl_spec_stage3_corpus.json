@@ -1,0 +1,65 @@
+[
+  {
+    "id": "U10",
+    "rule": "W5 numeric expr",
+    "cmd": "perl -e 'sysopen(F, \".claude/settings.json\", 01|01000)'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E16",
+    "rule": "W5 numeric expr",
+    "cmd": "perl -e 'sysopen(my $f,\".claude/settings.json\",1|64) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U09",
+    "rule": "W5 numeric",
+    "cmd": "perl -e 'sysopen(my $f, \".claude/settings.json\", 1); print $f \"{}\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U29",
+    "rule": "F1 + W5 list op",
+    "cmd": "perl -MFcntl -e 'sysopen F, \".claude/settings.json\", O_WRONLY'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E12",
+    "rule": "F1 Fcntl:: + W5",
+    "cmd": "perl -MFcntl -e 'sysopen(my $f,\".claude/settings.json\",Fcntl::O_WRONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E13",
+    "rule": "F1 POSIX:: + W5",
+    "cmd": "perl -MPOSIX -e 'sysopen(my $f,\".claude/settings.json\",POSIX::O_WRONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E15",
+    "rule": "W5 hex",
+    "cmd": "perl -e 'sysopen(my $f,\".claude/settings.json\",0x241) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E18",
+    "rule": "F1 + W5",
+    "cmd": "perl -e 'use Fcntl qw(:DEFAULT); sysopen(my $f,\".claude/settings.json\",O_WRONLY+O_CREAT) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E19",
+    "rule": "W5 4-arg",
+    "cmd": "perl -e 'sysopen(my $f,\".claude/settings.json\",0x241,0600) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  }
+]
