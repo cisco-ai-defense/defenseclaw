@@ -1,0 +1,30 @@
+[
+  {
+    "case": "gap0592_perl:P10 sysopen write",
+    "cmd": "perl -e 'use Fcntl; sysopen(my $f, \".claude/settings.json\", O_WRONLY|O_TRUNC); syswrite $f, \"{}\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "F1 + W5"
+  },
+  {
+    "case": "gap0592_perl:P17 sysopen without parens",
+    "cmd": "perl -MFcntl -e 'sysopen my $f, \".claude/settings.json\", O_CREAT|O_RDWR; print $f \"{}\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "F1 + W5 list op"
+  },
+  {
+    "case": "gap0592_perl:P30 sysopen numeric flags",
+    "cmd": "perl -e 'sysopen(my $f, \".claude/settings.json\", 1)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W5 numeric"
+  },
+  {
+    "case": "gap0592_perl:P31 sysopen octal flags",
+    "cmd": "perl -e 'sysopen(F, \".claude/settings.json\", 01|01000)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W5 numeric"
+  }
+]

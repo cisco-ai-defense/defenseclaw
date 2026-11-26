@@ -1,0 +1,562 @@
+[
+  {
+    "id": "U16",
+    "rule": "W1",
+    "cmd": "perl -e 'unlink \"./.claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U17",
+    "rule": "W1",
+    "cmd": "perl -e 'unlink \"../proj/.claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U18",
+    "rule": "W1",
+    "cmd": "perl -e 'unlink \".claude/settings.local.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U20",
+    "rule": "W1",
+    "cmd": "perl -e \"unlink '.claude/settings.json'\"",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U22",
+    "rule": "W1",
+    "cmd": "env perl -e 'unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U23",
+    "rule": "W1",
+    "cmd": "/usr/bin/perl -e 'unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U25",
+    "rule": "W1",
+    "cmd": "bash -c \"perl -e 'unlink \\\".claude/settings.json\\\"'\"",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U26",
+    "rule": "W1",
+    "cmd": "perl -E 'unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U27",
+    "rule": "W1",
+    "cmd": "perl -we 'unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U28",
+    "rule": "W1",
+    "cmd": "perl -le 'truncate \".claude/settings.json\", 0'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U33",
+    "rule": "W1",
+    "cmd": "perl -e 'unlink   (   \".claude/settings.json\"   )'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N29",
+    "rule": "W1",
+    "cmd": "perl -e 'rename(q{notes.txt}, \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "R01",
+    "rule": "C1 + W1",
+    "cmd": "perl -e 'rename (\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "R03",
+    "rule": "C1 + W1",
+    "cmd": "perl -e 'rename((\"notes.txt\"), \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U37",
+    "rule": "C1 + W1",
+    "cmd": "perl -e 'unlink \".claude/settings.json\"\n'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "R05",
+    "rule": "C1 trailing comma + W1",
+    "cmd": "perl -e 'rename(\"notes.txt\", \".claude/settings.json\",)'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "R06",
+    "rule": "C1 trailing comma + W1",
+    "cmd": "perl -e 'truncate(\".claude/settings.json\", 0,)'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "R07",
+    "rule": "C1 trailing comma + W1",
+    "cmd": "perl -e 'symlink(\"notes.txt\", \".claude/settings.json\",)'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U01",
+    "rule": "C1/L4 operator + W1",
+    "cmd": "perl -e 'print 0*unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U02",
+    "rule": "C1/L4 operator + W1",
+    "cmd": "perl -e 'print 1&unlink(\".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U02b",
+    "rule": "C1/L4 operator + W1",
+    "cmd": "perl -e 'print 1%rename(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U21",
+    "rule": "W3",
+    "cmd": "perl -e \"open(F, '>.claude/settings.json'); print F 1\"",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E03",
+    "rule": "W3",
+    "cmd": "perl -e 'open(F,\"<notes.txt\"); open(G,\">.claude/settings.json\"); print G \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E10",
+    "rule": "W3",
+    "cmd": "perl -e 'open(F,\"<notes.txt\");\n open(G,\">.claude/settings.json\"); print G \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "K02",
+    "rule": "L4 regex after =~ + W1",
+    "cmd": "perl -e 'print 1 if \"a\" =~ /\"/; unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "K03",
+    "rule": "L4 regex after =~ + W1",
+    "cmd": "perl -e 'print 1 if \"a\" =~ /#/; unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "R08",
+    "rule": "C1 &CORE:: + W1",
+    "cmd": "perl -e '&CORE::rename(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N25",
+    "rule": "C1 &CORE:: + W1",
+    "cmd": "perl -e '&CORE::rename(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U04",
+    "rule": "C1 newline paren + W1",
+    "cmd": "perl -e 'unlink\n(\".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U08b",
+    "rule": "C1 newline paren + W1",
+    "cmd": "perl -e 'rename\n(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U36",
+    "rule": "C1 CORE:: + W1",
+    "cmd": "perl -e 'CORE::rename(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N24",
+    "rule": "C1 CORE:: + W1",
+    "cmd": "perl -e 'CORE::rename(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N09",
+    "rule": "L5 heredoc + W1",
+    "cmd": "perl -e 'print <<X;\n__END__\nX\nunlink \".claude/settings.json\";\n'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N10",
+    "rule": "L5 heredoc + W1",
+    "cmd": "perl -e 'print <<X;\na \" b\nX\nunlink \".claude/settings.json\"; print \"c\";\n'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N14",
+    "rule": "L4 subscript term + W1",
+    "cmd": "perl -e 'my %h=(a=>1); print $h{a}*unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N15",
+    "rule": "L4 subscript term + W1",
+    "cmd": "perl -e 'my %h=(a=>1); print $h{a}&unlink(\".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "K01",
+    "rule": "L2 q## + W1",
+    "cmd": "perl -e 'print q#x#; unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "K04",
+    "rule": "L2 + W2",
+    "cmd": "perl -e 'print q#x#; open(my $f, \">\", \".claude/settings.json\"); print $f \"{}\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "K05",
+    "rule": "L1 + W1",
+    "cmd": "perl -e 'print 1; # c\nunlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "R04",
+    "rule": "C1 list op + W1",
+    "cmd": "perl -e 'rename \"notes.txt\", \".claude/settings.json\" or die'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U05b",
+    "rule": "C1 newline paren + W2",
+    "cmd": "perl -e 'open\n(my $f, \"+<\", \".claude/settings.json\"); print $f 1'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U06",
+    "rule": "C1 newline + W1",
+    "cmd": "perl -e 'unlink\n\".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U07",
+    "rule": "L1 + C1 + W1",
+    "cmd": "perl -e 'unlink # x\n\".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U08",
+    "rule": "C1 multiline + W1",
+    "cmd": "perl -e 'rename\n\t\"notes.txt\",\n\t\".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U30",
+    "rule": "W1 link",
+    "cmd": "perl -e 'link \"notes.txt\", \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U35",
+    "rule": "W3 leading space",
+    "cmd": "perl -e 'open(F, \" >> .claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U38",
+    "rule": "C1 in block + W1",
+    "cmd": "perl -e 'if (1) {unlink \".claude/settings.json\"}'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U39",
+    "rule": "C1 in do block + W1",
+    "cmd": "perl -e 'do{unlink \".claude/settings.json\"}'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "X05",
+    "rule": "W3 + P1 concat",
+    "cmd": "perl -e 'open(F, \">\" . \".claude/settings.json\"); print F \"{}\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "X06",
+    "rule": "W2 + P1 concat",
+    "cmd": "perl -e 'open(my $f, \">\", \".claude/\" . \"settings.json\"); print $f \"{}\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "X07",
+    "rule": "W1 + P1 concat",
+    "cmd": "perl -e 'unlink \".claude/\" . \"settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "X10",
+    "rule": "W1 + P1 $ENV{HOME}",
+    "cmd": "perl -e 'unlink \"$ENV{HOME}/.claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "X11",
+    "rule": "W3 + P1 $ENV{HOME}",
+    "cmd": "perl -e 'open(F, \">$ENV{HOME}/.claude/settings.json\"); print F \"{}\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "X14",
+    "rule": "W2 +< list op",
+    "cmd": "perl -e 'open F, \"+<\", \".claude/settings.json\"; print F \"{}\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N01",
+    "rule": "L3 {y} key + W1",
+    "cmd": "perl -e 'my %p; $p{y}=1; unlink \".claude/settings.json\"; $p{x}=1;'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N02",
+    "rule": "L3 {s} key + W1",
+    "cmd": "perl -e 'my %o; $o{s}=1; unlink \".claude/settings.json\"; $o{t}=2;'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N03",
+    "rule": "L3 ->{m} key + W1",
+    "cmd": "perl -e 'my $h={}; $h->{m}=1; unlink \".claude/settings.json\"; $h->{n}=1;'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N04",
+    "rule": "L3 -s filetest + W1",
+    "cmd": "perl -e 'print -s \"notes.txt\"; unlink \".claude/settings.json\"; print \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N05",
+    "rule": "L4 split regex + W1",
+    "cmd": "perl -e \"my @w = split /\\s+/, \\\"a b\\\"; unlink \\\".claude/settings.json\\\"; print 1+1\"",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N06",
+    "rule": "L3 ->s method + W1",
+    "cmd": "perl -e 'package O; sub s {1} package main; O->s(1); unlink \".claude/settings.json\"; print 1;'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N07",
+    "rule": "L1 q-space-# + W1",
+    "cmd": "perl -e 'print q #c\n{a}; unlink \".claude/settings.json\"; # z\n'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N08",
+    "rule": "L2 s{}NL{}e + W1",
+    "cmd": "perl -e '$_=\"a\"; s{a}\n{unlink \".claude/settings.json\"}e;\nprint 1;\n'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N11",
+    "rule": "L6 POD + W1",
+    "cmd": "perl -e '=pod\n\n__END__\n\n=cut\n\nunlink \".claude/settings.json\";\n'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N13",
+    "rule": "L3 non-ASCII ident + W1",
+    "cmd": "perl -Mutf8 -e 'sub éq{ unlink \".claude/settings.json\" } éq();'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N16",
+    "rule": "L3 => key + W1",
+    "cmd": "perl -e 'my %h = (q => 1); unlink \".claude/settings.json\";'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N17",
+    "rule": "L3 {q} key + W1",
+    "cmd": "perl -e 'my %h; $h{q}=1; unlink \".claude/settings.json\"; $h{r}=2'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N18",
+    "rule": "L2 escape + W1",
+    "cmd": "perl -e 'print q{a\\}b}; unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N19",
+    "rule": "L2 nesting + W1",
+    "cmd": "perl -e 'print q{a{b}c}; unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N20",
+    "rule": "L2 s///e live + W1",
+    "cmd": "perl -e '$_=\"a\"; s{a}{unlink \".claude/settings.json\"}e'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N23",
+    "rule": "L7 in string + W1",
+    "cmd": "perl -e 'print \"x\n__END__\n\"; unlink \".claude/settings.json\";'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N28",
+    "rule": "L2 s{} # c NL {}e + W1",
+    "cmd": "perl -e '$_=\"a\"; s{a} # c\n {unlink \".claude/settings.json\"}e;\nprint 1;\n'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "N30",
+    "rule": "L2 y/// + W1",
+    "cmd": "perl -e '$_=\"a\"; y/a/b/; unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E01",
+    "rule": "S1 + W4",
+    "cmd": "perl -e 'my $m=\">\"; open(F,$m,\".claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E02",
+    "rule": "W2 concat mode",
+    "cmd": "perl -e 'open(F, \">\" . \"\", \".claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E04",
+    "rule": "W3 +<",
+    "cmd": "perl -e 'open(F,\"+<.claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E05",
+    "rule": "W2 layer",
+    "cmd": "perl -e 'open(F,\"<:raw\",\"notes.txt\"); open(G,\">:raw\",\".claude/settings.json\"); print G \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E06",
+    "rule": "L5 + W3",
+    "cmd": "perl -e 'open(F,\"<notes.txt\"); my $s=<<X;\nhello\nX\nopen(G,\">.claude/settings.json\"); print G \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "E11",
+    "rule": "L1 + W3",
+    "cmd": "perl -e 'open(F,\"<notes.txt\"); # comment\n open(G,\">.claude/settings.json\"); print G \"x\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U19",
+    "rule": "W1 sanitized absolute path",
+    "cmd": "perl -e 'unlink \"/tmp/user/.claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "id": "U19b",
+    "rule": "W1 sanitized absolute path",
+    "cmd": "perl -e 'rename \"notes.txt\", \"/tmp/user/.claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB"
+  }
+]

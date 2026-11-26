@@ -948,6 +948,17 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 	if len(code) > 16<<10 {
 		return nil
 	}
+	paths := literalInterpreterWritesBase(code, language, cwd, home)
+	if language == "perl" {
+		paths = append(paths, perlProvenWrites(code, cwd, home)...)
+	}
+	return paths
+}
+
+func literalInterpreterWritesBase(code, language, cwd, home string) []string {
+	if len(code) > 16<<10 {
+		return nil
+	}
 	pathString := literalString
 	if language == "python" || strings.HasPrefix(language, "python3") {
 		pathString = literalPythonString
