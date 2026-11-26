@@ -590,6 +590,9 @@ type guestReadingMemo struct {
 	// their placed children (sandboxGuestPlacedChildren).
 	readings []guestAnalysisEntry
 	children []guestChildrenEntry
+	// placed keeps the placed readings of the hook's walks
+	// (placedReader).
+	placed []*guestPlacedEntry
 	// relative keeps the relative-operand answers of every split of the
 	// hook (actionfacts.RelativeOperandMemo).
 	relative actionfacts.RelativeOperandMemo
@@ -618,6 +621,16 @@ type guestChildrenEntry struct {
 	children, candidates []actionfacts.Facts
 	cut                  bounded.CapSet
 }
+
+// guestPlacedEntry keeps the readings of the placements of every guest input
+// equal to base but for its command and folder (placedReader), by text and
+// folder.
+type guestPlacedEntry struct {
+	base     actionfacts.Input
+	readings map[guestPlacedKey]actionfacts.Facts
+}
+
+type guestPlacedKey struct{ text, cwd string }
 
 // guestReadingMemoEntries bounds each list of a guestReadingMemo: a hook
 // reads a few guest inputs (the call, its twins), and an older entry gives
@@ -679,9 +692,8 @@ func (memo *guestReadingMemo) analyze(input actionfacts.Input) actionfacts.Facts
 
 // guestReadingMemoReadings bounds the guest readings a guestReadingMemo
 // keeps: the call, its twins, the statements the dispatch reads alone and
-// the placed children of their walks (sandboxGuestPlacedChildrenWalk, which
-// places the same command in the same folder for the call and its twins,
-// GAP-2215).
+// the last placed children of their walks (placedReader keeps all of them
+// by text and folder, GAP-2215, rel-1-0-10:GAP-2226).
 const guestReadingMemoReadings = 16
 
 // clippedFacts is facts with each of its lists at its length.
@@ -736,6 +748,74 @@ func clippedFactsList(list []actionfacts.Facts) []actionfacts.Facts {
 		out[at] = clippedFacts(facts)
 	}
 	return out
+}
+
+// placedReader reads a placement of input, its command text in its folder
+// (sandboxGuestPlacedChildrenWalk), as actionfacts.Analyze reads input with
+// that command and folder and no tool arguments. A hook walks the call and
+// its twins (an Args-only call and its command form, a here-string and its
+// pipe twin), whose placements are mostly the same texts in the same
+// folders: each reading is kept for the hook by text and folder, for every
+// input equal to this one but for its command, folder and arguments, so a
+// later walk reads only what an earlier one did not. The reading depends on
+// the input alone, as analyze's does. A nil memo keeps nothing.
+func (memo *guestReadingMemo) placedReader(input actionfacts.Input) func(guestPlacement) actionfacts.Facts {
+	childOf := func(placement guestPlacement) actionfacts.Input {
+		child := input
+		child.Command, child.CWD = placement.text, placement.cwd
+		child.Args, child.Argv = nil, nil
+		return child
+	}
+	if memo == nil {
+		return func(placement guestPlacement) actionfacts.Facts { return actionfacts.Analyze(childOf(placement)) }
+	}
+	base := childOf(guestPlacement{})
+	memo.mu.Lock()
+	var entry *guestPlacedEntry
+	for _, kept := range memo.placed {
+		if reflect.DeepEqual(kept.base, base) {
+			entry = kept
+			break
+		}
+	}
+	if entry == nil {
+		entry = &guestPlacedEntry{base: base, readings: map[guestPlacedKey]actionfacts.Facts{}}
+		if len(memo.placed) == guestReadingMemoEntries {
+			memo.placed = slices.Delete(memo.placed, 0, 1)
+		}
+		memo.placed = append(memo.placed, entry)
+	}
+	memo.mu.Unlock()
+	return func(placement guestPlacement) actionfacts.Facts {
+		key := guestPlacedKey{placement.text, placement.cwd}
+		memo.mu.Lock()
+		facts, ok := entry.readings[key]
+		memo.mu.Unlock()
+		if ok {
+			return clippedFacts(facts)
+		}
+		facts = memo.analyze(childOf(placement))
+		memo.mu.Lock()
+		entry.readings[key] = facts
+		memo.mu.Unlock()
+		return clippedFacts(facts)
+	}
+}
+
+// guestCandidateMayReadKey reports a candidate reading's text that may read
+// an SSH private key's content in some folder, the one thing a reading in a
+// candidate folder counts for (sandboxGuestPlacedChildren): a text with a
+// quote, an escape, an expansion or a pattern, or one that names a program
+// of sshPrivateKeyContentReaders. The analysis takes a command's program
+// from a word of its text (its base name, or less an .exe or .cmd suffix),
+// so a text of plain words that names none of them has no reader command in
+// any folder, and its readings there prove nothing (rel-1-0-10:GAP-2226).
+func guestCandidateMayReadKey(text string) bool {
+	if strings.ContainsAny(text, "'\"\\$`^%!*?[{") {
+		return true
+	}
+	lower := strings.ToLower(text)
+	return slices.ContainsFunc(sshPrivateKeyContentReaders, func(program string) bool { return strings.Contains(lower, program) })
 }
 
 // plan is newGuestPlacementPlan(input, facts) over the memo's splits.
