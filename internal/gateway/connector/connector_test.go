@@ -5562,10 +5562,9 @@ env_key = "OPENAI_API_KEY"
 	}
 }
 
+const editedWindowsHookBinaryName = "defenseclaw-hook-edited.exe"
+
 func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows Codex registers the native hook launcher, not hooks/codex-hook.sh (GAP-1032 is the shell-script form)")
-	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := []byte("# personal\nmodel = \"gpt-5\"\n[profiles.review]\nmodel = \"gpt-5.1\"\n")
@@ -5574,6 +5573,21 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	}
 	CodexConfigPathOverride = path
 	defer func() { CodexConfigPathOverride = "" }()
+	// Unix registers hooks/codex-hook.sh (GAP-1032 is that script form).
+	// Windows Codex registers the native launcher instead: the registration
+	// that gets edited is the launcher's path.
+	registered, edited := "/hooks/codex-hook.sh", "/xhooks/codex-hook.sh"
+	if runtime.GOOS == "windows" {
+		previousInspector := codexPolicyInspector
+		codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+			return codexEffectivePolicy{Source: "healed edited hook paths test"}, nil
+		}
+		defer func() { codexPolicyInspector = previousInspector }()
+		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
+		// An edited launcher name: a defenseclaw-* executable beside the
+		// launcher is DefenseClaw's own edited entry (isRenamedDefenseClawHookExecutable).
+		registered, edited = windowsHookBinaryName, editedWindowsHookBinaryName
+	}
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw"), APIAddr: "127.0.0.1:18970"}
 	if err := c.Setup(context.Background(), opts); err != nil {
@@ -5583,11 +5597,11 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	edited := bytes.ReplaceAll(installed, []byte("/hooks/codex-hook.sh"), []byte("/xhooks/codex-hook.sh"))
-	if bytes.Equal(edited, installed) {
+	editedConfig := bytes.ReplaceAll(installed, []byte(registered), []byte(edited))
+	if bytes.Equal(editedConfig, installed) {
 		t.Fatal("test did not edit a hook registration")
 	}
-	if err := os.WriteFile(path, edited, 0o600); err != nil {
+	if err := os.WriteFile(path, editedConfig, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Setup(context.Background(), opts); err != nil {
@@ -5600,9 +5614,11 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(got), "xhooks") || strings.Contains(string(got), "hooks.state") ||
+	if strings.Contains(string(got), "xhooks") || strings.Contains(string(got), editedWindowsHookBinaryName) || strings.Contains(string(got), "hooks.state") ||
 		!bytes.Contains(got, []byte("# personal")) {
-		t.Fatalf("edited hooks or trust state survived teardown: %s", got)
+		t.Fatalf("edited hooks or trust state survived teardown (edited path %v, trust state %v, hook tables %d, personal %v)",
+			strings.Contains(string(got), "xhooks") || strings.Contains(string(got), editedWindowsHookBinaryName),
+			strings.Contains(string(got), "hooks.state"), strings.Count(string(got), "[[hooks."), bytes.Contains(got, []byte("# personal")))
 	}
 }
 
