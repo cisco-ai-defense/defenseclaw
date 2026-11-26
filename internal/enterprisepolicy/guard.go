@@ -754,10 +754,15 @@ func ownedCommand(goos, command, hookBinary string) bool {
 // binary hookBinary. Every check of whether a handler is DefenseClaw's own
 // uses it: machine-policy verify and status coverage, the guardian and the
 // higher-precedence (HKLM Settings) check. Off Windows the spelling must be
-// exact. On Windows case folds, and an 8.3 short alias of the installed
-// binary counts the way Claude Code enrolment counts it (GAP-2175); a
-// junction, symbolic link or hard link elsewhere does not
-// (winpath.SameNamedFile).
+// exact. On Windows the command must name the installed binary file itself
+// (winpath.SameNamedFile): the same name as NTFS compares it, or an 8.3
+// short alias, the way Claude Code enrolment counts it (GAP-2175), and the
+// same file; a junction, symbolic link or hard link elsewhere does not
+// count. The strings.EqualFold accept that came first is gone: Unicode
+// folding takes a Kelvin sign for k, so a fold twin of the hook path in a
+// folder a user can create counted as owned without naming the hook file
+// (rel-1-0-10:GAP-2221). A Windows layout read on another host (tests,
+// planning) has no files to compare: the names decide (winpath.EqualNames).
 func sameHookBinary(goos, command, hookBinary string) bool {
 	if command == "" || hookBinary == "" {
 		return false
@@ -765,7 +770,10 @@ func sameHookBinary(goos, command, hookBinary string) bool {
 	if goos != "windows" {
 		return command == hookBinary
 	}
-	return strings.EqualFold(command, hookBinary) || winpath.SameNamedFile(command, hookBinary)
+	if runtimeGOOS() != "windows" {
+		return winpath.EqualNames(command, hookBinary)
+	}
+	return winpath.SameNamedFile(command, hookBinary)
 }
 
 func validConnectorToken(value string) bool {
