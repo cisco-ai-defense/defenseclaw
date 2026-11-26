@@ -542,6 +542,14 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, false, 0})
 			}
 		}
+		// Once the pass is cut and full, a plain candidate reading changes
+		// nothing: one listed stays a candidate, and one not listed is
+		// dropped (guestCollect). Its arrival is not counted, which keeps
+		// the order of the later readings. An 8 KB cd chain offered each of
+		// its 1,100 calls in 64 targets to the full list (rel-1-0-10:GAP-2249).
+		if callsDropped && len(callReadings) >= maxSandboxGuestPlacements && !guestReadingFirst(call.text) {
+			continue
+		}
 		for _, dir := range plan.targets {
 			if !byPosition || plan.known[dir] <= call.at {
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
