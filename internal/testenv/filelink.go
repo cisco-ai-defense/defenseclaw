@@ -4,19 +4,10 @@
 package testenv
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
-
-// noSymlinkPrivilege reports an error that is a Windows account without the
-// create-symbolic-link right outside GitHub Actions (which runs elevated, so
-// there the missing right is a failure).
-func noSymlinkPrivilege(err error) bool {
-	return runtime.GOOS == "windows" && errors.Is(err, errorPrivilegeNotHeld) && os.Getenv("GITHUB_ACTIONS") != "true"
-}
 
 // TryFileLink makes a symbolic link to target at link and reports whether it
 // could. A standard Windows account without SeCreateSymbolicLinkPrivilege
@@ -29,7 +20,7 @@ func TryFileLink(t testing.TB, target, link string) bool {
 	if err == nil {
 		return true
 	}
-	if noSymlinkPrivilege(err) {
+	if symlinkPrivilegeMissing(err) {
 		t.Logf("this account lacks SeCreateSymbolicLinkPrivilege: no file link %s; its rows run in the elevated leg only", link)
 		return false
 	}
