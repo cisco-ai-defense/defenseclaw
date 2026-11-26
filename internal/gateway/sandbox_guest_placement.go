@@ -203,14 +203,15 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 			return list
 		}
 		dir = path.Clean(dir)
-		if slices.Contains(list, dir) {
+		// A full list keeps no plain folder, listed or not, so it is not
+		// searched for one: guestKnownFolders offers every cd target of an
+		// 8 KB call to a full list (rel-1-0-10:GAP-2226).
+		first := len(list) < maxSandboxGuestCandidateDirs || guestDirFirst(dir, input.ActiveHome)
+		if !first || slices.Contains(list, dir) {
 			return list
 		}
 		if len(list) < maxSandboxGuestCandidateDirs {
 			return append(list, dir)
-		}
-		if !guestDirFirst(dir, input.ActiveHome) {
-			return list
 		}
 		for at := len(list) - 1; at > 0; at-- {
 			if !guestDirFirst(list[at], input.ActiveHome) {
@@ -679,6 +680,10 @@ func (memo *guestReadingMemo) analyze(input actionfacts.Input) actionfacts.Facts
 			return clippedFacts(entry.facts)
 		}
 	}
+	if facts, ok := memo.placedReading(input); ok {
+		memo.mu.Unlock()
+		return clippedFacts(facts)
+	}
 	memo.mu.Unlock()
 	facts := actionfacts.Analyze(input)
 	memo.mu.Lock()
@@ -794,12 +799,35 @@ func (memo *guestReadingMemo) placedReader(input actionfacts.Input) func(guestPl
 		if ok {
 			return clippedFacts(facts)
 		}
-		facts = memo.analyze(childOf(placement))
+		// A placed reading is kept here only: through analyze, each of a
+		// walk's thousands of readings was compared with its sixteen
+		// readings first, and pushed out the call's own (rel-1-0-10:GAP-2226).
+		// analyze still finds it (placedReading).
+		facts = actionfacts.Analyze(childOf(placement))
 		memo.mu.Lock()
 		entry.readings[key] = facts
 		memo.mu.Unlock()
 		return clippedFacts(facts)
 	}
+}
+
+// placedReading is the placed reading kept for input (placedReader), when
+// input is a placement of one of the inputs a walk read: no tool arguments,
+// and equal to that input but for its command and folder. The caller holds
+// memo.mu.
+func (memo *guestReadingMemo) placedReading(input actionfacts.Input) (actionfacts.Facts, bool) {
+	if len(memo.placed) == 0 || input.Args != nil || input.Argv != nil {
+		return actionfacts.Facts{}, false
+	}
+	key := guestPlacedKey{input.Command, input.CWD}
+	base := input
+	base.Command, base.CWD = "", ""
+	for _, entry := range memo.placed {
+		if facts, ok := entry.readings[key]; ok && reflect.DeepEqual(entry.base, base) {
+			return facts, true
+		}
+	}
+	return actionfacts.Facts{}, false
 }
 
 // guestCandidateMayReadKey reports a candidate reading's text that may read
@@ -1556,13 +1584,19 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 		for _, move := range moves {
 			call := calls[move.at]
 			bases = bases[:0]
-			for _, dir := range slices.Concat(dirs, grown) {
-				if since, ok := known[dir]; ok && since <= call.at {
-					bases = append(bases, dir)
+			for _, list := range [2][]string{dirs, grown} {
+				for _, dir := range list {
+					if since, ok := known[dir]; ok && since <= call.at {
+						bases = append(bases, dir)
+					}
 				}
 			}
 			for _, target := range guestCDJoin(move.operand, bases, home) {
-				reached[target]++
+				// reached is read only against followed, which counts no
+				// folder when the split followed no value.
+				if len(followed) != 0 {
+					reached[target]++
+				}
 				grown = keep(grown, target)
 				if since, ok := known[target]; !ok || call.first < since {
 					known[target] = call.first
