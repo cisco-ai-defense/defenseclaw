@@ -20,7 +20,8 @@ import (
 // expression is judged by its pattern: live unless the pattern matches no
 // text (a^, the pack tombstone). A pack rule always has a compiled pattern;
 // a rule built in the package without one reads as live, as before. With no
-// compiler (a generation whose compile failed) an expression reads as live.
+// compiler (a generation whose compile failed) an expression reads as live,
+// except the literal tombstone false.
 func indexEffectRuleSeverity(categories []ruleCategory, compiler *semantic.Compiler) map[string]string {
 	index := map[string]string{}
 	for _, category := range categories {
@@ -41,7 +42,7 @@ func indexEffectRuleSeverity(categories []ruleCategory, compiler *semantic.Compi
 func effectRuleLive(rule PatternRule, compiler *semantic.Compiler) bool {
 	if expression := strings.TrimSpace(rule.Expression); expression != "" {
 		if compiler == nil {
-			return true
+			return expression != "false"
 		}
 		program, code := compiler.Compile(expression)
 		return code == semantic.CompileOK && !program.NeverTrue()
