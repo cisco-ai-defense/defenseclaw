@@ -117,9 +117,11 @@ func gap1153API(t *testing.T, connectorName string, c gap1153Config) *APIServer 
 	return &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 }
 
-// gap1153Facts are the kit facts of a call with rel/1.0.11 dfb6d9c707's
-// whole-command proofs on calls over the statement budget (rel) and without
-// them (head), in the guest's namespace.
+// gap1153Facts compares the current base with the budget skip disabled
+// against the current head with the skip enabled. The rel variable name
+// denotes that baseline for historical reasons; after the p47b merge it
+// also includes p47b path placement. Both sides retain the private-key
+// read proof. Only the protected-write proof may differ.
 func gap1153Facts(t *testing.T, s gap0545Shape, host []byte, home string) (rel, head *SubstrateFacts) {
 	t.Helper()
 	restore := kit.SetOverBudgetShellProofsForTest(true)
@@ -129,17 +131,13 @@ func gap1153Facts(t *testing.T, s gap0545Shape, host []byte, home string) (rel, 
 	return rel, head
 }
 
-// TestGAP1153ActorOverBudgetVerdictIdentity: the kit makes no whole-command
-// proof (private-key read, protected-target decision) for a shell command
-// over the statement budget (substrate-1 GAP-1153). On a generated corpus
-// of 2,400 commands of every BISECT-1153 form, in three connector shell
-// shapes, the kit's facts are byte-identical to rel's (the same envelope,
-// so the same request to the gateway) on every call under the budget and
-// on every call over it where rel's proofs found nothing; every call whose
-// facts differ is over the budget, and the gateway answers it (action and
-// rules) with head's facts as with rel's, in the default, strict and
-// permissive packs and in observe mode, refusing it at the budget
-// (ACTION-COMPOUND-LIMIT).
+// TestGAP1153ActorOverBudgetVerdictIdentity checks the protected-write
+// decision skip on commands over the statement budget. On 2,400 generated
+// commands in three connector shell shapes, all facts are byte-identical
+// except for that proof on a call with no claimable placed word. For each
+// changed fact set, the gateway action and rule IDs must equal the current
+// base with the skip disabled in default, strict and permissive action and
+// default observe mode. Every changed call must hit ACTION-COMPOUND-LIMIT.
 func TestGAP1153ActorOverBudgetVerdictIdentity(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
