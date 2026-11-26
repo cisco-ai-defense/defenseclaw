@@ -67,42 +67,27 @@ func TestGAP2226OwnShellReadingsHasEveryPair(t *testing.T) {
 	}
 }
 
-// TestGAP2226CleanAbsIsPathClean pins guestCleanAbs to path.Clean.
-func TestGAP2226CleanAbsIsPathClean(t *testing.T) {
-	for _, dir := range []string{"", ".", "a", "a/b", "/", "//", "/a", "/a/", "/a//b", "/a/./b", "/a/../b", "/..", "/.", "/a/.", "/a/..",
-		"/a/b.c/.d", "/a/...", "/.ssh", "/home/alice/.cache/s0/s1", "/a/b/", "/a/./", "./a", "../a", "/a/b//"} {
-		want := path.Clean(dir)
-		if !path.IsAbs(want) {
-			want = ""
+// TestGAP2226CDJoinCleanIsCDJoin pins guestCDJoinClean to guestCDJoin over
+// clean bases, and its targets to clean folders, the walks' invariant.
+func TestGAP2226CDJoinCleanIsCDJoin(t *testing.T) {
+	var bases []string
+	for _, base := range []string{"/", "/a", "/a/b.c/.d", "/a/...", "/.ssh", "/home/alice/.cache/s0/s1", "/x y", "rel"} {
+		if base != "rel" && path.Clean(base) != base {
+			t.Fatalf("base %q is not clean", base)
 		}
-		if got := guestCleanAbs(dir); got != want {
-			t.Errorf("guestCleanAbs(%q) = %q, want %q", dir, got, want)
-		}
+		bases = append(bases, base)
 	}
-}
-
-// TestGAP2226CDJoinIsPathJoin pins guestCDJoin's plain-name join to path.Join.
-func TestGAP2226CDJoinIsPathJoin(t *testing.T) {
-	bases := []string{"/", "/a", "/a/", "/a/./b", "/a/../b", "//x", "/home/alice/.cache/s0", "rel", ""}
-	for _, operand := range []string{"d5", ".ssh", "..x", "...", "a b", "x/y", "./x", "../x", ".", "..", "x/", "/abs", "~", "~/d", ""} {
-		got := guestCDJoin(operand, bases, "/home/alice")
-		var want []string
-		switch {
-		case operand == "" || operand == "~":
-			want = []string{"/home/alice"}
-		case strings.HasPrefix(operand, "~/"):
-			want = []string{path.Join("/home/alice", operand[2:])}
-		case path.IsAbs(operand):
-			want = []string{path.Clean(operand)}
-		default:
-			for _, base := range bases {
-				if path.IsAbs(base) {
-					want = append(want, path.Join(base, operand))
+	for _, operand := range []string{"d5", ".ssh", "..x", "...", "a b", "x/y", "./x", "../x", ".", "..", "x/", "/abs", "/a/../b", "~", "~/d", "~/../x", ""} {
+		for _, home := range []string{"/home/alice", "rel"} {
+			got := guestCDJoinClean(operand, bases, home)
+			if want := guestCDJoin(operand, bases, home); fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("guestCDJoinClean(%q, home %q) = %q, guestCDJoin %q", operand, home, got, want)
+			}
+			for _, target := range got {
+				if path.Clean(target) != target {
+					t.Errorf("guestCDJoinClean(%q) made %q, not clean", operand, target)
 				}
 			}
-		}
-		if fmt.Sprint(got) != fmt.Sprint(want) {
-			t.Errorf("guestCDJoin(%q) = %q, want %q", operand, got, want)
 		}
 	}
 }

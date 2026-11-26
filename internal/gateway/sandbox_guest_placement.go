@@ -198,11 +198,18 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	// cd s0; ...; cd s6 lists 2^7 plain folders, and the cd ../.ssh after
 	// them was never kept, so the authorized_keys write there was not read
 	// where the laptop blocks (substrate-1 GAP-0628).
+	// keepClean is keep of a clean absolute folder, which it does not clean
+	// again: a cd chain of an 8 KB call makes folders of kilobytes, and
+	// cleaning each of the thousands guestKnownFolders offers rescanned
+	// them all (rel-1-0-10:GAP-2249).
+	var keepClean func(list []string, dir string) []string
 	keep := func(list []string, dir string) []string {
 		if !path.IsAbs(dir) {
 			return list
 		}
-		dir = path.Clean(dir)
+		return keepClean(list, path.Clean(dir))
+	}
+	keepClean = func(list []string, dir string) []string {
 		// A full list keeps no plain folder, listed or not, so it is not
 		// searched for one: guestKnownFolders offers every cd target of an
 		// 8 KB call to a full list (rel-1-0-10:GAP-2226).
@@ -405,7 +412,7 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	// own place. Its cd targets are still kept.
 	scriptCalls, cdpath := guestScriptCalls(command, input.ActiveHome)
 	known := map[string]int{}
-	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keep, known, cdMemo)
+	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keepClean, known, cdMemo)
 	for _, call := range scriptCalls {
 		if !splitRead[call.text] {
 			plan.calls = append(plan.calls, call)
@@ -1216,13 +1223,17 @@ func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[
 	}
 	// seen is join's, cleared for each join: a fresh map for each statement
 	// was most of the walk's allocations on a long call (rel-1-0-10:GAP-2226).
+	// Every folder the walk holds is clean: the call's folder cleaned, then
+	// only targets guestCDTargets joins to clean folders. So join keeps the
+	// absolute ones as they are; cleaning each again rescanned folders that
+	// grow with a cd chain (GAP-2249).
 	seen := map[string]bool{}
 	join := func(sets ...[]string) []string {
 		var out []string
 		clear(seen)
 		for _, set := range sets {
 			for _, dir := range set {
-				if dir = guestCleanAbs(dir); dir != "" && !seen[dir] {
+				if path.IsAbs(dir) && !seen[dir] {
 					seen[dir] = true
 					out = append(out, dir)
 				}
@@ -1335,28 +1346,6 @@ func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[
 	return readings, placed
 }
 
-// guestCleanAbs is path.Clean(dir) when that is absolute, else "". A folder
-// the walk made is clean already, and is checked, not cleaned again.
-func guestCleanAbs(dir string) string {
-	if dir == "" || dir[0] != '/' {
-		return "" // path.Clean keeps a relative path relative
-	}
-	for start := 1; start < len(dir); {
-		end := start
-		for end < len(dir) && dir[end] != '/' {
-			end++
-		}
-		if segment := dir[start:end]; segment == "" || segment == "." || segment == ".." {
-			return path.Clean(dir)
-		}
-		start = end + 1
-		if start == len(dir) {
-			return path.Clean(dir) // a trailing slash
-		}
-	}
-	return dir
-}
-
 // guestStmtLeaves reports, lexically, a statement that is a plain exit or
 // return: the shell does not go on past it.
 func guestStmtLeaves(stmt *syntax.Stmt, home string) bool {
@@ -1420,7 +1409,7 @@ func guestCDTargets(text string, bases []string, home string) []string {
 	if !ok {
 		return nil
 	}
-	return guestCDJoin(operand, bases, home)
+	return guestCDJoinClean(operand, bases, home)
 }
 
 // guestCDOperand returns, lexically, the static operand of a cd or pushd
@@ -1609,24 +1598,35 @@ func guestCDJoin(operand string, bases []string, home string) []string {
 	case path.IsAbs(operand):
 		return []string{path.Clean(operand)}
 	}
-	// A plain name (cd d5) joined to a clean folder is that folder, a slash
-	// and the name, which is path.Join's answer without its clean: a long
-	// call joins each of its cds to up to 128 folders (rel-1-0-10:GAP-2226).
-	plain := !strings.ContainsRune(operand, '/') && operand != "." && operand != ".."
 	var targets []string
 	for _, base := range bases {
-		if !path.IsAbs(base) {
-			continue
+		if path.IsAbs(base) {
+			targets = append(targets, path.Join(base, operand))
 		}
-		if plain && guestCleanAbs(base) == base {
-			if base == "/" {
-				targets = append(targets, "/"+operand)
-			} else {
-				targets = append(targets, base+"/"+operand)
-			}
-			continue
+	}
+	return targets
+}
+
+// guestCDJoinClean is guestCDJoin for bases that are each clean
+// (path.Clean's answer), as the walks' own folder lists are. A plain name
+// (cd d5) joined to a clean folder is that folder, a slash and the name,
+// path.Join's answer without its clean, and the targets are clean too: a
+// long call joins each of its cds to up to 128 folders, and cleaning each
+// join rescanned folders that grow with the chain (rel-1-0-10:GAP-2226,
+// GAP-2249).
+func guestCDJoinClean(operand string, bases []string, home string) []string {
+	if operand == "" || operand == "~" || strings.HasPrefix(operand, "~/") || path.IsAbs(operand) ||
+		strings.ContainsRune(operand, '/') || operand == "." || operand == ".." {
+		return guestCDJoin(operand, bases, home)
+	}
+	var targets []string
+	for _, base := range bases {
+		switch {
+		case base == "/":
+			targets = append(targets, "/"+operand)
+		case path.IsAbs(base):
+			targets = append(targets, base+"/"+operand)
 		}
-		targets = append(targets, path.Join(base, operand))
 	}
 	return targets
 }
@@ -1655,6 +1655,9 @@ func guestCDJoin(operand string, bases []string, home string) []string {
 // most four rounds; past them every folder is known from the start.
 func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath int,
 	keep func([]string, string) []string, known map[string]int, cdMemo *guestCDMemo) []string {
+	// dirs and targets are clean (newGuestPlacementPlan's keep cleans each),
+	// so every target guestCDJoinClean makes from them is clean, and keep
+	// takes it as it is.
 	listed := slices.Concat(dirs, targets)
 	for _, dir := range listed {
 		if cdpath < 0 || dir == path.Clean(cwd) {
@@ -1698,7 +1701,7 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 					}
 				}
 			}
-			for _, target := range guestCDJoin(move.operand, bases, home) {
+			for _, target := range guestCDJoinClean(move.operand, bases, home) {
 				// reached is read only against followed, which counts no
 				// folder when the split followed no value.
 				if len(followed) != 0 {
