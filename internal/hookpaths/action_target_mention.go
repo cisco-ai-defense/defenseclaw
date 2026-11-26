@@ -513,6 +513,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				if !stateOnly {
 					inert = append(inert, actionSSHDirectorySetupWords(call, values, effectiveCWD, home)...)
 				}
+				// An archive or copy --exclude value names what the call leaves
+				// out, never a file it writes (substrate-1 GAP-0994).
+				inert = append(inert, actionExcludeOptionValueWords(call, home)...)
 				judgedWords = append(judgedWords, inert...)
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
@@ -3908,6 +3911,11 @@ func actionKnownReadOnlyShellMode(file *syntax.File, home string, depth int, bod
 		case "uniq", "tar", "gtar", "bsdtar", "find", "gfind":
 			words, known := actionStaticWords(call.Args, home)
 			safe = known && actionReadsOnlyWords(words)
+		case "git":
+			// git status reports the work tree and writes no file a rule
+			// protects (substrate-1 GAP-0994: cd ~/.ssh && git status).
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionGitStatusOnly(words[1:])
 		case "pwsh", "powershell":
 			// pwsh -Command "Get-ChildItem ~/.ssh" lists names, as ls does
 			// (rel-1-0-6:GAP-0145).
@@ -6731,4 +6739,63 @@ func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bo
 // glob reading of a quoted pattern came back there (rel-1-0-10:GAP-1627).
 func actionPlainValueJudged(resolverPattern, windowsHost bool, value string) bool {
 	return !resolverPattern || windowsHost && strings.Contains(value, `\`)
+}
+
+// actionExcludeOptionValueWords are the words of a tar or rsync call that
+// hold an --exclude pattern (--exclude=.ssh, or the word after --exclude):
+// what the call leaves out of an archive or a copy, never a file it reads
+// or writes (substrate-1 GAP-0994). A word after -- is an operand.
+func actionExcludeOptionValueWords(call *syntax.CallExpr, home string) []*syntax.Word {
+	if call == nil || len(call.Args) < 2 {
+		return nil
+	}
+	program, known := staticProgramWord(call.Args[0], home)
+	if !known {
+		return nil
+	}
+	switch programBase(program) {
+	case "tar", "gtar", "bsdtar", "rsync":
+	default:
+		return nil
+	}
+	var out []*syntax.Word
+	for i := 1; i < len(call.Args); i++ {
+		word, static := StaticWord(call.Args[i], home)
+		if !static || word == "--" {
+			break
+		}
+		switch {
+		case strings.HasPrefix(word, "--exclude="):
+			out = append(out, call.Args[i])
+		case word == "--exclude" && i+1 < len(call.Args):
+			if _, static := StaticWord(call.Args[i+1], home); !static {
+				return out
+			}
+			out = append(out, call.Args[i+1])
+			i++
+		}
+	}
+	return out
+}
+
+// actionGitStatusOnly reports git arguments that are a plain status with
+// only display options: no global option before the subcommand (-C, -c,
+// --git-dir and the like change what git reads or runs), no pathspec
+// (substrate-1 GAP-0994).
+func actionGitStatusOnly(args []string) bool {
+	if len(args) == 0 || args[0] != "status" {
+		return false
+	}
+	for _, arg := range args[1:] {
+		switch {
+		case arg == "-s", arg == "--short", arg == "-b", arg == "--branch", arg == "--long",
+			arg == "--porcelain", arg == "--porcelain=v1", arg == "--porcelain=v2", arg == "--show-stash",
+			arg == "-u", arg == "-uno", arg == "-unormal", arg == "-uall",
+			arg == "--untracked-files", strings.HasPrefix(arg, "--untracked-files="),
+			arg == "--ahead-behind", arg == "--no-ahead-behind", arg == "--no-renames", arg == "--renames":
+		default:
+			return false
+		}
+	}
+	return true
 }
