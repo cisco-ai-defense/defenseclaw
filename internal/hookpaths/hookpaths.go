@@ -6472,6 +6472,7 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 	// after following the link, not against its lexical parent.
 	seen := map[string]bool{path: true}
 	queue := []string{path}
+	logicalNames := map[string]string{}
 	// The host link walker may place a guest link under the host's physical
 	// spelling of its directory (for example /private/tmp on macOS). Match
 	// that spelling at the link component, even when the write goes below
@@ -6498,6 +6499,7 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 					if !seen[physical] {
 						seen[physical] = true
 						queue = append(queue, physical)
+						logicalNames[physical] = path
 					}
 				}
 			}
@@ -6524,6 +6526,14 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 			// deriving relative text from that physical name changes what
 			// a Linux guest would open.
 			next := alias.target
+			if logical := logicalNames[name]; logical != "" && logical != name && alias.text != "" {
+				// Host-walk aliases may be rooted in the host's physical
+				// directory. Rebase relative link text on the guest's
+				// logical name, including a suffix below the link.
+				logicalLink := strings.TrimSuffix(logical, rest)
+				logicalLink = strings.TrimSuffix(logicalLink, "/")
+				next = filepath.Dir(logicalLink) + "/" + alias.text
+			}
 			if rest != "" {
 				next += string(filepath.Separator) + rest
 			}
