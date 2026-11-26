@@ -144,6 +144,25 @@ func unionWorkFolders(sets ...workFolders) workFolders {
 	return append(out, workFolder{unknown: true})
 }
 
+// identicalWorkFolders reports the same folders in the same order; an
+// empty set (the hook's own folder) equals only another empty set of the
+// same kind: what a reading started from a or from b cannot tell apart
+// (loop).
+func identicalWorkFolders(a, b workFolders) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return (a == nil) == (b == nil)
+	}
+	for i := range a {
+		if !a[i].same(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func sameWorkFolders(a, b workFolders) bool {
 	a, b = a.orHook(), b.orHook()
 	if len(a) != len(b) {
@@ -315,6 +334,11 @@ type workFolderTracker struct {
 	// posixWorkFolders).
 	unreadMovers bool
 }
+
+// workFolderEveryLoopPass reads the second pass of every loop (loop), the
+// reading before substrate-1 GAP-1152. Only its test sets it, to show both
+// readings agree.
+var workFolderEveryLoopPass bool
 
 // workFolderFirstRun is the earliest offset of a call of an outer function
 // whose definition may have run there (ok false when no call qualifies).
@@ -1070,14 +1094,26 @@ func (t *workFolderTracker) ifClause(clause *syntax.IfClause, in workFolders) wo
 
 // loop reads a loop body twice: the second pass starts wherever a pass may
 // leave the shell. A body that moves further on every pass (a relative step)
-// leaves an unresolved folder.
+// leaves an unresolved folder. A first pass that leaves the shell exactly
+// where it started, and read no mover body, is the second pass: the same
+// start and the same state give the same folders and the same records, so
+// it is not read again. Reading it again made every loop in a loop read its
+// body twice per outer pass, 2^depth readings for loops nested depth deep
+// (20 nested for loops took minutes, substrate-1 GAP-1152).
 func (t *workFolderTracker) loop(cond, body []*syntax.Stmt, in workFolders) (ok, after workFolders) {
 	pass := func(start workFolders) workFolders {
 		_, condAfter := t.list(cond, start)
 		_, bodyAfter := t.list(body, condAfter)
 		return unionWorkFolders(start, condAfter, bodyAfter)
 	}
+	calls := 0
+	if t.calls != nil {
+		calls = *t.calls
+	}
 	first := pass(in)
+	if !workFolderEveryLoopPass && (t.calls == nil || *t.calls == calls) && identicalWorkFolders(first, in) {
+		return first, first
+	}
 	second := pass(first)
 	if !sameWorkFolders(first, second) {
 		second = unionWorkFolders(second, unresolvedWorkFolders)
