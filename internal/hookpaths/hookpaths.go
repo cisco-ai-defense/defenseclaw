@@ -6479,9 +6479,6 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 	// the link. Keep the guest spelling for relative target text.
 	if filepath.IsAbs(path) {
 		for _, alias := range l.links.aliases {
-			if alias.text == "" {
-				continue
-			}
 			marker := string(filepath.Separator) + filepath.Base(alias.name)
 			for offset := 0; offset < len(path) && len(queue) < maxLinkAliasSteps; {
 				at := strings.Index(path[offset:], marker)
