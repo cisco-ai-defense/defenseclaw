@@ -676,6 +676,13 @@ func dispatchTrustedActionOnce(
 	if request.ShellStartup != nil {
 		request.targetMemo.WithShellStartup(request.ShellStartup)
 	}
+	// Each statement of the call is judged with the dotglob its whole call
+	// may turn on: the rm -rf * of an eval body that runs shopt -s dotglob
+	// first reaches .ssh as the call written out does (rel-1-0-10:GAP-2267).
+	request.targetMemo.WithCallWords(request.Input.Command)
+	if request.parentPatch != nil {
+		request.targetMemo.WithCallWords(request.parentPatch.Command)
+	}
 	// A backup file of sed -i or perl -i the readers cannot resolve is a
 	// path target past what they judge: at least the unknown tier
 	// (rel-1-0-10:GAP-0540).
