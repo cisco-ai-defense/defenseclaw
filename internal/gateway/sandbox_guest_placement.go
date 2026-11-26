@@ -1326,16 +1326,22 @@ func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[
 			}
 		}
 		if len(out) > maxSandboxGuestOwnShellFolders {
-			slices.SortStableFunc(out, func(a, b string) int {
-				first := func(dir string) int {
-					if guestDirFirst(dir, home) {
-						return 0
+			// The folders that may hold protected files first (guestDirFirst),
+			// each part in its own order, up to the bound: the stable sort
+			// that did it asked guestDirFirst n log n times a join
+			// (rel-1-0-10:GAP-2249).
+			kept := make([]string, 0, maxSandboxGuestOwnShellFolders)
+			for _, first := range [2]bool{true, false} {
+				for _, dir := range out {
+					if len(kept) == maxSandboxGuestOwnShellFolders {
+						break
 					}
-					return 1
+					if guestDirFirst(dir, home) == first {
+						kept = append(kept, dir)
+					}
 				}
-				return first(a) - first(b)
-			})
-			out = out[:maxSandboxGuestOwnShellFolders]
+			}
+			out = kept
 		}
 		return out
 	}
