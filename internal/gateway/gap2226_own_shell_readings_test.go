@@ -18,8 +18,8 @@ func (readings *guestShellReadings) pairs() map[guestShellReading]bool {
 	out := map[guestShellReading]bool{}
 	for text, lists := range readings.texts {
 		for _, at := range lists {
-			for _, dir := range readings.lists[at] {
-				out[guestShellReading{text, dir}] = true
+			for _, id := range readings.lists[at] {
+				out[guestShellReading{text, readings.folders.path(id)}] = true
 			}
 		}
 	}
@@ -27,8 +27,8 @@ func (readings *guestShellReadings) pairs() map[guestShellReading]bool {
 }
 
 // TestGAP2226OwnShellReadingsHasEveryPair pins that has answers exactly the
-// pairs the walk read (rel-1-0-10:GAP-2226), short lists and set-backed
-// long ones alike, and no other text or folder.
+// pairs the walk read (rel-1-0-10:GAP-2226), short lists and long ones
+// alike, and no other text or folder.
 func TestGAP2226OwnShellReadingsHasEveryPair(t *testing.T) {
 	home := "/home/alice"
 	var long strings.Builder
