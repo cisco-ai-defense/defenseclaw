@@ -122,6 +122,7 @@ func TestCopilotMalformedLocalHookIsRepairedWithoutIndependentHandlers(t *testin
 }
 
 func TestCopilotPublishedCorruptionDoesNotReplaceRemovalPreimage(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, original := range []string{"", `{"version":1,"hooks":{"operatorEvent":[{"type":"command","bash":"operator-tool"}]}}`} {
 		for _, broken := range []string{"", `{`, `{"hooks":false}`, `{"hooks":{"preToolUse":"broken"}}`} {
 			t.Run(original+"/"+broken, func(t *testing.T) {
@@ -189,6 +190,7 @@ func TestCopilotPublishedCorruptionDoesNotReplaceRemovalPreimage(t *testing.T) {
 }
 
 func TestCopilotBinaryChangeReplacesRecordedHandlerOnly(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
 			if goos == "windows" && runtime.GOOS != "windows" {
