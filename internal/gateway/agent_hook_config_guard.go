@@ -1148,7 +1148,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		// Managed installations keep their own file policy. A literal
 		// configuration change on the launched agent is still a proved
 		// disablement of this call's hooks.
-		parts, placed := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
+		parts, placed, _ := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
 		for index, part := range parts {
 			if placed && index == 0 {
 				continue
@@ -1255,7 +1255,13 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	// The registration set is read by hookpaths' shared shell writer. A
 	// placed statement carries its own directory, including after literal cd.
-	parts, placed := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
+	parts, placed, cut := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
+	if cut {
+		// More statements of a long call name a hook file than the guard
+		// reads: the write rule, as the sandbox guard names it (substrate-1
+		// GAP-1160).
+		add(agentHookConfigWriteRuleID, "", agentHookConfigLongCallCut)
+	}
 	for index, part := range parts {
 		if placed && index == 0 {
 			continue
@@ -1480,10 +1486,14 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 			return agentHookConfigWriteRuleID, "", target
 		}
 		if len(command) > agentHookConfigMaxPlacedBytes && path.IsAbs(input.CWD) {
-			for _, statement := range agentHookConfigLongCallStatements(command, input.CWD, input.ActiveHome) {
+			statements, cut := agentHookConfigLongCallStatements(command, input.CWD, input.ActiveHome)
+			for _, statement := range statements {
 				if target := sandboxAgentHookConfigPlacedWrite(statement.Command, statement.Dir, input.ActiveHome); target != "" {
 					return agentHookConfigWriteRuleID, "", target
 				}
+			}
+			if cut {
+				return agentHookConfigWriteRuleID, "", agentHookConfigLongCallCut
 			}
 		}
 		return "", "", ""
@@ -1606,6 +1616,13 @@ func sandboxStatementMayNameHookConfig(statement string) bool {
 	if strings.ContainsAny(statement, "$`*?[{\\\r\n") {
 		return true
 	}
+	return sandboxStatementNamesHookConfig(statement)
+}
+
+// sandboxStatementNamesHookConfig reports a statement whose text, with
+// quotes taken out, names a hook file name: one that names its target in
+// plain letters, not only through an expansion or a pattern.
+func sandboxStatementNamesHookConfig(statement string) bool {
 	plain := sandboxHookConfigQuotes.Replace(statement)
 	for _, name := range sandboxHookConfigNames() {
 		if strings.Contains(plain, name) {
@@ -1622,8 +1639,15 @@ func sandboxStatementMayNameHookConfig(statement string) bool {
 const agentHookConfigMaxPlacedBytes = 8192
 
 // agentHookConfigLongCallStatementCap bounds the statements of a call over
-// agentHookConfigMaxPlacedBytes that the guards read.
+// agentHookConfigMaxPlacedBytes that the guards read: the first ones that
+// may name a hook file, then as many again of those that name one in plain
+// letters.
 const agentHookConfigLongCallStatementCap = 16
+
+// agentHookConfigLongCallCut is the target the guards name when a long call
+// has more statements naming a hook file than they read
+// (agentHookConfigLongCallStatements).
+const agentHookConfigLongCallCut = "hook-file statements past the long-call cap"
 
 // agentHookConfigLongCallStatements are the top-level statements of a call
 // over agentHookConfigMaxPlacedBytes, up to the analyzer's command bound,
@@ -1638,27 +1662,44 @@ const agentHookConfigLongCallStatementCap = 16
 // bound or its directories cannot be placed (TopLevelStatements): such a
 // call is read as before. One parse; the filter and both caps keep the
 // statement work under what one call at the bound costs (substrate-1
-// GAP-0364).
-func agentHookConfigLongCallStatements(command, cwd, home string) []hookpaths.PlacedStatement {
+// GAP-0364). Past the first cap only the statements that name a hook file
+// in plain letters (sandboxStatementNamesHookConfig) or a DefenseClaw file
+// are read, up to the cap
+// again, and cut reports one more: the guards then name the write rule as
+// an alert. The first cap cut the rest silently, so 16 cheap statements
+// with an expansion pushed a later settings write out of the reading
+// (substrate-1 GAP-1160).
+func agentHookConfigLongCallStatements(command, cwd, home string) (out []hookpaths.PlacedStatement, cut bool) {
 	if len(command) > agentHookConfigLongCallMaxBytes || !path.IsAbs(filepath.ToSlash(cwd)) && !filepath.IsAbs(cwd) {
-		return nil
+		return nil, false
 	}
 	statements, ok := hookpaths.TopLevelStatements(command, cwd, home)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	var out []hookpaths.PlacedStatement
+	named := 0
 	for _, statement := range statements {
-		if len(statement.Command) > agentHookConfigMaxPlacedBytes ||
-			!sandboxStatementMayNameHookConfig(statement.Command) && !strings.Contains(strings.ToLower(statement.Command), "defenseclaw") {
+		if len(statement.Command) > agentHookConfigMaxPlacedBytes {
 			continue
 		}
-		out = append(out, statement)
-		if len(out) == agentHookConfigLongCallStatementCap {
-			break
+		dc := strings.Contains(strings.ToLower(statement.Command), "defenseclaw")
+		if !dc && !sandboxStatementMayNameHookConfig(statement.Command) {
+			continue
 		}
+		if len(out) < agentHookConfigLongCallStatementCap {
+			out = append(out, statement)
+			continue
+		}
+		if !dc && !sandboxStatementNamesHookConfig(statement.Command) {
+			continue
+		}
+		if named == agentHookConfigLongCallStatementCap {
+			return out, true
+		}
+		out = append(out, statement)
+		named++
 	}
-	return out
+	return out, false
 }
 
 // agentHookConfigLongCallMaxBytes is the analyzer's command bound
@@ -2271,21 +2312,22 @@ func decodeAgentHookConfigRawShellCommand(raw json.RawMessage) string {
 // a nested sh -c body adds entries too, and when the statements were not
 // placed (popd; or a cd inside { ...; } that TopLevelStatements does not
 // read), the whole command is the only reading of the top-level writes
-// (rel-1-0-10:GAP-1014, rv1014).
-func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool) {
+// (rel-1-0-10:GAP-1014, rv1014). cut reports a long call with more
+// statements naming a hook file than agentHookConfigLongCallStatements reads.
+func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool, bool) {
 	if depth > 4 || command == "" {
-		return nil, false
+		return nil, false, false
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}
 	if len(command) > agentHookConfigMaxPlacedBytes {
 		if depth > 0 {
-			return nil, false
+			return nil, false, false
 		}
-		statements := agentHookConfigLongCallStatements(command, cwd, home)
+		statements, cut := agentHookConfigLongCallStatements(command, cwd, home)
 		if len(statements) == 0 {
-			return nil, false
+			return nil, false, cut
 		}
-		return append([]hookpaths.PlacedStatement{root}, statements...), true
+		return append([]hookpaths.PlacedStatement{root}, statements...), true, cut
 	}
 	out := []hookpaths.PlacedStatement{root}
 	placed := []hookpaths.PlacedStatement{root}
@@ -2298,7 +2340,7 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hook
 		}
 	}
 	if !strings.Contains(command, "sh") {
-		return out, topPlaced
+		return out, topPlaced, false
 	}
 	for _, statement := range placed {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: home})
@@ -2332,12 +2374,12 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hook
 						return true
 					})
 				}
-				nested, _ := agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)
+				nested, _, _ := agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)
 				out = append(out, nested...)
 			}
 		}
 	}
-	return out, topPlaced
+	return out, topPlaced, false
 }
 
 func agentHookConfigExactWords(command actionfacts.CommandFact) []string {
