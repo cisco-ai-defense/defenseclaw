@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -123,9 +124,7 @@ func TestWindowsConnectorUserRuntimeLeavesAreBounded(t *testing.T) {
 func TestRemoveWindowsConnectorUserRuntimeLeavesALinkedHooksFolderAsFound(t *testing.T) {
 	dataDir, target := t.TempDir(), t.TempDir()
 	writeConnectorRuntimeFixture(t, target, ".hook-cursor.token")
-	if err := os.Symlink(target, filepath.Join(dataDir, "hooks")); err != nil {
-		t.Skipf("cannot create a symbolic link here: %v", err)
-	}
+	testenv.Symlink(t, target, filepath.Join(dataDir, "hooks"))
 	root, err := os.OpenRoot(dataDir)
 	if err != nil {
 		t.Fatal(err)
@@ -511,9 +510,7 @@ func TestWindowsConnectorUserRuntimeLinkLeaves(t *testing.T) {
 	if err := os.Remove(record[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(decoys.root, ".hook-cursor.token"), token); err != nil {
-		t.Skipf("cannot create a symlink here: %v", err)
-	}
+	testenv.Symlink(t, filepath.Join(decoys.root, ".hook-cursor.token"), token)
 	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", []string{"cursor"}); got != nil {
 		t.Fatalf("a symlink leaf was counted as a leftover: %v", got)
 	}
