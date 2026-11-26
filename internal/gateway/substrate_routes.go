@@ -910,6 +910,9 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "delete_failed")
 			return
 		}
+		// The cluster has deleted the actor: record it now, so the row exists
+		// even when the registration write below fails (GAP-0667).
+		a.substrateAuditDeleted(st, r, reg, snaps, counted)
 		reg.Deleted = true
 		if err := st.cfg.Registrations.Put(r.Context(), reg); err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registration_failed")
@@ -919,7 +922,6 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			inv.Invalidate(reg.Atespace, reg.Name)
 		}
 		v := st.actorView(reg)
-		a.substrateAuditDeleted(st, r, reg, snaps, counted)
 		if counted {
 			v["snapshots"] = snaps
 		}
@@ -951,7 +953,7 @@ func (a *APIServer) substrateAuditDeleted(st *substrateState, r *http.Request, r
 	st.audit(context.WithoutCancel(r.Context()), "INFO", summary, map[string]any{
 		"event": "actor_deleted", "atespace": reg.Atespace, "actor": reg.Atespace + "/" + reg.Name, "actor_uid": reg.UID,
 		"principal": c.person.Principal, "person_id": ownerOf(c.person).ID(), "owner": reg.Person.Principal,
-		"admin": c.admin && !substrateOwnedBy(c, reg), "snapshots": snaps, "batch_id": reg.BatchID,
+		"by_admin": c.admin && !substrateOwnedBy(c, reg), "snapshots": snaps, "batch_id": reg.BatchID,
 	})
 }
 
