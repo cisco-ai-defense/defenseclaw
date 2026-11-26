@@ -207,7 +207,7 @@ func TestFIX2223EPhysicalGuestAlias(t *testing.T) {
 	}
 	key := "authorized_" + "keys"
 	command := "cd /tmp && ln -s ../sandbox/.ssh d && echo k >> d/" + key
-	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
+	links := GuestCommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
 	for _, operand := range []string{"/tmp/d/" + key, "/private/tmp/d/" + key} {
 		aliases := links.GuestAliasTargets(operand, false)
 		found := false

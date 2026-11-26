@@ -1696,10 +1696,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	guestAliasLinks = links
-	if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) && links.HasAliases() {
-		// The host-side cwd can be empty or name a mount. Place only the
-		// same-command links in the authenticated guest namespace.
-		guestAliasLinks = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command,
+	if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) {
+		// The host-side cwd can be empty or name a mount; a link the
+		// Linux guest creates need not be visible in the host-side walk.
+		// Read its bounded command in the authenticated guest namespace.
+		guestAliasLinks = hookpaths.GuestCommandLinksWithFacts(request.Input.Tool, input.Command,
 			request.SandboxGuestCWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	}
 	if request.sandboxGuest && guestAliasLinks.HasAliases() && filepath.IsAbs(request.SandboxGuestCWD) {
@@ -1708,6 +1709,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the guest cwd attested for this call.
 		writes, _, _ := hookpaths.ShellWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome)
 		writes = append(writes, hookpaths.LiteralWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome)...)
+		// ShellWriteOperands keeps the initial cwd for a redirect after cd.
+		// Place those writes in the guest before checking a link made there.
+		for _, placed := range hookpaths.GuestStaticDirectoryWriteOperands(
+			input.Command, request.SandboxGuestCWD, facts.ActiveHome) {
+			writes = append(writes, placed.Path)
+		}
 		for _, write := range writes {
 			if guestAliasProtected(write) {
 				return confirmed()

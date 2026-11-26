@@ -138,8 +138,8 @@ func TestFIX2223EReviewHoldsActor(t *testing.T) {
 		{"gcp-cwd-parent", "gcp /tmp/k /proc/self/cwd/../.ssh/" + key},
 		{"wrapped-cp-cwd-parent", "env cp /tmp/k /proc/self/cwd/../.ssh/" + key},
 		{"relative-dir-link", "cd /tmp && ln -s ../sandbox/.ssh d && echo k >> d/" + key},
-		{"relative-dir-link-cp", "cd /tmp && ln -s ../sandbox/.ssh d && cp /tmp/"+key+" d/"+key},
-		{"relative-dir-link-tee", "cd /tmp && ln -s ../sandbox/.ssh d && tee -a d/"+key+" < /tmp/k"},
+		{"relative-dir-link-cp", "cd /tmp && ln -s ../sandbox/.ssh d && cp /tmp/" + key + " d/" + key},
+		{"relative-dir-link-tee", "cd /tmp && ln -s ../sandbox/.ssh d && tee -a d/" + key + " < /tmp/k"},
 		{"cwd-alias-parent", "ln -s /proc/self/cwd c && echo k >> c/../.ssh/" + key},
 		{"cwd-alias-parent-dd", "ln -s /proc/self/cwd c && dd if=/tmp/k of=c/../.ssh/" + key},
 	}

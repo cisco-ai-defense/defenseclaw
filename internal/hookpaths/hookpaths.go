@@ -4744,16 +4744,27 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	return commandLinks(command, cwd, home, facts, record, false)
 }
 
+// guestCommandLinksWithFacts places a Linux guest's link calls in its logical
+// directories even when this host resolves a directory such as /tmp through a
+// different physical spelling.
+func guestCommandLinksWithFacts(command, cwd, home string, facts map[string]string) shellLinks {
+	return commandLinksForGuest(command, cwd, home, facts, false, false, true)
+}
+
 // commandLinks reads the links of command. A nested literal shell body
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
 func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
-	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true)
+	return commandLinksForGuest(command, cwd, home, facts, record, nested, false)
+}
+
+func commandLinksForGuest(command, cwd, home string, facts map[string]string, record, nested, guest bool) shellLinks {
+	links, fallback := commandLinksReadForGuest(command, cwd, home, facts, record, nested, true, guest)
 	if fallback {
 		// A copy of links on disk that the end of the command does not let
 		// us read is read as before, an opaque copy scope at the copy call
 		// (rel-1-0-6:GAP-0274).
-		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false)
+		links, _ = commandLinksReadForGuest(command, cwd, home, facts, record, nested, false, guest)
 	}
 	return links
 }
@@ -4762,6 +4773,10 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 // of links on disk as those links (copyDiskLinks). fallback reports such a
 // copy that could not be read so.
 func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool) (shellLinks, bool) {
+	return commandLinksReadForGuest(command, cwd, home, facts, record, nested, readDisk, false)
+}
+
+func commandLinksReadForGuest(command, cwd, home string, facts map[string]string, record, nested, readDisk, guest bool) (shellLinks, bool) {
 	links := shellLinks{known: true, callAt: -1, scopeAt: -1}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -4771,7 +4786,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// -ItemType spelling opaqueLink finds was read here).
 		if opaqueLink.MatchString(command) || commandNewItemLinkSpelled(command) {
 			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
-				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+				return commandLinksReadForGuest(twin, cwd, home, facts, record, nested, readDisk, guest)
 			}
 			links.unknown(true)
 		}
@@ -4782,7 +4797,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other
 		// link-making text keeps the opaque reading.
 		if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
-			return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+			return commandLinksReadForGuest(twin, cwd, home, facts, record, nested, readDisk, guest)
 		}
 		if !links.addPythonLiteralLinks(file, command, cwd, home) {
 			links.unknown(true)
@@ -4791,6 +4806,14 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, nestedCopyDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
+	if guest && linkCall != nil {
+		// The special three-statement reader checks cd on this host and
+		// returns its physical directory. Only the guest link proof must
+		// place the link where the Linux guest names that directory.
+		if dirs := linkDirs[linkCall]; len(dirs) == 1 {
+			linkCWD = dirs[0]
+		}
+	}
 	knownWords, knownValues := knownWordParameters(command, file, home, cdEnterable(cwd, facts, record), linkDirs)
 	loopWords := boundedLoopIteratorWords(command, file, home)
 	lineWords := straightLineWords(command, file, home)
@@ -5209,7 +5232,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				// placed its call (rel-1-0-6:GAP-0260).
 				bodyDir, placedBody = callDirs[0], true
 			}
-			inner := commandLinks(body, bodyDir, home, facts, record, true)
+			inner := commandLinksForGuest(body, bodyDir, home, facts, record, true, guest)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
@@ -6250,10 +6273,26 @@ func CommandLinks(tool, command, cwd, home string) Links {
 
 // CommandLinksWithFacts uses copy-source link evidence from the user-side hook.
 func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) Links {
+	return commandLinksWithGuestFacts(tool, command, cwd, home, facts, false)
+}
+
+// GuestCommandLinksWithFacts places a Linux guest's same-command links in its
+// namespace on every gateway OS. It is used only for guest write proof.
+func GuestCommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) Links {
+	return commandLinksWithGuestFacts(tool, command, cwd, home, facts, true)
+}
+
+func commandLinksWithGuestFacts(tool, command, cwd, home string, facts map[string]string, guest bool) Links {
 	if command == "" || isApplyPatchToolName(tool) {
 		return Links{links: shellLinks{known: true}}
 	}
-	links := Links{links: commandLinksWithFacts(command, cwd, home, facts, false)}
+	var shell shellLinks
+	if guest {
+		shell = guestCommandLinksWithFacts(command, cwd, home, facts)
+	} else {
+		shell = commandLinksWithFacts(command, cwd, home, facts, false)
+	}
+	links := Links{links: shell}
 	if len(links.links.aliases) > 0 {
 		links.protected = newProtectedFiles(home)
 	}
@@ -6429,9 +6468,10 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 		return nil
 	}
 	var out []string
-	seen := map[string]bool{filepath.Clean(path): true}
-	queue := []string{filepath.Clean(path)}
-	logicalNames := map[string]string{queue[0]: queue[0]}
+	// Keep a dot-dot after a command-created link: the kernel applies it
+	// after following the link, not against its lexical parent.
+	seen := map[string]bool{path: true}
+	queue := []string{path}
 	// The host link walker may place a guest link under the host's physical
 	// spelling of its directory (for example /private/tmp on macOS). Match
 	// that spelling at the link component, even when the write goes below
@@ -6458,7 +6498,6 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 					if !seen[physical] {
 						seen[physical] = true
 						queue = append(queue, physical)
-						logicalNames[physical] = queue[0]
 					}
 				}
 			}
@@ -6480,27 +6519,19 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 			if first && entry && rest == "" {
 				continue
 			}
+			// The recorded target is rooted at the guest link name. The
+			// host may also record a physical alias (/private/tmp for /tmp);
+			// deriving relative text from that physical name changes what
+			// a Linux guest would open.
 			next := alias.target
-			if alias.text != "" {
-				// A relative link is read from its guest directory, not
-				// the host's physical spelling of that directory. Drop
-				// any suffix below the link before finding its parent.
-				logicalLink := logicalNames[name]
-				if rest != "" {
-					logicalLink = strings.TrimSuffix(logicalLink, string(filepath.Separator)+rest)
-				}
-				next = filepath.Dir(logicalLink) + string(filepath.Separator) + alias.text
-			}
 			if rest != "" {
 				next += string(filepath.Separator) + rest
 			}
 			next = GuestOwnRootPath(next)
 			out = append(out, next)
-			clean := filepath.Clean(next)
-			if !seen[clean] {
-				seen[clean] = true
-				queue = append(queue, clean)
-				logicalNames[clean] = clean
+			if !seen[next] {
+				seen[next] = true
+				queue = append(queue, next)
 			}
 			if len(out) >= maxLinkAliasSteps {
 				break
@@ -7310,11 +7341,9 @@ func cpDestination(args []string, static []bool, cwd string) string {
 	if !parsed.ok {
 		return ""
 	}
-	destination := parsed.destination
-	if !filepath.IsAbs(destination) {
-		destination = filepath.Join(cwd, destination)
-	}
-	return filepath.Clean(destination)
+	// A process link in the destination must survive a following dot-dot
+	// until the write proof can resolve the link boundary.
+	return OperandPath(parsed.destination, cwd)
 }
 
 // CopyDestination returns a statically understood cp destination.
