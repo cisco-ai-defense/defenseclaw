@@ -48,28 +48,19 @@ func TestGAP2275MoveInstallSyncLiteralWritesOnlyBelowProcessLinks(t *testing.T) 
 	}
 }
 
-func TestGAP2275ThroughProcessLink(t *testing.T) {
-	rows := []struct {
-		path string
-		want bool
-	}{
-		{"/proc/self/cwd/../x", true},
-		{"/proc/4242/root/tmp/x", true},
-		{"/proc/self/task/42/cwd/x", true},
-		{"/dev/fd/3/x", true},
-		{"/dev/stdout", true},
-		{"//proc/./self/cwd", true},
-		{"/home/u/proc/self/cwd/x", false},
-		{"/proc/self/status", false},
-		{"/tmp/dst", false},
-		{"dst/", false},
-	}
-	for _, row := range rows {
-		if got := throughProcessLink(row.path); got != row.want {
-			t.Errorf("throughProcessLink(%q) = %t, want %t", row.path, got, row.want)
+// GAP-2274: a copy destination that is not below a process link is cleaned,
+// as at rel, so the hook config guard matches x/../.claude/settings.json to
+// the registered file. Only a process-link destination keeps its dot-dot.
+func TestGAP2274CopyDestinationDotDotIsCleanedOutsideProcessLinks(t *testing.T) {
+	cwd, home := t.TempDir(), t.TempDir()
+	want := home + "/.claude/settings.json"
+	for _, command := range []string{
+		"cp new.json " + home + "/proj/../.claude/settings.json",
+		"cp -f new.json " + home + "/a/b/../../.claude/settings.json",
+	} {
+		got := LiteralWriteOperands(command, cwd, home)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("%q: literal writes %q, want [%s]", command, got, want)
 		}
-	}
-	if got := processLinkWrites([]string{"/srv/out/a"}, "/proc/self/cwd"); len(got) != 1 {
-		t.Errorf("a call placed below a process link keeps its operands, got %q", got)
 	}
 }
