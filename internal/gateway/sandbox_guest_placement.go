@@ -560,6 +560,10 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 	// readings. So a repeated text is offered only in the folders known
 	// first between its last call and this one: an 8 KB call of 550 $C
 	// statements offered each in all 128 folders (rel-1-0-10:GAP-2249).
+	// The skip of the targets below rests on a state that only grows:
+	// callsDropped never resets and callReadings never shrinks, so once the
+	// full-and-cut skip holds for a text it holds for every later call of
+	// that text too.
 	offered := map[string]int{}
 	for _, call := range plan.calls {
 		last, again := offered[call.text]
