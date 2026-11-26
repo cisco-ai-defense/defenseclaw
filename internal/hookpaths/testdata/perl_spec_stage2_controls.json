@@ -1,0 +1,114 @@
+[
+  {
+    "case": "rv0592f_regr:B11 heredoc GLOBAL literal read",
+    "cmd": "perl -e 'my $x=<<X;\nCORE::GLOBAL\nX\nopen(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B12 POD GLOBAL literal read",
+    "cmd": "perl -e '=pod\n\nCORE::GLOBAL\n\n=cut\nopen(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B13 comment GLOBAL literal read",
+    "cmd": "perl -e '# CORE::GLOBAL\nopen(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B14 string GLOBAL literal read",
+    "cmd": "perl -e 'print \"CORE::GLOBAL\"; open(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B15 data GLOBAL after read",
+    "cmd": "perl -e 'open(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>;\n__END__\nCORE::GLOBAL'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B16 line comment then read",
+    "cmd": "perl -e 'my $m=\"<\"; #line 99 \"sub\"\nopen(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B01 helper scalar read",
+    "cmd": "perl -e 'my $m=\"<\"; sub read_file { open(my $f,$m,\".claude/settings.json\") or die $!; print <$f> }; read_file()'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B02 eval block then read",
+    "cmd": "perl -e 'my $m=\"<\"; eval { 1 }; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B03 require Fcntl then read",
+    "cmd": "perl -e 'my $m=\"<\"; require Fcntl; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B04 unrelated constant then read",
+    "cmd": "perl -e 'use constant K => 1; my $m=\"<\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B05 quoted sub then read",
+    "cmd": "perl -e 'my $m=\"<\"; print \"sub\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B06 comment sub then read",
+    "cmd": "perl -e 'my $m=\"<\"; # sub\nopen(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B07 heredoc sub then read",
+    "cmd": "perl -e 'my $m=\"<\"; my $x=<<X;\nsub\nX\nopen(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B08 loop scalar read",
+    "cmd": "perl -e 'my $m=\"<\"; for (1..2) { open(my $f,$m,\".claude/settings.json\") or die $!; print <$f> }'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B09 implicit read",
+    "cmd": "perl -e 'open(F,\".claude/settings.json\") or die $!; print <F>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  },
+  {
+    "case": "rv0592f_regr:B10 explicit two arg read",
+    "cmd": "perl -e 'open(F,\"<.claude/settings.json\") or die $!; print <F>'",
+    "rel": "AA",
+    "spec": "AA",
+    "rule": "no W rule fires (read)"
+  }
+]
