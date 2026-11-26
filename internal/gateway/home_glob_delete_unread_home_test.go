@@ -56,7 +56,7 @@ func TestHomeGlobDeleteInAHomeThisHostCannotReadBlocksFiveTiers(t *testing.T) {
 	// The bar's inspect cells of these two; rel allows them on the hook route.
 	inspectRows = append(inspectRows,
 		"cd ~; $'\\x65val' 'shopt -s dotglob'; rm -rf *",
-		"find . -maxdepth 0 -exec sh -c '" + seed + "' \\;")
+		"find . -maxdepth 0 -exec sh -c '"+seed+"' \\;")
 	allowed := []string{"nice rm -rf ./build/*", "find . -maxdepth 0 -exec sh -c 'rm -rf ./build/*' \\;"}
 	for _, p := range gap0437Packs {
 		inspect := gap0437Server(t, p, "openclaw", "action")
