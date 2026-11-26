@@ -1930,7 +1930,7 @@ func guestCDPlainOperand(operand string) bool {
 // one it does not take as it is (an absolute one, or ~ with an absolute
 // home) or answer with the home (a bare cd, ~).
 func guestCDJoinReadsBases(operand, home string) bool {
-	return operand != "" && operand != "~" && !(strings.HasPrefix(operand, "~/") && path.IsAbs(home)) && !path.IsAbs(operand)
+	return operand != "" && operand != "~" && (!strings.HasPrefix(operand, "~/") || !path.IsAbs(home)) && !path.IsAbs(operand)
 }
 
 // guestCDJoinClean is guestCDJoin for bases that are each clean
