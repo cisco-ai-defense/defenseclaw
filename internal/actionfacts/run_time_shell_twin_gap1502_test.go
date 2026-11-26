@@ -6,6 +6,9 @@ package actionfacts
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // TestGAP1502WrittenScriptTwin: a later statement that runs a file an earlier
@@ -43,5 +46,39 @@ func TestGAP1502WrittenScriptTwin(t *testing.T) {
 		if got, ok, _, _ := RunTimeShellTwin(command); ok {
 			t.Errorf("RunTimeShellTwin(%q) = %q; want no reading", command, got)
 		}
+	}
+}
+
+// TestGAP1502WrittenScriptTwinIsBounded: every run of a written file copies
+// its text into the twin, so the copies share one byte budget per reading
+// (maxRunTimeShellCopiedBytes): a large written file run many times gives a
+// twin of about the command plus the budget, the runs past it are read as
+// written and the reading reports the bytes cap; what was read before the
+// cap is kept (CHK-RF-HOOKSHELL F3).
+func TestGAP1502WrittenScriptTwinIsBounded(t *testing.T) {
+	var doc strings.Builder
+	for doc.Len() < 32<<10 {
+		doc.WriteString("echo building step\n")
+	}
+	command := "cat > s.sh <<'EOF'\n" + doc.String() + "EOF\n" + strings.Repeat("sh s.sh; ", 1000)
+	started := time.Now()
+	twin, ok, truncated, _ := RunTimeShellTwin(command)
+	elapsed := time.Since(started)
+	if !ok || !strings.Contains(twin, "bash -c 'echo building step") {
+		t.Fatalf("the first run is not read: ok=%v twin starts %q", ok, twin[:min(len(twin), 80)])
+	}
+	if limit := len(command) + 2*maxRunTimeShellCopiedBytes; len(twin) > limit {
+		t.Errorf("twin is %d bytes for a %d-byte command, want at most %d", len(twin), len(command), limit)
+	}
+	if !truncated.Has(bounded.Bytes) {
+		t.Errorf("truncated = %v, want the bytes cap", truncated)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("twin took %v, want under 5s", elapsed)
+	}
+	// A few runs of a small file stay whole and untruncated.
+	twin, ok, truncated, _ = RunTimeShellTwin("cat > s.sh <<'EOF'\nmake\nEOF\nsh s.sh; sh s.sh; sh s.sh")
+	if !ok || strings.Count(twin, "bash -c 'make\n'") != 3 || truncated.Any() {
+		t.Errorf("small file run three times: %q ok=%v truncated=%v", twin, ok, truncated)
 	}
 }

@@ -5,9 +5,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -113,5 +115,52 @@ func TestGAP1640ShellFileWriteView(t *testing.T) {
 		if c.wantComplete && strings.Contains(string(complete), "note.txt") {
 			t.Errorf("%s: the expanded write is in the complete view %s", c.name, complete)
 		}
+	}
+}
+
+// TestGAP1640ShellFileWriteViewIsBounded: one document written to many names
+// is one added file per extension, a write to a device is not a file, and
+// the written texts together hold at most actionfacts.MaxCommandBytes; past
+// that the writes already read are kept and the view stays complete
+// (CHK-RF-HOOKSHELL F6).
+func TestGAP1640ShellFileWriteViewIsBounded(t *testing.T) {
+	var doc strings.Builder
+	for doc.Len() < 32<<10 {
+		doc.WriteString("print('built')\n")
+	}
+	names := make([]string, 1000)
+	for i := range names {
+		names[i] = fmt.Sprintf("m%d.py", i)
+	}
+	command := "tee " + strings.Join(names, " ") + " /dev/null <<'EOF'\n" + doc.String() + "EOF"
+	started := time.Now()
+	writes := actionfacts.ShellDocumentFileWrites(command)
+	if len(writes) != 1 || writes[0].Expanded {
+		t.Fatalf("tee to 1000 .py names: %d writes, want 1 literal", len(writes))
+	}
+	args, _ := json.Marshal(map[string]string{"command": command})
+	complete, shown, ok := codeGuardShellPatchArgs(actionfacts.Input{Tool: "Bash", Args: args})
+	if !ok || shown != nil || len(complete) > len(command)+actionfacts.MaxCommandBytes {
+		t.Errorf("view: ok=%v shown=%v complete=%d bytes for a %d-byte command", ok, shown != nil, len(complete), len(command))
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("view took %v, want under 5s", elapsed)
+	}
+	// Distinct texts past the budget: the writes read first are kept, the
+	// view is complete.
+	var many strings.Builder
+	for i := 0; i < 3; i++ {
+		fmt.Fprintf(&many, "cat > p%d.py <<'EOF'\n# part %d\n%sEOF\n", i, i, doc.String())
+	}
+	writes = actionfacts.ShellDocumentFileWrites(many.String())
+	total := 0
+	for _, write := range writes {
+		total += len(write.Text)
+	}
+	if len(writes) == 0 || total > actionfacts.MaxCommandBytes {
+		t.Errorf("three 32 KB writes: %d writes, %d bytes, want 1..2 within %d", len(writes), total, actionfacts.MaxCommandBytes)
+	}
+	if got := actionfacts.ShellDocumentFileWrites("echo 'print(1)' > /dev/null; echo 'print(1)' > /dev/fd/3"); len(got) != 0 {
+		t.Errorf("writes to devices: %d writes, want none", len(got))
 	}
 }

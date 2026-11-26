@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"path"
 	"sort"
 	"strings"
 
@@ -34,6 +35,15 @@ type ShellFileWrite struct {
 // scanners read such a write as they read a write tool's content
 // (rel-1-0-10:GAP-1640). A command the shell grammar does not parse, or a
 // write whose target or text is made at run time, gives nothing.
+//
+// The writes are bounded: one text written to several names with the same
+// extension is one write (the content scanners read a file by its extension
+// and text; a literal and an expanded write of one text stay two), a write
+// to a device (/dev/null, /dev/stderr, /dev/fd/N) is not
+// a file, and the texts together hold at most MaxCommandBytes. Past that
+// budget the writes already read are kept and the rest is not added. Size
+// alone never makes the view partial: the distinct texts of one command
+// are the command's own text, which the analysis bounds at the same size.
 func ShellDocumentFileWrites(command string) (writes []ShellFileWrite) {
 	if command == "" || !strings.ContainsAny(command, ">") && !strings.Contains(command, "tee") {
 		return nil
@@ -54,20 +64,45 @@ func ShellDocumentFileWrites(command string) (writes []ShellFileWrite) {
 	}
 	expanded := shellTextExpanded(file, inputs)
 	asWritten := heredocBodiesAsWritten(command, file)
-	for target, list := range written {
-		for _, write := range list {
+	targets := make([]string, 0, len(written))
+	for target := range written {
+		if !strings.HasPrefix(target, "/dev/") {
+			targets = append(targets, target)
+		}
+	}
+	sort.Strings(targets)
+	type seenKey struct {
+		ext, text string
+		expanded  bool
+	}
+	seen := map[seenKey]bool{}
+	budget := MaxCommandBytes
+	for _, target := range targets {
+		for _, write := range written[target] {
+			add := ShellFileWrite{Path: target}
 			switch body, raw := asWritten[write.end]; {
 			case write.known:
-				writes = append(writes, ShellFileWrite{Path: target, Text: write.text, Expanded: expanded[write.end]})
+				add.Text, add.Expanded = write.text, expanded[write.end]
 			case raw:
 				// The shell expands the parameters of the document
 				// before it writes it: the text as written is what the
 				// scanners can read, a partial view.
-				writes = append(writes, ShellFileWrite{Path: target, Text: body, Expanded: true})
+				add.Text, add.Expanded = body, true
+			default:
+				continue
 			}
+			key := seenKey{ext: path.Ext(target), text: add.Text, expanded: add.Expanded}
+			if seen[key] {
+				continue
+			}
+			if len(add.Text) > budget {
+				return writes
+			}
+			seen[key] = true
+			budget -= len(add.Text)
+			writes = append(writes, add)
 		}
 	}
-	sort.SliceStable(writes, func(i, j int) bool { return writes[i].Path < writes[j].Path })
 	return writes
 }
 

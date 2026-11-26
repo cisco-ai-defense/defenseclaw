@@ -47,6 +47,13 @@ const (
 	// its nested texts included: the syntax node bound of the analysis
 	// (maxPOSIXNodes).
 	maxRunTimeShellWords = maxPOSIXNodes
+	// maxRunTimeShellCopiedBytes bounds the text one reading copies into
+	// its twin: the text of a written file each later run of it inlines
+	// (rel-1-0-10:GAP-1502), nested readings included. Moved text (a
+	// here-document or here-string handed to -c, whose source the twin
+	// drops) is not copied. The bound is the longest command an analysis
+	// reads, so the twin of a command holds at most about twice its size.
+	maxRunTimeShellCopiedBytes = maxCommandBytes
 )
 
 // shellWordReader reads the program words of one run-time shell reading.
@@ -57,7 +64,9 @@ const (
 type shellWordReader struct {
 	trunc *bounded.Truncated
 	words bounded.Counter
-	memo  map[shellWordKey]shellWordValue
+	// copied is the text the twin copies in (maxRunTimeShellCopiedBytes).
+	copied bounded.Counter
+	memo   map[shellWordKey]shellWordValue
 	// unread is set when a POSIX shell of the call (its nested texts
 	// included) runs here-document or here-string text the reading cannot
 	// know (rel-1-0-10:GAP-1147).
@@ -78,6 +87,7 @@ type shellWordValue struct {
 func newShellWordReader(trunc *bounded.Truncated) *shellWordReader {
 	r := &shellWordReader{trunc: trunc, memo: map[shellWordKey]shellWordValue{}}
 	r.words = bounded.NewCounter(trunc, bounded.Nodes, maxRunTimeShellWords)
+	r.copied = bounded.NewCounter(trunc, bounded.Bytes, maxRunTimeShellCopiedBytes)
 	return r
 }
 
@@ -279,7 +289,7 @@ func RunTimeShellTwin(command string) (twin string, ok bool, truncated bounded.C
 	var trunc bounded.Truncated
 	reader := newShellWordReader(&trunc)
 	twin, ok = runTimeShellTwin(command, 0, true, reader)
-	return twin, ok, trunc.Set(&reader.words), reader.unread
+	return twin, ok, trunc.Set(&reader.words, &reader.copied), reader.unread
 }
 
 func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shellWordReader) (twin string, ok bool) {
@@ -511,9 +521,11 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			// sh F, . F, ./F of a file an earlier statement of the call wrote
 			// with text the reading knows (cat > F <<'EOF' ... EOF; sh F):
 			// the call runs that text, so the twin runs it in place
-			// (rel-1-0-10:GAP-1502).
+			// (rel-1-0-10:GAP-1502). Each run copies the text, so the copies
+			// share one byte budget: past it the run is read as written
+			// (sh F) and the reading is TRUNCATED (the one bound rule).
 			if text, known := written.latest(target, int(call.Pos().Offset())); known &&
-				(sourced || found || shebangRunsPOSIXShell(text)) {
+				(sourced || found || shebangRunsPOSIXShell(text)) && reader.copied.TakeN(len(text)) {
 				if nested, changed := runTimeShellTwin(text, depth+1, true, reader); changed {
 					text = nested
 				}
