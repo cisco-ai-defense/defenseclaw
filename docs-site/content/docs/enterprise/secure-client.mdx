@@ -465,17 +465,19 @@ The gateway sends Cisco AI Defense every skill the enrolled agents load, with it
 publisher. The fields are listed in [Managed skill inventory](/docs/ai-discovery#managed-skill-inventory).
 Nothing needs to be turned on.
 
-To also send the text of each skill's SKILL.md, add this to the config you install with `CONFIG=`, or apply
-it later with `/repair CONFIG=`:
+The Secure Client installers also send the text of each skill's SKILL.md by default: the config they render
+sets `ai_discovery.include_skill_manifests: true`. SKILL.md text leaves the endpoint once per file version,
+through the `sensitive` redaction profile, which masks secrets before upload. Where skill text must stay on
+the device, turn it off in the config you install with `CONFIG=`, or apply it later with `/repair CONFIG=`:
 
 ```yaml
 ai_discovery:
   enabled: true
-  include_skill_manifests: true
+  include_skill_manifests: false
 ```
 
-SKILL.md text leaves the endpoint once per file version, through the `sensitive` redaction profile, which
-masks secrets before upload. Leave it off where skill text must stay on the device.
+The built-in default stays off, so per-user and standalone managed installs do not send SKILL.md text unless
+an administrator turns it on.
 
 ## Restart-required controls
 

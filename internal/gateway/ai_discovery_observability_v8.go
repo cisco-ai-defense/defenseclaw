@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -44,17 +45,76 @@ type aiDiscoveryV8Adapter struct {
 	// deployment mode. A nil gate never suppresses, so the lifecycle-delta
 	// contract for non-managed modes is unaffected.
 	publishGate *managedInventoryPublishState
+	// secureClient is the resolved Secure Client profile
+	// (cfg.SecureClientIntegration()), never a user-writable key. Only that
+	// profile exports local model identity (defenseclaw.ai.model.*) and the
+	// snapshot completeness fields on ai.discovery.completed (Spec 016); every
+	// other mode emits exactly what it did before.
+	secureClient bool
 }
 
 func newAIDiscoveryV8Adapter(
 	emitter sidecarRuntimeEmitter,
 	gate *managedInventoryPublishState,
+	secureClient bool,
 ) inventory.AIDiscoveryObservabilityV8 {
 	runtime, ok := emitter.(aiDiscoveryV8Runtime)
 	if !ok || runtime == nil {
 		return nil
 	}
-	return &aiDiscoveryV8Adapter{runtime: runtime, publishGate: gate}
+	return &aiDiscoveryV8Adapter{runtime: runtime, publishGate: gate, secureClient: secureClient}
+}
+
+// aiDiscoveryV8SnapshotSummary carries the Secure Client completeness fields
+// of one scan's ai.discovery.completed record.
+type aiDiscoveryV8SnapshotSummary struct {
+	published         bool
+	localModelSignals int64
+}
+
+// aiDiscoveryV8LocalModelExport is the defenseclaw.ai.model.* projection of one
+// local_model signal, already normalized to the registry vocabularies.
+type aiDiscoveryV8LocalModelExport struct {
+	id, key, provider, status, format, modality, owner, relevance observability.Optional[string]
+	sizeBytes                                                     observability.Optional[int64]
+}
+
+// aiDiscoveryV8SecureClient reports the resolved Secure Client profile of a
+// possibly nil configuration.
+func aiDiscoveryV8SecureClient(cfg *config.Config) bool {
+	return cfg != nil && cfg.SecureClientIntegration()
+}
+
+func aiDiscoveryV8LocalModelFields(signal inventory.AISignal) (aiDiscoveryV8LocalModelExport, bool) {
+	if signal.Category != inventory.SignalLocalModel || signal.Model == nil {
+		return aiDiscoveryV8LocalModelExport{}, false
+	}
+	model := signal.Model
+	provider := inventory.NormalizeLocalModelProvider(model.Provider)
+	out := aiDiscoveryV8LocalModelExport{
+		id:        aiDiscoveryV8OptionalText(inventory.LocalModelExportID(model.ID)),
+		key:       aiDiscoveryV8OptionalText(inventory.LocalModelKey(model.Provider, model.ID)),
+		provider:  aiDiscoveryV8OptionalText(provider),
+		status:    aiDiscoveryV8OptionalText(inventory.NormalizeLocalModelStatus(model.Status)),
+		format:    aiDiscoveryV8OptionalText(inventory.NormalizeLocalModelFormat(model.Format)),
+		modality:  aiDiscoveryV8OptionalText(inventory.NormalizeLocalModelModality(model.Modality)),
+		owner:     aiDiscoveryV8OptionalText(inventory.LocalModelExportOwner(model.OwnerApplication)),
+		relevance: aiDiscoveryV8OptionalText(inventory.NormalizeLocalModelRelevance(model.Relevance)),
+	}
+	if model.SizeBytes > 0 {
+		out.sizeBytes = observability.Present(model.SizeBytes)
+	}
+	return out, true
+}
+
+// aiDiscoveryV8EmitsSignal is the single predicate EmitReport uses to decide
+// whether a signal's lifecycle record ships this scan, so the summary's
+// local_model_signals counts exactly the records the loop sends.
+func aiDiscoveryV8EmitsSignal(signal inventory.AISignal, managedSnapshot, signalsPublish bool) bool {
+	isDelta := signal.State == inventory.AIStateNew ||
+		signal.State == inventory.AIStateChanged || signal.State == inventory.AIStateGone
+	return (isDelta || (managedSnapshot && signal.State == inventory.AIStateSeen)) &&
+		(!managedSnapshot || signalsPublish)
 }
 
 func (adapter *aiDiscoveryV8Adapter) StartScan(
@@ -193,12 +253,20 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 	if adapter == nil || adapter.runtime == nil || ctx == nil || !aiDiscoveryV8SummaryValid(report.Summary) {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	// The per-scan summary is the liveness signal ("device alive, inventory
-	// unchanged, total = N") and stays unconditional in every mode, including a
-	// fully suppressed managed cycle.
-	logErr := adapter.emitSummaryLog(ctx, report.Summary)
 	managedSnapshot := ManagedEnterpriseActive()
 	signalsPublish, signalsCycle, signalsDigest := adapter.resolveSignalsPublish(managedSnapshot, report)
+	// The per-scan summary is the liveness signal ("device alive, inventory
+	// unchanged, total = N") and stays unconditional in every mode, including a
+	// fully suppressed managed cycle. Other modes emit it first, as before.
+	// Secure Client emits it after the signal loop: its snapshot fields state
+	// whether every signal of this scan reached the managed destination and how
+	// many local_model records did, and AI Defense removes models only after a
+	// complete, published scan, so the fields must come from record outcomes.
+	var logErr error
+	if !adapter.secureClient {
+		logErr = adapter.emitSummaryLog(ctx, report.Summary, nil)
+	}
+	var acceptedLocalModels int64
 	signalsErr := false
 	ownerEmails := standaloneOwnerEmailObservations(report.Signals)
 	for i, signal := range report.Signals {
@@ -206,19 +274,17 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		// steady-state `seen` observations, but only on a cycle where the
 		// inventory actually changed or the daily full bundle is due. Other modes
 		// keep the historical lifecycle-delta contract.
-		isDelta := signal.State == inventory.AIStateNew ||
-			signal.State == inventory.AIStateChanged || signal.State == inventory.AIStateGone
 		// Suppression is reachable only when this scan carried no
 		// new/changed/gone signal (see resolveSignalsPublish), so no
 		// lifecycle delta can be dropped here.
-		if (isDelta || (managedSnapshot && signal.State == inventory.AIStateSeen)) &&
-			(!managedSnapshot || signalsPublish) {
+		if aiDiscoveryV8EmitsSignal(signal, managedSnapshot, signalsPublish) {
 			outcome, err := adapter.emitSignalLog(ctx, report.Summary, signal)
 			// Emit returns nil when the optional managed AI Defense projection fails,
 			// so the outcome — not the error — is what says whether the managed
 			// destination actually received this record. See
 			// managedInventoryPublishRejected.
-			if managedInventoryPublishRejected(outcome) {
+			rejected := managedInventoryPublishRejected(outcome)
+			if rejected {
 				signalsErr = true
 			}
 			if err != nil {
@@ -227,6 +293,9 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 					logErr = err
 				}
 			}
+			if !rejected && err == nil && signal.Category == inventory.SignalLocalModel {
+				acceptedLocalModels++
+			}
 		}
 		if ownerEmails[i] {
 			observed := signal
@@ -234,6 +303,17 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 			if _, err := adapter.emitSignalLog(ctx, report.Summary, observed); err != nil && logErr == nil {
 				logErr = err
 			}
+		}
+	}
+	if adapter.secureClient {
+		// A rejected or failed record means this scan did not send every current
+		// signal: the snapshot is not published and no removals may follow.
+		snapshot := &aiDiscoveryV8SnapshotSummary{published: managedSnapshot && signalsPublish && !signalsErr}
+		if snapshot.published {
+			snapshot.localModelSignals = acceptedLocalModels
+		}
+		if err := adapter.emitSummaryLog(ctx, report.Summary, snapshot); err != nil && logErr == nil {
+			logErr = err
 		}
 	}
 	if signalsPublish && signalsCycle != nil {
@@ -438,6 +518,22 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			base.DefenseClawAIModelProvenanceSource = aiDiscoveryV8OptionalText(provenance.Source)
 			base.DefenseClawAIModelProvenanceConfidence = aiDiscoveryV8OptionalText(provenance.Confidence)
 		}
+		// Model identity leaves the device only on the Secure Client profile
+		// (Spec 016, approved 2026-11-20); every other mode keeps the
+		// provenance-only record above.
+		if adapter.secureClient {
+			if model, ok := aiDiscoveryV8LocalModelFields(signal); ok {
+				base.DefenseClawAIModelID = model.id
+				base.DefenseClawAIModelKey = model.key
+				base.DefenseClawAIModelProvider = model.provider
+				base.DefenseClawAIModelStatus = model.status
+				base.DefenseClawAIModelFormat = model.format
+				base.DefenseClawAIModelSizeBytes = model.sizeBytes
+				base.DefenseClawAIModelModality = model.modality
+				base.DefenseClawAIModelOwnerApplication = model.owner
+				base.DefenseClawAIModelRelevance = model.relevance
+			}
+		}
 		switch eventName {
 		case "ai_component.discovered":
 			return builder.BuildLogAIComponentDiscovered(observability.LogAIComponentDiscoveredInput(base))
@@ -472,6 +568,15 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAIModelProvenanceDerivation:   base.DefenseClawAIModelProvenanceDerivation,
 				DefenseClawAIModelProvenanceSource:       base.DefenseClawAIModelProvenanceSource,
 				DefenseClawAIModelProvenanceConfidence:   base.DefenseClawAIModelProvenanceConfidence,
+				DefenseClawAIModelID:                     base.DefenseClawAIModelID,
+				DefenseClawAIModelKey:                    base.DefenseClawAIModelKey,
+				DefenseClawAIModelProvider:               base.DefenseClawAIModelProvider,
+				DefenseClawAIModelStatus:                 base.DefenseClawAIModelStatus,
+				DefenseClawAIModelFormat:                 base.DefenseClawAIModelFormat,
+				DefenseClawAIModelSizeBytes:              base.DefenseClawAIModelSizeBytes,
+				DefenseClawAIModelModality:               base.DefenseClawAIModelModality,
+				DefenseClawAIModelOwnerApplication:       base.DefenseClawAIModelOwnerApplication,
+				DefenseClawAIModelRelevance:              base.DefenseClawAIModelRelevance,
 				DefenseClawAgentIdentityID:               base.DefenseClawAgentIdentityID,
 				DefenseClawSandboxID:                     base.DefenseClawSandboxID,
 				DefenseClawSandboxName:                   base.DefenseClawSandboxName,
@@ -811,7 +916,14 @@ func (adapter *aiDiscoveryV8Adapter) emitComponentConfidenceLog(
 func (adapter *aiDiscoveryV8Adapter) emitSummaryLog(
 	ctx context.Context,
 	summary inventory.AIDiscoverySummary,
+	snapshot *aiDiscoveryV8SnapshotSummary,
 ) error {
+	var snapshotPublished observability.Optional[bool]
+	var localModelSignals observability.Optional[int64]
+	if snapshot != nil {
+		snapshotPublished = observability.Present(snapshot.published)
+		localModelSignals = observability.Present(snapshot.localModelSignals)
+	}
 	severity := "INFO"
 	canonicalSeverity := observability.SeverityInfo
 	logLevel := observability.LogLevelInfo
@@ -851,20 +963,22 @@ func (adapter *aiDiscoveryV8Adapter) emitSummaryLog(
 		return builder.BuildLogAIDiscoveryCompleted(observability.LogAIDiscoveryCompletedInput{
 			Envelope: aiDiscoveryV8EmitEnvelope(ctx, snapshot, "scan"),
 			Severity: observability.Present(canonicalSeverity), LogLevel: observability.Present(logLevel),
-			Outcome:                                outcome,
-			DefenseClawAIDiscoveryScanID:           summary.ScanID,
-			DefenseClawAIDiscoverySource:           summary.Source,
-			DefenseClawAIDiscoveryPrivacyMode:      summary.PrivacyMode,
-			DefenseClawAIDiscoveryResult:           summary.Result,
-			DefenseClawAIDiscoveryDurationMs:       summary.DurationMs,
-			DefenseClawAIDiscoverySignalsTotal:     int64(summary.TotalSignals),
-			DefenseClawAIDiscoveryActiveSignals:    int64(summary.ActiveSignals),
-			DefenseClawAIDiscoveryNewSignals:       int64(summary.NewSignals),
-			DefenseClawAIDiscoveryChangedSignals:   int64(summary.ChangedSignals),
-			DefenseClawAIDiscoveryGoneSignals:      int64(summary.GoneSignals),
-			DefenseClawAIDiscoveryFilesScanned:     int64(summary.FilesScanned),
-			DefenseClawAIDiscoveryDedupeSuppressed: int64(summary.DedupeSuppressed),
-			DefenseClawAIDiscoveryErrors:           int64(summary.Errors),
+			Outcome:                                 outcome,
+			DefenseClawAIDiscoveryScanID:            summary.ScanID,
+			DefenseClawAIDiscoverySource:            summary.Source,
+			DefenseClawAIDiscoveryPrivacyMode:       summary.PrivacyMode,
+			DefenseClawAIDiscoveryResult:            summary.Result,
+			DefenseClawAIDiscoveryDurationMs:        summary.DurationMs,
+			DefenseClawAIDiscoverySignalsTotal:      int64(summary.TotalSignals),
+			DefenseClawAIDiscoveryActiveSignals:     int64(summary.ActiveSignals),
+			DefenseClawAIDiscoveryNewSignals:        int64(summary.NewSignals),
+			DefenseClawAIDiscoveryChangedSignals:    int64(summary.ChangedSignals),
+			DefenseClawAIDiscoveryGoneSignals:       int64(summary.GoneSignals),
+			DefenseClawAIDiscoveryFilesScanned:      int64(summary.FilesScanned),
+			DefenseClawAIDiscoveryDedupeSuppressed:  int64(summary.DedupeSuppressed),
+			DefenseClawAIDiscoveryErrors:            int64(summary.Errors),
+			DefenseClawAIDiscoverySnapshotPublished: snapshotPublished,
+			DefenseClawAIDiscoveryLocalModelSignals: localModelSignals,
 		})
 	})
 	return err

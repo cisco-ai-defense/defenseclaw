@@ -657,6 +657,33 @@ attributes:
     overrides: {min: 0, max: 9223372036854775807}
     notes: Nonnegative bounded count
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.discovery.snapshot_published
+  type: boolean
+  brief: Whether this scan sent every current signal as ai_component.observed, sent only by the Secure Client profile
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: false when the unchanged-inventory gate suppressed the snapshot
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.discovery.local_model_signals
+  type: int64
+  brief: Number of local_model records sent for this scan, sent only by the Secure Client profile
+  examples: [15]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: 0 when the snapshot was not published; lets a consumer prove it received the whole snapshot
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.ai.discovery.active_signals
   type: int64
   brief: Active discovery signals in the scan result
@@ -1893,6 +1920,137 @@ attributes:
       enum: [high, medium, low]
     notes: Resolver confidence only; distinct from discovery signal confidence
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.id
+  type: string
+  brief: Identifier of a discovered local model, sent only by the Secure Client profile
+  examples: ['llama3.2:3b']
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 512}
+    notes: Hugging Face repo ID, Ollama model:tag, local API model ID or a file or directory stem; never a path; log-only and subject to destination redaction
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.key
+  type: string
+  brief: Stable per-model key derived from the runtime and model ID, sent only by the Secure Client profile
+  examples: ['mdl_4f0c2a9d1b7e6c5a3f8e9d0b1c2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 68, pattern: '^mdl_[0-9a-f]{64}$'}
+    notes: mdl_ plus hex SHA-256 of a versioned label, the provider and the normalized model ID; independent of paths and of the gateway token
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.provider
+  type: string
+  brief: Normalized local runtime or store that holds a discovered local model
+  examples: [ollama]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [ollama, lmstudio, huggingface, mlx, llamacpp, lemonade, jan, gpt4all, anythingllm, localai, vllm, coreml, flm, filesystem, other]
+    notes: Closed vocabulary; filesystem covers generic roots and other covers any unlisted runtime
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.status
+  type: string
+  brief: Whether a discovered local model is installed or loaded by a running server
+  examples: [loaded]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [installed, loaded]
+    notes: loaded only when a loopback model API reports the model as running
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.format
+  type: string
+  brief: Normalized artifact format of a discovered local model
+  examples: [gguf]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [gguf, ggml, safetensors, mlx, coreml, q4nx, onnx, ort, tflite, pytorch, bin, ollama, ollama-blob, other]
+    notes: ollama is an Ollama manifest; ollama-blob is the Ollama blob store, not a model; pytorch covers .pt, .pth and .ckpt
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.size_bytes
+  type: int64
+  brief: Size in bytes of a discovered local model's artifacts
+  examples: [2019393189]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Nonnegative; absent when unknown
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.modality
+  type: string
+  brief: Inferred modality of a discovered local model
+  examples: [generative]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [generative, speech, vision, embedding, audio, unknown]
+    notes: Closed scanner vocabulary
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.owner_application
+  type: string
+  brief: Application that owns a discovered local model
+  examples: [LM Studio]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Runtime, store or application label; never a path
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.ai.model.relevance
+  type: string
+  brief: Whether a discovered local model is a primary, supporting or embedded model
+  examples: [primary]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [primary, supporting, embedded, unknown]
+    notes: embedded marks models inside browsers, conferencing apps, app bundles and caches
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.item.name
   type: string
   brief: Bounded configured name of one endpoint inventory item
@@ -9174,7 +9332,11 @@ groups:
   extends:
   - body.ai.discovery.run
   attributes: []
-  body_fields: []
+  body_fields:
+  - ref: defenseclaw.ai.discovery.snapshot_published
+    requirement_level: recommended
+  - ref: defenseclaw.ai.discovery.local_model_signals
+    requirement_level: recommended
   log:
     event_name: ai.discovery.completed
   x-defenseclaw:
@@ -9219,6 +9381,24 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.key
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provider
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.status
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.format
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.size_bytes
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.modality
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.owner_application
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.relevance
     requirement_level: recommended
   - ref: user.id
     requirement_level: recommended
@@ -9305,6 +9485,24 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.key
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provider
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.status
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.format
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.size_bytes
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.modality
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.owner_application
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.relevance
     requirement_level: recommended
   - ref: user.id
     requirement_level: recommended
@@ -9407,6 +9605,24 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
     requirement_level: recommended
+  - ref: defenseclaw.ai.model.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.key
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provider
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.status
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.format
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.size_bytes
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.modality
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.owner_application
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.relevance
+    requirement_level: recommended
   - ref: defenseclaw.sandbox.id
     requirement_level: recommended
   - ref: defenseclaw.sandbox.name
@@ -9453,6 +9669,24 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.key
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provider
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.status
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.format
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.size_bytes
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.modality
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.owner_application
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.relevance
     requirement_level: recommended
   - ref: user.id
     requirement_level: recommended

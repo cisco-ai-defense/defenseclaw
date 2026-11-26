@@ -2652,7 +2652,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
-			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter(), s.inventoryPublish))
+			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter(), s.inventoryPublish, aiDiscoveryV8SecureClient(appliedCfg)))
 			// Before the swap, so the restart worker never runs the
 			// replacement with a stale scan-history window.
 			s.applyAIDiscoveryHistoryRetention(nextAIDiscovery)

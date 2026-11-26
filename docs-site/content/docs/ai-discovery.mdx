@@ -362,7 +362,7 @@ Loaded-model rows can additionally carry `modality`, `device`, and `pinned`, plu
 
 The country is the ISO 3166-1 alpha-2 country associated with the organization that released the resolved root/base weights—not the quantizer, Hub uploader, local runtime, or download location. The TUI and macOS app derive the flag locally (`CN 🇨🇳`); emoji is never stored on the wire. `base_models`, `quantized`, `distilled`, and `derivation` preserve the detected lineage, while `source` and `confidence` distinguish embedded/runtime evidence from catalog or Hub enrichment. Missing evidence stays absent/unknown rather than becoming a guess.
 
-The `ai_component.*` logs carry this bounded provenance subset for `local_model` signals, but never the installed artifact's model ID and never as metric labels. Publisher, country, derivation flags, source, and confidence are metadata fields. Root/base model names are included only for a reviewed exact lineage or a successful public Hub lookup. Those names and config-derived quantization text are log-only `content` fields so each OTLP destination's selected redaction profile can transform or remove them.
+The `ai_component.*` logs carry this bounded provenance subset for `local_model` signals, never as metric labels. Outside the Secure Client profile they never carry the installed artifact's model ID; the Secure Client profile adds the model identity fields described under [Managed enterprise export](#managed-enterprise-export). Publisher, country, derivation flags, source, and confidence are metadata fields. Root/base model names are included only for a reviewed exact lineage or a successful public Hub lookup. Those names and config-derived quantization text are log-only `content` fields so each OTLP destination's selected redaction profile can transform or remove them.
 
 **Optional Hugging Face enrichment.** Set `ai_discovery.lookup_model_provenance_online=true` (or pass `--lookup-model-provenance-online` to `agent discovery enable`) to look up public model-card ancestry. This is off by default because a lookup transmits a model repository ID. The resolver calls only the fixed public Hugging Face model-info endpoint, refuses redirects, bounds responses and recursion, caches positive and negative results, and starts only from an exact ID recovered from a Hugging Face cache path, an explicit `huggingface.co` URL in embedded metadata, or a reviewed exact lineage rule. It does not send local paths or slash-shaped relative aliases, fuzzy-search arbitrary filenames, or use a private Hub token. Transient failures retain a previously resolved result for at most seven days; a definitive not-found response clears it. A fully renamed GGUF can still resolve when its embedded `general.source.*` or `general.base_model.*` repository URL survives conversion; if identifiers and metadata were stripped, discovery reports the provenance as unknown.
 
@@ -1132,6 +1132,38 @@ actions. That exclusivity applies to the release-owned managed inventory
 actions; `ai_discovery` records continue to follow the
 destination policy and also reach the generated destination in managed mode.
 
+**Local models on the Secure Client profile.** Only the Secure Client profile
+(`cfg.SecureClientIntegration()`) adds model identity to each `local_model`
+record, so AI Defense can keep one inventory row per device and model.
+OSS per-user and standalone managed (including MDM) records are unchanged.
+
+| Field | Meaning |
+|---|---|
+| `defenseclaw.ai.model.id` | Model ID: a Hugging Face repo ID, an Ollama `model:tag`, a local API model ID, or a file or directory stem. Never a path. A `content` field, so `strict` removes it |
+| `defenseclaw.ai.model.key` | `mdl_` plus a SHA-256 of the runtime and model ID. Stable across moves, reinstalls and `--purge`; the same model found by a file and by a loopback API gets one key. Absent when the model has no ID |
+| `defenseclaw.ai.model.provider` | Runtime or store: `ollama`, `lmstudio`, `huggingface`, `mlx`, `llamacpp`, `lemonade`, `jan`, `gpt4all`, `anythingllm`, `localai`, `vllm`, `coreml`, `flm`, `filesystem`, `other` |
+| `defenseclaw.ai.model.status` | `installed` or `loaded` |
+| `defenseclaw.ai.model.format` | `gguf`, `ggml`, `safetensors`, `mlx`, `coreml`, `q4nx`, `onnx`, `ort`, `tflite`, `pytorch`, `bin`, `ollama` (an Ollama manifest), `ollama-blob` (the Ollama blob store, not a model), `other` |
+| `defenseclaw.ai.model.size_bytes` | Artifact size in bytes, when known |
+| `defenseclaw.ai.model.modality` | `generative`, `speech`, `vision`, `embedding`, `audio`, `unknown` |
+| `defenseclaw.ai.model.owner_application` | Owning runtime or application label |
+| `defenseclaw.ai.model.relevance` | `primary`, `supporting`, `embedded` (inside a browser, conferencing app, app bundle or cache) or `unknown` |
+
+The Secure Client `ai.discovery.completed` summary also carries
+`defenseclaw.ai.discovery.snapshot_published` and
+`defenseclaw.ai.discovery.local_model_signals`. Secure Client emits this summary
+after the scan's records, and both fields come from what was actually sent:
+`snapshot_published` is `true` only when the scan published its snapshot and the
+managed destination accepted every current signal as `ai_component.observed`. A
+rejected or failed record makes it `false`. `local_model_signals` counts the
+accepted `local_model` records and is `0` when the snapshot was not published.
+Together with `scan_id` and `result`, AI Defense uses them to remove a model
+only after a complete, published snapshot no longer contains it.
+
+The model key hashes the complete model ID. Only the exported
+`defenseclaw.ai.model.id` is capped at 512 bytes, so two IDs that differ only
+past the cap keep different keys.
+
 ### Managed skill inventory
 
 In `managed_enterprise`, the managed inventory carries every skill the agents load in the `endpoint_skill_inventory` collection (action `managed_skill_inventory`): one `ai_component.observed` record per skill and agent, with these fields under `defenseclaw.inventory.skill`:
@@ -1255,7 +1287,7 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
 
 On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. Without Full Disk Access the scan does not open the folders that make macOS prompt the user (Desktop, Documents, Downloads, Movies, Music, Pictures, iCloud Drive, `~/Library/Containers`, `~/Library/Group Containers` and Contacts data). A skipped protected folder makes the scan summary `result: partial`, increments `errors`, and adds `detector_errors.macos_privacy`. Other unreadable roots also leave successful detections in place and add sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
 
-The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; the gateway prunes scans older than `observability.local.retention_days` (seven days by default) and always keeps the latest scan. Records sent to a destination follow that destination's redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired `privacy.disable_redaction` setting no longer turns redaction off.
+The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; the gateway prunes scans older than `observability.local.retention_days` (seven days by default) and always keeps the latest scan. Records sent to a destination follow that destination's redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. The Secure Client profile is the one exception: its managed AI Defense destination receives the model ID and a stable model key (see [Managed enterprise export](#managed-enterprise-export)); paths and basenames stay unsent. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired `privacy.disable_redaction` setting no longer turns redaction off.
 
 ## Runtime planes: what actually ran
 

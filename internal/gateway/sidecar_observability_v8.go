@@ -370,7 +370,7 @@ func (s *Sidecar) bindObservabilityV8ConsumersLocked() {
 		s.hilt.bindObservabilityV8(hiltRuntime)
 	}
 	if discovery := s.aiDiscoverySnapshot(); discovery != nil {
-		discovery.BindObservabilityV8(newAIDiscoveryV8Adapter(emitter, s.inventoryPublish))
+		discovery.BindObservabilityV8(newAIDiscoveryV8Adapter(emitter, s.inventoryPublish, aiDiscoveryV8SecureClient(s.currentConfig())))
 	}
 
 	s.apiMu.RLock()
