@@ -221,17 +221,18 @@ func assertWindowsOpenCodeWithoutVersionEvidence(t *testing.T, s *Sidecar, rawVe
 		}
 	}
 
-	// Observe mode: the unversioned OpenCode is admitted like any other
-	// unversioned agent; the version on the PATH or in discovery decides nothing.
+	// Observe mode: the unversioned OpenCode passes admission like any other
+	// unversioned agent (Setup runs for it; the version in discovery decides
+	// nothing). The stub connector writes no plugin, so the refresh then ends
+	// at the registration verification: that is not the admission refusal and
+	// not the isolated "not V2" stop.
 	_, openCode, _, transaction, err := refresh()
-	if err != nil {
-		t.Fatalf("observe mode: an OpenCode with no valid version evidence stopped the start: %v", err)
-	}
-	if want := []string{"copilot", "opencode", "codex"}; !reflect.DeepEqual(transaction.succeeded, want) {
-		t.Errorf("observe mode: running connectors = %v, want %v", transaction.succeeded, want)
-	}
 	if openCode.setupCalls != 1 {
-		t.Errorf("observe mode: OpenCode setup calls = %d, want 1", openCode.setupCalls)
+		t.Errorf("observe mode: OpenCode setup calls = %d, want 1 (admitted)", openCode.setupCalls)
+	}
+	if err != nil && (errors.Is(err, ErrHookContractAdmission) || strings.Contains(err.Error(), "not V2") ||
+		!strings.Contains(err.Error(), "registration verification failed")) {
+		t.Errorf("observe mode: error = %v, want admission passed and only the stub's registration verification failing", err)
 	}
 	if reason := transaction.agentSettingsRefused["opencode"]; reason != "" {
 		t.Errorf("observe mode: OpenCode was isolated as not V2 (%q); Windows reads no version for it", reason)

@@ -2299,7 +2299,7 @@ func TestAllowRuleDoesNotReleaseAnotherPath(t *testing.T) {
 func refuseWritesToFolder(t *testing.T, dir string, mode os.FileMode) func() {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		return denyAccessForTest(t, dir, "WD,AD")
+		return denyAccessForTest(t, dir, "(WD,AD)")
 	}
 	if err := os.Chmod(dir, mode); err != nil {
 		t.Fatal(err)
@@ -2329,7 +2329,7 @@ func denyWritesToFolder(t *testing.T, dir string) string {
 func denyReadOfFolder(t *testing.T, dir string) func() error {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		restore := denyAccessForTest(t, dir, "RD")
+		restore := denyAccessForTest(t, dir, "(RD)")
 		return func() error { restore(); return nil }
 	}
 	if err := os.Chmod(dir, 0); err != nil {
@@ -2339,17 +2339,23 @@ func denyReadOfFolder(t *testing.T, dir string) func() error {
 	return func() error { return os.Chmod(dir, 0o700) }
 }
 
-// holdOriginalUndeletable makes the skill folder (or file) at path impossible to rename
-// or delete for the test user until the returned release runs: mode 0o500 on
-// its parent on POSIX, an open handle without delete sharing on its SKILL.md on
+// holdOriginalUndeletable makes the skill folder (or file) at path impossible
+// to rename or delete for the test user until the returned release runs: mode
+// 0o500 on its parent on POSIX, access-list entries refusing the deletion on
 // Windows.
 func holdOriginalUndeletable(t *testing.T, parent, path string) func() {
 	t.Helper()
 	if runtime.GOOS == "windows" {
+		// Access denied, not a sharing violation: only that error reaches the
+		// installed source remover (fs.ErrPermission). Deleting needs DELETE on
+		// the item or DELETE_CHILD on its folder, so both are refused.
+		spec := "(DE)"
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			path = filepath.Join(path, "SKILL.md")
+			spec = "(OI)(CI)(DE,DC)"
 		}
-		return holdOpenForTest(t, path)
+		restoreParent := denyAccessForTest(t, parent, "(DC)")
+		restoreItem := denyAccessForTest(t, path, spec)
+		return func() { restoreItem(); restoreParent() }
 	}
 	if err := os.Chmod(parent, 0o500); err != nil {
 		t.Fatal(err)
