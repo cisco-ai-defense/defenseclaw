@@ -83,7 +83,6 @@ func windowsRelaxTestFormat(format string, sid *windows.SID) string {
 // returns that token to the owner-private shape first, and publication over
 // the relaxed token succeeds with nothing but ownership.
 func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
-	requireElevatedManagedWindows(t)
 	oldToken := strings.Repeat("a", 64)
 	newToken := strings.Repeat("b", 64)
 
@@ -106,6 +105,12 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 			t.Fatalf("republish over the hardened token: err = %v, want the bound staged file refusal", err)
 		}
 	}
+
+	// The relax step runs as the guardian (LocalSystem, which the hardened
+	// DACL grants full control); only an elevated runner can stand in for it.
+	// The refusal leg above is the owner's own behaviour and runs for a
+	// standard user too.
+	requireElevatedManagedWindows(t)
 
 	// With the relax step (run by the guardian as LocalSystem, which the
 	// hardened DACL grants full control; the elevated runner stands in).

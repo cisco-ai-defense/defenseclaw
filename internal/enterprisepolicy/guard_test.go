@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func guardRequest(t *testing.T, connector string, mode string) GuardRequest {
@@ -228,9 +229,7 @@ func TestGuardFailsClosedOnSymlinkedHookFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink unavailable (a standard Windows user holds no symlink privilege): %v", err)
-	}
+	testenv.Symlink(t, target, link)
 	decision := EvaluateForeignHooks(req)
 	if !decision.Deny || !strings.Contains(decision.Reason, "cannot be verified") {
 		t.Fatalf("a symlinked hook file must fail closed: %+v", decision)

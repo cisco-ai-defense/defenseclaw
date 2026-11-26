@@ -2137,8 +2137,7 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 }
 
 // Shared-hook descriptor drift (here an Everyone write grant) is repaired by
-// an elevated verifier and accepted with a log by an unprivileged one; the
-// script bytes stay bound by the contract digest either way.
+// the verifier; the script bytes stay bound by the contract digest either way.
 func TestVerifyWindowsClaudeRepairsNoncanonicalSharedHookProtection(t *testing.T) {
 	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
@@ -2177,10 +2176,9 @@ func TestVerifyWindowsClaudeRejectsHardLinkedSharedHook(t *testing.T) {
 }
 
 // Contract-lock descriptor drift (here an Everyone write grant) is permission
-// drift: an elevated verifier re-stamps the canonical protection on the held
-// file and an unprivileged one accepts and logs it. The contract bytes stay
-// bound by their digests either way; a hard-linked shared hook is still
-// refused (TestVerifyWindowsClaudeRejectsHardLinkedSharedHook).
+// drift: the verifier re-stamps the canonical protection on the held file. The
+// contract bytes stay bound by their digests either way; a hard-linked shared
+// hook is still refused (TestVerifyWindowsClaudeRejectsHardLinkedSharedHook).
 func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *testing.T) {
 	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
@@ -2197,9 +2195,6 @@ func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *t
 		fixture.targetSID.String(),
 	); err != nil {
 		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want repair or accepted drift", err)
-	}
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		return
 	}
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
@@ -2603,9 +2598,7 @@ func TestValidateWindowsManagedPolicyDirectoryProtectionRejectsUnprotectedLeaf(t
 // An administrator-owned lock whose DACL drifted (here an Everyone write
 // grant) is re-stamped before the transaction opens it.
 func TestWindowsClaudeManagedPolicyTransactionRepairsDriftedLock(t *testing.T) {
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("repairing an Administrators-owned lock needs an elevated token")
-	}
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
 	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {

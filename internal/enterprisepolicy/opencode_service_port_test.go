@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestOpenCodeServicePortReadDistinguishesContentFromUnavailableFile(t *testing.T) {
@@ -73,9 +75,7 @@ func TestSetOpenCodeServicePort(t *testing.T) {
 			_ = os.Remove(path)
 			target := filepath.Join(home, "elsewhere.json")
 			_ = os.WriteFile(target, []byte("{}"), 0o600)
-			if err := os.Symlink(target, path); err != nil {
-				t.Skipf("symlink unavailable: %v", err)
-			}
+			testenv.Symlink(t, target, path)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -40,7 +40,8 @@ const hookAnswerWithHeldAuditLock = time.Second
 // larger reading counts); a product that waits longer than its busy timeout
 // (a second busy wait is 1.5 s, the lock itself 5 s) is over the stretched bound at
 // any slowdown the host reports, because the stretch is capped at
-// hookAnswerHostStretch.
+// hookAnswerHostStretch. The cap leaves only 100 ms under a second busy wait:
+// do not raise it without checking that margin.
 const hookAnswerHostStretch = 1.4
 
 // hookAnswerWindow is the bound on a locked call at a host slowdown.

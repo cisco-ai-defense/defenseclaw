@@ -1601,10 +1601,6 @@ func assertNoWindowsCorrelationTemps(t *testing.T, dir string) {
 	}
 }
 
-// skipCorrelationKeyAsLocalSystem skips a per-user key store test run as
-// LocalSystem: the store keys a per-user process to its own account, and the
-// gateway service names its service SID, so LocalSystem is no owner it
-// serves and the store refuses it (unsafe_key_permissions).
 // requireCorrelationKeyTamperAccess skips a test that rewrites the key file or
 // its DACL behind the store's back. The canonical DACL gives the owner read
 // access only and OWNER RIGHTS just READ_CONTROL (the hardening the other tests
@@ -1620,6 +1616,10 @@ func requireCorrelationKeyTamperAccess(t *testing.T) {
 	}
 }
 
+// skipCorrelationKeyAsLocalSystem skips a per-user key store test run as
+// LocalSystem: the store keys a per-user process to its own account, and the
+// gateway service names its service SID, so LocalSystem is no owner it
+// serves and the store refuses it (unsafe_key_permissions).
 func skipCorrelationKeyAsLocalSystem(t *testing.T) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
