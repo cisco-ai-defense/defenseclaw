@@ -1,0 +1,324 @@
+[
+  {
+    "case": "gap0592_perl:P02 two-arg open for write",
+    "cmd": "perl -e 'open(F, \">.claude/settings.json\"); print F \"{}\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W3"
+  },
+  {
+    "case": "gap0592_perl:P04 read-write open",
+    "cmd": "perl -e 'open(my $f, \"+<\", \".claude/settings.json\"); print $f \"{}\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W2 +<"
+  },
+  {
+    "case": "gap0592_perl:P07 unlink",
+    "cmd": "perl -e 'unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W1"
+  },
+  {
+    "case": "gap0592_perl:P08 rename",
+    "cmd": "perl -e 'rename \".claude/settings.json\", \".claude/x.json\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W1"
+  },
+  {
+    "case": "gap0592_perl:P11 write open with a layer",
+    "cmd": "perl -e 'open(my $f, \">:raw\", \".claude/settings.json\"); print $f \"{}\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W2 layer"
+  },
+  {
+    "case": "gap0592_perl:P12 two-arg open without parens",
+    "cmd": "perl -e 'open F, \"+>.claude/settings.json\" or die; print F \"{}\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W3 list op"
+  },
+  {
+    "case": "gap0592_perl:P13 truncate",
+    "cmd": "perl -e 'truncate \".claude/settings.json\", 0'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W1"
+  },
+  {
+    "case": "gap0592_perl:P14 unlink with parens",
+    "cmd": "perl -e 'unlink(\".claude/settings.json\") or die'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W1"
+  },
+  {
+    "case": "gap0592_perl:P15 rename onto the hook file",
+    "cmd": "perl -e 'rename(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W1"
+  },
+  {
+    "case": "gap0592_perl:P16 symlink onto the hook file",
+    "cmd": "perl -e 'symlink \"notes.txt\", \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W1"
+  },
+  {
+    "case": "gap0592_perl:P18 CORE::unlink",
+    "cmd": "perl -e 'CORE::unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 CORE:: + W1"
+  },
+  {
+    "case": "gap0592_perl:P19 rename trailing comma",
+    "cmd": "perl -e 'rename(\"notes.txt\", \".claude/settings.json\",)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 + W1"
+  },
+  {
+    "case": "gap0592_perl:P20 truncate trailing comma",
+    "cmd": "perl -e 'truncate(\".claude/settings.json\", 0,)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 + W1"
+  },
+  {
+    "case": "gap0592_perl:P21 symlink trailing comma",
+    "cmd": "perl -e 'symlink(\"notes.txt\", \".claude/settings.json\",)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 + W1"
+  },
+  {
+    "case": "gap0592_perl:P22 link trailing comma",
+    "cmd": "perl -e 'link(\"notes.txt\", \".claude/settings.json\",)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 + W1"
+  },
+  {
+    "case": "gap0592_perl:P23 unlink newline paren",
+    "cmd": "perl -e 'unlink\n(\".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 + W1"
+  },
+  {
+    "case": "gap0592_perl:P24 rename newline paren",
+    "cmd": "perl -e 'rename\n(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 + W1"
+  },
+  {
+    "case": "gap0592_perl:P25 open newline paren",
+    "cmd": "perl -e 'open\n(my $f, \"+<\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "C1 + W2"
+  },
+  {
+    "case": "gap0592_perl:P26 unlink comment",
+    "cmd": "perl -e 'unlink # x\n\".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L1 + W1"
+  },
+  {
+    "case": "gap0592_perl:P27 operator star",
+    "cmd": "perl -e 'print 0*unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L4 + W1"
+  },
+  {
+    "case": "gap0592_perl:P28 operator ampersand",
+    "cmd": "perl -e 'print 1&unlink(\".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L4 + W1"
+  },
+  {
+    "case": "gap0592_perl:P29 operator percent",
+    "cmd": "perl -e 'print 1%rename(\"notes.txt\", \".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L4 + W1"
+  },
+  {
+    "case": "gap0592_perl:E01 variable write mode",
+    "cmd": "perl -e 'my $m=\">\"; open(F,$m,\".claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_perl:E02 concatenated write mode",
+    "cmd": "perl -e 'open(F, \">\" . \"\", \".claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W2 concat mode"
+  },
+  {
+    "case": "gap0592_perl:E21 append variable mode",
+    "cmd": "perl -e 'my $m=\">>\"; open(F,$m,\".claude/settings.json\"); print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_perl:X10 local mode",
+    "cmd": "perl -e 'our $m=\"<\"; { local $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 local + W4"
+  },
+  {
+    "case": "gap0592_perl:X21 scalar name open",
+    "cmd": "perl -e 'my $open=\">\"; open(F,$open,\".claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4 ($open is a scalar)"
+  },
+  {
+    "case": "gap0592_perl:X22 leading-space mode",
+    "cmd": "perl -e 'open(F,\" >.claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W3 leading space"
+  },
+  {
+    "case": "gap0592_perl:N01 hash key y",
+    "cmd": "perl -e 'my %p; $p{y}=1; unlink \".claude/settings.json\"; $p{x}=1;'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L3 + W1"
+  },
+  {
+    "case": "gap0592_perl:N02 hash key s",
+    "cmd": "perl -e 'my %o; $o{s}=1; unlink \".claude/settings.json\"; $o{t}=2;'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L3 + W1"
+  },
+  {
+    "case": "gap0592_perl:N03 arrow hash key m",
+    "cmd": "perl -e 'my $h={}; $h->{m}=1; unlink \".claude/settings.json\"; $h->{n}=1;'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L3 + W1"
+  },
+  {
+    "case": "gap0592_perl:N04 file test s",
+    "cmd": "perl -e 'print -s \"notes.txt\"; unlink \".claude/settings.json\"; print \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L3 + W1"
+  },
+  {
+    "case": "gap0592_perl:N05 split regex escape",
+    "cmd": "perl -e 'my @w = split /\\s+/, \"a b\"; unlink \".claude/settings.json\"; print 1+1'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L4 + W1"
+  },
+  {
+    "case": "gap0592_perl:N06 method named s",
+    "cmd": "perl -e 'package O; sub s {1} package main; O->s(1); unlink \".claude/settings.json\"; print 1;'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L3 + W1"
+  },
+  {
+    "case": "gap0592_perl:N07 quote after comment",
+    "cmd": "perl -e 'print q #c\n{a}; unlink \".claude/settings.json\"; # z\n'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L1 + W1"
+  },
+  {
+    "case": "gap0592_perl:N08 substitution newline replacement",
+    "cmd": "perl -e '$_=\"a\"; s{a}\n{unlink \".claude/settings.json\"}e;\nprint 1;\n'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L2 + W1"
+  },
+  {
+    "case": "gap0592_perl:N13 utf8 sub identifier",
+    "cmd": "perl -Mutf8 -e 'sub éq{ unlink \".claude/settings.json\" } éq();'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L3 + W1"
+  },
+  {
+    "case": "gap0592_perl:N14 hash term star",
+    "cmd": "perl -e 'my %h=(a=>1); print $h{a}*unlink \".claude/settings.json\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L4 + W1"
+  },
+  {
+    "case": "gap0592_perl:N15 hash term ampersand",
+    "cmd": "perl -e 'my %h=(a=>1); print $h{a}&unlink(\".claude/settings.json\")'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L4 + W1"
+  },
+  {
+    "case": "gap0592_perl:N17 hash key q",
+    "cmd": "perl -e 'my %h; $h{q}=1; unlink \".claude/settings.json\"; $h{r}=2'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L3 + W1"
+  },
+  {
+    "case": "gap0592_cust:variable write mode",
+    "cmd": "perl -e 'my $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_cust:concat write mode",
+    "cmd": "perl -e 'open(my $f, \">\" . \"\", \".claude/settings.json\") or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W2 concat"
+  },
+  {
+    "case": "gap0592_cust:variable append mode",
+    "cmd": "perl -e 'my $m=\">>\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4"
+  },
+  {
+    "case": "gap0592_cust:X10 local mode",
+    "cmd": "perl -e 'our $m=\"<\"; { local $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 local + W4"
+  },
+  {
+    "case": "gap0592_cust:X21 scalar name open",
+    "cmd": "perl -e 'my $open=\">\"; open(F,$open,\".claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "S1 + W4 ($open is a scalar)"
+  },
+  {
+    "case": "gap0592_cust:X22 leading-space mode",
+    "cmd": "perl -e 'open(F,\" >.claude/settings.json\") or die $!; print F \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "W3 leading space"
+  }
+]

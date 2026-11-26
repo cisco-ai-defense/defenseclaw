@@ -46,7 +46,8 @@ import (
 // touch the gateway confirms the box was short of CPU (openLoopBoxProbe, read
 // right before the baseline, between the baseline and the stream, and after the
 // teardown: a spin on its own OS thread got less than openLoopProbeMinShare of a
-// core, or the Linux CPU pressure of the box was openLoopProbeMaxPressure or
+// core, the Linux CPU pressure of the box was openLoopProbeMaxPressure or
+// more, or its 1-minute load average per core was openLoopProbeMaxLoad or
 // more), and so are the two timing outcomes below (unanswered, over the p95
 // budget) on such a box; on a box the probe finds quiet they fail,
 // because the slow real path is then the gateway's own:
@@ -659,7 +660,27 @@ const (
 	// starved, so its run is inconclusive, never a pass.
 	openLoopProbeSyncs   = 7
 	openLoopProbeMaxSync = 6 * time.Millisecond
+	// openLoopProbeMaxLoad is the 1-minute load average, per core, at or above
+	// which other test binaries are keeping half the cores busy. A spin that
+	// found a free core and a pressure under its limit at three instants of
+	// 200 ms each can miss that (GAP-1974: a 24-shard gateway gate, the baseline
+	// of the real path twice its quiet value, the probe reading a quiet box).
+	openLoopProbeMaxLoad = 0.5
 )
+
+// openLoopLoadPerCore is the 1-minute load average of the box over its CPUs
+// (-1 where the kernel does not report it).
+func openLoopLoadPerCore() float64 {
+	raw, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return -1
+	}
+	var load float64
+	if _, err := fmt.Sscan(string(raw), &load); err != nil {
+		return -1
+	}
+	return load / float64(runtime.NumCPU())
+}
 
 // openLoopSyncLatency is the median time of openLoopProbeSyncs write+fsync
 // pairs in the temp directory, and false where the file cannot be written.
@@ -717,7 +738,7 @@ var openLoopProbeSink atomic.Uint64
 // over wall time), and the CPU pressure of the box over the same window (-1
 // where the kernel does not report it).
 type openLoopProbe struct {
-	share, pressure float64
+	share, pressure, load float64
 	// sync is the median write+fsync latency (0 where it cannot be read).
 	sync time.Duration
 }
@@ -745,7 +766,7 @@ func openLoopBoxProbe() (openLoopProbe, bool) {
 		return openLoopProbe{}, false
 	}
 	openLoopProbeSink.Add(x)
-	reading := openLoopProbe{share: float64(after.Nano()-before.Nano()) / float64(wall.Nanoseconds()), pressure: -1}
+	reading := openLoopProbe{share: float64(after.Nano()-before.Nano()) / float64(wall.Nanoseconds()), pressure: -1, load: openLoopLoadPerCore()}
 	reading.sync, _ = openLoopSyncLatency()
 	if havePressure && pressureAfter {
 		reading.pressure = float64(stallAfter-stallBefore) / float64(wall)
@@ -765,7 +786,7 @@ func (p *openLoopProbes) take() {
 // starved reports whether any reading found the box short of CPU.
 func (p openLoopProbes) starved() bool {
 	for _, r := range p {
-		if r.share < openLoopProbeMinShare || r.pressure >= openLoopProbeMaxPressure || r.sync >= openLoopProbeMaxSync {
+		if r.share < openLoopProbeMinShare || r.pressure >= openLoopProbeMaxPressure || r.load >= openLoopProbeMaxLoad || r.sync >= openLoopProbeMaxSync {
 			return true
 		}
 	}
@@ -776,6 +797,7 @@ func (p openLoopProbes) String() string {
 	shares := make([]string, len(p))
 	pressures := make([]string, len(p))
 	syncs := make([]string, len(p))
+	loads := make([]string, len(p))
 	for i, r := range p {
 		shares[i] = fmt.Sprintf("%.2f", r.share)
 		syncs[i] = r.sync.Round(100 * time.Microsecond).String()
@@ -783,8 +805,13 @@ func (p openLoopProbes) String() string {
 		if r.pressure >= 0 {
 			pressures[i] = fmt.Sprintf("%.2f", r.pressure)
 		}
+		loads[i] = "n/a"
+		if r.load >= 0 {
+			loads[i] = fmt.Sprintf("%.2f", r.load)
+		}
 	}
-	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f), median write+fsync [%s] (limit %v)", strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure, strings.Join(syncs, " "), openLoopProbeMaxSync)
+	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f), load average per core [%s] (limit %.2f), median write+fsync [%s] (limit %v)",
+		strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure, strings.Join(loads, " "), openLoopProbeMaxLoad, strings.Join(syncs, " "), openLoopProbeMaxSync)
 }
 
 // The disk-flush probe (substrate-1 GAP-1041). The serialised stage the stream
@@ -1034,20 +1061,36 @@ func (p *openLoopFlushProbe) String() string {
 	return s
 }
 
-// settleOpenLoop ends an open-loop test on its verdict. An INCONCLUSIVE verdict
+// openLoopOutcome is how one attempt of an open-loop test ended: "ok" and
+// "skip" end the test, "fail" fails it, and "retry" is an attempt that failed
+// on a box the probe found quiet, which is run again (openLoopAttempts).
+type openLoopOutcome struct {
+	kind, msg string
+}
+
+// openLoopAttempts is how many times a run that failed on a box the probe found
+// quiet is made before the test fails. The probe reads the box at three
+// instants of 200 ms each; a box that is busy between them (GAP-1974: pressure
+// 0.49 at the first reading, a limit of 0.50, and every reading of the spin
+// quiet) can fail the baseline or the p95 bound there while the probe calls it
+// quiet. A gateway whose own real path is slow fails every attempt, so the
+// rate, the window and the p95 bound are never lowered.
+const openLoopAttempts = 3
+
+// classifyOpenLoop ends one attempt on its verdict. An INCONCLUSIVE verdict
 // is a skip naming GAP-1456 and the numbers when the box probe found the box
-// short of CPU or the flush probe found its disk flush stalled, and a failure
-// when neither did (the box had CPU and disk to spare, so the real path that
-// could not carry the stream is the gateway's own). The two timing verdicts,
-// unanswered and slow, are measured on the same wall clock and are a skip on
-// such a box as well; on a quiet box they fail. A disk stall explains a
-// timing verdict only when the stream, judged again on timing without the
-// calls the stall overlaps, passes (openLoopFlushProbe.explains). A refusal or
-// an explicit failure is not a timing matter and fails on any box. Every
-// verdict prints both probes, and a timing verdict what the stream showed
-// without the stalled calls.
-func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error, timing *openLoopTiming) {
-	t.Helper()
+// short of CPU or the flush probe found its disk flush stalled, and a retry,
+// then a failure, when neither did (the box had CPU and disk to spare, so the
+// real path that could not carry the stream is the gateway's own). The two
+// timing verdicts, unanswered and slow, are measured on the same wall clock
+// and are a skip on such a box as well; on a quiet box they are retried, then
+// fail. A disk stall explains a timing verdict only when the stream, judged
+// again on timing without the calls the stall overlaps, passes
+// (openLoopFlushProbe.explains). A refusal or an explicit failure is not a
+// timing matter and fails on any box, at once. Every verdict prints both
+// probes, and a timing verdict what the stream showed without the stalled
+// calls.
+func classifyOpenLoop(verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error, timing *openLoopTiming) openLoopOutcome {
 	flush.stop()
 	stalled, rest := flush.explains(verdict.kind, timing)
 	short := probes.starved() || stalled
@@ -1063,13 +1106,32 @@ func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes
 	}
 	switch {
 	case verdict.kind == "ok":
-		t.Logf("%s; %s; %s", verdict.detail, probes, flush)
+		return openLoopOutcome{"ok", fmt.Sprintf("%s; %s; %s", verdict.detail, probes, flush)}
 	case (verdict.kind == "inconclusive" || verdict.kind == "unanswered" || verdict.kind == "slow") && short:
-		t.Skipf("GAP-1456 GAP-1041 INCONCLUSIVE, box short of CPU or of disk flush (%s; %s): %s", probes, flush, verdict.detail)
+		return openLoopOutcome{"skip", fmt.Sprintf("GAP-1456 GAP-1041 INCONCLUSIVE, box short of CPU or of disk flush (%s; %s): %s", probes, flush, verdict.detail)}
 	case verdict.kind == "inconclusive":
-		t.Fatalf("GAP-1456 FAIL, not a skip: the box was not short of CPU or disk flush (%s; %s), so this is the gateway: %s", probes, flush, verdict.detail)
+		return openLoopOutcome{"retry", fmt.Sprintf("GAP-1456 FAIL, not a skip: the box was not short of CPU or disk flush (%s; %s), so this is the gateway: %s", probes, flush, verdict.detail)}
+	case verdict.kind == "unanswered" || verdict.kind == "slow":
+		return openLoopOutcome{"retry", fmt.Sprintf("%s (%s; %s)", verdict.detail, probes, flush)}
 	default:
-		t.Fatalf("%s (%s; %s)", verdict.detail, probes, flush)
+		return openLoopOutcome{"fail", fmt.Sprintf("%s (%s; %s)", verdict.detail, probes, flush)}
+	}
+}
+
+// settleOpenLoop ends a test on one attempt's verdict with no retry: a skip or a
+// failure. The GAP-1041 child test settles synthetic verdicts through it, so
+// its parent can tell a skip from a failure; the open-loop streams retry through
+// runGAP0490OpenLoop.
+func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, flush *openLoopFlushProbe, deadline error, timing *openLoopTiming) {
+	t.Helper()
+	outcome := classifyOpenLoop(verdict, probes, flush, deadline, timing)
+	switch outcome.kind {
+	case "ok":
+		t.Log(outcome.msg)
+	case "skip":
+		t.Skip(outcome.msg)
+	default:
+		t.Fatal(outcome.msg)
 	}
 }
 
@@ -1131,7 +1193,33 @@ func openLoopDataOnRAM(t *testing.T) {
 	t.Setenv("TMPDIR", dir)
 }
 
+// runGAP0490OpenLoop runs the stream, again when an attempt failed on a box
+// the probe found quiet (openLoopAttempts).
 func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Duration) {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		outcome := attemptGAP0490OpenLoop(t, sandboxes, perSecond, duration)
+		switch outcome.kind {
+		case "ok":
+			t.Log(outcome.msg)
+			return
+		case "skip":
+			t.Skip(outcome.msg)
+		case "retry":
+			if attempt < openLoopAttempts {
+				t.Logf("attempt %d of %d: %s", attempt, openLoopAttempts, outcome.msg)
+				continue
+			}
+			t.Fatalf("attempt %d of %d: %s", attempt, openLoopAttempts, outcome.msg)
+		default:
+			t.Fatal(outcome.msg)
+		}
+	}
+}
+
+// attemptGAP0490OpenLoop is one run of the stream and its verdict.
+func attemptGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Duration) openLoopOutcome {
+	t.Helper()
 	openLoopDataOnRAM(t)
 	ctx, cancel := context.WithTimeout(t.Context(), openLoopTestDeadline)
 	defer cancel()
@@ -1193,8 +1281,7 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 				t.Errorf("GAP-1456: the ingress still served requests %v after the session start of sandbox %d went unanswered", openLoopTeardownDeadline, i)
 			}
 			probes.take()
-			settleOpenLoop(t, openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the session start of sandbox %d was not answered inside %v (%v)", i, openLoopWait, err)}, probes, flush, ctx.Err(), nil)
-			return
+			return classifyOpenLoop(openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the session start of sandbox %d was not answered inside %v (%v)", i, openLoopWait, err)}, probes, flush, ctx.Err(), nil)
 		}
 	}
 	// The baseline: the real path, one call after the other, right before the
@@ -1224,7 +1311,7 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		t.Errorf("GAP-1456: the ingress still served requests %v after the stream ended (%s)", openLoopTeardownDeadline, probes)
 	}
 	verdict := judgeOpenLoop(plan, got, base)
-	settleOpenLoop(t, verdict, probes, flush, ctx.Err(), &openLoopTiming{got, openLoopBudget(plan, base)})
+	return classifyOpenLoop(verdict, probes, flush, ctx.Err(), &openLoopTiming{got, openLoopBudget(plan, base)})
 }
 
 // openLoopProcessCPU is the user and system CPU time this process has used.
