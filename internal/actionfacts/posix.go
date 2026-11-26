@@ -1523,6 +1523,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		program := commandProgram(command.Executable)
 		var child parseOutput
+		chdir := ""
 		switch posixStaticWrapperSwitchKey(program) {
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 			if structuralPOSIXPipelineStdinInterpreter(out, &command) ||
@@ -1597,7 +1598,15 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			}
 			child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 		case posixStaticWrapperKey:
-			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
+			argv := command.Argv
+			if program == "env" {
+				// env -C DIR runs its program in DIR, as (cd DIR && program)
+				// does (substrate-1:GAP-0685).
+				if stripped, target, ok := posixEnvChdir(command); ok {
+					argv, chdir = stripped, target
+				}
+			}
+			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
@@ -1622,13 +1631,18 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		default:
 			continue
 		}
+		outer, outerMover := command.workFolders, command.moverUnreadOrFolders()
+		if chdir != "" {
+			outer, outerMover = outer.with(chdir), outerMover.with(chdir)
+		}
 		for i := range child.commands {
-			// The body of a wrapper starts in the folder its caller is in.
+			// The body of a wrapper starts in the folder its caller is in,
+			// or in the folder env -C names.
 			inner := &child.commands[i]
 			if inner.moverUnread || command.moverUnread {
-				inner.moverUnreadFolders, inner.moverUnread = inner.moverUnreadOrFolders().within(command.moverUnreadOrFolders()), true
+				inner.moverUnreadFolders, inner.moverUnread = inner.moverUnreadOrFolders().within(outerMover), true
 			}
-			inner.workFolders = inner.workFolders.within(command.workFolders)
+			inner.workFolders = inner.workFolders.within(outer)
 		}
 		mergeStaticPOSIXWrapperChild(out, command, child)
 	}
@@ -2058,6 +2072,90 @@ func staticPOSIXShellCommandArgv(argv []string) bool {
 func posixExecLoginOption(arg string) bool {
 	return len(arg) > 1 && arg[0] == '-' && arg[1] != '-' &&
 		strings.ContainsRune(arg[1:], 'l')
+}
+
+// posixEnvChdir reads the change of folder of an env call (-C DIR, -CDIR,
+// --chdir DIR, --chdir=DIR; substrate-1:GAP-0685): argv without those words,
+// which staticPOSIXWrapperArgv unwraps as any env, and the folder its
+// program starts in as a cd step (workFolders.with): an absolute folder, a
+// relative one from the folder env runs in ("./" first: env reads no
+// CDPATH), the home a ~ or $HOME spelling names, or "\x00" (a folder the
+// words do not give: an unresolved folder). The last one counts, as in GNU
+// env. ok is false when env changes no folder before its program, and for
+// an option this reading does not split (a -iC bundle), which
+// staticPOSIXWrapperArgv still reads as unsure.
+func posixEnvChdir(command CommandFact) (argv []string, target string, ok bool) {
+	words := command.Argv
+	drop := make(map[int]bool)
+	for i := 1; i < len(words); i++ {
+		arg := words[i]
+		switch {
+		case arg == "-C" || arg == "--chdir":
+			if i+1 >= len(words) {
+				return nil, "", false
+			}
+			drop[i], drop[i+1] = true, true
+			target = posixEnvChdirTarget(command, i+1, "")
+			ok = true
+			i++
+			continue
+		case strings.HasPrefix(arg, "--chdir="):
+			drop[i] = true
+			target = posixEnvChdirTarget(command, i, "--chdir=")
+			ok = true
+			continue
+		case len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			drop[i] = true
+			target = posixEnvChdirTarget(command, i, "-C")
+			ok = true
+			continue
+		}
+		if _, valued := posixEnvWrapperValueOptions[arg]; valued {
+			i++
+			continue
+		}
+		if _, flag := posixEnvWrapperSwitchOptions[arg]; flag || strings.HasPrefix(arg, "--unset=") {
+			continue
+		}
+		break
+	}
+	if !ok {
+		return nil, "", false
+	}
+	argv = make([]string, 0, len(words)-len(drop))
+	for i, word := range words {
+		if !drop[i] {
+			argv = append(argv, word)
+		}
+	}
+	return argv, target, true
+}
+
+// posixEnvChdirTarget is the cd step of the folder word at index of an env
+// call, after its option prefix ("" for a word of its own).
+func posixEnvChdirTarget(command CommandFact, index int, prefix string) string {
+	if index >= len(command.Arguments) || len(command.Arguments) != len(command.Argv) {
+		return "\x00"
+	}
+	argument := command.Arguments[index]
+	value := strings.TrimPrefix(command.Argv[index], prefix)
+	if argument.Expands {
+		home := argument.homeSpelling
+		if home == "" && prefix == "" {
+			home = argument.homeTilde
+		}
+		if home, cut := strings.CutPrefix(home, prefix); cut && (home == "~" || strings.HasPrefix(home, "~/")) {
+			return home
+		}
+		return "\x00"
+	}
+	switch {
+	case value == "" || strings.ContainsAny(value, "\x00\n"):
+		return "\x00"
+	case simplePOSIXAbs(value):
+		return value
+	}
+	return "./" + value
 }
 
 func posixEnvChangesDirectory(arg string) bool {
