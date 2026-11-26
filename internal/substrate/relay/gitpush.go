@@ -32,6 +32,11 @@ const (
 	// ExitGitUnseparated is the answer of a relay of the agent's own user:
 	// a review it ran would be no safer than the in-actor scripts.
 	ExitGitUnseparated = 96
+	// ExitGitNoRootGit is the answer of a separated relay whose image holds
+	// no git, /bin/sh or program they use that only root can change
+	// (gitRelayEnv): it will not run them as root, and the launcher runs
+	// the in-actor scripts as the agent, with a warning, as for 96.
+	ExitGitNoRootGit = 95
 	// ExitGitObjects is a pack whose objects do not match their ids, or
 	// that lacks some of the commit's objects (index-pack, fsck).
 	ExitGitObjects = 14

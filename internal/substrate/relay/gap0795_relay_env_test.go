@@ -86,10 +86,12 @@ func TestGAP0795RelayRootRunsNoAgentPathProgram(t *testing.T) {
 	}
 }
 
-// GAP-0795 H1: a program only root may run must be root's alone, even in a
-// root-only folder: a git the image gave the agent's user is refused, not
-// run as root.
-func TestGAP0795RelayRefusesAProgramTheAgentOwns(t *testing.T) {
+// GAP-0795 H1: a program the relay runs as root must be root's alone, even
+// in a root-only folder. A git the image gave the agent's user is never run
+// as root: the relay answers ExitGitNoRootGit and the review runs as the
+// agent with the warning, as on a relay without separation (never less
+// than rel, where every review ran as the agent).
+func TestGAP0795RelayNeverRunsAProgramTheAgentOwns(t *testing.T) {
 	g := newGAP0795(t)
 	g.write("app.txt", "work\n")
 	g.git(g.repo, "add", ".")
@@ -106,11 +108,16 @@ func TestGAP0795RelayRefusesAProgramTheAgentOwns(t *testing.T) {
 	if _, rerr := os.Stat(mark); rerr == nil {
 		t.Fatal("the separated relay ran a git the agent's user owns as root")
 	}
-	if err == nil {
-		p.Discard(ctx, g.run)
-		t.Fatal("the review ran with a git the agent's user owns first on PATH; want it refused")
+	if err != nil {
+		t.Fatalf("review: %v", err)
 	}
-	t.Logf("refused: %v", err)
+	defer p.Discard(ctx, g.run)
+	if !strings.Contains(p.Warning, "only root can change") {
+		t.Fatalf("warning %q, want the review said to run as the agent because the image has no root-only git", p.Warning)
+	}
+	if p.Commits != 1 || len(p.Files) != 1 || p.Files[0] != "app.txt" {
+		t.Fatalf("review: %d commits, files %v", p.Commits, p.Files)
+	}
 }
 
 // GAP-0795 H2 (RV-REG): git attributes the agent controls must not change

@@ -239,7 +239,7 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label, origin 
 		return nil, err
 	}
 	p.relayOwned = true
-	if code == relay.ExitGitUnseparated || code == relay.ExitNotRunnable {
+	if code == relay.ExitGitUnseparated || code == relay.ExitNotRunnable || code == relay.ExitGitNoRootGit {
 		p.relayOwned, p.Warning = false, unseparatedReview(code)
 		out, stderr, code, err = run(ctx, []string{"sh", "-c", pushReviewScript, "sh", p.objects, p.PushURL, p.Commit, kit.PlaceholderSecret, pushReplacedPattern},
 			p.Dir, pushEnv, 5*time.Minute)
@@ -298,8 +298,11 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label, origin 
 // its own user (code is its answer to relay.GitCommand).
 func unseparatedReview(code int) string {
 	why := "the agent's relay runs as the agent's user (its template was built without relay.agent_user)"
-	if code == relay.ExitNotRunnable {
+	switch code {
+	case relay.ExitNotRunnable:
 		why = "the agent's relay is older than this computer's DefenseClaw"
+	case relay.ExitGitNoRootGit:
+		why = "the agent's image holds no git (or /bin/sh, or a program they use) that only root can change, so its relay will not run them as root"
 	}
 	return why + ", so the review below ran as the agent: an agent process could change what it shows. " +
 		"The push still carries exactly the reviewed commit"

@@ -46,8 +46,9 @@ var (
 var gitTestWrap string
 
 // runGitOp runs a GitCommand exec request (GAP-0795). A relay of the
-// agent's own user answers ExitGitUnseparated, and the launcher runs the
-// in-actor scripts. A separated relay runs the operation with its fixed
+// agent's own user answers ExitGitUnseparated, and one whose image has no
+// programs only root can change ExitGitNoRootGit; the launcher then runs
+// the in-actor scripts. A separated relay runs the operation with its fixed
 // scripts: only the pack of the commit is made as the agent's user, in
 // dir; everything else runs as the relay's user in a folder only the
 // relay can write, with an environment of its own (gitRelayEnv: never the
@@ -81,6 +82,9 @@ func runGitOp(ctx context.Context, argv []string, dir string, env map[string]str
 	renv, err := gitRelayEnv(ctx)
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
+		if errors.Is(err, errNoRootGit) {
+			return ExitGitNoRootGit
+		}
 		return 6
 	}
 	switch op, args := argv[1], argv[2:]; {
@@ -223,7 +227,7 @@ func gitRelayRun(ctx context.Context, renv []string, dir, script string, stdin i
 	}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
-		if code := exitCodeOf(ee.ProcessState); code != ExitNotRunnable && code != ExitGitUnseparated {
+		if code := exitCodeOf(ee.ProcessState); code != ExitNotRunnable && code != ExitGitUnseparated && code != ExitGitNoRootGit {
 			return code
 		}
 	}
@@ -231,6 +235,10 @@ func gitRelayRun(ctx context.Context, renv []string, dir, script string, stdin i
 	fmt.Fprintln(stderr, err.Error())
 	return 6
 }
+
+// errNoRootGit is an image without the programs, only root can change,
+// that the relay's own runs need (an image property the agent cannot make).
+var errNoRootGit = errors.New("the relay will not run git as root")
 
 // gitRelayShell runs the relay's own scripts. It is named by its path:
 // the image PATH may name a folder the agent can write (GAP-0795 H1).
@@ -250,7 +258,7 @@ var gitRelayPrograms = []string{"git", "awk", "cat", "cp", "cut", "env", "mkdir"
 // keeps only folders that root alone can write (rootOnlyDir), the image's
 // first, then gitSystemPath; /bin/sh, every program of gitRelayPrograms
 // and git's own exec-path folder must resolve to root's files there, else
-// the operation is refused. The agent's HOME and any XDG_* or GIT_* name
+// the operation is refused (errNoRootGit). The agent's HOME and any XDG_* or GIT_* name
 // stay out (git reads attributes and config from them); gitRelayRun sets
 // HOME and TMPDIR to the relay's 0700 folder. Locale C keeps the scripts'
 // sort and awk byte-wise.
@@ -264,7 +272,7 @@ func gitRelayEnv(ctx context.Context) ([]string, error) {
 		}
 	}
 	if !rootOnlyFile(gitRelayShell) {
-		return nil, fmt.Errorf("the relay will not run git as root: %s is not a program only root can change", gitRelayShell)
+		return nil, fmt.Errorf("%w: %s is not a program only root can change", errNoRootGit, gitRelayShell)
 	}
 	var git string
 	for _, n := range gitRelayPrograms {
@@ -284,7 +292,7 @@ func gitRelayEnv(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("the relay will not run git as root: %s --exec-path: %v", git, err)
 	}
 	if xp := strings.TrimSpace(string(out)); xp == "" || !isRootOnlyDir(xp) {
-		return nil, fmt.Errorf("the relay will not run git as root: its program folder %q is not one only root can write", xp)
+		return nil, fmt.Errorf("%w: its program folder %q is not one only root can write", errNoRootGit, xp)
 	}
 	return env, nil
 }
@@ -337,11 +345,11 @@ func rootOnlyProgram(dirs []string, name string) (string, error) {
 			continue
 		}
 		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm()&0o111 == 0 || !rootOnlyFile(p) {
-			return "", fmt.Errorf("the relay will not run git as root: %s is not a program only root can change", p)
+			return "", fmt.Errorf("%w: %s is not a program only root can change", errNoRootGit, p)
 		}
 		return p, nil
 	}
-	return "", fmt.Errorf("the relay will not run git as root: no %s in a folder only root can write (%s)", name, strings.Join(dirs, ":"))
+	return "", fmt.Errorf("%w: no %s in a folder only root can write (%s)", errNoRootGit, name, strings.Join(dirs, ":"))
 }
 
 // gitScratchRoot is the relay's folder for review repositories: its own
