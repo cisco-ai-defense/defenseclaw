@@ -3687,6 +3687,7 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		// invocation grammar as Analyze so option order and +n are honored.
 		return "", false, false, false
 	}
+	shortSeen := false
 	for index := 1; index < len(args); index++ {
 		// The option is the word the shell sees, after quote removal and
 		// escapes ('-c', "-c", $'-c', -'c', \-c read as -c), not its
@@ -3703,6 +3704,16 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		if option == "--" {
 			continue
 		}
+		if shellProgram == "bash" && !shortSeen && strings.HasPrefix(option, "--") {
+			if login, ok := simpleBashLongOption(option); ok {
+				if login && cwdUnknown != nil {
+					// A login shell runs its profile before the body.
+					*cwdUnknown = true
+				}
+				continue
+			}
+		}
+		shortSeen = true
 		if option == "-o" || option == "+o" {
 			index++
 			if index >= len(args) {
@@ -3737,6 +3748,25 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		}
 	}
 	return "", false, false, false
+}
+
+// simpleBashLongOption reports a long option bash reads before its short
+// ones, as Analyze reads it (parseBashInvocation), that takes no value and
+// leaves a following -c body what the shell runs: --norc, --noprofile,
+// --noediting, --posix, --restricted, --verbose and --login (login: the
+// profile it runs may change folder first). Before, the walk read no long
+// option, so bash --norc -c BODY was a gap of the split whose twins added the
+// unknown tier (ACTION-COMPOUND-LIMIT) to a relative protected path of BODY,
+// in the folder a cd or an env -C gave it (substrate-1:GAP-0685 follow-up).
+// --rcfile, --init-file and --debugger name startup input and stay unread.
+func simpleBashLongOption(option string) (login, ok bool) {
+	switch option {
+	case "--login":
+		return true, true
+	case "--norc", "--noprofile", "--noediting", "--posix", "--restricted", "--verbose":
+		return false, true
+	}
+	return false, false
 }
 
 func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program string) bool {
