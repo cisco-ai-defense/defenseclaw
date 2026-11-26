@@ -144,17 +144,17 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 	var none *guestViewEvalTable
 	for range 2 {
 		for _, view := range []*guestViewEvalTable{table, none} {
-			projection, code := view.project(facts)
+			projection, code := view.project(&facts)
 			wantProjection, wantCode := semantic.Project(facts)
 			if code != wantCode || !reflect.DeepEqual(fmt.Sprint(projection), fmt.Sprint(wantProjection)) {
 				t.Fatal("a kept projection differs from a fresh one")
 			}
-			enforcement, _, _ := view.enforcementOf(facts)
+			enforcement, _, _ := view.enforcementOf(&facts)
 			if !reflect.DeepEqual(enforcement, facts.EnforcementProjection()) {
 				t.Fatal("a kept enforcement projection differs from a fresh one")
 			}
 			for rule, candidate := range generation.semanticRules {
-				if view.eligibleFor(rule, candidate, facts) != candidate.owner.eligible(facts) {
+				if view.eligibleFor(rule, &candidate, &facts) != candidate.owner.eligible(facts) {
 					t.Fatalf("rule %s: kept eligibility differs from a fresh one", candidate.rule.ID)
 				}
 			}

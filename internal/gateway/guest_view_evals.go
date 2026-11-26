@@ -116,20 +116,23 @@ func (evals *guestViewEvals) unlock() {
 	}
 }
 
-// project is semantic.Project(view).
-func (table *guestViewEvalTable) project(view actionfacts.Facts) (*semanticpb.Facts, semantic.ProjectionCode) {
+// project is semantic.Project(*view). The reads take the reading by
+// pointer: a reading is a 1.5 KB struct, and a copy of it for each rule of
+// each placed view made herestr-cd-touch, whose readings are judged once,
+// slower than with no table.
+func (table *guestViewEvalTable) project(view *actionfacts.Facts) (*semanticpb.Facts, semantic.ProjectionCode) {
 	if table == nil {
-		return semantic.Project(view)
+		return semantic.Project(*view)
 	}
 	if !table.projected {
-		table.projection, table.projectionCode = semantic.Project(view)
+		table.projection, table.projectionCode = semantic.Project(*view)
 		table.projected = true
 	}
 	return table.projection, table.projectionCode
 }
 
 // enforcementOf is view.EnforcementProjection() and its projection.
-func (table *guestViewEvalTable) enforcementOf(view actionfacts.Facts) (actionfacts.Facts, *semanticpb.Facts, semantic.ProjectionCode) {
+func (table *guestViewEvalTable) enforcementOf(view *actionfacts.Facts) (actionfacts.Facts, *semanticpb.Facts, semantic.ProjectionCode) {
 	if table == nil {
 		facts := view.EnforcementProjection()
 		projection, code := semantic.Project(facts)
@@ -143,11 +146,11 @@ func (table *guestViewEvalTable) enforcementOf(view actionfacts.Facts) (actionfa
 	return table.enforcement.facts, table.enforcement.projection, table.enforcement.code
 }
 
-// eligibleFor is candidate.owner.eligible(view), candidate being rule rule
-// of the table's generation.
-func (table *guestViewEvalTable) eligibleFor(rule int, candidate compiledSemanticRule, view actionfacts.Facts) bool {
+// eligibleFor is candidate.owner.eligible(*view), candidate being rule
+// rule of the table's generation.
+func (table *guestViewEvalTable) eligibleFor(rule int, candidate *compiledSemanticRule, view *actionfacts.Facts) bool {
 	if table == nil {
-		return candidate.owner.eligible(view)
+		return candidate.owner.eligible(*view)
 	}
 	if table.eligible == nil {
 		table.eligible = make([]uint64, (2*len(table.generation.semanticRules)+63)/64)
@@ -155,7 +158,7 @@ func (table *guestViewEvalTable) eligibleFor(rule int, candidate compiledSemanti
 	word, bit := (2*rule)/64, uint((2*rule)%64)
 	if table.eligible[word]&(1<<bit) == 0 {
 		table.eligible[word] |= 1 << bit
-		if candidate.owner.eligible(view) {
+		if candidate.owner.eligible(*view) {
 			table.eligible[word] |= 1 << (bit + 1)
 		}
 	}

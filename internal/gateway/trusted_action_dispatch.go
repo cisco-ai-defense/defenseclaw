@@ -1742,7 +1742,7 @@ func dispatchTrustedActionWith(
 			if candidateOK != nil && !candidateOK(candidate) {
 				continue
 			}
-			if !kept.eligibleFor(rule, candidate, view) {
+			if !kept.eligibleFor(rule, &candidate, &view) {
 				if !matchOnly && candidate.owner.suppressFallback != nil &&
 					candidate.owner.suppressFallback(view) {
 					excludeSemanticOwner(excluded, candidate.owner, false)
@@ -1773,7 +1773,7 @@ func dispatchTrustedActionWith(
 			}
 
 			if !enforcementProjected {
-				enforcementFacts, enforcementProjection, projectionCode = kept.enforcementOf(view)
+				enforcementFacts, enforcementProjection, projectionCode = kept.enforcementOf(&view)
 				enforcementProjected = true
 			}
 			if projectionCode != semantic.ProjectionOK {
@@ -1858,7 +1858,7 @@ func dispatchTrustedActionWith(
 			}
 			kept := evals.lock(generation)
 			defer evals.unlock()
-			if projection, code := kept.project(*view); code == semantic.ProjectionOK {
+			if projection, code := kept.project(view); code == semantic.ProjectionOK {
 				// Each view has its own pair of budget keys (the view and its
 				// enforcement projection), after the fixed views 0 to 5.
 				evaluateSemanticRules(placedReadingFirstView+2*index, *view, projection, placedRule, true, nil, kept)
