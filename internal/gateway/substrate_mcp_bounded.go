@@ -70,7 +70,7 @@ const (
 	// word it puts where the cut dropped one (substrateMCPCut).
 	substrateMCPTailRoom = len("x ")
 	// substrateMCPFreeCandidates is the most hidden actions a call carries
-	// before its judging takes the over-cap admission (substrateMCPOverCap).
+	// before its judging takes the over-cap admission (substrateMCPReadingScans.overCap).
 	substrateMCPFreeCandidates = 8
 	// substrateMCPStringLevels is how many JSON-in-string levels the hidden
 	// action scan opens.

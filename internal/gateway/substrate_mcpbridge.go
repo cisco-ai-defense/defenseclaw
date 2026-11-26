@@ -572,15 +572,6 @@ func (s substrateMCPReadingScans) overCap() bool {
 	return false
 }
 
-// substrateMCPOverCap is whether judging c takes the over-cap admission.
-func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
-	readings := c.args
-	if c.params != nil {
-		readings = append(slices.Clip(c.args), c.params)
-	}
-	return substrateMCPScanReadings(readings).overCap()
-}
-
 // substrateMCPOverCapGateway is the most over-cap judgments the gateway
 // runs at once across every actor and owner (GAP-1124).
 var substrateMCPOverCapGateway = max(2, runtime.GOMAXPROCS(0)/2)
