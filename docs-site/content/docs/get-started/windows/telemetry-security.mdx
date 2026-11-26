@@ -90,6 +90,11 @@ Project-scoped servers retain separate identities even when their names match;
 user-scoped server identities remain stable. Ambiguous tool-to-server aliases
 are not attributed to an arbitrary project.
 
+Deferred targets that have not been protected yet do not supply inventory and
+do not prevent successfully protected users from supplying their own records.
+Failed repairs and unreadable records still keep the affected collection partial;
+a snapshot with only pending targets cannot retire previously known inventory.
+
 These server identities allow authenticated MCP calls to populate the local
 `mcp_observed_tools` table and the corresponding managed inventory. A captured
 tool invocation alone does not prove that tool inventory was generated or
