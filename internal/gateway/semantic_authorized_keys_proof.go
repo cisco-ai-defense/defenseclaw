@@ -1279,6 +1279,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
+	var guestAliasLinks hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
 	// A plain mv onto an existing link to a file replaces the link entry
 	// and writes neither file (GAP-2559); a gateway that reads the file
@@ -1340,9 +1341,32 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		return false
 	}
+	// The same-command link text is a write spelling too. Keep its raw
+	// process-link suffix until the proof decides whether it is knowable.
+	linkNameUnproved := func(path string, guest bool) bool {
+		base := filepath.Base(path)
+		protectedName := slices.Contains(hookpaths.AuthorizedKeysFiles[:], base) ||
+			filepath.Base(filepath.Dir(path)) == ".ssh" && slices.Contains(hookpaths.SSHControlFiles[:], base)
+		return protectedName && hookpaths.ProcessLinkWriteUnproved(path, guest)
+	}
+	guestAliases := func(path string) []string {
+		if filepath.IsAbs(request.SandboxGuestCWD) && !filepath.IsAbs(path) {
+			path = hookpaths.OperandPath(path, request.SandboxGuestCWD)
+		}
+		return guestAliasLinks.GuestAliasTargets(path, false)
+	}
 	guestAliasProtected := func(path string) bool {
-		for _, alias := range links.GuestAliasTargets(path, false) {
-			if guestProtected(alias) {
+		for _, alias := range guestAliases(path) {
+			folded := hookpaths.GuestOwnRootPath(alias)
+			if guestProtected(folded) || linkNameUnproved(folded, true) {
+				return true
+			}
+		}
+		return false
+	}
+	guestAliasUnproved := func(path string, guest bool) bool {
+		for _, alias := range guestAliases(path) {
+			if linkNameUnproved(hookpaths.GuestOwnRootPath(alias), guest) {
 				return true
 			}
 		}
@@ -1350,8 +1374,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
+			if guestLayoutHost && filepath.IsAbs(request.SandboxGuestCWD) &&
+				guestProtected(request.SandboxGuestCWD+"/"+target) {
+				return confirmed()
+			}
 			if guestLayoutHost && guestAliasProtected(target) {
 				return confirmed()
+			}
+			if cannotResolveLocally && request.sandboxGuest && guestAliasUnproved(target, true) {
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
 			}
 			// No directory places this operand: the gateway cannot see the
 			// caller's cwd and the client evidence that would carry it is
@@ -1407,6 +1438,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if guestLayoutHost && (guestProtected(target) || guestAliasProtected(target)) {
 			return confirmed()
 		}
+		if runtime.GOOS == "linux" && guestAliasUnproved(target, cannotResolveLocally && request.sandboxGuest) {
+			return unproven(hookpaths.UnprovenTargetUnresolved, target)
+		}
 		// A key file name below another process's root, cwd, exe or
 		// descriptor link is resolved in that process's tree. Unless this
 		// host proves the link (never for a sandbox guest, whose processes
@@ -1419,10 +1453,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if guest {
 				operand = hookpaths.GuestOwnRootPath(target)
 			}
-			// Only the two POSIX authorized-keys basenames are key files;
-			// config, rc and environment keep their prior ordinary answer.
-			if slices.Contains(hookpaths.AuthorizedKeysFiles[:], filepath.Base(operand)) &&
-				hookpaths.ProcessLinkWriteUnproved(operand, guest) {
+			// SSH control names are protected only inside .ssh. An
+			// ordinary config, rc or environment elsewhere stays ordinary.
+			if linkNameUnproved(operand, guest) {
 				return unproven(hookpaths.UnprovenTargetUnresolved, target)
 			}
 		}
@@ -1665,6 +1698,25 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return true
 	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	guestAliasLinks = links
+	if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) && links.HasAliases() {
+		// The host-side cwd can be empty or name a mount. Place only the
+		// same-command links in the authenticated guest namespace.
+		guestAliasLinks = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command,
+			request.SandboxGuestCWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	}
+	if request.sandboxGuest && guestAliasLinks.HasAliases() && filepath.IsAbs(request.SandboxGuestCWD) {
+		// The ordinary host-side write readers may have no cwd for a
+		// sandbox actor. Only a same-command alias is judged here, using
+		// the guest cwd attested for this call.
+		writes, _, _ := hookpaths.ShellWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome)
+		writes = append(writes, hookpaths.LiteralWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome)...)
+		for _, write := range writes {
+			if guestAliasProtected(write) {
+				return confirmed()
+			}
+		}
+	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
 	// The claudecode scoping above drops the client's reading of the
@@ -1686,6 +1738,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				directoryFacts = make(map[string]string, 1)
 			}
 			directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD] = start
+		}
+	}
+	if guestLayoutHost && filepath.IsAbs(request.SandboxGuestCWD) &&
+		strings.Contains(input.Command, "/proc/") && strings.Contains(input.Command, "cd ") {
+		// The host cwd is not the guest cwd. A concrete write after a
+		// guest directory change can still be proved protected; an
+		// unknown eval keeps the existing host-side answer.
+		placed := hookpaths.GuestStaticDirectoryWriteOperands(
+			input.Command, request.SandboxGuestCWD, facts.ActiveHome)
+		for _, write := range placed {
+			if guestProtected(write.Path) {
+				return confirmed()
+			}
 		}
 	}
 	var operands []string

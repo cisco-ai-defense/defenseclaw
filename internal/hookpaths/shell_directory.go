@@ -63,6 +63,15 @@ func GuestShellDirectoryWriteOperands(command, cwd, home string, directoryFacts 
 	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, false, true, true, nil, nil)
 }
 
+// GuestStaticDirectoryWriteOperands places concrete writes in the guest
+// namespace without requiring a directory fact. Only exact protected names
+// from this result may confirm a finding; its unknown result is deliberately
+// ignored because the host-side strict walk owns that decision.
+func GuestStaticDirectoryWriteOperands(command, cwd, home string) []RedirectOccurrence {
+	operands, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, true, nil, nil)
+	return operands
+}
+
 // shellDirectoryWriteOperandsWithFile reuses a previously parsed command
 // while preserving the same directory and literal-writer walk. parsedOut
 // reports whether the shared shell parser accepted the command, so a client
@@ -86,7 +95,7 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 		// directory fact on every gateway OS (rel-1-0-10:GAP-2228).
 		named := logical
 		if linuxGuest {
-			named = GuestOwnRootPath(filepath.Clean(logical))
+			named = GuestOwnRootPath(logical)
 		}
 		if !record && directoryFacts != nil {
 			if value, present := directoryFacts[key]; present {
@@ -104,7 +113,7 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			// spells no POSIX folder, so its walk is left as it was.
 			// The guest's own root link (/proc/self/root) is its /, as a
 			// Linux gateway reads its own (rel-1-0-10:GAP-2223).
-			placed := GuestOwnRootPath(filepath.Clean(logical))
+			placed := GuestOwnRootPath(logical)
 			if guestOtherProcessFolder(placed) {
 				return "", false
 			}
@@ -125,7 +134,14 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	// (RV-c7-1); env --chdir=~/x does not expand it either.
 	setDirectory := func(s *shellDirectoryState, directory string, physicalMode bool) {
 		absolute := filepath.IsAbs(directory)
-		if absolute {
+		if linuxGuest {
+			// Retain link-boundary dot steps until the guest path is folded.
+			if absolute {
+				s.logical = directory
+			} else {
+				s.logical = s.logical + string(filepath.Separator) + directory
+			}
+		} else if absolute {
 			s.logical = filepath.Clean(directory)
 		} else {
 			s.logical = filepath.Join(s.logical, directory)
@@ -203,7 +219,13 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 				!strings.HasPrefix(name, "~/") && shellAuthorizedKeysBase(name) {
 				unknown = true
 			}
-			redirects = append(redirects, OperandPath(name, s.logical))
+			placed := OperandPath(name, s.logical)
+			if linuxGuest && !filepath.IsAbs(name) && strings.Contains(s.logical, "/proc/") {
+				// OperandPath cleans dot-dot before the guest root link is
+				// folded. Keep this relative write raw through that link.
+				placed = s.logical + string(filepath.Separator) + name
+			}
+			redirects = append(redirects, placed)
 			keys = append(keys, OperandPath(name, cwd))
 		}
 		if !s.changed {
@@ -861,63 +883,48 @@ func guestOtherProcessFolder(directory string) bool {
 	return false
 }
 
-// GuestOwnRootPath folds a leading guest-owned root link before any lexical
-// cleanup. Cleaning first would remove the link in root/.. even though the
-// kernel keeps that step at the root reached through the link. The suffix is
-// left raw: a later /proc/<pid>/root/.. must still reach the process-link
-// proof rather than disappear in filepath.Clean (GAP-2223, GAP-2227).
+// GuestOwnRootPath folds guest-owned root links while walking the raw path.
+// A dot-dot after root stays at the guest root. The suffix after a different
+// process or descriptor link stays raw for the process-link proof.
+// (GAP-2223, GAP-2227).
 func GuestOwnRootPath(path string) string {
-	for {
-		rest, ok := guestOwnRootRest(path)
-		if !ok {
-			return path
-		}
-		// At the guest root, dot-dot stays at that root. Strip only
-		// leading steps; a later process link and its suffix stay raw.
-		parts := strings.Split(rest, "/")
-		for len(parts) > 0 && (parts[0] == "" || parts[0] == "." || parts[0] == "..") {
-			parts = parts[1:]
-		}
-		path = "/" + strings.Join(parts, "/")
+	if !strings.HasPrefix(path, "/") || !strings.Contains(path, "proc") {
+		return path
 	}
-}
-
-// guestOwnRootRest recognizes only a leading own-root link. Empty and dot
-// components before it are harmless; ordinary components are not assumed to
-// be directories because they could themselves be links.
-func guestOwnRootRest(path string) (string, bool) {
-	if !strings.HasPrefix(path, "/") {
-		return "", false
-	}
-	parts := strings.Split(path, "/")
-	var prefix []string
-	for i := 1; i < len(parts); i++ {
-		part := parts[i]
-		switch part {
+	input := strings.Split(path, "/")
+	parts := make([]string, 0, len(input))
+	folded := false
+	for i := 1; i < len(input); i++ {
+		switch input[i] {
 		case "", ".":
 			continue
 		case "..":
-			if len(prefix) == 0 {
-				continue
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
 			}
-			if len(prefix) == 2 && prefix[0] == "proc" && prefix[1] == "self" {
-				prefix = prefix[:1]
-				continue
-			}
-			return "", false
 		default:
-			prefix = append(prefix, part)
+			parts = append(parts, input[i])
 		}
-		if len(prefix) == 3 && prefix[0] == "proc" &&
-			(prefix[1] == "self" || prefix[1] == "thread-self") && prefix[2] == "root" {
-			return strings.Join(parts[i+1:], "/"), true
+		if len(parts) == 3 && parts[0] == "proc" &&
+			(parts[1] == "self" || parts[1] == "thread-self") && parts[2] == "root" {
+			// A dot-dot following this link stays at the guest root.
+			parts = parts[:0]
+			folded = true
+			continue
 		}
-		if len(prefix) > 2 || len(prefix) == 1 && prefix[0] != "proc" ||
-			len(prefix) == 2 && (prefix[0] != "proc" || prefix[1] != "self" && prefix[1] != "thread-self") {
-			return "", false
+		if folded && processLinkHead(parts) {
+			// Another process or descriptor link owns its raw suffix.
+			prefix := "/" + strings.Join(parts, "/")
+			if i+1 < len(input) {
+				return prefix + "/" + strings.Join(input[i+1:], "/")
+			}
+			return prefix
 		}
 	}
-	return "", false
+	if !folded {
+		return path
+	}
+	return "/" + strings.Join(parts, "/")
 }
 
 // directoryCreationFact reports a path fact of a POSIX mkdir call.
