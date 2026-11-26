@@ -550,9 +550,33 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 		return places
 	}
 	dirsKnown, targetsKnown := firstPlaces(plan.dirs), firstPlaces(plan.targets)
+	// offered keeps, for each call text, the latest place a call of it was
+	// offered from. A text offered again in a folder it was offered in
+	// before changes nothing: a listed reading keeps its candidate mark
+	// (candidate && the same mark), and one not listed was dropped from the
+	// full list, as it would be again (a full list only loses plain
+	// readings, so a first one dropped there finds no plain slot later);
+	// its arrival is not counted, which keeps the order of the later
+	// readings. So a repeated text is offered only in the folders known
+	// first between its last call and this one: an 8 KB call of 550 $C
+	// statements offered each in all 128 folders (rel-1-0-10:GAP-2249).
+	offered := map[string]int{}
 	for _, call := range plan.calls {
+		last, again := offered[call.text]
+		if !again || call.at > last {
+			offered[call.text] = call.at
+		}
+		if again && (!byPosition || call.at <= last) {
+			continue
+		}
+		fresh := func(place int) bool {
+			if !byPosition {
+				return true
+			}
+			return place <= call.at && (!again || place > last)
+		}
 		for at, dir := range plan.dirs {
-			if !byPosition || dirsKnown[at] <= call.at {
+			if fresh(dirsKnown[at]) {
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, false, 0})
 			}
 		}
@@ -565,7 +589,7 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 			continue
 		}
 		for at, dir := range plan.targets {
-			if !byPosition || targetsKnown[at] <= call.at {
+			if fresh(targetsKnown[at]) {
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
 			}
 		}
