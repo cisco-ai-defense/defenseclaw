@@ -427,6 +427,11 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
 	}
+	if cfg.SecureClientIntegration() {
+		// Secure Client inventory needs the same trusted server definitions as
+		// standalone admission. The gateway never opens users' profile files.
+		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; retried next cycle
+	}
 	if standalone {
 		// The cache keeps signed-out users' last seen group membership;
 		// the record lets status and verify name every agent found
@@ -1036,16 +1041,17 @@ var enterpriseWindowsMCPRefresh mcpasuser.Coalescer
 // connector in mcpasuser.PublishedConnectors for the users manifest enrolls
 // for the gateway, whose service account reads nothing in a profile:
 // ~/.claude.json (GAP-0424), a protected ~/.kiro/settings/mcp.json
-// (GAP-1468), Codex config.toml (GAP-0686). Standalone only: the Secure Client
-// profile gateway has no enrolled-user watcher. When something was not
-// published (also logged) it returns a *mcpasuser.RefreshIncomplete that
+// (GAP-1468), Codex config.toml (GAP-0686). Standalone uses these for admission;
+// Secure Client uses them for MCP inventory when AI discovery is enabled.
+// Publication does not start a watcher or execute any MCP server. When something
+// was not published (also logged) it returns a *mcpasuser.RefreshIncomplete that
 // names, per connector, the records it could not publish, or the connector
 // whose record folder could not be written: the gateway reads the records
 // that were published and refuses only the calls of what it names, so one
 // user's failed record does not refuse other users' or other connectors'
 // calls.
 func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) error {
-	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+	if cfg == nil || !(cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() && cfg.AIDiscovery.Enabled) {
 		return nil
 	}
 	enterpriseWindowsMCPPublishMu.Lock()

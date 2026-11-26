@@ -73,6 +73,24 @@ gateway's process log is a different file,
 
 ## Privacy and redaction boundary
 
+### Secure Client MCP inventory
+
+On Windows Secure Client deployments, the gateway obtains enrolled users'
+Claude Code, Codex, and Kiro MCP server definitions from administrator-owned
+records published by the hook enumerator when AI discovery is enabled. It does
+not read their profile configuration directly. The guardian authorization must
+be fresh, and the published record must pass the same trust checks used for MCP
+admission. Missing or unreadable records produce partial
+inventory rather than an authoritative empty server list.
+
+These server identities allow authenticated MCP calls to populate the local
+`mcp_observed_tools` table and the corresponding managed inventory. A captured
+tool invocation alone does not prove that tool inventory was generated or
+delivered. Inspect the inventory discovery summaries and the destination's
+delivery status separately. This does not enable additional MCP server scans.
+
+### Destination redaction
+
 Connectors capture prompt content so that each destination can apply its own
 redaction. A new install's redaction profile is `none`. Therefore:
 

@@ -740,6 +740,16 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 			})
 		}
 	}
+	// The Secure Client Windows gateway cannot read user profiles. The hook
+	// enumerator already publishes their MCP definitions in a trusted spool;
+	// use it for inventory too, so observed tools can resolve their parents.
+	if goos == "windows" && cfg.SecureClientIntegration() && cfg.AIDiscovery.Enabled {
+		status = appendWindowsMCPSpoolInventory(cfg, seenConnector, func(name, home string, owner llmEventUser, servers []config.MCPServerEntry) {
+			owners[name+"\x00"+home] = owner
+			appendServers(name, endpointInventoryScopeKey(home), home, servers)
+		})
+		return components, status
+	}
 	// Pass 1 — daemon's own HOME (covers zero-HomeDirs installs and dev runs).
 	// ReadMCPServersForConnector's default case reads the OpenClaw registry, so
 	// any unrecognized connector slug would spuriously duplicate OpenClaw
