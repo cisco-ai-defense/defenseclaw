@@ -36,7 +36,12 @@ func appendWindowsMCPSpoolInventory(
 		markAllIncomplete()
 		return status
 	}
-	if authorization.FailureCount > 0 || authorization.PendingCount > 0 {
+	// Pending targets have no protected row to read. Only the successfully
+	// protected targets below supply inventory, so a deferred account cannot
+	// make an enrolled sibling incomplete. Failed repairs may retain old
+	// protected rows and must remain partial. A pending-only snapshot cannot
+	// establish an authoritative empty inventory.
+	if authorization.FailureCount > 0 || (authorization.PendingCount > 0 && authorization.SuccessCount == 0) {
 		markAllIncomplete()
 	}
 	for _, target := range authorization.ProtectedTargets {

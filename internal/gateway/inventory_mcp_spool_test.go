@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func windowsMCPInventoryFixture(t *testing.T, names ...string) (*config.Config, 
 	for _, name := range names {
 		cfg.Guardrail.Connectors[name] = config.PerConnectorGuardrailConfig{}
 		targets = append(targets, managedGuardianAuthorizationTarget{
-			User: "alice", UserHome: home, SID: sid, Connector: name, OK: true,
+			User: "dclawadmin", UserHome: home, SID: sid, Connector: name, OK: true,
 		})
 		dir := enrolledMCPSpoolDir(cfg, name)
 		if dir == "" {
@@ -87,15 +88,45 @@ func readWindowsMCPInventoryFixture(t *testing.T, cfg *config.Config) ([]endpoin
 }
 
 func TestWindowsSecureClientMCPInventoryPersistsObservedToolsFromSpool(t *testing.T) {
-	for _, name := range []string{"codex", "claudecode"} {
-		t.Run(name, func(t *testing.T) {
+	for _, testName := range []string{"codex", "claudecode", "codex-with-pending", "claudecode-with-pending"} {
+		t.Run(testName, func(t *testing.T) {
+			name := strings.TrimSuffix(testName, "-with-pending")
 			cfg, home, sid := windowsMCPInventoryFixture(t, name)
+			if testName != name {
+				authorization, reason := readManagedGuardianAuthorization(cfg.DataDir)
+				if authorization == nil {
+					t.Fatal(reason)
+				}
+				// Match the VM: four protected dclawadmin connectors and four
+				// deferred DefenseClawEval targets, which have no protected rows.
+				for _, other := range []string{"claudecode", "codex", "cursor", "copilot"} {
+					if other != name {
+						authorization.ProtectedTargets = append(authorization.ProtectedTargets, managedGuardianAuthorizationTarget{
+							User: "dclawadmin", UserHome: home, SID: sid, Connector: other, OK: true,
+						})
+					}
+				}
+				authorization.TargetCount, authorization.SuccessCount, authorization.PendingCount = 8, 4, 4
+				writeWindowsMCPInventoryAuthorization(t, cfg, *authorization)
+				// Even a valid record for an account not in ProtectedTargets
+				// must not enter inventory or create a conflicting alias.
+				pendingSID := "S-1-5-21-1-2-3-1008"
+				data, err := enterprisehooks.MarshalClaudeMCPSpoolRecord(pendingSID, []config.MCPServerEntry{{
+					Name: "openaiDeveloperDocs", URL: "https://pending.example/mcp", Transport: "http",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(enrolledMCPSpoolDir(cfg, name), pendingSID+".json"), data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			parents, status := readWindowsMCPInventoryFixture(t, cfg)
 			if status.partial || len(parents) != 1 {
 				t.Fatalf("parents=%+v status=%+v", parents, status)
 			}
 			parent := parents[0]
-			if parent.userID != sid || parent.userName != "alice" || parent.agentConnector != name ||
+			if parent.userID != sid || parent.userName != "dclawadmin" || parent.agentConnector != name ||
 				parent.mcpServerURL != "https://developers.openai.com" || parent.mcpTransport != "http" {
 				t.Fatalf("spool metadata/owner lost: %+v", parent)
 			}
@@ -308,5 +339,43 @@ func TestWindowsSecureClientMCPInventorySeparatesProjects(t *testing.T) {
 		if !ids[row.id] {
 			t.Fatalf("identity depends on order: %+v", row)
 		}
+	}
+}
+
+func TestWindowsSecureClientMCPInventoryIncompleteAuthorization(t *testing.T) {
+	for _, test := range []struct {
+		name                            string
+		total, success, pending, failed int
+		protected                       bool
+	}{
+		{"pending-only", 4, 0, 4, 0, false},
+		{"failed-repair", 2, 1, 0, 1, true},
+		{"inconsistent-counts", 8, 1, 4, 0, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, home, sid := windowsMCPInventoryFixture(t, "claudecode")
+			previous, _ := readWindowsMCPInventoryFixture(t, cfg)
+			authorization := managedGuardianAuthorization{Version: 1, UpdatedAt: time.Now().UTC().Format(time.RFC3339), OK: true,
+				TargetCount: test.total, SuccessCount: test.success, PendingCount: test.pending, FailureCount: test.failed}
+			if test.protected {
+				authorization.ProtectedTargets = []managedGuardianAuthorizationTarget{{User: "dclawadmin", UserHome: home, SID: sid, Connector: "claudecode", OK: true}}
+			}
+			writeWindowsMCPInventoryAuthorization(t, cfg, authorization)
+			rows, status := readWindowsMCPInventoryFixture(t, cfg)
+			if !status.partial {
+				t.Fatal("incomplete authorization became authoritative")
+			}
+			fresh := &mcpToolInventory{}
+			fresh.refreshCompleteParents(rows, status.incompleteConnectors)
+			if _, ok := fresh.resolveConfiguredServer("claudecode", "openaiDeveloperDocs"); ok {
+				t.Fatal("incomplete authorization established a new parent")
+			}
+			retained := &mcpToolInventory{}
+			retained.refreshCompleteParents(previous, nil)
+			retained.refreshCompleteParents(rows, status.incompleteConnectors)
+			if _, ok := retained.resolveConfiguredServer("claudecode", "openaiDeveloperDocs"); !ok {
+				t.Fatal("incomplete authorization retired the last complete parent")
+			}
+		})
 	}
 }
