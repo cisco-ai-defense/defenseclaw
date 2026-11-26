@@ -1949,14 +1949,14 @@ func (r *credentialPathResolver) searchWorkFolders(command CommandFact, each boo
 		return []string{r.cwd}, r.outerCommandsStay(command)
 	}
 	if len(folders) == 1 {
-		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folders[0])
+		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, r.gitBashDriveSteps(folders[0]))
 		return []string{filepath.FromSlash(logical)}, ok
 	}
 	if !each {
 		return unplaced, false
 	}
 	for _, folder := range folders {
-		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folder)
+		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, r.gitBashDriveSteps(folder))
 		if !ok || logical != "" && !simplePathAbs(logical) {
 			return unplaced, false
 		}
@@ -1971,6 +1971,36 @@ func (r *credentialPathResolver) searchWorkFolders(command CommandFact, each boo
 		}
 	}
 	return bases, true
+}
+
+// gitBashDrive is the drive spelling (C:/x) of a Git Bash or Cygwin drive
+// mount (/c/x, /cygdrive/c/x) when the call runs under a Windows drive
+// home, and value unchanged otherwise. Git Bash hands a native program (rg,
+// grep) the drive path for such a word and runs a cd to it in that folder,
+// so the search reads and names C:/x: before, the walk joined /c/x onto the
+// hook folder (filepath.IsAbs is false without a volume) and a recursive
+// search of a Git Bash folder counted no credentials read where its C:/x
+// spelling did (substrate-1:GAP-0691). Under a POSIX home /c/x is the folder
+// it names.
+func (r *credentialPathResolver) gitBashDrive(value string) string {
+	if !DriveLetterPath(r.home) {
+		return value
+	}
+	return MSYSDrivePath(value)
+}
+
+// gitBashDriveSteps is folder with each step a Git Bash drive mount spelled
+// as its drive path (gitBashDrive).
+func (r *credentialPathResolver) gitBashDriveSteps(folder workFolder) workFolder {
+	if !DriveLetterPath(r.home) || !slices.ContainsFunc(folder.steps, func(step string) bool { return MSYSDrivePath(step) != step }) {
+		return folder
+	}
+	steps := make([]string, len(folder.steps))
+	for i, step := range folder.steps {
+		steps[i] = MSYSDrivePath(step)
+	}
+	folder.steps = steps
+	return folder
 }
 
 // searchFolderWord is the folder a recursive search's operand names: its
@@ -2002,6 +2032,7 @@ func (r *credentialPathResolver) searchFolderWord(argument ArgumentFact) string 
 // so the search itself is judged as it was before the walk (T6 ruling
 // 2026-11-18).
 func (r *credentialPathResolver) searchFolder(id int64, folder, base string, placed bool, filter credentialWalkFilter) {
+	folder = r.gitBashDrive(folder)
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
