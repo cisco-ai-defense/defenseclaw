@@ -1088,7 +1088,33 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, 
 // findRootHolds reports a path at or below a find root; prefix is the root
 // ending in one separator. Windows compares names without case, so find c:/
 // walks a C: home (rel-1-0-10:GAP-1642).
+//
+// A root that keeps a dot-dot step (OperandPath leaves it raw after a link or
+// a name it cannot read) starts where the kernel climbs: it is compared by the
+// folder the link-aware walk resolves, as a write operand of the same spelling
+// is (rel-1-0-10:GAP-1648), against the path and the file the path resolves
+// to.
 func findRootHolds(root, prefix, path string) bool {
+	if rootSpellingHolds(root, prefix, path) {
+		return true
+	}
+	if !hasDotDotStep(root) {
+		return false
+	}
+	physical, ok := ResolveWriteTarget(root)
+	if !ok || physical == root || hasDotDotStep(physical) {
+		return false
+	}
+	physicalPrefix := rootPrefix(physical)
+	if rootSpellingHolds(physical, physicalPrefix, path) {
+		return true
+	}
+	resolved, ok := ResolveWriteTarget(path)
+	return ok && resolved != path && rootSpellingHolds(physical, physicalPrefix, resolved)
+}
+
+// rootSpellingHolds is findRootHolds by the spelling of the root alone.
+func rootSpellingHolds(root, prefix, path string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(path, root) || len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
 	}

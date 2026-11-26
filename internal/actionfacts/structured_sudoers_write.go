@@ -145,49 +145,68 @@ func posixOperandPath(name, cwd string) string {
 // would erase a directory link before the following dot-dot, and cleans every
 // other spelling (./, doubled slashes, a trailing slash).
 //
-// A dot-dot step in front of every name of the operand (../x, ./../x,
-// .././../x) is applied to the supplied directory itself. When that directory
-// has no link in its path, the clean join is the path the kernel opens, also
-// when the directory does not exist yet (a directory that pushd or cd has not
-// entered); when it has one, the kernel applies the step to the link target,
-// which only the component walk that follows links can tell, so the spelling
-// stays raw. A step after a name, and any step of an absolute operand, stay
-// raw.
+// Every dot-dot step is applied as text only where the kernel applies it to
+// the same folder, in one walk for every spelling (rel-1-0-10:GAP-1648):
+//   - a step in front of every name of a relative operand (../x, ./../x,
+//     .././../x) climbs from the supplied directory while that directory has
+//     no link in its path, also when it does not exist yet (a directory that
+//     pushd or cd has not entered);
+//   - a step after a name, and every step of an absolute operand ($HOME/..,
+//     /home/../alice/.claude, proj/../.claude), climbs only from a directory
+//     that exists with no link in its path: the clean join is then the path
+//     the kernel opens. A name that does not exist yet (a link the same
+//     command creates) or a directory reached through a link keeps the whole
+//     spelling raw, for the component walk that follows links.
+//
+// Before, an absolute operand kept every step raw, so a find root such as
+// $HOME/../<home>/.claude reached none of the hook files find ~/.claude
+// reaches.
 func OperandPath(name, cwd string) string {
-	slashed := filepath.ToSlash(name)
-	leading, rest := leadingDotDotSteps(slashed)
-	inner := hasDotDotStep(rest)
-	if leading == 0 && !inner {
+	if !hasDotDotStep(filepath.ToSlash(name)) {
 		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
 			return filepath.Join(cwd, name)
 		}
 		return filepath.Clean(name)
 	}
-	if filepath.IsAbs(name) || !filepath.IsAbs(cwd) {
-		return name
-	}
-	if leading != 0 && !inner {
-		if clean, ok := applyLeadingSteps(cwd, leading, rest); ok {
+	if filepath.IsAbs(name) {
+		if clean, ok := applyDotDotSteps("", name); ok {
 			return clean
 		}
+		return name
+	}
+	if !filepath.IsAbs(cwd) {
+		return name
+	}
+	if clean, ok := applyDotDotSteps(cwd, name); ok {
+		return clean
 	}
 	return cwd + string(filepath.Separator) + name
 }
 
 // maxOperandLeadingSteps bounds the link probes one operand may cost; an
-// operand with more leading steps stays raw.
+// operand with more dot-dot steps stays raw.
 const maxOperandLeadingSteps = 16
 
 // operandLinkProbe reports a directory whose path, or the longest existing
-// part of it, passes through a link. The default sees none: the probe reads the
-// file system through the bounded readers of the hook path package, which
-// installs it (SetOperandLinkProbe) in the client and in the gateway alike, so
-// both key an operand the same way.
-var operandLinkProbe = func(string) bool { return false }
+// part of it, passes through a link. operandPlainDirProbe reports a directory
+// that exists, is a directory and has no link in its path. The defaults see
+// no link and no directory: the probes read the file system through the
+// bounded readers of the hook path package, which installs them
+// (SetOperandLinkProbe, SetOperandPlainDirProbe) in the client and in the
+// gateway alike, so both key an operand the same way.
+var (
+	operandLinkProbe     = func(string) bool { return false }
+	operandPlainDirProbe = func(string) bool { return false }
+)
 
 // SetOperandLinkProbe installs the link probe OperandPath asks. It is called
 // once from an init function.
 func SetOperandLinkProbe(probe func(dir string) bool) { operandLinkProbe = probe }
+
+// SetOperandPlainDirProbe installs the existing-directory probe OperandPath
+// asks for a dot-dot step after a name. It is called once from an init
+// function.
+func SetOperandPlainDirProbe(probe func(dir string) bool) { operandPlainDirProbe = probe }
 
 // hasDotDotStep reports a slash-separated operand with a ".." component.
 func hasDotDotStep(slashed string) bool {
@@ -199,37 +218,35 @@ func hasDotDotStep(slashed string) bool {
 	return false
 }
 
-// leadingDotDotSteps counts the ".." components in front of the first name of
-// a slash-separated operand (empty and "." components are skipped) and returns
-// the operand from that name on.
-func leadingDotDotSteps(slashed string) (steps int, rest string) {
-	parts := strings.Split(slashed, "/")
-	for i, part := range parts {
+// applyDotDotSteps walks name from base (an absolute name: base is empty and
+// the walk starts at its root) and applies each ".." step as text when the
+// kernel applies it to the same folder (see OperandPath). ok is false when a
+// step must stay raw.
+func applyDotDotSteps(base, name string) (string, bool) {
+	slashed := filepath.ToSlash(name)
+	prefix, named := filepath.Clean(base), false
+	if base == "" {
+		volume := filepath.VolumeName(name)
+		prefix, named = volume+string(filepath.Separator), true
+		slashed = filepath.ToSlash(name[len(volume):])
+	}
+	steps := 0
+	for _, part := range strings.Split(slashed, "/") {
 		switch part {
 		case "", ".":
 		case "..":
-			steps++
+			if steps++; steps > maxOperandLeadingSteps {
+				return "", false
+			}
+			if named && !operandPlainDirProbe(prefix) || !named && operandLinkProbe(prefix) {
+				return "", false
+			}
+			prefix = filepath.Dir(prefix)
 		default:
-			return steps, strings.Join(parts[i:], "/")
+			prefix, named = filepath.Join(prefix, part), true
 		}
 	}
-	return steps, ""
-}
-
-// applyLeadingSteps applies the leading ".." steps to cwd as text, each only
-// while the folder in front of it has no link, and joins the rest.
-func applyLeadingSteps(cwd string, steps int, rest string) (string, bool) {
-	if steps > maxOperandLeadingSteps {
-		return "", false
-	}
-	prefix := cwd
-	for range steps {
-		if operandLinkProbe(prefix) {
-			return "", false
-		}
-		prefix = filepath.Dir(filepath.Clean(prefix))
-	}
-	return filepath.Join(prefix, rest), true
+	return prefix, true
 }
 
 // mayNameSudoers is the cheap test that keeps an ordinary file-tool call from

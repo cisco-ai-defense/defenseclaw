@@ -674,7 +674,26 @@ func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
 }
 
-func init() { actionfacts.SetOperandLinkProbe(directoryHasLink) }
+func init() {
+	actionfacts.SetOperandLinkProbe(directoryHasLink)
+	actionfacts.SetOperandPlainDirProbe(plainDirectory)
+}
+
+// plainDirectory reports a directory that exists and whose path passes
+// through no link: a dot-dot step after it climbs to its parent folder, as
+// the cleaned spelling says (rel-1-0-10:GAP-1648). A path that cannot be
+// read is not one.
+func plainDirectory(dir string) bool {
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	clean := filepath.Clean(dir)
+	if info, err := pathStat(clean); err != nil || !info.IsDir() {
+		return false
+	}
+	real, err := pathEvalSymlinks(clean)
+	return err == nil && real == clean
+}
 
 // directoryHasLink reports a directory whose path, or the longest existing
 // part of it, passes through a link. A directory that does not exist yet is
