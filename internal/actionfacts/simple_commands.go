@@ -4385,10 +4385,7 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if state.cwd == "" {
 		return "", true
 	}
-	if simplePOSIXAbs(state.cwd) {
-		return path.Join(state.cwd, dir), true
-	}
-	return filepath.Clean(filepath.Join(state.cwd, dir)), true
+	return simplePathJoin(state.cwd, dir), true
 }
 
 // simplePathAbs reports whether a shell directory or operand is absolute.
