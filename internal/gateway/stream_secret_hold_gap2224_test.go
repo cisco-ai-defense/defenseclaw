@@ -123,3 +123,51 @@ func TestGAP2224ResponsesImageAfterSummaryNumberIsSent(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP2224ResponsesEncryptedReasoningOverBoundIsSent: on the OpenAI
+// Responses passthrough, in every tier, a benign reply whose reasoning
+// summary ends in a number, then the reasoning item's output_item.done with
+// an encrypted_content over streamSecretMaxHeld, then the answer, goes out
+// whole with no TRUNCATED verdict, as on rel. encrypted_content is a skip
+// scalar the walker does not read: the snapshot spends the parked run by it
+// (CHK-T23E2224C N1; red at 5ca5483b49: 3 TRUNCATED, strict and
+// managed-strict cut).
+func TestGAP2224ResponsesEncryptedReasoningOverBoundIsSent(t *testing.T) {
+	const end = "GAP2224-ENCRYPTED-END-MARK"
+	path := gap0429PathsNamed(t, "passthrough/openai-responses")[0]
+	sum := "Let me count the rows: step 3"
+	part := func(typ string, extra map[string]any) string {
+		f := map[string]any{"item_id": "rs_1", "output_index": 0, "summary_index": 0}
+		for k, v := range extra {
+			f[k] = v
+		}
+		return gap2162Event(typ, f)
+	}
+	answer := "The table has 3 rows. " + end
+	pieces := []string{
+		part("response.reasoning_summary_part.added", map[string]any{"part": map[string]any{"type": "summary_text", "text": ""}}),
+		part("response.reasoning_summary_text.delta", map[string]any{"delta": sum}),
+		part("response.reasoning_summary_text.done", map[string]any{"text": sum}),
+		part("response.reasoning_summary_part.done", map[string]any{"part": map[string]any{"type": "summary_text", "text": sum}}),
+		gap2162Event("response.output_item.done", map[string]any{"output_index": 0, "item": map[string]any{
+			"type": "reasoning", "id": "rs_1", "summary": []any{map[string]any{"type": "summary_text", "text": sum}}, "encrypted_content": streamTailImage()}}),
+		gap2162Event("response.output_item.added", map[string]any{"output_index": 1, "item": map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "content": []any{}}}),
+		gap2162Event("response.content_part.added", map[string]any{"item_id": "msg_1", "output_index": 1, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""}}),
+		gap2162Event("response.output_text.delta", map[string]any{"item_id": "msg_1", "output_index": 1, "content_index": 0, "delta": answer}),
+		gap2162Event("response.output_text.done", map[string]any{"item_id": "msg_1", "output_index": 1, "content_index": 0, "text": answer}),
+	}
+	var rows []gap1265Row
+	for _, tier := range streamTailTiers {
+		rows = append(rows, gap1265Row{name: "encrypted-reasoning-over-bound", tier: tier.name, pack: tier.pack, managed: tier.managed, pieces: pieces})
+	}
+	results, log := gap1265Serve(t, path, rows)
+	if n := strings.Count(log, "STREAM-TRUNCATED"); n != 0 {
+		t.Errorf("%d TRUNCATED line(s) for a benign encrypted reasoning reply, want 0: %s", n, gap1265LogLine(log, "TRUNCATED"))
+	}
+	for i, row := range rows {
+		res := results[i]
+		if res.blocked || !strings.Contains(res.got, end) {
+			t.Errorf("%s/%s: a benign encrypted reasoning reply was cut or blocked (blocked=%v, %d bytes)", path.name, row.tier, res.blocked, len(res.got))
+		}
+	}
+}
