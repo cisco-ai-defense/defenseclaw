@@ -397,6 +397,12 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			return []string{dest}
 		}
 	case program == "mv" || program == "gmv":
+		// mv, install and rsync have their own readers (the rename, the
+		// move onto a link, the recursive copy scope). Only a destination
+		// below a process link, which those readers cannot place, is listed
+		// here (rel-1-0-10:GAP-2227, GAP-2237); listing every destination
+		// judged a plain rename onto a link and a recursive folder sync as
+		// writes through links (rel-1-0-10:GAP-2275).
 		op, ok := parseRename(words[1:], cwd)
 		if !ok || len(op.sources) == 0 {
 			return nil
@@ -406,10 +412,10 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			for _, source := range op.sources {
 				names = append(names, OperandPath(op.targetDir, cwd)+"/"+filepath.Base(source))
 			}
-			return names
+			return processLinkWrites(names, cwd)
 		}
 		if op.dest != "" {
-			return []string{OperandPath(op.dest, cwd)}
+			return processLinkWrites([]string{OperandPath(op.dest, cwd)}, cwd)
 		}
 	case program == "install" || program == "ginstall":
 		if len(words) < 3 {
@@ -449,10 +455,10 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			for _, source := range sources {
 				names = append(names, OperandPath(destination, cwd)+"/"+filepath.Base(source))
 			}
-			return names
+			return processLinkWrites(names, cwd)
 		}
 		if len(sources) >= 2 {
-			return []string{OperandPath(sources[len(sources)-1], cwd)}
+			return processLinkWrites([]string{OperandPath(sources[len(sources)-1], cwd)}, cwd)
 		}
 	case program == "rsync":
 		if len(words) < 3 {
@@ -460,7 +466,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 		dest := archiveCopyDestination(words[1:], makeStatic(len(words)-1), cwd)
 		if dest != "" {
-			return []string{dest}
+			return processLinkWrites([]string{dest}, cwd)
 		}
 	case program == "tee" || program == "gtee":
 		var names []string

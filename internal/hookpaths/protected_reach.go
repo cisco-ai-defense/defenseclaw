@@ -792,6 +792,53 @@ func processLinkPrefix(path string) string {
 	return path
 }
 
+// processLinkWrites keeps the write operands whose placed path passes
+// through a process-dependent link (processLinkHead): the writes that only
+// the process-link proof reads (GAP-2227, GAP-2237, GAP-2275). A call placed
+// in a folder below such a link keeps every operand, as a host that cleans
+// a relative dot-dot it cannot probe may have dropped the link from it.
+func processLinkWrites(names []string, cwd string) []string {
+	if throughProcessLink(cwd) {
+		return names
+	}
+	kept := names[:0]
+	for _, name := range names {
+		if throughProcessLink(name) {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
+// throughProcessLink reports an absolute path with a process link among its
+// lexically placed prefixes, as processLinkPrefix walks it.
+func throughProcessLink(path string) bool {
+	path = filepath.ToSlash(path)
+	if !strings.HasPrefix(path, "/") {
+		return false
+	}
+	parts := make([]string, 0, 8)
+	for _, part := range strings.Split(path, "/")[1:] {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, part)
+		}
+		if processLinkHead(parts) {
+			return true
+		}
+	}
+	return false
+}
+
 // ProcessLinkWriteUnproved reports a write below a process link whose target
 // the hook cannot prove. Opener-relative descriptors and task links are
 // always unproved. A numbered PID link keeps its existing fixedPIDLink proof.
