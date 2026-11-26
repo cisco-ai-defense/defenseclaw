@@ -42,4 +42,3 @@ func BenchmarkPerlSpecPadded(b *testing.B) {
 		}
 	})
 }
-

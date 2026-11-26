@@ -963,8 +963,10 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 		pathString = literalPythonString
 	}
 	var paths []string
+	scan := newLiteralCodeScanner(code, language)
+	pathlibImport := strings.Index(code, "from pathlib import Path")
 	for _, loc := range literalOpenCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0], language) {
+		if !scan.at(loc[0]) {
 			continue
 		}
 		call, ok := literalBoundedCall(code, loc[1]-1)
@@ -1009,7 +1011,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 		}
 	}
 	for _, loc := range literalWriteCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0], language) {
+		if !scan.at(loc[0]) {
 			continue
 		}
 		if name := strings.TrimSpace(code[loc[0] : loc[1]-1]); (name == "writeFile" || name == "appendFile") && language != "node" {
@@ -1025,7 +1027,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 		}
 	}
 	for _, loc := range literalNodeStream.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0], language) {
+		if !scan.at(loc[0]) {
 			continue
 		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
@@ -1041,7 +1043,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 	pythonCopyfileImported := false
 	if language == "python" {
 		for _, loc := range literalPythonCopyImport.FindAllStringIndex(code, -1) {
-			if literalCodePosition(code, loc[0], language) {
+			if scan.at(loc[0]) {
 				pythonCopyfileImported = true
 				break
 			}
@@ -1049,14 +1051,14 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 	}
 	if language == "perl" {
 		for _, loc := range literalPerlImport.FindAllStringIndex(code, -1) {
-			if literalCodePosition(code, loc[0], language) {
+			if scan.at(loc[0]) {
 				perlCopyImported = true
 				break
 			}
 		}
 	}
 	for _, loc := range literalCopyCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0], language) {
+		if !scan.at(loc[0]) {
 			continue
 		}
 		name := strings.TrimSpace(code[loc[0] : loc[1]-1])
@@ -1087,7 +1089,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 	}
 	if language == "perl" {
 		for _, match := range literalPerlCopy.FindAllStringSubmatchIndex(code, -1) {
-			if literalCodePosition(code, match[0], language) &&
+			if scan.at(match[0]) &&
 				literalCopyAPI(language, code[match[2]:match[3]], perlCopyImported) {
 				if path, ok := pathString(code[match[4]:match[5]]); ok {
 					paths = append(paths, path)
@@ -1096,14 +1098,14 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 		}
 	}
 	for _, match := range literalPathWrite.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0], language) {
+		if scan.at(match[0]) {
 			paths = append(paths, code[match[2]:match[3]])
 		}
 	}
 	for _, match := range literalPathOpen.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0], language) &&
+		if scan.at(match[0]) &&
 			(strings.HasPrefix(code[match[0]:match[1]], "pathlib.") ||
-				strings.Contains(code[:match[0]], "from pathlib import Path")) &&
+				pathlibImport >= 0 && pathlibImport+len("from pathlib import Path") <= match[0]) &&
 			validPythonWriteMode(code[match[4]:match[5]]) {
 			paths = append(paths, code[match[2]:match[3]])
 		}
@@ -1177,7 +1179,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 		}
 	}
 	for _, match := range literalPerlOpen.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0], language) {
+		if scan.at(match[0]) {
 			paths = append(paths, code[match[2]:match[3]])
 		}
 	}
@@ -1380,36 +1382,62 @@ func literalCallArgs(call string) []string {
 }
 
 func literalCodePosition(code string, position int, language string) bool {
-	var quote byte
-	comment := false
-	perlHashDelimiters := 0
-	for i := 0; i < position; i++ {
-		c := code[i]
-		if comment {
+	scan := newLiteralCodeScanner(code, language)
+	return scan.at(position)
+}
+
+// literalCodeScanner answers literalCodePosition for many positions of one
+// program. The reading of a byte never depends on the position asked, so the
+// state after the bytes before one position is the start of the reading for
+// a later one: questions in ascending order (the matches of a regexp) read
+// the program once. A position before the last one asked starts over. Each
+// question read the whole prefix again, the square of dense code
+// (rel-1-0-10:GAP-2230).
+type literalCodeScanner struct {
+	code, language     string
+	i, last            int
+	quote              byte
+	comment            bool
+	perlHashDelimiters int
+}
+
+func newLiteralCodeScanner(code, language string) *literalCodeScanner {
+	return &literalCodeScanner{code: code, language: language}
+}
+
+func (s *literalCodeScanner) at(position int) bool {
+	if position < s.last {
+		*s = literalCodeScanner{code: s.code, language: s.language}
+	}
+	s.last = position
+	code, language := s.code, s.language
+	for ; s.i < position; s.i++ {
+		c := code[s.i]
+		if s.comment {
 			if c == '\n' {
-				comment = false
+				s.comment = false
 			}
 			continue
 		}
-		if quote != 0 {
+		if s.quote != 0 {
 			if c == '\\' {
-				i++
-			} else if c == quote {
-				quote = 0
+				s.i++
+			} else if c == s.quote {
+				s.quote = 0
 			}
 		} else if c == '\'' || c == '"' {
-			quote = c
+			s.quote = c
 		} else if c == '#' {
-			if language == "perl" && perlHashDelimiters > 0 {
-				perlHashDelimiters--
-			} else if language == "perl" && perlHashRegexpStart(code, i) > 0 {
-				perlHashDelimiters = perlHashRegexpStart(code, i)
-			} else if literalCommentStart(code, i, language) {
-				comment = true
+			if language == "perl" && s.perlHashDelimiters > 0 {
+				s.perlHashDelimiters--
+			} else if language == "perl" && perlHashRegexpStart(code, s.i) > 0 {
+				s.perlHashDelimiters = perlHashRegexpStart(code, s.i)
+			} else if literalCommentStart(code, s.i, language) {
+				s.comment = true
 			}
 		}
 	}
-	return quote == 0 && !comment
+	return s.quote == 0 && !s.comment
 }
 
 func perlHashRegexpStart(code string, i int) int {

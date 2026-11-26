@@ -974,12 +974,13 @@ var actionInterpreterHomeCall = lazyregexp.New(`Path\.home\(\)|expanduser\(`)
 // appendFileSync ...) in executable code, not inside a string or comment:
 // a path built only inside inert text writes nothing (GAP-0475 row).
 func actionInterpreterCodeWrites(code, language string) bool {
+	scan := newLiteralCodeScanner(code, language)
 	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
 		if language == "python" || strings.HasPrefix(language, "python3") {
 			if pythonExecutableCodePosition(code, location[0]) {
 				return true
 			}
-		} else if literalCodePosition(code, location[0], language) {
+		} else if scan.at(location[0]) {
 			return true
 		}
 	}

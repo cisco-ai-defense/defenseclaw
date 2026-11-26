@@ -231,7 +231,7 @@ func TestGAP2230PerlScansMatchTheirOracles(t *testing.T) {
 				checked++
 			}
 			for _, flag := range flags {
-				if got, want := perlVisibilityAt(tokens, call, flag), perlVisibilityAtOracle(tokens, call, flag); got != want {
+				if got, want := perlVisibilityAt(s1, tokens, call, flag), perlVisibilityAtOracle(tokens, call, flag); got != want {
 					t.Fatalf("%q: call at %d, %s: visibility %+v, oracle %+v", code, call.start, flag, got, want)
 				}
 			}
@@ -241,4 +241,73 @@ func TestGAP2230PerlScansMatchTheirOracles(t *testing.T) {
 		t.Fatalf("only %d span questions checked", checked)
 	}
 	t.Logf("GAP-2230 oracle: %d programs, %d span questions", len(programs), checked)
+}
+
+// literalCodePositionOracle is literalCodePosition before GAP-2230: the
+// reading of the whole prefix per question.
+func literalCodePositionOracle(code string, position int, language string) bool {
+	var quote byte
+	comment := false
+	perlHashDelimiters := 0
+	for i := 0; i < position; i++ {
+		c := code[i]
+		if comment {
+			if c == '\n' {
+				comment = false
+			}
+			continue
+		}
+		if quote != 0 {
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		} else if c == '\'' || c == '"' {
+			quote = c
+		} else if c == '#' {
+			if language == "perl" && perlHashDelimiters > 0 {
+				perlHashDelimiters--
+			} else if language == "perl" && perlHashRegexpStart(code, i) > 0 {
+				perlHashDelimiters = perlHashRegexpStart(code, i)
+			} else if literalCommentStart(code, i, language) {
+				comment = true
+			}
+		}
+	}
+	return quote == 0 && !comment
+}
+
+// TestGAP2230CodeScannerMatchesTheOracle: one scanner asked positions in
+// ascending order, with repeats and with steps back, answers what the
+// reading of the whole prefix answers for each one.
+func TestGAP2230CodeScannerMatchesTheOracle(t *testing.T) {
+	alphabet := []byte("'\"\\#\n$smqrty;=~( a")
+	languages := []string{"perl", "python", "ruby", "node", "javascript"}
+	rng := rand.New(rand.NewSource(2230))
+	questions := 0
+	for program := range 20000 {
+		code := make([]byte, rng.Intn(48))
+		for i := range code {
+			code[i] = alphabet[rng.Intn(len(alphabet))]
+		}
+		language := languages[program%len(languages)]
+		scan := newLiteralCodeScanner(string(code), language)
+		position := 0
+		for range 24 {
+			switch rng.Intn(6) {
+			case 0:
+				position = rng.Intn(len(code) + 1) // anywhere, often back
+			case 1:
+				// the same position again
+			default:
+				position = min(len(code), position+rng.Intn(4))
+			}
+			questions++
+			if got, want := scan.at(position), literalCodePositionOracle(string(code), position, language); got != want {
+				t.Fatalf("%s %q at %d: scanner %v, oracle %v", language, code, position, got, want)
+			}
+		}
+	}
+	t.Logf("%d questions", questions)
 }

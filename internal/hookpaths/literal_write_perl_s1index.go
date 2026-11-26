@@ -41,7 +41,10 @@ type perlS1Index struct {
 // perlS1Lazy builds the index of a program on its first question: most
 // programs have no scalar mode or flag to resolve. A nil perlS1Lazy builds a
 // fresh index per question.
-type perlS1Lazy struct{ index *perlS1Index }
+type perlS1Lazy struct {
+	index *perlS1Index
+	vis   *perlVisIndex
+}
 
 func (lazy *perlS1Lazy) of(tokens []perlToken) *perlS1Index {
 	if lazy == nil {

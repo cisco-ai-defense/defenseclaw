@@ -46,18 +46,13 @@ func perlTwoArgWritePath(spec string) (string, bool) {
 	return "", false
 }
 
+// perlScalarName finds the argument's first token by its start (tokens are
+// in source order): the walk from the program's first token per argument
+// grew with the square of dense code (rel-1-0-10:GAP-2230).
 func perlScalarName(tokens []perlToken, arg [2]int) string {
-	first := -1
-	for i := range tokens {
-		if tokens[i].start < arg[0] {
-			continue
-		}
-		if tokens[i].end > arg[1] {
-			break
-		}
-		if first < 0 {
-			first = i
-		}
+	first := sort.Search(len(tokens), func(i int) bool { return tokens[i].start >= arg[0] })
+	if first == len(tokens) || tokens[first].end > arg[1] {
+		first = -1
 	}
 	if first >= 0 && first+1 < len(tokens) && tokens[first].text == "$" &&
 		tokens[first+1].kind == 'w' && tokens[first+1].end == arg[1] {
