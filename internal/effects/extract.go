@@ -1903,16 +1903,24 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// or a shell that sources startup files. A program's own effects are then
 	// unaccounted; a shell or code runner keeps the effects of the code it
 	// runs and gets one unaccounted exec for the input.
-	envUA, envShell := false, false
+	envUA, envShell, envName := false, false, ""
 	shellCode := known && entry.ShellCode
-	if dialect == DialectPOSIX && (w.unreviewedEnvInput(program, strings.Contains(prog.Value, "/"), shellCode, spec) != "" || shellStartupFlag(program, inner[1:])) {
-		if shellCode {
-			envShell = true
-		} else {
-			envUA = true
+	if dialect == DialectPOSIX {
+		envName = w.unreviewedEnvInput(program, strings.Contains(prog.Value, "/"), shellCode, spec)
+		if envName != "" || shellStartupFlag(program, inner[1:]) {
+			if shellCode {
+				envShell = true
+			} else {
+				envUA = true
+			}
 		}
 	}
 	unaccounted := wrapperUA || declUA || bsdReject || entry.BuiltinUnknown || envUA
+	// homeOnly: the one unaccounted input is a HOME other than the caller's
+	// (sudo, doas, runuser, su, env -i, a HOME= prefix). It gives the program
+	// its own config files to read; it does not change the paths the call
+	// names, which the caller's shell already expanded (GAP-1478).
+	homeOnly := envUA && envName == "HOME" && !wrapperUA && !declUA && !bsdReject && !entry.BuiltinUnknown
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
@@ -1927,7 +1935,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			end = nestedStart
 		}
 		for i := cmdStart; i < end; i++ {
-			w.res.Effects[i].addReason(ReasonUnknownFlag, ScopeRole)
+			e := &w.res.Effects[i]
+			if homeOnly && len(e.Reasons) == 0 && e.RoleState == RoleStateKnown && e.TargetState == TargetStateKnown &&
+				e.Target.Type == TargetPath {
+				e.addReason(ReasonHomeInput, ScopeRole)
+			}
+			e.addReason(ReasonUnknownFlag, ScopeRole)
 		}
 	}()
 	baseIdx := w.emit(base)

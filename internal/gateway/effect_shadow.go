@@ -518,7 +518,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		// preserves the registered entries is no hook mutation; the legacy
 		// readers still grade the call. Deletes, truncations and opaque data
 		// keep their effect grade (GAP-1478).
-		if fullyAccounted && len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 {
+		// A HomeInput write keeps its known member only to be decided by its
+		// proof (GAP-1478); it was never a preserved write before.
+		if fullyAccounted && len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 &&
+			!effectrules.HomeInput(f) {
 			preserved := false
 			if env.preservedHookConfigPaths != nil {
 				_, preserved = env.preservedHookConfigPaths[effectHookConfigTargetKey(t.GetPath())]
@@ -556,7 +559,17 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if proof, ok := stateFolderWriteProof(f, flavor); ok {
 			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
 		}
-		r := factReach(f, known, unknownEffect, env, flavor)
+		var mutationProofs []decide.Proof
+		if fullyAccounted {
+			mutationProofs = knownProtectedMutationProofs(f, flavor)
+		}
+		// A named mutation that is known but for the HOME of its program
+		// (effectNamedRoleKnown: sudo rsync --log-file=MEMBER) is decided by
+		// its proof like the unwrapped spelling, not by reach (GAP-1478).
+		r := ""
+		if !unknownEffect || len(mutationProofs) == 0 {
+			r = factReach(f, known, unknownEffect, env, flavor)
+		}
 		if len(known) == 0 && r == "" {
 			continue
 		}
@@ -581,7 +594,7 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		}
 		if fullyAccounted {
-			for _, proof := range knownProtectedMutationProofs(f, flavor) {
+			for _, proof := range mutationProofs {
 				c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
 				c.known, c.knownMutation = true, true
 				// The authorized-keys ruling blocks in every pack.
@@ -1138,6 +1151,21 @@ func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (dec
 	return decide.Proof{}, false
 }
 
+// effectNamedRoleKnown reports an effect whose role the call words decide:
+// fully known, or known but for a HOME change in front of its program
+// (effectrules.HomeInput: sudo, doas, env -i, a HOME= prefix). The program
+// run with another HOME may read config files of its own, which is why the
+// effect is not fully known, but the write, append or delete the call names
+// on a member is still that mutation (rel-1-0-10:GAP-1478: sudo rsync
+// --log-file on the audit db was allowed while the unwrapped spelling
+// alerted).
+func effectNamedRoleKnown(f *semanticpb.EffectFact) bool {
+	if f.GetRoleState() == "known" {
+		return len(f.GetReasons()) == 0
+	}
+	return effectrules.HomeInput(f)
+}
+
 // knownProtectedMutationProofs are the decision proofs of one Known write,
 // append or delete of an exact member of a protected set, whatever program
 // the program table modeled it for (redirection, cp, tee, sort -o, rsync, a
@@ -1163,7 +1191,7 @@ func knownProtectedMutationProofs(f *semanticpb.EffectFact, flavor effects.Flavo
 	default:
 		return nil
 	}
-	if f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
+	if f.GetTargetState() != "known" || !effectNamedRoleKnown(f) ||
 		!effectrules.CanonicalAbsolute(f.GetTarget().GetPath(), flavor) {
 		return nil
 	}

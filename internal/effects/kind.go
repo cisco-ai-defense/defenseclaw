@@ -121,6 +121,16 @@ const (
 	// what the rest of the shell runs, or the statement sits behind a provably
 	// false `&&` / true `||` (rel-1-0-10 GAP-0218).
 	ReasonExecutionState ReasonCode = "execution_state"
+	// ReasonHomeInput marks a path effect the call names in its own words (an
+	// operand or an option argument) that was fully known until the one
+	// unaccounted input of its command turned out to be a changed HOME (an
+	// identity wrapper such as sudo or doas, env -i, a HOME= prefix). The new
+	// HOME gives the program config files of its own to read, so the effect
+	// also carries unknown_flag and the call is never fully known; but the
+	// write or append it names is still that write (rel-1-0-10:GAP-1478,
+	// gateway knownProtectedMutationProofs). It is only ever added beside
+	// unknown_flag.
+	ReasonHomeInput ReasonCode = "home_input"
 )
 
 // reasonPrecedence orders reasons so a composite unknown reports the most
@@ -149,6 +159,7 @@ var reasonPrecedence = map[ReasonCode]int{
 	ReasonDestMayBeDir:       12,
 	ReasonVirtualRoot:        10,
 	ReasonExecutionState:     6,
+	ReasonHomeInput:          18,
 }
 
 // Reason is one closed reason with its scope.

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -289,10 +290,15 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 		uncertainEffect := fact.GetTargetState() != string(effects.TargetStateKnown) ||
 			fact.GetRoleState() != string(effects.RoleStateKnown) ||
 			fact.GetKind() == string(effects.KindOpaque)
+		namedMutation := HomeInputNamedMutation(fact)
 		for _, match := range target.GetProtected() {
 			// An inode match is direct resolver evidence for the physical file;
-			// retain it when command role or placement remains uncertain.
-			if uncertainEffect && match.GetState() == string(gradeKnown) && match.GetReason() != "inode" {
+			// retain it when command role or placement remains uncertain. So
+			// is the exact member a named mutation writes when only the HOME
+			// of its program changed (HomeInputNamedMutation).
+			keep := match.GetReason() == "inode" ||
+				namedMutation && (match.GetReason() == "exact" || match.GetReason() == "other_home")
+			if uncertainEffect && match.GetState() == string(gradeKnown) && !keep {
 				match.State = string(gradeUnknown)
 				match.Reason = "call_maybe"
 			}
@@ -423,6 +429,34 @@ func projectSources(in []effects.Source) []*semanticpb.EffectSource {
 		})
 	}
 	return out
+}
+
+// homeInputReasons are the reasons of a path effect the call names whose
+// only unknown is the changed HOME of its program (effects.ReasonHomeInput,
+// always beside unknown_flag).
+var homeInputReasons = []string{
+	string(effects.ScopeRole) + ":" + string(effects.ReasonUnknownFlag),
+	string(effects.ScopeRole) + ":" + string(effects.ReasonHomeInput),
+}
+
+// HomeInput reports a fact whose role the call words decide but for the
+// HOME of its program (sudo, doas, env -i, a HOME= prefix): the program may
+// read config files of its own, so the fact is not fully known, but the
+// target and role it names are (rel-1-0-10:GAP-1478).
+func HomeInput(fact *semanticpb.EffectFact) bool {
+	return fact.GetTargetState() == string(effects.TargetStateKnown) &&
+		slices.Equal(fact.GetReasons(), homeInputReasons)
+}
+
+// HomeInputNamedMutation reports a HomeInput write, append or delete: sudo
+// rsync --log-file=MEMBER writes MEMBER as the unwrapped spelling does, so
+// its exact protected match stays known (GAP-1478).
+func HomeInputNamedMutation(fact *semanticpb.EffectFact) bool {
+	switch effects.Kind(fact.GetKind()) {
+	case effects.KindWrite, effects.KindAppend, effects.KindDelete:
+		return HomeInput(fact)
+	}
+	return false
 }
 
 func reasonStrings(in []effects.Reason) []string {
