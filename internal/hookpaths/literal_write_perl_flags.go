@@ -103,6 +103,18 @@ func perlImportHasName(tokens []perlToken, start, end int, name string) bool {
 
 func perlVisibilityAt(tokens []perlToken, call perlCall, name string) perlFlagVisibility {
 	var visibility perlFlagVisibility
+	// prefix: the tokens before the call; lastBranch: the last word of the
+	// prefix after which a require is not straight-line code before the
+	// call. Each require read the rest of the prefix for such a word, the
+	// square of a dense program (rel-1-0-10:GAP-2230).
+	prefix, lastBranch := 0, -1
+	for prefix < len(tokens) && tokens[prefix].start < call.start {
+		switch tokens[prefix].text {
+		case "sub", "for", "foreach", "while", "until", "if", "unless":
+			lastBranch = prefix
+		}
+		prefix++
+	}
 	for i := 0; i+1 < len(tokens) && tokens[i].start < call.start; i++ {
 		word := tokens[i].text
 		module := perlFlagModule(tokens[i+1].text)
@@ -124,14 +136,7 @@ func perlVisibilityAt(tokens []perlToken, call perlCall, name string) perlFlagVi
 		if word == "require" && module < 2 {
 			if tokens[i].block == call.block && tokens[i].blockKind != "sub" &&
 				tokens[i].blockKind != "loop" {
-				straight := true
-				for j := i + 2; j < len(tokens) && tokens[j].start < call.start; j++ {
-					switch tokens[j].text {
-					case "sub", "for", "foreach", "while", "until", "if", "unless":
-						straight = false
-					}
-				}
-				if straight {
+				if lastBranch < i+2 {
 					visibility.runtime[module] = true
 				}
 			} else if tokens[i].blockKind == "BEGIN" || tokens[i].blockKind == "UNITCHECK" ||
@@ -165,11 +170,11 @@ func perlFlagVisible(tokens []perlToken, call perlCall, spelling string, callFor
 	return name, v.loaded[module] || callForm && v.runtime[module]
 }
 
-func perlFlagExpression(tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef) (uint64, bool) {
-	return perlFlagExpressionDepth(tokens, call, span, defs, 0)
+func perlFlagExpression(s1 *perlS1Lazy, tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef) (uint64, bool) {
+	return perlFlagExpressionDepth(s1, tokens, call, span, defs, 0)
 }
 
-func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef, depth int) (uint64, bool) {
+func perlFlagExpressionDepth(s1 *perlS1Lazy, tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef, depth int) (uint64, bool) {
 	if depth > 1 {
 		return 0, false
 	}
@@ -193,12 +198,12 @@ func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, def
 				return 0, false
 			}
 			at = next
-			valueSpan, proven := perlS1ValueSpan(tokens, call, name)
+			valueSpan, proven := perlS1ValueSpan(s1, tokens, call, name)
 			if !proven {
 				return 0, false
 			}
 			source := perlCall{start: valueSpan[0], block: call.block}
-			return perlFlagExpressionDepth(tokens, source, valueSpan, defs, depth+1)
+			return perlFlagExpressionDepth(s1, tokens, source, valueSpan, defs, depth+1)
 		}
 		if tok.text == "(" {
 			at++
@@ -268,7 +273,7 @@ func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, def
 	return value, ok && at == len(expr)
 }
 
-func perlSysopenWrites(tokens []perlToken, calls []perlCall, definitions []perlDef, skip map[int]bool) []string {
+func perlSysopenWrites(s1 *perlS1Lazy, tokens []perlToken, calls []perlCall, definitions []perlDef, skip map[int]bool) []string {
 	var paths []string
 	defs := make(map[string]perlDef)
 	next := 0
@@ -293,7 +298,7 @@ func perlSysopenWrites(tokens []perlToken, calls []perlCall, definitions []perlD
 		if !fixed {
 			continue
 		}
-		flags, known := perlFlagExpression(tokens, call, call.args[2], defs)
+		flags, known := perlFlagExpression(s1, tokens, call, call.args[2], defs)
 		if !known {
 			continue
 		}

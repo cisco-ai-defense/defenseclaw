@@ -3,7 +3,10 @@
 
 package hookpaths
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 func perlArgumentLiteral(tokens []perlToken, arg [2]int) (string, bool) {
 	return perlFixedPath(tokens, arg[0], arg[1])
@@ -79,28 +82,6 @@ func perlScalarAt(tokens []perlToken, at int) (string, int) {
 	return "", at
 }
 
-func perlS1Enclosing(tokens []perlToken, assignment, callAt int) bool {
-	depth := 0
-	for i := assignment; i < callAt; i++ {
-		switch tokens[i].text {
-		case "{":
-			depth++
-			if i+1 < len(tokens) {
-				switch tokens[i+1].blockKind {
-				case "sub", "loop":
-					return false
-				}
-			}
-		case "}":
-			depth--
-			if depth < 0 {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func perlOpaqueAt(tokens []perlToken, at int) bool {
 	if at+1 >= len(tokens) {
 		return false
@@ -117,71 +98,51 @@ func perlOpaqueAt(tokens []perlToken, at int) bool {
 	return false
 }
 
-func perlS1ValueSpan(tokens []perlToken, call perlCall, name string) ([2]int, bool) {
-	callAt := -1
-	for i := range tokens {
-		if tokens[i].start == call.start {
-			callAt = i
-			break
-		}
-	}
-	if callAt < 0 {
+// perlS1ValueSpan is the span of the value of the last straight-line S1
+// assignment "$name = VALUE" before call that encloses it (no sub or loop
+// boundary and no closing brace between them, not escaped, not under a
+// statement modifier loop or a conditional), when nothing between the value
+// and the call uses $name again or runs code the reading cannot see
+// (perlOpaqueAt). Every question is answered from the program's index
+// (perlS1Index): the reading of the whole token prefix per question grew
+// with the square of dense code (rel-1-0-10:GAP-2230).
+func perlS1ValueSpan(s1 *perlS1Lazy, tokens []perlToken, call perlCall, name string) ([2]int, bool) {
+	index := s1.of(tokens)
+	callAt, found := index.at[call.start]
+	if !found {
 		return [2]int{}, false
 	}
 	assignment, valueStart := -1, -1
-	for i := 0; i < callAt; i++ {
-		scalar, next := perlScalarAt(tokens, i)
-		if scalar != name || next >= callAt || tokens[next].text != "=" ||
-			!perlS1Enclosing(tokens, i, callAt) || tokens[i].modifierLoop {
-			continue
+	assigns := index.assigns[name]
+	for k := sort.SearchInts(assigns, callAt) - 1; k >= 0; k-- {
+		i := assigns[k]
+		if _, next := perlScalarAt(tokens, i); next < callAt && index.encloses(i, callAt) {
+			assignment, valueStart = i, next+1
+			break
 		}
-		if i > 0 && tokens[i-1].text == string(rune(92)) {
-			continue
-		}
-		conditional := false
-		for j := i - 1; j >= 0 && tokens[j].text != ";" && tokens[j].text != "{" && tokens[j].text != "}"; j-- {
-			switch tokens[j].text {
-			case "if", "unless", "while", "until", "for", "foreach":
-				conditional = true
-			}
-		}
-		if conditional {
-			continue
-		}
-		assignment, valueStart = i, next+1
 	}
 	if assignment < 0 {
 		return [2]int{}, false
 	}
-	for i := valueStart; i < callAt; i++ {
-		scalar, _ := perlScalarAt(tokens, i)
-		if scalar == name {
-			return [2]int{}, false
-		}
-		if perlOpaqueAt(tokens, i) {
-			return [2]int{}, false
-		}
+	if perlIndexWithin(index.uses[name], valueStart, callAt) || perlIndexWithin(index.opaque, valueStart, callAt) {
+		return [2]int{}, false
 	}
-	valueEnd := valueStart
-	for valueEnd < callAt && tokens[valueEnd].text != ";" &&
-		tokens[valueEnd].text != "," && tokens[valueEnd].text != ")" {
-		valueEnd++
-	}
+	valueEnd := min(index.term[valueStart], callAt)
 	if valueEnd == valueStart {
 		return [2]int{}, false
 	}
 	return [2]int{tokens[valueStart].start, tokens[valueEnd-1].end}, true
 }
 
-func perlDirectScalarMode(tokens []perlToken, call perlCall, name string) (string, bool) {
-	span, proven := perlS1ValueSpan(tokens, call, name)
+func perlDirectScalarMode(s1 *perlS1Lazy, tokens []perlToken, call perlCall, name string) (string, bool) {
+	span, proven := perlS1ValueSpan(s1, tokens, call, name)
 	if !proven {
 		return "", false
 	}
 	return perlFixedPath(tokens, span[0], span[1])
 }
 
-func perlResolveDirectWrites(tokens []perlToken, calls []perlCall, skip map[int]bool) []string {
+func perlResolveDirectWrites(s1 *perlS1Lazy, tokens []perlToken, calls []perlCall, skip map[int]bool) []string {
 	var paths []string
 	add := func(value string) {
 		if value == "" {
@@ -245,7 +206,7 @@ func perlResolveDirectWrites(tokens []perlToken, calls []perlCall, skip map[int]
 				}
 				if !known {
 					if name := perlScalarName(tokens, call.args[1]); name != "" {
-						if mode, proven := perlDirectScalarMode(tokens, call, name); proven && perlThreeArgWriteMode(mode) {
+						if mode, proven := perlDirectScalarMode(s1, tokens, call, name); proven && perlThreeArgWriteMode(mode) {
 							if path, fixed := pathAt(call, 2); fixed {
 								add(path)
 							}
@@ -258,7 +219,7 @@ func perlResolveDirectWrites(tokens []perlToken, calls []perlCall, skip map[int]
 						add(path)
 					}
 				}
-				if path, proven := perlInterpolatedOpenPath(tokens, call); proven {
+				if path, proven := perlInterpolatedOpenPath(s1, tokens, call); proven {
 					add(path)
 				}
 			}
@@ -267,7 +228,7 @@ func perlResolveDirectWrites(tokens []perlToken, calls []perlCall, skip map[int]
 	return paths
 }
 
-func perlInterpolatedOpenPath(tokens []perlToken, call perlCall) (string, bool) {
+func perlInterpolatedOpenPath(s1 *perlS1Lazy, tokens []perlToken, call perlCall) (string, bool) {
 	if call.argc != 2 {
 		return "", false
 	}
@@ -287,7 +248,7 @@ func perlInterpolatedOpenPath(tokens []perlToken, call perlCall) (string, bool) 
 	if end == 1 || end == len(inner) || strings.ContainsAny(inner[end:], "$@\\") {
 		return "", false
 	}
-	mode, proven := perlDirectScalarMode(tokens, call, inner[1:end])
+	mode, proven := perlDirectScalarMode(s1, tokens, call, inner[1:end])
 	if !proven || !perlThreeArgWriteMode(mode) {
 		return "", false
 	}

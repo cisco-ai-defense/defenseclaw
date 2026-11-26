@@ -24,26 +24,26 @@ func perlDefName(name string) string {
 	return name
 }
 
-func perlDefinitionValue(tokens []perlToken, from, to int, defs map[string]perlDef) (uint64, bool) {
+func perlDefinitionValue(s1 *perlS1Lazy, tokens []perlToken, from, to int, defs map[string]perlDef) (uint64, bool) {
 	if from >= to {
 		return 0, false
 	}
 	call := perlCall{start: tokens[from].start, block: tokens[from].block}
-	return perlFlagExpression(tokens, call, [2]int{tokens[from].start, tokens[to-1].end}, defs)
+	return perlFlagExpression(s1, tokens, call, [2]int{tokens[from].start, tokens[to-1].end}, defs)
 }
 
-func perlNamedDefinitions(tokens []perlToken) []perlDef {
+func perlNamedDefinitions(s1 *perlS1Lazy, tokens []perlToken) []perlDef {
 	var result []perlDef
 	defs := make(map[string]perlDef)
 	for i := 0; i+2 < len(tokens); i++ {
 		if tokens[i].text == "*" {
-			if def, parsed := perlGlobDefinition(tokens, i, defs); parsed {
+			if def, parsed := perlGlobDefinition(s1, tokens, i, defs); parsed {
 				result = append(result, def)
 				defs[def.name] = def
 			}
 		}
 		if tokens[i].text == "sub" {
-			if def, parsed := perlSubDefinition(tokens, i, defs); parsed {
+			if def, parsed := perlSubDefinition(s1, tokens, i, defs); parsed {
 				result = append(result, def)
 				defs[def.name] = def
 			}
@@ -76,7 +76,7 @@ func perlNamedDefinitions(tokens []perlToken) []perlDef {
 					k++
 				}
 			hashEnd:
-				value, known := perlDefinitionValue(tokens, start, k, defs)
+				value, known := perlDefinitionValue(s1, tokens, start, k, defs)
 				def := perlDef{name: name, value: value, known: known, at: tokens[j].start, block: tokens[j].block}
 				result = append(result, def)
 				defs[name] = def
@@ -92,7 +92,7 @@ func perlNamedDefinitions(tokens []perlToken) []perlDef {
 			for k < len(tokens) && tokens[k].text != ";" {
 				k++
 			}
-			value, known := perlDefinitionValue(tokens, start, k, defs)
+			value, known := perlDefinitionValue(s1, tokens, start, k, defs)
 			def := perlDef{name: name, value: value, known: known, at: tokens[j].start, block: tokens[j].block}
 			result = append(result, def)
 			defs[name] = def
@@ -101,7 +101,7 @@ func perlNamedDefinitions(tokens []perlToken) []perlDef {
 	return result
 }
 
-func perlSubDefinition(tokens []perlToken, at int, defs map[string]perlDef) (perlDef, bool) {
+func perlSubDefinition(s1 *perlS1Lazy, tokens []perlToken, at int, defs map[string]perlDef) (perlDef, bool) {
 	if at+2 >= len(tokens) || tokens[at].text != "sub" {
 		return perlDef{}, false
 	}
@@ -144,11 +144,11 @@ func perlSubDefinition(tokens []perlToken, at int, defs map[string]perlDef) (per
 	if end > start && tokens[end-1].text == ";" {
 		end--
 	}
-	value, known := perlDefinitionValue(tokens, start, end, defs)
+	value, known := perlDefinitionValue(s1, tokens, start, end, defs)
 	return perlDef{name: name, value: value, known: known, at: tokens[at].start, block: tokens[at].block}, true
 }
 
-func perlGlobDefinition(tokens []perlToken, at int, defs map[string]perlDef) (perlDef, bool) {
+func perlGlobDefinition(s1 *perlS1Lazy, tokens []perlToken, at int, defs map[string]perlDef) (perlDef, bool) {
 	if tokens[at].text != "*" || at+4 >= len(tokens) {
 		return perlDef{}, false
 	}
@@ -192,7 +192,7 @@ func perlGlobDefinition(tokens []perlToken, at int, defs map[string]perlDef) (pe
 	if end > start && tokens[end-1].text == ";" {
 		end--
 	}
-	value, known := perlDefinitionValue(tokens, start, end, defs)
+	value, known := perlDefinitionValue(s1, tokens, start, end, defs)
 	compileTime := tokens[at].blockKind == "BEGIN" || tokens[at].blockKind == "UNITCHECK" ||
 		tokens[at].blockKind == "CHECK" || tokens[at].blockKind == "INIT"
 	return perlDef{name: name, value: value, known: known, runtime: !compileTime,

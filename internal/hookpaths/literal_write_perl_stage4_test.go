@@ -69,7 +69,7 @@ func TestPerlStageFourConstantSub(t *testing.T) {
 			got := literalInterpreterWrites(tc.code, "perl", "/tmp", "/tmp")
 			if slices.Contains(got, "p") != tc.write {
 				tokens, complete := perlLex(tc.code)
-				defs := perlNamedDefinitions(tokens)
+				defs := perlNamedDefinitions(nil, tokens)
 				t.Fatalf("paths = %v, want write %v, complete=%v tokens=%v defs=%v", got, tc.write, complete, tokens, defs)
 			}
 		})

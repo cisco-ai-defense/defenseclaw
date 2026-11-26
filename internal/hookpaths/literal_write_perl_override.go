@@ -145,7 +145,7 @@ func perlArgumentSyntax(tokens []perlToken, span [2]int) string {
 	return out.String()
 }
 
-func perlOverrideBodyPaths(tokens []perlToken, body perlOverrideDef, caller perlCall, calls []perlCall) []string {
+func perlOverrideBodyPaths(s1 *perlS1Lazy, tokens []perlToken, body perlOverrideDef, caller perlCall, calls []perlCall) []string {
 	var paths []string
 	pathAt := func(index int) (string, bool) {
 		if index >= caller.argc {
@@ -192,7 +192,7 @@ func perlOverrideBodyPaths(tokens []perlToken, body perlOverrideDef, caller perl
 			if inner.argc < 3 || perlArgumentSyntax(tokens, inner.args[1]) != "$_[1]" {
 				continue
 			}
-			flags, known := perlFlagExpression(tokens, inner, inner.args[2], nil)
+			flags, known := perlFlagExpression(s1, tokens, inner, inner.args[2], nil)
 			if known && (flags&3 != 0 || flags&uint64(perlCommonFlags[3].value|perlCommonFlags[4].value|perlCommonFlags[5].value) != 0) {
 				if path, fixed := pathAt(1); fixed {
 					paths = append(paths, path)
@@ -236,7 +236,7 @@ func perlOverrideBodyPaths(tokens []perlToken, body perlOverrideDef, caller perl
 	return paths
 }
 
-func perlResolveOverrides(tokens []perlToken, calls []perlCall) perlOverrideResult {
+func perlResolveOverrides(s1 *perlS1Lazy, tokens []perlToken, calls []perlCall) perlOverrideResult {
 	imports := perlUseSubs(tokens)
 	defs := perlOverrideDefinitions(tokens)
 	result := perlOverrideResult{skip: make(map[int]bool)}
@@ -265,7 +265,7 @@ func perlResolveOverrides(tokens []perlToken, calls []perlCall) perlOverrideResu
 		}
 		result.skip[call.start] = true
 		if matched != nil {
-			result.paths = append(result.paths, perlOverrideBodyPaths(tokens, *matched, call, calls)...)
+			result.paths = append(result.paths, perlOverrideBodyPaths(s1, tokens, *matched, call, calls)...)
 		}
 	}
 	return result
