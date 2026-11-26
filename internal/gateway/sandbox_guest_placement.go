@@ -945,7 +945,13 @@ func guestReadingFirst(text string) bool {
 // placement's folder bound: the home, or a folder whose name starts with a
 // dot (~/.ssh, ~/.aws, ~/.defenseclaw, a project's .git or .claude).
 func guestDirFirst(dir, home string) bool {
-	return dir == path.Clean(home) || strings.HasPrefix(path.Base(dir), ".")
+	// Cleaning never makes a path longer, so a folder longer than home is
+	// not the home and home is not cleaned for it: the walks ask this of
+	// each folder they keep or sort, thousands a call (rel-1-0-10:GAP-2249).
+	if len(dir) <= len(home) && dir == path.Clean(home) {
+		return true
+	}
+	return strings.HasPrefix(path.Base(dir), ".")
 }
 
 // guestPlainFolder reports a folder in which a plain reading (one
