@@ -89,14 +89,16 @@ func AbsoluteHookExecutable(path string) bool {
 }
 
 // ParseInvocationMode reads the event and availability answer bound by Setup.
-// Older registrations without a mode keep their released closed answer.
+// Older registrations without a mode keep their released closed answer. The
+// launcher is defenseclaw-hook.exe by its long name or, on Windows, by an
+// 8.3 alias of that file (hookExecutableAlias, GAP-2244).
 func ParseInvocationMode(args []string) (launcher string, hookArgs []string, event string, wrapped, open, ok bool) {
 	want := []string{"hook", "--connector", "claudecode"}
 	if len(args) < 2+len(want) || len(args) > 7+len(want) {
 		return "", nil, "", false, false, false
 	}
 	if args[0] != Subcommand && args[0] != WrappedSubcommand ||
-		!Guardable(args[1]) || !AbsoluteHookExecutable(args[1]) {
+		!Guardable(args[1]) || !(AbsoluteHookExecutable(args[1]) || hookExecutableAlias(args[1])) {
 		return "", nil, "", false, false, false
 	}
 	for i, arg := range want {
