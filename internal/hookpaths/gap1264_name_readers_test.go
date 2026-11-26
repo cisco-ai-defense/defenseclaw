@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -115,6 +116,10 @@ func TestGAP1264ReadRegularFileBoundedReadsTheGatedPath(t *testing.T) {
 					t.Fatalf("ReadRegularFileBounded read the share's file through a link pointed at it after the share gate (changed=%v)", changed.Load())
 				case kind == "plain" && got != "local":
 					t.Fatalf("a name with no link on the way read %s, want the local file", got)
+				case moment == "control" && runtime.GOOS != "windows" && got != "local":
+					// safefile reads through a link above the folder that holds
+					// the file here; the gated read keeps that answer.
+					t.Fatalf("an unchanged link above the file's folder read %s, want the local file", got)
 				case got != "local" && got != "refused":
 					t.Fatalf("read %s, want the local file or a refusal", got)
 				}

@@ -26,11 +26,11 @@ import (
 // hold is one open of the whole path that follows no reparse point on the
 // way (OBJ_DONT_REPARSE) and none at its end (FILE_OPEN_REPARSE_POINT): when
 // it succeeds, no folder of the path was a link at that moment, and while it
-// is open none can become one. still() has nothing left to look at.
+// is open none can become one; a pinned hold's still() has nothing left to
+// look at.
 const (
 	holdShare  = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
 	walkAccess = windows.FILE_READ_ATTRIBUTES
-	walkShare  = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
 )
 
 // holdAccesses are tried in order: a file's contents or a folder's listing,
@@ -50,10 +50,32 @@ func holdUnlinked(path string) (func() bool, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	handle, err := holdOpen(nt)
+	pinned := err == nil
+	if err == windows.STATUS_SHARING_VIOLATION || err == windows.STATUS_ACCESS_DENIED {
+		// Another handle denies read sharing or has delete access (a
+		// registry hive, a file another program holds), or the account may
+		// neither read nor enter the component: it cannot be pinned. It is
+		// opened for its attributes, the path still followed by no link on
+		// the way, and looked at again in still(): the read is discarded
+		// unless the name then still opens, with no link on the way, the very
+		// file the hold opened. The folders above stay pinned by the open
+		// handle (rel-1-0-10:GAP-1264; a locked file keeps the answers it had).
+		// Without delete sharing still: an attributes-only open is checked
+		// against no other handle, and NTFS refuses a rename of a folder above
+		// a handle that does not share delete.
+		handle, err = ntOpen(0, nt, walkAccess, holdShare, windows.OBJ_DONT_REPARSE)
+		if err == windows.STATUS_REPARSE_POINT_ENCOUNTERED {
+			handle, err = holdByComponents(nt, walkAccess, holdShare)
+		}
+	}
 	if err != nil {
 		return nil, holdError(path, err)
 	}
 	linked, err := handleIsLink(handle)
+	var held windows.ByHandleFileInformation
+	if err == nil && !linked && !pinned {
+		err = windows.GetFileInformationByHandle(handle, &held)
+	}
 	if err != nil || linked {
 		_ = windows.CloseHandle(handle)
 		if linked {
@@ -61,10 +83,35 @@ func holdUnlinked(path string) (func() bool, error) {
 		}
 		return nil, &os.PathError{Op: "open", Path: path, Err: ErrUnpinned}
 	}
+	if pinned {
+		return func() bool {
+			_ = windows.CloseHandle(handle)
+			return true
+		}, nil
+	}
 	return func() bool {
-		_ = windows.CloseHandle(handle)
-		return true
+		defer windows.CloseHandle(handle) //nolint:errcheck // a handle opened for attributes only
+		return stillTheHeldFile(nt, held)
 	}, nil
+}
+
+// stillTheHeldFile reports that nt opens, following no link on the way and
+// with no link at its end, the file whose information is held.
+func stillTheHeldFile(nt string, held windows.ByHandleFileInformation) bool {
+	now, err := ntOpen(0, nt, walkAccess, holdShare, windows.OBJ_DONT_REPARSE)
+	if err == windows.STATUS_REPARSE_POINT_ENCOUNTERED {
+		now, err = holdByComponents(nt, walkAccess, holdShare)
+	}
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(now) //nolint:errcheck // a handle opened for attributes only
+	var info windows.ByHandleFileInformation
+	if linked, err := handleIsLink(now); err != nil || linked || windows.GetFileInformationByHandle(now, &info) != nil {
+		return false
+	}
+	return info.VolumeSerialNumber == held.VolumeSerialNumber && info.FileIndexHigh == held.FileIndexHigh &&
+		info.FileIndexLow == held.FileIndexLow
 }
 
 // holdOpen opens nt as the hold. A reparse point on the way is either a
@@ -77,7 +124,7 @@ func holdOpen(nt string) (windows.Handle, error) {
 	for _, access := range holdAccesses {
 		handle, err = ntOpen(0, nt, access, holdShare, windows.OBJ_DONT_REPARSE)
 		if err == windows.STATUS_REPARSE_POINT_ENCOUNTERED {
-			return holdByComponents(nt, access)
+			return holdByComponents(nt, access, holdShare)
 		}
 		if err != windows.STATUS_ACCESS_DENIED {
 			break
@@ -92,26 +139,28 @@ func holdOpen(nt string) (windows.Handle, error) {
 // anything below it is looked up. Each handle is closed only once the one
 // below it is open, so no folder on the way can be renamed in between; the
 // last component is opened as the hold.
-func holdByComponents(nt string, access uint32) (windows.Handle, error) {
+func holdByComponents(nt string, access, share uint32) (windows.Handle, error) {
 	root, rest, ok := ntSplitRoot(nt)
 	if !ok {
 		return 0, windows.STATUS_REPARSE_POINT_ENCOUNTERED
 	}
 	names := strings.FieldsFunc(rest, func(r rune) bool { return r == '\\' })
 	if len(names) == 0 {
-		return ntOpen(0, root, access, holdShare, windows.OBJ_DONT_REPARSE)
+		return ntOpen(0, root, access, share, windows.OBJ_DONT_REPARSE)
 	}
-	parent, err := ntOpen(0, root, walkAccess, walkShare, windows.OBJ_DONT_REPARSE)
+	parent, err := ntOpen(0, root, walkAccess, holdShare, windows.OBJ_DONT_REPARSE)
 	if err != nil {
 		return 0, err
 	}
 	for i, name := range names {
 		last := i == len(names)-1
-		childAccess, childShare := uint32(walkAccess), uint32(walkShare)
+		childAccess := uint32(walkAccess)
 		if last {
-			childAccess, childShare = access, holdShare
+			childAccess = access
 		}
-		child, err := ntOpen(parent, name, childAccess, childShare, 0)
+		// Every handle on the way shares no delete: NTFS then refuses a
+		// rename of any folder above it until the next one is open.
+		child, err := ntOpen(parent, name, childAccess, share, 0)
 		_ = windows.CloseHandle(parent)
 		if err != nil {
 			return 0, err
@@ -131,12 +180,10 @@ func holdByComponents(nt string, access uint32) (windows.Handle, error) {
 	return parent, nil
 }
 
-// holdError is the error of a hold that could not be taken. A name that is
-// not there or cannot name a file is that error, as the read would fail;
-// any other failure (another handle denies read sharing or has delete
-// access, as a registry hive or the paging file does; the account may
-// neither read nor enter it) is ErrUnpinned: what a read would show is
-// unknown, and it is not made unpinned.
+// holdError is the error of a hold that could not be taken at all. A name
+// that is not there or cannot name a file is that error, as the read would
+// fail; any other failure (no handle at all, as for the paging file) is
+// ErrUnpinned: what a read would show is unknown, and it is not made.
 func holdError(path string, err error) error {
 	if errors.Is(err, ErrLinked) {
 		return ErrLinked

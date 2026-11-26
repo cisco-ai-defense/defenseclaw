@@ -972,18 +972,43 @@ func ReadFile(name string) ([]byte, error) {
 // hook call names, read as pathOpen reads it: a share on another machine is
 // never contacted, and the file read is the file the share decision was
 // made for (rel-1-0-10:GAP-1074). safefile reads the path the gate read,
-// under its hold. It refuses a link on the way, so a name the walk read
-// through a link is refused here before anything opens it (readNameAsGated):
-// opening the name again would follow the link as it is now, which may lead
-// to a share since the walk (rel-1-0-10:GAP-1264).
+// under its hold, never the name again: opening the name would follow a
+// link on the way as it is now, which may lead to a share since the walk
+// (rel-1-0-10:GAP-1264). A name the walk read through a link that safefile
+// refuses for the name is refused here before anything opens it
+// (readNameAsSafefile), so the answer stays the one safefile gives the name.
 func ReadRegularFileBounded(name string, maxBytes int64) ([]byte, error) {
 	body, _, err := readGated("open", name, func(path string) ([]byte, error) {
-		if err := readNameAsGated("open", name, path); err != nil {
+		if err := readNameAsSafefile("open", name, path); err != nil {
 			return nil, err
 		}
 		return safefile.ReadRegularFileBounded(path, maxBytes)
 	}, nil)
 	return body, err
+}
+
+// readNameAsSafefile refuses (errNameReadThroughLink) a name that the walk
+// read through a link where safefile refuses one: on Windows any link on the
+// way (rejectReparseChain); elsewhere a link as the last component or as the
+// folder that holds it, which are looked at with the walk's own reads
+// (pathLstat). A link further up is read through, as safefile does.
+func readNameAsSafefile(op, name, path string) error {
+	if path == fixturefs.Map(name) {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+	}
+	for _, component := range []string{name, filepath.Dir(name)} {
+		info, err := pathLstat(component)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+		}
+	}
+	return nil
 }
 
 // errNameReadThroughLink is the refusal of a reader that reads the name it

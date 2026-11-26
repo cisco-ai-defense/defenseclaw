@@ -66,8 +66,8 @@ func SetPinnedStatHookForTest(fn func(path string)) (restore func()) {
 var ErrLinked = errors.New("pathidentity: the last component of the path is a link")
 
 // ErrUnpinned is the error of HoldUnlinked on Windows for a component it
-// cannot hold against a rename or delete. What a read of it would show is
-// unknown (rel-1-0-10:GAP-1264).
+// cannot open at all (the paging file and the like). What a read of it
+// would show is unknown (rel-1-0-10:GAP-1264).
 var ErrUnpinned = errors.New("pathidentity: the component cannot be held against a rename")
 
 // HoldUnlinked holds the last component of path, which a check has read as
@@ -83,9 +83,12 @@ var ErrUnpinned = errors.New("pathidentity: the component cannot be held against
 // above it, so no link can take the place of any of them, and a folder on
 // the way that is a link now is refused (ErrLinked, rel-1-0-10:GAP-1263). A
 // component that cannot be held so (another handle denies read sharing or
-// has delete access, or the account may neither read nor enter it) is
-// ErrUnpinned: it is not read unpinned (rel-1-0-10:GAP-1264). On other
-// platforms it is read with lstat before and after the read.
+// has delete access, or the account may neither read nor enter it) is held
+// for its attributes, which still pins the folders above it, and still()
+// reports false unless its name then opens the same file with no link on
+// the way. One that cannot be opened at all is ErrUnpinned: it is not read
+// (rel-1-0-10:GAP-1264). On other platforms it is read with lstat before and
+// after the read.
 //
 // A component that does not exist, or a name that cannot name a file, is
 // that error.

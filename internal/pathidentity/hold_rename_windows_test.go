@@ -74,21 +74,25 @@ func TestGAP1264HeldComponentCannotBeRenamed(t *testing.T) {
 	}
 }
 
-// rel-1-0-10:GAP-1264: a component that cannot be held against a rename
-// (another handle denies read sharing, or holds delete access so that a
-// hold without delete sharing is refused) is ErrUnpinned. The hold used to
-// fall back to a handle that shares delete, or to none, and let the read
-// run unpinned.
-func TestGAP1264UnpinnableComponentIsUnknown(t *testing.T) {
+// rel-1-0-10:GAP-1264: a component another handle keeps from being pinned
+// (that handle denies read sharing, or holds delete access so that a hold
+// without delete sharing is refused). It keeps its hold (a locked file such
+// as a registry hive keeps its answers), and still() reports whether its
+// name still opens the file the hold opened. The hold used to look only for
+// a link at the name, so a file put in its place passed. The folders above
+// stay pinned by the hold's handle.
+func TestGAP1264UnpinnableComponentIsLookedAtAgain(t *testing.T) {
 	for _, row := range []struct {
 		id            string
 		access, share uint32
+		replace       bool
 	}{
-		{"exclusive-reader", windows.GENERIC_READ, 0},
-		{"delete-holder", windows.DELETE | windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE},
+		{"exclusive-reader", windows.GENERIC_READ, 0, false},
+		{"delete-holder", windows.DELETE | windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, false},
+		{"delete-holder-replaced", windows.DELETE | windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, true},
 	} {
 		t.Run(row.id, func(t *testing.T) {
-			_, held := heldTree(t, "file")
+			root, held := heldTree(t, "file")
 			name, _ := windows.UTF16PtrFromString(held)
 			other, err := windows.CreateFile(name, row.access, row.share, nil, windows.OPEN_EXISTING, 0, 0)
 			if err != nil {
@@ -96,12 +100,25 @@ func TestGAP1264UnpinnableComponentIsUnknown(t *testing.T) {
 			}
 			defer windows.CloseHandle(other) //nolint:errcheck // test handle
 			still, err := HoldUnlinked(held)
-			if err == nil {
-				still()
-				t.Fatalf("%s: the hold was taken although it cannot pin the file", row.id)
+			if err != nil {
+				t.Fatalf("%s: hold error %v, want a hold", row.id, err)
 			}
-			if !errors.Is(err, ErrUnpinned) {
-				t.Fatalf("%s: hold error %v, want ErrUnpinned", row.id, err)
+			if os.Rename(filepath.Join(root, "above"), filepath.Join(root, "above2")) == nil {
+				still()
+				t.Fatalf("%s: a folder above was renamed while held", row.id)
+			}
+			if row.replace {
+				if err := os.Rename(held, held+"-away"); err != nil {
+					still()
+					t.Fatalf("%s: rename: %v", row.id, err)
+				}
+				if err := os.WriteFile(held, []byte("b"), 0o600); err != nil {
+					still()
+					t.Fatal(err)
+				}
+			}
+			if got := still(); got == row.replace {
+				t.Fatalf("%s: still() = %v, want %v", row.id, got, !row.replace)
 			}
 		})
 	}
