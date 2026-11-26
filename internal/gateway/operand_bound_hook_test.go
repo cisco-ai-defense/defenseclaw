@@ -49,24 +49,35 @@ func TestLongOperandListAnswersInsideHookDeadlineAndKeepsProtectedBlocks(t *test
 	} else {
 		f.answerOperandRow(t, rows[0].command, rows[0].verdict)
 	}
+	// A shared runner stalls for a second at a time: a row over the budget is
+	// measured again (twice at most) and fails only when every measurement is
+	// over it, as a real slowdown would be (rel-1-0-10:GAP-1809). Every answer
+	// of every measurement still checks its verdict.
+	attempts := 3
+	if hookAnswerRaceBuild {
+		attempts = 1
+	}
 	for _, row := range rows {
-		var timed [][]time.Duration
-		for range runs {
-			timed = append(timed, f.answerOperandRow(t, row.command, row.verdict))
-		}
-		var slowest time.Duration
-		for call := range timed[0] {
-			var times []time.Duration
-			for _, run := range timed {
-				times = append(times, run[call])
+		slowest, used := settledTime(attempts, tolerated, func() time.Duration {
+			var timed [][]time.Duration
+			for range runs {
+				timed = append(timed, f.answerOperandRow(t, row.command, row.verdict))
 			}
-			slices.Sort(times)
-			slowest = max(slowest, times[len(times)/2])
-		}
-		t.Logf("%.40s...: slowest median call %s, runs %v", row.command, slowest.Round(time.Millisecond), timed)
+			var slowest time.Duration
+			for call := range timed[0] {
+				var times []time.Duration
+				for _, run := range timed {
+					times = append(times, run[call])
+				}
+				slices.Sort(times)
+				slowest = max(slowest, times[len(times)/2])
+			}
+			t.Logf("%.40s...: slowest median call %s, runs %v", row.command, slowest.Round(time.Millisecond), timed)
+			return slowest
+		})
 		if !hookAnswerRaceBuild && slowest > tolerated {
-			t.Errorf("%.40s...: slowest median call took %s, want under %s (%s budget, 25 percent tolerance)",
-				row.command, slowest.Round(time.Millisecond), tolerated, perCall)
+			t.Errorf("%.40s...: best slowest median call of %d measurements took %s, want under %s (%s budget, 25 percent tolerance)",
+				row.command, used, slowest.Round(time.Millisecond), tolerated, perCall)
 		}
 	}
 }

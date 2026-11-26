@@ -318,6 +318,11 @@ func cascadeModuleConfig(t *testing.T, posture, module, extra string) *APIServer
 	if inv := loaded.Guardrail.Cascade.Invalid(); inv != nil {
 		t.Fatalf("cascade refused: %s", inv.Error)
 	}
+	// The loader caps timeout_ms at 50, the production bound. Past the load
+	// check these tests give the evaluation a budget a loaded box cannot cross,
+	// so a slow evaluation never turns a pinned decision into the unknown tier
+	// (GAP-1808).
+	loaded.Guardrail.Cascade.Policy.TimeoutMs = 10_000
 	api.scannerCfg.Guardrail.Cascade = loaded.Guardrail.Cascade
 	return api
 }

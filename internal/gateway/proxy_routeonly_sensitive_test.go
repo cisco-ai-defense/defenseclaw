@@ -6,7 +6,6 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -303,12 +302,11 @@ func TestPassthroughSensitiveConversationStaysNarrowed(t *testing.T) {
 }
 
 func TestRouteOnlySensitiveUnreachableLocalIsRefusedAndAudited(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	closed := "http://" + ln.Addr().String()
-	_ = ln.Close()
+	// A port nobody can take: a TCP socket bound and never listening refuses
+	// every connection and keeps its port for the whole test. A port that was
+	// listened on and released can be handed to any other test or process of a
+	// shared box, which then answers the call (GAP-2062).
+	closed := "http://" + refusingLocalAddress(t)
 	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}, BaseURL: closed})
 	store, logger := testStoreAndLogger(t)
 	f.srv.router.SetAuditLogger(logger)
