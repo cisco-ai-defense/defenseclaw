@@ -536,9 +536,23 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 	var callReadings []guestPending
 	callsDropped, callsListed, arrivals := false, map[key]int{}, 0
 	var callsPlain []int
+	// Each folder's first place is read once, not for every call: an 8 KB
+	// call looked up 128 long folder keys for each of its 1,100 calls
+	// (rel-1-0-10:GAP-2249). A folder missing from known is read as 0, as
+	// the map gives it.
+	firstPlaces := func(dirs []string) []int {
+		places := make([]int, len(dirs))
+		if byPosition {
+			for at, dir := range dirs {
+				places[at] = plan.known[dir]
+			}
+		}
+		return places
+	}
+	dirsKnown, targetsKnown := firstPlaces(plan.dirs), firstPlaces(plan.targets)
 	for _, call := range plan.calls {
-		for _, dir := range plan.dirs {
-			if !byPosition || plan.known[dir] <= call.at {
+		for at, dir := range plan.dirs {
+			if !byPosition || dirsKnown[at] <= call.at {
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, false, 0})
 			}
 		}
@@ -550,8 +564,8 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 		if callsDropped && len(callReadings) >= maxSandboxGuestPlacements && !guestReadingFirst(call.text) {
 			continue
 		}
-		for _, dir := range plan.targets {
-			if !byPosition || plan.known[dir] <= call.at {
+		for at, dir := range plan.targets {
+			if !byPosition || targetsKnown[at] <= call.at {
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
 			}
 		}
