@@ -380,15 +380,15 @@ func TestGAP0548KitClaimsOfAnEnvelopeAreReadInLinearTime(t *testing.T) {
 	}
 	// Within the cap, every fact naming the argument decodes it once.
 	link := SubstratePathFact{Field: "tool_input.file_path", Path: value, Abs: "/sandbox/app/x", Resolved: "/sandbox/.ssh/id_ed25519"}
-	env.Facts = &SubstrateFacts{Paths: slices.Repeat([]SubstratePathFact{link}, 32)}
+	env.Facts = &SubstrateFacts{Paths: slices.Repeat([]SubstratePathFact{link}, maxSubstrateGuestPathFacts)}
 	start = time.Now()
 	claims = substrateGuestClaimsOf(env)
 	if elapsed := time.Since(start); elapsed > 2*time.Second || claims == nil || len(claims.links) != maxSubstrateGuestLinkClaims {
-		t.Fatalf("32 facts: %s, claims %d, want %d links at once", elapsed, len(claims.links), maxSubstrateGuestLinkClaims)
+		t.Fatalf("%d facts: %s, claims %d, want %d links at once", maxSubstrateGuestPathFacts, elapsed, len(claims.links), maxSubstrateGuestLinkClaims)
 	}
-	env.Facts = &SubstrateFacts{Paths: slices.Repeat([]SubstratePathFact{link}, 33)}
+	env.Facts = &SubstrateFacts{Paths: slices.Repeat([]SubstratePathFact{link}, maxSubstrateGuestPathFacts+1)}
 	if claims := substrateGuestClaimsOf(env); claims != nil {
-		t.Fatalf("33 facts: claims %+v, want none", claims)
+		t.Fatalf("%d facts: claims %+v, want none", maxSubstrateGuestPathFacts+1, claims)
 	}
 }
 

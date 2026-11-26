@@ -25,8 +25,11 @@ import (
 
 const (
 	maxPathFacts = 32
-	maxLinkHops  = 40
-	maxWalkDepth = 4
+	// Shell calls can carry a few link places after the ordinary path cap.
+	// The original 32 facts stay byte-identical and in order.
+	maxShellLinkFacts = 8
+	maxLinkHops       = 40
+	maxWalkDepth      = 4
 	// maxProjectHookBytes bounds the project settings file the kit reads;
 	// maxProjectHookEvents and maxProjectHookEventLen bound what it reports.
 	maxProjectHookBytes    = 1 << 20
@@ -36,6 +39,10 @@ const (
 	// command the kit resolves (PlacedCommandPathWords); past it the claims
 	// are cut (substrate-1 GAP-0622).
 	maxCommandWordChecks = 2048
+	// A bounded directory snapshot filters missing padding operands after the
+	// path-fact cap without a file-system walk per word.
+	maxCommandFactDirEntries = 4096
+	maxCommandFactDirs       = 16
 	// maxDroppedPathChecks bounds the path arguments past maxPathFacts the
 	// kit still checks for a link; past it the claims are cut.
 	maxDroppedPathChecks = 4 * maxPathFacts
@@ -356,6 +363,9 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	// GAP-0623). An unplaced word keeps the call's folder.
 	type placed struct{ text, dir string }
 	seen := map[placed]bool{}
+	dirNames := map[string]commandFactDirNames{}
+	privateHomeDirs := map[string]bool{}
+	privateHomeSeen := map[string]bool{}
 	for _, word := range hookpaths.PlacedCommandPathWords(command, cwd, home) {
 		dirs := word.Dirs
 		if len(dirs) == 0 || strings.HasPrefix(word.Value, "/") {
@@ -370,15 +380,97 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 				return
 			}
 			seen[placed{word.Text, dir}] = true
+			if len(f.Paths) >= maxPathFacts && !commandWordMayExist(word.Value, dir, dirNames) {
+				// The original reader would list a missing word only
+				// when it was a private-home observation. Preserve its
+				// truncation flag exactly in that case.
+				if privacy && !f.Truncated {
+					// A missing first component cannot change the owner or
+					// link chain of its existing directory. Cache this one
+					// ownership check instead of repeating it for padding.
+					abs := hookpaths.CommandWordAbs(word, dir)
+					ssh := filepath.Join(home, ".ssh")
+					if abs != ssh && !strings.HasPrefix(abs, ssh+string(filepath.Separator)) {
+						if !privateHomeSeen[dir] {
+							privateHomeDirs[dir] = hookpaths.PrivateHomePlace(dir, home)
+							privateHomeSeen[dir] = true
+						}
+						if privateHomeDirs[dir] {
+							f.Truncated, f.claimsCut = true, true
+						}
+					}
+				}
+				continue
+			}
 			if fact, listed := commandWordFact(word, dir, home, privacy); listed {
 				if len(f.Paths) >= maxPathFacts {
 					f.Truncated, f.claimsCut = true, true
-					return
+					// Padding can fill the ordinary fact cap before a later
+					// protected link. Keep the old facts and add only bounded
+					// link places: the gateway needs that place to prove the
+					// statement after its budget refusal.
+					if (fact.Resolved != "" || fact.Entry != "") &&
+						len(f.Paths) < maxPathFacts+maxShellLinkFacts {
+						f.Paths = append(f.Paths, fact)
+					}
+					continue
 				}
 				f.Paths = append(f.Paths, fact)
 			}
 		}
 	}
+}
+
+// commandFactDirNames is one bounded snapshot. An incomplete or unreadable
+// directory cannot rule a word out, so its words are inspected normally.
+type commandFactDirNames struct {
+	names    map[string]bool
+	complete bool
+}
+
+// commandWordMayExist filters only a relative word whose first component is
+// absent from its known directory. Such a word cannot reach a link or hard
+// link there. This runs only after the path-fact cap: no ordinary call pays
+// for a directory snapshot, and a padded command does not walk every
+// missing operand after the cap.
+func commandWordMayExist(value, dir string, cache map[string]commandFactDirNames) bool {
+	if !filepath.IsAbs(dir) || filepath.IsAbs(value) || strings.HasPrefix(value, "~") || strings.Contains(value, "..") {
+		return true
+	}
+	for strings.HasPrefix(value, "./") {
+		value = strings.TrimPrefix(value, "./")
+	}
+	first, _, _ := strings.Cut(value, "/")
+	if first == "" || first == "." || first == ".." {
+		return true
+	}
+	listing, cached := cache[dir]
+	if !cached {
+		if len(cache) >= maxCommandFactDirs {
+			return true
+		}
+		listing = commandFactDirNames{}
+		// A moved directory can give even a missing child an Entry
+		// fact; never filter its words by the logical directory.
+		if physical, ok := hookpaths.ResolveWriteTarget(dir); !ok || physical != filepath.Clean(dir) {
+			cache[dir] = listing
+			return true
+		}
+		folder, err := os.Open(dir)
+		if err == nil {
+			names, readErr := folder.Readdirnames(maxCommandFactDirEntries + 1)
+			_ = folder.Close()
+			if (readErr == nil || readErr == io.EOF) && len(names) <= maxCommandFactDirEntries {
+				listing.complete = true
+				listing.names = make(map[string]bool, len(names))
+				for _, name := range names {
+					listing.names[name] = true
+				}
+			}
+		}
+		cache[dir] = listing
+	}
+	return !listing.complete || listing.names[first]
 }
 
 // commandWordFact is the CommandWordField fact of one command word: its place

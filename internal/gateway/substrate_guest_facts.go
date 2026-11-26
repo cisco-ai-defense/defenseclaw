@@ -32,14 +32,14 @@ import (
 // the gateway uses them only to add the finding the laptop makes, never to
 // remove one; a claim that does not match the call it came with is ignored.
 
-// The kit sends at most 32 path facts (kit maxPathFacts) and two proofs. An
+// The kit sends at most 40 path facts (32 ordinary plus 8 shell-link facts) and two proofs. An
 // envelope with more facts, or more than 8 proofs, is not the kit's, and none of
 // its claims is read: the call is judged as one with no facts, which is never
 // more lenient than with them (substrate-1 GAP-0548). Reading the claims of
 // an envelope decodes each argument of its call once, so it is linear in the
 // envelope's size.
 const (
-	maxSubstrateGuestPathFacts = 32
+	maxSubstrateGuestPathFacts = 40
 	maxSubstrateGuestProofs    = 8
 	// maxSubstrateGuestLinkClaims bounds the file-tool link claims one call
 	// carries.
