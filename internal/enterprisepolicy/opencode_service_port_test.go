@@ -157,9 +157,7 @@ func TestReadOpenCodeServicePortAsUserFollowsFinalLink(t *testing.T) {
 	if err := os.WriteFile(target, []byte(`{"port":25002}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, path); err != nil {
-		t.Skipf("service link unavailable: %v", err)
-	}
+	testenv.Symlink(t, target, path)
 	if port, err := ReadOpenCodeServicePortAsUser(home); err != nil || port != 25002 {
 		t.Fatalf("account port through final link: %d %v", port, err)
 	}
