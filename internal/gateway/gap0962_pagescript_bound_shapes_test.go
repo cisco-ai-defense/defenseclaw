@@ -28,21 +28,18 @@ func gap0962BoundShapes() map[string]string {
 	}
 }
 
-// gap0962SeverityRank orders verdict severities.
-var gap0962SeverityRank = map[string]int{"": 0, "NONE": 0, "INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
-
-// gap0962Want is the verdict severity of a call whose reading stopped at a
-// cap: MEDIUM for the bound, or the highest of the other findings when one
-// ranks above it (the nested goto also sends the cookie it read: the
-// session egress finding keeps its own HIGH). The bound never raises it.
-func gap0962Want(others []string) string {
-	want := "MEDIUM"
-	for _, severity := range others {
-		if gap0962SeverityRank[severity] > gap0962SeverityRank[want] {
-			want = severity
-		}
-	}
-	return want
+// gap0962Want is the exact verdict severity of each shape: MEDIUM for the
+// bound alone; the nested goto also sends the cookie it read, so its session
+// egress finding keeps its own HIGH. A constant, not the highest of the other
+// findings, so that a regression raising any finding to CRITICAL fails
+// (CHK-FIX1020 N4).
+var gap0962Want = map[string]string{
+	"288KB-bytes-cap":      "MEDIUM",
+	"140KB-tokens-cap":     "MEDIUM",
+	"160KB-nested-parens":  "MEDIUM",
+	"160KB-nested-objects": "MEDIUM",
+	"160KB-nested-arrays":  "MEDIUM",
+	"160KB-nested-goto":    "HIGH",
 }
 
 // rel-1-0-10:GAP-0962 (owner ruling 2026-11-21, fixed in c9cd0c91cc): a page
@@ -60,36 +57,36 @@ func TestGAP0962PageScriptBoundShapesAreMedium(t *testing.T) {
 			session := "gap0962-" + name
 			pgNavigate(t, session, pgOwnHost)
 			got := pgCall(t, session, pgPlaywright+"browser_evaluate", pgArgs(t, map[string]any{"function": script}), false)
-			var ids, others []string
+			want, ok := gap0962Want[name]
+			if !ok {
+				t.Fatalf("%s: no expected severity", name)
+			}
+			var ids []string
 			bound := boundedLimitIndex(got)
-			for index, f := range got {
+			for _, f := range got {
 				ids = append(ids, f.RuleID+"="+f.Severity)
-				if index != bound {
-					others = append(others, HighestSeverity([]RuleFinding{f}))
-				}
 			}
 			t.Logf("%s: %d bytes, tool-call findings %s", name, len(script), strings.Join(ids, ","))
 			if bound < 0 {
 				t.Fatalf("%s (%d bytes): no evaluation bound finding (%s), want the reader to report its cap", name, len(script), strings.Join(ids, ","))
 			}
-			if sev, want := HighestSeverity(got), gap0962Want(others); sev != want {
+			if sev := HighestSeverity(got); sev != want {
 				t.Errorf("tool-call route: verdict severity %s, want %s (%s)", sev, want, strings.Join(ids, ","))
 			}
 			api := testAPIServerWithConfig(t, "action")
 			body := fmt.Sprintf(`{"tool":%q,"args":{"function":%q}}`, pgPlaywright+"browser_evaluate", script)
 			_, v := postInspect(t, api, body)
-			var rules, besides []string
+			var rules []string
+			boundSeen := false
 			for _, f := range v.DetailedFindings {
 				rules = append(rules, f.RuleID+"="+f.Severity)
-				if canonicalTrustedRuleID(f.RuleID) != evaluationLimitRuleID {
-					besides = append(besides, f.Severity)
-				}
+				boundSeen = boundSeen || canonicalTrustedRuleID(f.RuleID) == evaluationLimitRuleID
 			}
 			t.Logf("%s: inspect action=%s severity=%s %s", name, v.Action, v.Severity, strings.Join(rules, ","))
-			if len(besides) == len(rules) {
+			if !boundSeen {
 				t.Fatalf("inspect route: no evaluation bound finding (%s), want the reader to report its cap", strings.Join(rules, ","))
 			}
-			if want := gap0962Want(besides); v.Severity != want {
+			if v.Severity != want {
 				t.Errorf("inspect route: verdict severity %s (action %s), want %s: %s", v.Severity, v.Action, want, strings.Join(rules, ","))
 			}
 		})
