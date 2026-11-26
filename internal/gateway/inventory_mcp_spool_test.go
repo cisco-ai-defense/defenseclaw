@@ -50,7 +50,9 @@ func windowsMCPInventoryFixture(t *testing.T, names ...string) (*config.Config, 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, sid+".json"), data, 0o600); err != nil {
+		if err := enterprisehooks.PublishMCPInventorySpool(dir, func() error {
+			return os.WriteFile(filepath.Join(dir, sid+".json"), data, 0o600)
+		}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -240,5 +242,71 @@ func TestWindowsSecureClientMCPInventoryLeavesOtherModesUnchanged(t *testing.T) 
 				t.Fatalf("other mode consumed Windows spool: calls=%d rows=%+v status=%+v", guardCalls, rows, status)
 			}
 		})
+	}
+}
+
+func TestWindowsSecureClientMCPInventoryFailedPublicationKeepsSibling(t *testing.T) {
+	cfg, _, sid := windowsMCPInventoryFixture(t, "codex", "claudecode")
+	dir := enrolledMCPSpoolDir(cfg, "codex")
+	err := enterprisehooks.PublishMCPInventorySpool(dir, func() error {
+		return fmt.Errorf("access denied updating and withdrawing old record")
+	}, nil)
+	if err == nil {
+		t.Fatal("failed publication succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(dir, sid+".json")); err != nil {
+		t.Fatal(err)
+	}
+	rows, status := readWindowsMCPInventoryFixture(t, cfg)
+	if !status.partial || len(rows) != 1 || rows[0].agentConnector != "claudecode" {
+		t.Fatalf("rows=%+v status=%+v", rows, status)
+	}
+}
+
+func TestWindowsSecureClientMCPInventorySeparatesProjects(t *testing.T) {
+	cfg, home, sid := windowsMCPInventoryFixture(t, "claudecode")
+	dir := enrolledMCPSpoolDir(cfg, "claudecode")
+	servers := []config.MCPServerEntry{
+		{Name: "docs", URL: "https://user.example/mcp"},
+		{Name: "docs", URL: "https://first.example/mcp", Project: filepath.Join(home, "first")},
+		{Name: "docs", URL: "https://second.example/mcp", Project: filepath.Join(home, "second")},
+	}
+	write := func(servers []config.MCPServerEntry) {
+		t.Helper()
+		data, err := enterprisehooks.MarshalClaudeMCPSpoolRecord(sid, servers)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, sid+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(servers)
+	rows, status := readWindowsMCPInventoryFixture(t, cfg)
+	if status.partial || len(rows) != 3 {
+		t.Fatalf("rows=%+v status=%+v", rows, status)
+	}
+	ids := map[string]bool{}
+	for _, row := range rows {
+		ids[row.id] = true
+	}
+	if len(ids) != 3 {
+		t.Fatalf("projects collapsed: %+v", rows)
+	}
+	want := endpointInventoryComponentID("mcp-entry", "claudecode/"+endpointInventoryScopeKey(home)+"/docs")
+	if rows[0].id != want {
+		t.Fatalf("user scope id changed: %s want %s", rows[0].id, want)
+	}
+	tools := &mcpToolInventory{}
+	tools.refreshCompleteParents(rows, nil)
+	if _, ok := tools.resolveConfiguredServer("claudecode", "docs"); ok {
+		t.Fatal("ambiguous project alias resolved arbitrarily")
+	}
+	write([]config.MCPServerEntry{servers[2], servers[1], servers[0]})
+	reversed, _ := readWindowsMCPInventoryFixture(t, cfg)
+	for _, row := range reversed {
+		if !ids[row.id] {
+			t.Fatalf("identity depends on order: %+v", row)
+		}
 	}
 }

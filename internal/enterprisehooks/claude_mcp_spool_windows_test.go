@@ -630,3 +630,25 @@ func TestWriteWindowsMCPSpoolNamesTheRecordItCouldNotPublish(t *testing.T) {
 		t.Fatalf("the other user's record: %v (%v), want published", servers, readErr)
 	}
 }
+
+func TestWriteWindowsMCPSpoolWithdrawsConnectorOnProtectionFailure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), KiroMCPSpoolDirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-1001"
+	data, err := MarshalClaudeMCPSpoolRecord(sid, []config.MCPServerEntry{{Name: "old", Command: "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	denied := errors.New("directory protection denied")
+	if err := WriteWindowsKiroMCPSpool(dir, Manifest{}, func(string) error { return denied }, nil); !errors.Is(err, denied) {
+		t.Fatalf("error=%v", err)
+	}
+	if servers, _, err := ReadKiroMCPSpool(dir, sid, nil); err == nil && len(servers) > 0 {
+		t.Fatalf("old records survived early publication failure: %+v", servers)
+	}
+}
