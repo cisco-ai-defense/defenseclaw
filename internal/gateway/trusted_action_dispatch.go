@@ -4903,15 +4903,38 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 		}
 		folders = guestOwnShellFolders(command, input.CWD, input.ActiveHome)
 	}
+	// A candidate in a folder the call's own shell may stand in is read as a
+	// child, but a plain reading in a plain folder stays a candidate, as
+	// before the own-shell folders (guestPlainFolder, rel-1-0-10:GAP-2249).
+	var plain map[string]bool
 	isCandidate := func(placement guestPlacement) bool {
-		return placement.candidate && !folders.has(placement.text, path.Clean(placement.cwd))
+		if !placement.candidate {
+			return false
+		}
+		dir := path.Clean(placement.cwd)
+		if !folders.has(placement.text, dir) {
+			return true
+		}
+		if guestReadingFirst(placement.text) {
+			return false
+		}
+		ok, seen := plain[dir]
+		if !seen {
+			if plain == nil {
+				plain = make(map[string]bool)
+			}
+			ok = guestPlainFolder(dir, input.ActiveHome)
+			plain[dir] = ok
+		}
+		return ok
 	}
 	// Each list is made at its size: a long call places thousands of
 	// readings, and growing the lists copied their facts again and again
 	// (substrate-1 GAP-0956).
+	candidate := make([]bool, len(placements))
 	candidateCount := 0
-	for _, placement := range placements {
-		if isCandidate(placement) {
+	for at, placement := range placements {
+		if candidate[at] = isCandidate(placement); candidate[at] {
 			candidateCount++
 		}
 	}
@@ -4919,8 +4942,8 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 		children = make([]actionfacts.Facts, 0, count)
 	}
 	read := memo.placedReader(input)
-	for _, placement := range placements {
-		if !isCandidate(placement) {
+	for at, placement := range placements {
+		if !candidate[at] {
 			children = append(children, read(placement))
 		} else if guestCandidateMayReadKey(placement.text) {
 			candidates = append(candidates, read(placement))

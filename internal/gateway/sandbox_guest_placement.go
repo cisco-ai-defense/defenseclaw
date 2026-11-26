@@ -940,6 +940,58 @@ func guestDirFirst(dir, home string) bool {
 	return dir == path.Clean(home) || strings.HasPrefix(path.Base(dir), ".")
 }
 
+// guestPlainFolder reports a folder in which a plain reading (one
+// guestReadingFirst does not read first: touch f17, ls, rm -f out) names no
+// file the laptop protects by its folder, so the guest placement keeps the
+// reading there a candidate even where the call's own shell may stand in
+// the folder (sandboxGuestPlacedChildrenWalk): a folder strictly below the
+// home each of whose names below the home is a plain name (letters, digits,
+// _ and -), except that the first may be .cache, the cache folder, outside
+// its huggingface folder (the token file the credentials table keeps there,
+// .cache/huggingface/token). Never the home, a hidden folder or one below
+// it (~/.ssh, ~/.aws, ~/.config, a project's .git or .claude), ~/Library,
+// ~/AppData or ~/bin (the macOS and Windows agent and startup folders and
+// the user's own commands), a folder outside the home (/etc, /tmp) or one
+// the credentials table keeps whole (appdata/roaming/gcloud/legacy_credentials).
+// Promoting each plain reading of fan-out shapes (cd .cache; bash <<< true;
+// $CMD; 7 cds; touch f0 ... f1000) made every semantic owner judge 8,125
+// placed views a call where the 1.0.10 line judged 133, and the copy-mode
+// actor took twice its time, with no other verdict (rel-1-0-10:GAP-2249).
+// dir is clean.
+func guestPlainFolder(dir, home string) bool {
+	home = path.Clean(home)
+	if !path.IsAbs(home) || home == "/" {
+		return false
+	}
+	rest, ok := strings.CutPrefix(dir, home+"/")
+	if !ok || rest == "" {
+		return false
+	}
+	for first := true; rest != ""; first = false {
+		name, after, _ := strings.Cut(rest, "/")
+		rest = after
+		if first && name == ".cache" {
+			if next, _, _ := strings.Cut(after, "/"); strings.EqualFold(next, "huggingface") {
+				return false
+			}
+			continue
+		}
+		if first && (strings.EqualFold(name, "Library") || strings.EqualFold(name, "AppData") || name == "bin") {
+			return false
+		}
+		if name == "" || name[0] == '-' {
+			return false
+		}
+		for at := 0; at < len(name); at++ {
+			if !guestNameByte(name[at]) {
+				return false
+			}
+		}
+	}
+	_, kept := actionfacts.MatchCredentialFileShape(dir + "/f")
+	return !kept
+}
+
 // guestNameByte reports a byte of a bare file name: a letter, a digit, _
 // or -.
 func guestNameByte(c byte) bool {
