@@ -109,8 +109,13 @@ func TestWindowsNativeFileToolCredentialFileIsJudgedInEverySpellingWindowsOpens(
 // included. Ordinary files in those folders keep theirs.
 func TestWindowsNativeFileToolCredentialFileOutsideTheActiveHomeIsJudgedLikeAnyOtherHome(t *testing.T) {
 	const home = `C:\Users\r109yws.d-2`
+	// Every folder here is a spelling, not a real profile: a name that is the
+	// account of a lab or developer machine (dcw-std2 was one) makes the
+	// product fail to verify the path of an ordinary file under it for a
+	// standard user who cannot read that profile (TOOL-PATH-UNVERIFIED), which
+	// is not what this test asks (GAP-1100).
 	homes := []string{
-		`C:\r109sfix\home\fixture`, `C:\Users\dcw-std2`, `C:\Users\fixture`, `C:\home\fixture`,
+		`C:\r109sfix\home\fixture`, `C:\Users\dc-other-account`, `C:\Users\fixture`, `C:\home\fixture`,
 		`D:\Users\bob`, `C:\Users\dcw.std2`, `C:\Users\Émile`, `c:\USERS\Fixture`, `\\localhost\c$\Users\fixture`,
 	}
 	files := []string{`.netrc`, `.git-credentials`, `.aws\credentials`, `.NETRC`, `.Aws\Credentials`}

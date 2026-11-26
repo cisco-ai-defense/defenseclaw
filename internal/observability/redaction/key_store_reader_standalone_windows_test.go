@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -18,9 +19,7 @@ import (
 // already have been read. It is rotated; Secure Client keeps the re-stamp.
 func TestWindowsCorrelationKeyUntrustedReaderIsRotatedOnStandalone(t *testing.T) {
 	skipCorrelationKeyAsLocalSystem(t)
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("needs an elevated token (the Windows CI runners and the native test hosts run elevated)")
-	}
+	testenv.RequireElevated(t, "the fixture rewrites the key file ACL and owner")
 	for _, standalone := range []bool{true, false} {
 		name := "standalone"
 		if !standalone {
@@ -92,9 +91,7 @@ func TestWindowsCorrelationKeyUntrustedReaderIsRotatedOnStandalone(t *testing.T)
 // base path and never rotates.
 func TestWindowsCorrelationKeyWithANullDACLIsRotatedOnStandalone(t *testing.T) {
 	skipCorrelationKeyAsLocalSystem(t)
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("needs an elevated token (the Windows CI runners and the native test hosts run elevated)")
-	}
+	testenv.RequireElevated(t, "the fixture rewrites the key file ACL and owner")
 	for _, standalone := range []bool{true, false} {
 		name := "standalone"
 		if !standalone {

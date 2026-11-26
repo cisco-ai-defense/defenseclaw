@@ -18,6 +18,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -853,6 +854,7 @@ func TestWindowsCorrelationKeyRequiresServicePinInManagedMode(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMaterial(t *testing.T) {
+	testenv.RequireElevated(t, "the fixture rewrites the key file ACL and owner, which the account that runs the test holds no right to once the product has protected the key (an administrator token does)")
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	created, err := LoadOrCreateCorrelationKey(dir)
@@ -897,6 +899,7 @@ func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMateria
 }
 
 func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
+	testenv.RequireElevated(t, "the fixture rewrites the key file ACL, which the account that runs the test holds no right to once the product has protected the key (an administrator token does)")
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	created, err := LoadOrCreateCorrelationKey(dir)
@@ -948,6 +951,7 @@ func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
 }
 
 func TestWindowsCorrelationKeyFreshProcessRestartRepairsTrustedDACL(t *testing.T) {
+	testenv.RequireElevated(t, "the fixture rewrites the key file ACL, which the account that runs the test holds no right to once the product has protected the key (an administrator token does)")
 	skipCorrelationKeyAsLocalSystem(t)
 	const (
 		dirEnv = "DEFENSECLAW_TEST_CORRELATION_RESTART_DIR"
@@ -1032,6 +1036,7 @@ func setWindowsCorrelationTrustedUnprotectedDACL(t *testing.T, path string) {
 }
 
 func TestWindowsCorrelationKeyAcceptsUnprotectedReadOnlyDriftWithoutRepair(t *testing.T) {
+	testenv.RequireElevated(t, "the fixture rewrites the key file ACL, which the account that runs the test holds no right to once the product has protected the key (an administrator token does)")
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1110,6 +1115,7 @@ func TestWindowsCorrelationKeyAcceptsUnprotectedReadOnlyDriftWithoutRepair(t *te
 }
 
 func TestWindowsCorrelationKeyAcceptsReadACLButRejectsWriteACL(t *testing.T) {
+	testenv.RequireElevated(t, "the fixture rewrites the key file ACL, which the account that runs the test holds no right to once the product has protected the key (an administrator token does)")
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1235,6 +1241,7 @@ func windowsCorrelationKeyUntrustedWritersAt(t *testing.T, path string) []string
 }
 
 func TestWindowsCorrelationKeyRejectsInvalidLength(t *testing.T) {
+	testenv.RequireElevated(t, "the fixture overwrites the key file the product protected, which the account that runs the test cannot open for writing (an administrator token can)")
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1278,15 +1285,14 @@ func TestWindowsCorrelationKeyRejectsReparsePoint(t *testing.T) {
 	if err := os.WriteFile(target, bytes.Repeat([]byte{0x33}, hashV1KeySize), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(dir, correlationKeyFilename)); err != nil {
-		t.Skipf("Windows symlink privilege unavailable: %v", err)
-	}
+	testenv.Symlink(t, target, filepath.Join(dir, correlationKeyFilename))
 	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafeType) {
 		t.Fatalf("error = %v, want unsafe type", err)
 	}
 }
 
 func TestWindowsCorrelationKeyRejectsHardLinkedLeaf(t *testing.T) {
+	testenv.RequireElevated(t, "the fixture hard-links the key file the product protected, which the account that runs the test cannot open (an administrator token can)")
 	skipCorrelationKeyAsLocalSystem(t)
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
@@ -1309,9 +1315,7 @@ func TestWindowsCorrelationKeyRejectsReparseDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(root, "alias")
-	if err := os.Symlink(target, alias); err != nil {
-		t.Skipf("Windows symlink privilege unavailable: %v", err)
-	}
+	testenv.Symlink(t, target, alias)
 	if _, err := LoadOrCreateCorrelationKey(alias); !IsKeyStoreError(err, KeyStoreErrorInvalidDataDir) {
 		t.Fatalf("error = %v, want invalid data directory", err)
 	}

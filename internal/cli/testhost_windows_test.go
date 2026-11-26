@@ -1020,12 +1020,12 @@ func testTokenIsElevated() bool { return windows.GetCurrentProcessToken().IsElev
 // cannot create them, so the test cannot give the same answer as a standard
 // user (GAP-0079); the elevated CI runner, an elevated administrator and
 // LocalSystem run it. A folder under C:\ProgramData alone does not need it:
-// BUILTIN\Users can create one.
+// BUILTIN\Users can create one. Under GitHub Actions, or with
+// CI_REQUIRE_ELEVATED=1, a token without the rights fails instead of
+// skipping (the one check is testenv.RequireElevated, GAP-1101).
 func requireAdministratorTestToken(t *testing.T, why string) {
 	t.Helper()
-	if !testTokenIsElevated() && !testRunsAsLocalSystem() {
-		t.Skip("needs an administrator token: " + why)
-	}
+	testenv.RequireElevated(t, why)
 }
 
 // grantTestTreeToCurrentUser gives the test account full control of root
