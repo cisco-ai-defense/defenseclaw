@@ -306,6 +306,10 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	type edit struct {
 		start, end int
 		text       string
+		// soft numbers the edits that only respell text (a pending
+		// here-document as a here-string, two edits): they give way
+		// together to any edit one of them overlaps. 0 for the others.
+		soft int
 	}
 	var edits []edit
 	replace := func(word *syntax.Word, text string) {
@@ -409,6 +413,129 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	written := writtenScripts(file, inputs)
 	priorIndex, lastShell := 0, ""
 	var visit func(syntax.Node) bool
+	// pending holds the here-documents of file. A call between the operator
+	// of one and its body (on the operator's line) must not put a line
+	// break into the twin there, or the body would start inside the text it
+	// adds (CHK-RF-HOOKSHELL F2).
+	type heredocSpan struct {
+		redir                *syntax.Redirect
+		operator, body, tail int
+	}
+	var pending []heredocSpan
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if redir, ok := node.(*syntax.Redirect); ok && (redir.Op == syntax.Hdoc || redir.Op == syntax.DashHdoc) && redir.Hdoc != nil && redir.Word != nil {
+			span := heredocSpan{redir: redir, operator: int(redir.OpPos.Offset()), body: int(redir.Hdoc.Pos().Offset())}
+			// tail is the end of the delimiter line, its line break included.
+			span.tail = len(command)
+			if from := int(redir.Hdoc.End().Offset()); from >= 0 && from <= len(command) {
+				if newline := strings.IndexByte(command[from:], '\n'); newline >= 0 {
+					span.tail = from + newline + 1
+				}
+			}
+			pending = append(pending, span)
+		}
+		return true
+	})
+	respelled := map[*syntax.Redirect]bool{}
+	// unpend respells every here-document pending at offset at as the
+	// here-string of the same text (cat <<'EOF' ... EOF -> cat <<< 'TEXT'),
+	// so the line holds no pending document and the twin can break it.
+	// It is false, and respells nothing, when one of them has text the
+	// reading does not know or that the shell expands.
+	unpend := func(at int) bool {
+		var spans []heredocSpan
+		for _, span := range pending {
+			if span.operator < at && at < span.body {
+				if _, known := heredocScriptText(span.redir); !known || heredocHasParameters(span.redir) {
+					return false
+				}
+				spans = append(spans, span)
+			}
+		}
+		for _, span := range spans {
+			if respelled[span.redir] {
+				continue
+			}
+			respelled[span.redir] = true
+			text, _ := heredocScriptText(span.redir)
+			wordEnd, group := int(span.redir.Word.End().Offset()), len(respelled)
+			edits = append(edits,
+				edit{start: span.operator, end: wordEnd, text: "<<< " + posixSingleQuoted(strings.TrimSuffix(text, "\n")), soft: group},
+				edit{start: span.body, end: span.tail, soft: group})
+		}
+		return true
+	}
+	// afterPending is the offset after the delimiter line of the last
+	// here-document pending at offset at: the first offset where a new
+	// line of statements can start. ok is false when none is pending.
+	afterPending := func(at int) (offset int, ok bool) {
+		offset = -1
+		for _, span := range pending {
+			if span.operator < at && at < span.body && span.tail > offset {
+				offset = span.tail
+			}
+		}
+		return offset, offset >= 0
+	}
+	// keepOperands reads the assignments of call and its operands after
+	// args[fileAt] as any other words of the call: the twin keeps them in
+	// place, so a command they run is still read (CHK-RF-HOOKSHELL F1).
+	keepOperands := func(call *syntax.CallExpr, fileAt int) {
+		for _, assign := range call.Assigns {
+			syntax.Walk(assign, visit)
+		}
+		for _, arg := range call.Args[fileAt+1:] {
+			syntax.Walk(arg, visit)
+		}
+	}
+	// sourceScript is the twin of a call that sources script (args[fileAt]
+	// is the word that names it; a builtin or command word before source
+	// goes with it): the statements of script run in the current shell, as
+	// source does, so a cd or an assignment in it holds for the statements
+	// after it. The call's own assignments, which a special builtin keeps,
+	// open the group, and its operands stay as the operands of a no-op
+	// before the script, both read as before:
+	//   A=1 . F x y  ->  { A=1\n: x y\nSCRIPT\n}
+	// On a line whose here-document is still pending, the call keeps only
+	// its assignments and operands (A=1 : x y) and the group follows the
+	// document's delimiter line: the statements of the script are read as
+	// statements of their own, never inside the line.
+	sourceScript := func(call *syntax.CallExpr, fileAt int, script string) {
+		callStart, from := int(call.Pos().Offset()), int(call.Args[0].Pos().Offset())
+		fileEnd, end := int(call.Args[fileAt].End().Offset()), int(call.End().Offset())
+		group := "{ " + strings.TrimRight(script, "\n") + "\n}"
+		if len(call.Assigns) > 0 {
+			from = int(call.Assigns[len(call.Assigns)-1].End().Offset())
+		}
+		if at, ok := afterPending(callStart); ok && !unpend(callStart) {
+			head := ":"
+			if len(call.Assigns) > 0 {
+				head = " :"
+			}
+			if at == len(command) && !strings.HasSuffix(command, "\n") {
+				group = "\n" + group
+			} else {
+				group += "\n"
+			}
+			edits = append(edits, edit{start: from, end: fileEnd, text: head}, edit{start: at, end: at, text: group})
+			keepOperands(call, fileAt)
+			return
+		}
+		operands := fileAt+1 < len(call.Args)
+		head, body := "{ ", strings.TrimRight(script, "\n")+"\n}"
+		if operands {
+			head, body = "{ :", "\n"+body
+		}
+		if len(call.Assigns) > 0 {
+			edits = append(edits, edit{start: callStart, end: callStart, text: "{ "})
+			head = "\n"
+			if operands {
+				head = "\n:"
+			}
+		}
+		edits = append(edits, edit{start: from, end: fileEnd, text: head}, edit{start: end, end: end, text: body})
+		keepOperands(call, fileAt)
+	}
 	visit = func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall {
@@ -438,7 +565,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			if nested && static && depth < maxNestedShellStrings {
 				if twin, changed := runTimeShellTwin(body, depth+1, zeroIsShell, reader); changed {
 					start, end := int(call.Args[at].Pos().Offset()), int(call.End().Offset())
-					edits = append(edits, edit{start, end, "eval " + posixSingleQuoted(twin)})
+					edits = append(edits, edit{start: start, end: end, text: "eval " + posixSingleQuoted(twin)})
 					return false
 				}
 			}
@@ -451,15 +578,15 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			if nested, changed := runTimeShellTwin(script, depth+1, true, reader); changed {
 				script = nested
 			}
-			start, end := int(call.Args[at].Pos().Offset()), int(call.End().Offset())
-			text := "bash -c " + posixSingleQuoted(script)
 			if sourced && !found {
 				// source <(...) and . <(...) run the text in the current
 				// shell, so a cd in it moves the statements after it
 				// (rel-1-0-10:GAP-1151).
-				start, text = sourcedGroup(command, call, at, script)
+				sourceScript(call, len(call.Args)-1, script)
+				return false
 			}
-			edits = append(edits, edit{start, end, text})
+			start, end := int(call.Args[at].Pos().Offset()), int(call.End().Offset())
+			edits = append(edits, edit{start: start, end: end, text: "bash -c " + posixSingleQuoted(script)})
 			return false
 		}
 		if !known && (sourced || program == "eval" && len(call.Args)-at == 2) && holdsHereText(call.Args[at+1]) {
@@ -468,22 +595,21 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			// (rel-1-0-10:GAP-1147, GAP-1193).
 			reader.unread = true
 		}
-		if sourceAt, sourced := sourcedStdinCall(call.Args, at, program); sourced {
-			at = sourceAt
+		if fileAt, sourced := sourcedStdinCall(call.Args, at, program); sourced {
 			// source /dev/stdin, . /dev/fd/0: the current shell runs the
 			// text it reads on its standard input, as a shell reading its
 			// script there does (rel-1-0-10:GAP-1151). Known text is the
 			// group of its statements; text the reading does not know is
-			// judged as the stdin shell that runs it.
+			// judged as the stdin shell that runs it, bash -s, whose
+			// operands set the positional parameters as source's do. The
+			// assignments and operands stay and are read either way.
 			body, known, hereText, source := stdinText(call, program, "bash")
 			if !known && hereText {
 				reader.unread = true
 			}
 			if !known {
-				replace(call.Args[at], "bash")
-				for _, arg := range call.Args[at+1:] {
-					replace(arg, "")
-				}
+				edits = append(edits, edit{start: int(call.Args[0].Pos().Offset()), end: int(call.Args[fileAt].End().Offset()), text: "bash -s"})
+				keepOperands(call, fileAt)
 				return false
 			}
 			if depth < maxNestedShellStrings {
@@ -491,8 +617,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 					body = nested
 				}
 			}
-			start, text := sourcedGroup(command, call, at, body)
-			edits = append(edits, edit{start, int(call.End().Offset()), text})
+			sourceScript(call, fileAt, body)
 			if source != nil {
 				if start, end, ok := stdinSourceSpan(command, source); ok {
 					edits = append(edits, edit{start: start, end: end, text: ""})
@@ -517,7 +642,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			}
 			return true
 		}
-		if target, sourced, runs := writtenScriptRunTarget(call.Args, at, program, found); runs && depth < maxNestedShellStrings {
+		if target, fileAt, sourced, runs := writtenScriptRunTarget(call.Args, at, program, found); runs && depth < maxNestedShellStrings {
 			// sh F, . F, ./F of a file an earlier statement of the call wrote
 			// with text the reading knows (cat > F <<'EOF' ... EOF; sh F):
 			// the call runs that text, so the twin runs it in place
@@ -529,11 +654,18 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 				if nested, changed := runTimeShellTwin(text, depth+1, true, reader); changed {
 					text = nested
 				}
-				start, replacement := int(call.Args[at].Pos().Offset()), "bash -c "+posixSingleQuoted(text)
 				if sourced {
-					start, replacement = sourcedGroup(command, call, at, text)
+					sourceScript(call, fileAt, text)
+					return false
 				}
-				edits = append(edits, edit{start, int(call.End().Offset()), replacement})
+				// The script's operands stay after it ($0 is the file, as
+				// for sh F x y) and are read as before (CHK-RF-HOOKSHELL F1).
+				start, end, replacement := int(call.Args[at].Pos().Offset()), int(call.End().Offset()), "bash -c "+posixSingleQuoted(text)
+				if fileAt+1 < len(call.Args) {
+					end, replacement = int(call.Args[fileAt].End().Offset()), replacement+" "+posixSingleQuoted(target)
+				}
+				edits = append(edits, edit{start: start, end: end, text: replacement})
+				keepOperands(call, fileAt)
 				return false
 			}
 		}
@@ -567,7 +699,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 						body = nested
 					}
 				}
-				edits = append(edits, edit{int(call.Args[at].Pos().Offset()), int(call.End().Offset()), "bash -c " + posixSingleQuoted(body)})
+				edits = append(edits, edit{start: int(call.Args[at].Pos().Offset()), end: int(call.End().Offset()), text: "bash -c " + posixSingleQuoted(body)})
 				if source != nil {
 					if start, end, ok := stdinSourceSpan(command, source); ok {
 						edits = append(edits, edit{start: start, end: end, text: ""})
@@ -613,6 +745,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		return "", false
 	}
 	sort.SliceStable(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
+	edits = withoutOverlappedSoftEdits(edits, func(e edit) (int, int, int) { return e.start, e.end, e.soft })
 	var out strings.Builder
 	last := 0
 	for _, change := range edits {
@@ -625,6 +758,37 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	}
 	out.WriteString(command[last:])
 	return out.String(), true
+}
+
+// withoutOverlappedSoftEdits drops every edit of a soft group (span reports
+// an edit's start, end and group, 0 for none) when one of them overlaps an
+// edit outside the group: the respelling gives way as a whole, and the twin
+// is built from the edits that change what runs.
+func withoutOverlappedSoftEdits[E any](edits []E, span func(E) (int, int, int)) []E {
+	dropped := map[int]bool{}
+	for i := range edits {
+		start, end, group := span(edits[i])
+		if group == 0 || dropped[group] {
+			continue
+		}
+		for j := range edits {
+			otherStart, otherEnd, otherGroup := span(edits[j])
+			if otherGroup != group && otherStart < end && start < otherEnd {
+				dropped[group] = true
+				break
+			}
+		}
+	}
+	if len(dropped) == 0 {
+		return edits
+	}
+	kept := edits[:0:0]
+	for _, change := range edits {
+		if _, _, group := span(change); !dropped[group] {
+			kept = append(kept, change)
+		}
+	}
+	return kept
 }
 
 // writtenScript is the text one statement of a call writes to a file it
@@ -714,34 +878,35 @@ func (written writtenScriptSet) latest(target string, before int) (string, bool)
 
 // writtenScriptRunTarget returns the file a call runs as a script (args[at]
 // is its program word; shell reports a POSIX shell found by
-// shellCallProgram): the script operand of a shell (sh F, sudo bash F), the
-// file of source F or . F (sourced: it runs in the current shell, also after
-// builtin or command), or a program named by a path (./F, /tmp/F).
-func writtenScriptRunTarget(args []*syntax.Word, at int, program string, shell bool) (target string, sourced, ok bool) {
+// shellCallProgram) and the index of the word that names it: the script
+// operand of a shell (sh F, sudo bash F), the file of source F or . F
+// (sourced: it runs in the current shell, also after builtin or command), or
+// a program named by a path (./F, /tmp/F).
+func writtenScriptRunTarget(args []*syntax.Word, at int, program string, shell bool) (target string, fileAt int, sourced, ok bool) {
 	if at >= len(args) {
-		return "", false, false
+		return "", 0, false, false
 	}
 	if shell {
 		argv := []string{"bash"}
 		for _, arg := range args[at+1:] {
 			value := projectPOSIXWord(arg)
 			if value.Expands {
-				return "", false, false
+				break
 			}
 			argv = append(argv, value.Value)
 		}
 		invocation := parsePOSIXShellInvocation("bash", argv)
 		if !invocation.valid || invocation.noExec || invocation.mode != posixShellModeScript ||
 			invocation.scriptIndex <= 0 || invocation.scriptIndex >= len(argv) {
-			return "", false, false
+			return "", 0, false, false
 		}
-		return argv[invocation.scriptIndex], false, true
+		return argv[invocation.scriptIndex], at + invocation.scriptIndex, false, true
 	}
 	for (program == "builtin" || program == "command") && at+1 < len(args) {
 		at++
 		word := projectPOSIXWord(args[at])
 		if word.Expands {
-			return "", false, false
+			return "", 0, false, false
 		}
 		program = word.Value
 	}
@@ -753,13 +918,13 @@ func writtenScriptRunTarget(args []*syntax.Word, at int, program string, shell b
 			}
 		}
 		if at >= len(args) {
-			return "", false, false
+			return "", 0, false, false
 		}
 		word := projectPOSIXWord(args[at])
-		return word.Value, true, !word.Expands && word.Value != ""
+		return word.Value, at, true, !word.Expands && word.Value != ""
 	}
 	word := projectPOSIXWord(args[at])
-	return word.Value, false, !word.Expands && strings.Contains(word.Value, "/")
+	return word.Value, at, false, !word.Expands && strings.Contains(word.Value, "/")
 }
 
 // shebangRunsPOSIXShell reports text a POSIX shell runs when it is started
@@ -793,7 +958,7 @@ func shebangRunsPOSIXShell(text string) bool {
 // shell (/dev/stdin, /dev/fd/0, /proc/self/fd/0): the shell runs the text it
 // reads there as statements of its own (rel-1-0-10:GAP-1151). Operands after
 // FILE only set the positional parameters of the text. The index of the
-// source word is returned.
+// FILE word is returned.
 func sourcedStdinCall(args []*syntax.Word, at int, program string) (int, bool) {
 	// builtin source and command . run the builtin itself.
 	for (program == "builtin" || program == "command") && at+1 < len(args) {
@@ -807,7 +972,6 @@ func sourcedStdinCall(args []*syntax.Word, at int, program string) (int, bool) {
 	if program != "source" && program != "." {
 		return 0, false
 	}
-	source := at
 	at++
 	if at < len(args) {
 		if word := projectPOSIXWord(args[at]); !word.Expands && word.Value == "--" {
@@ -818,31 +982,7 @@ func sourcedStdinCall(args []*syntax.Word, at int, program string) (int, bool) {
 		return 0, false
 	}
 	file := projectPOSIXWord(args[at])
-	return source, !file.Expands && posixStdinFilePath(file.Value)
-}
-
-// sourcedGroup is the twin text of a call that sources script (args[at] is
-// its source word): a group that runs the statements of script in the
-// current shell, as source does, so a cd or an assignment in it holds for
-// the statements after it. The call's own assignments, which a special
-// builtin keeps, open the group; a builtin or command word before source is
-// dropped with them. start is the offset the text replaces from.
-func sourcedGroup(command string, call *syntax.CallExpr, at int, script string) (start int, text string) {
-	start = int(call.Args[at].Pos().Offset())
-	prefix := ""
-	if len(call.Assigns) > 0 {
-		from := int(call.Pos().Offset())
-		if from >= 0 && from < start && start <= len(command) {
-			prefix = strings.TrimSpace(command[from:start])
-			start = from
-		}
-	} else if at > 0 {
-		start = int(call.Args[0].Pos().Offset())
-	}
-	if prefix != "" {
-		prefix += "\n"
-	}
-	return start, "{ " + prefix + strings.TrimRight(script, "\n") + "\n}"
+	return at, !file.Expands && posixStdinFilePath(file.Value)
 }
 
 // pipelineStageInputs reads the pipelines of file: inputs is the text each

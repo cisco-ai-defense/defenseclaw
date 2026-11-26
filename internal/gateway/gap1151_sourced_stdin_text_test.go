@@ -43,6 +43,15 @@ func TestGAP1151SourcedStdinTextIsTheScriptTheShellRuns(t *testing.T) {
 		"builtin source /dev/stdin <<< 'BODY'",
 		"command . /dev/stdin <<< 'BODY'",
 		"cd /tmp; . /dev/stdin <<< 'BODY'",
+		// The operands and assignments of the sourced call are read too
+		// (CHK-RF-HOOKSHELL F1).
+		"source /dev/stdin \"$(bash <<<'BODY')\" <<<'echo hi'",
+		"cat x | source /dev/stdin \"$(bash <<<'BODY')\"",
+		"builtin source /dev/stdin \"$(bash <<<'BODY')\" <<<'echo hi'",
+		"A=\"$(bash <<<'BODY')\" source /dev/stdin <<<'echo hi'",
+		"cat x | A=\"$(bash <<<'BODY')\" . /dev/stdin",
+		"cat > s.sh <<'EOF'\necho hi\nEOF\n. ./s.sh \"$(bash <<<'BODY')\"",
+		"cat > s.sh <<'EOF'\necho hi\nEOF\nsh s.sh \"$(bash <<<'BODY')\"",
 	}
 	shellTextTiers(t, func(tier string, decide func(string) (string, []string), oracle func(string, bool) (string, []string)) {
 		for _, body := range bodies {
