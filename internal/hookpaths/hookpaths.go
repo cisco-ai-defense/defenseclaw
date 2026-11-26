@@ -6420,6 +6420,50 @@ func (l Links) AliasTargets(path string, entry bool) []string {
 	return out
 }
 
+// GuestAliasTargets keeps the raw link text until the guest-owned root has
+// been folded. A host Clean would erase root/.. before the guest can judge it.
+// Only the guest write proof uses this reading; other callers retain the
+// established lexical AliasTargets behavior.
+func (l Links) GuestAliasTargets(path string, entry bool) []string {
+	if len(l.links.aliases) == 0 || path == "" {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{filepath.Clean(path): true}
+	queue := []string{filepath.Clean(path)}
+	for first := true; len(queue) > 0 && len(out) < maxLinkAliasSteps; first = false {
+		name := queue[0]
+		queue = queue[1:]
+		for _, alias := range l.links.aliases {
+			// The guest is Linux even when this gateway host compares
+			// names without case. A link named L does not alias l.
+			rest, under := strings.CutPrefix(name, alias.name)
+			if !under || rest != "" && !strings.HasPrefix(rest, "/") {
+				continue
+			}
+			rest = strings.TrimPrefix(rest, "/")
+			if first && entry && rest == "" {
+				continue
+			}
+			next := alias.target
+			if rest != "" {
+				next += string(filepath.Separator) + rest
+			}
+			next = GuestOwnRootPath(next)
+			out = append(out, next)
+			clean := filepath.Clean(next)
+			if !seen[clean] {
+				seen[clean] = true
+				queue = append(queue, clean)
+			}
+			if len(out) >= maxLinkAliasSteps {
+				break
+			}
+		}
+	}
+	return out
+}
+
 // copyLinkOptions reports a cp call with a static link option, and one with
 // a word that is not static and may expand to an option.
 func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option, dynamic bool) {

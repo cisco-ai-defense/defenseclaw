@@ -61,6 +61,11 @@ func TestGAP2227WriteBelowAnotherProcessLinkIsUnknown(t *testing.T) {
 		rules           []string
 	}{
 		{"echo k >> /proc/1/root/sandbox/.ssh/" + kf, "block", keys},
+		{"echo k >> /proc/4242/root/../sandbox/.ssh/" + kf, "block", keys},
+		{"echo k >> /proc/4242/root/../../sandbox/.ssh/" + kf, "block", keys},
+		{"echo k >> /proc/self/root/../proc/4242/root/../sandbox/.ssh/" + kf, "block", keys},
+		{"echo k >> /proc/1/root/./../sandbox/.ssh/" + kf, "block", keys},
+		{"echo m > /proc/1/root/sandbox/app/config", "allow", nil},
 		{"echo k >> /proc/1/task/1/root/sandbox/.ssh/" + kf, "block", keys},
 		{"echo k >> /proc/1/fd/3/.ssh/" + kf, "block", keys},
 		{"echo k >> /proc/self/root/proc/1/root/sandbox/.ssh/" + kf, "block", keys},
@@ -92,14 +97,18 @@ func TestGAP2227WriteBelowAnotherProcessLinkIsUnknown(t *testing.T) {
 				return
 			}
 			want, wantRules := "allow", []string(nil)
+			wantDot, wantDotRules := "block", keys
 			if runtime.GOOS == "linux" {
 				want, wantRules = "block", keys
+				wantDotRules = []string{"ACTION-COMPOUND-LIMIT", gap2203KeysRule}
 			}
 			for _, row := range []struct {
 				command, action string
 				rules           []string
 			}{
 				{"echo k >> /proc/1/root" + home + "/.ssh/" + kf, want, wantRules},
+				{"echo k >> /proc/1/root/.." + home + "/.ssh/" + kf, wantDot, wantDotRules},
+				{"echo m > /proc/1/root" + home + "/app/config", "allow", nil},
 				{"echo k >> /proc/1/task/1/root" + home + "/.ssh/" + kf, want, wantRules},
 				{"echo m > /proc/1/root" + home + "/notes.txt", "allow", nil},
 				{"echo m > /proc/1/fd/1", "allow", nil},

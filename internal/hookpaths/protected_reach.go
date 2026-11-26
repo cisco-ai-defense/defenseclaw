@@ -726,21 +726,51 @@ func (g *procLinkGuard) unproved(path string, below bool) bool {
 	return !fixedPIDLeafProved(link)
 }
 
-// ProcessLinkWriteUnproved reports a write operand that goes on below a
-// numbered process's link (/proc/<pid>/root, cwd, exe, fd/<n> or
-// map_files/<n>, also under task/<tid>) whose reading the hook cannot prove
-// is its own: the part below the link is resolved in that process's mount
-// tree, which may hold the user's key file under any name. A Linux gateway
-// that cannot read /proc/1/root judged echo k >> /proc/1/root<home>/.ssh/<keys>
-// an ordinary write (rel-1-0-10:GAP-2227). A sandbox guest's (guest)
-// process ids are not this host's, so for a guest no such link is proved.
-// A write to the link itself (echo m > /proc/1/fd/1) is not below it.
+// ProcessLinkWriteUnproved reports a write below a process link whose target
+// the hook cannot prove. Opener-relative descriptors and task links are
+// always unproved. A numbered PID link keeps its existing fixedPIDLink proof.
+// A write to the descriptor itself is ordinary: only a path continuing below
+// it could name a key file in an unknown directory (GAP-2227, GAP-2237).
 func ProcessLinkWriteUnproved(path string, guest bool) bool {
+	if openerRelativeLinkBelow(path) {
+		return true
+	}
 	link, ok := fixedPIDLink(path)
-	if !ok || filepath.ToSlash(filepath.Clean(path)) == link {
+	if !ok || filepath.ToSlash(path) == link {
 		return false
 	}
 	return guest || !fixedPIDLinkProved(link)
+}
+
+func openerRelativeLinkBelow(path string) bool {
+	path = filepath.ToSlash(path)
+	if strings.HasPrefix(path, "/dev/fd/") {
+		rest := strings.TrimPrefix(path, "/dev/fd/")
+		n, below, ok := strings.Cut(rest, "/")
+		return ok && below != "" && allDigits(n)
+	}
+	rest, found := strings.CutPrefix(path, "/proc/")
+	if !found {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) < 3 || parts[0] != "self" && parts[0] != "thread-self" {
+		return false
+	}
+	entry := 1
+	if parts[1] == "task" {
+		if len(parts) < 5 || !allDigits(parts[2]) {
+			return false
+		}
+		entry = 3
+	}
+	switch parts[entry] {
+	case "root", "cwd", "exe":
+		return len(parts) > entry+1 && parts[entry+1] != ""
+	case "fd", "map_files":
+		return len(parts) > entry+2 && allDigits(parts[entry+1]) && parts[entry+2] != ""
+	}
+	return false
 }
 
 func unprovedProcessLink(path string, below bool) bool {

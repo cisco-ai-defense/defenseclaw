@@ -1324,8 +1324,35 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		return "", false
 	}
+	// The guest uses case-sensitive names. A link created in the same shell
+	// command can place a relative redirect even when the event cwd is not
+	// attested: its absolute link text is independent of that cwd.
+	guestProtected := func(path string) bool {
+		path = hookpaths.GuestOwnRootPath(path)
+		if !filepath.IsAbs(path) {
+			return false
+		}
+		path = filepath.Clean(path)
+		for _, protected := range protectedPaths {
+			if path == protected {
+				return true
+			}
+		}
+		return false
+	}
+	guestAliasProtected := func(path string) bool {
+		for _, alias := range links.GuestAliasTargets(path, false) {
+			if guestProtected(alias) {
+				return true
+			}
+		}
+		return false
+	}
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
+			if guestLayoutHost && guestAliasProtected(target) {
+				return confirmed()
+			}
 			// No directory places this operand: the gateway cannot see the
 			// caller's cwd and the client evidence that would carry it is
 			// incomplete or was rejected as malformed. Such evidence never
@@ -1377,14 +1404,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return confirmed()
 		}
-		if guestLayoutHost {
-			// The guest's own root link (/proc/self/root,
-			// /proc/thread-self/root) is the guest's /: a Linux gateway
-			// reads its own root there and finds the guest's key file; a
-			// gateway host with no /proc does not (rel-1-0-10:GAP-2223).
-			if folded := hookpaths.GuestOwnRootPath(filepath.Clean(target)); folded != filepath.Clean(target) && isProtected(folded) {
-				return confirmed()
-			}
+		if guestLayoutHost && (guestProtected(target) || guestAliasProtected(target)) {
+			return confirmed()
 		}
 		// A key file name below another process's root, cwd, exe or
 		// descriptor link is resolved in that process's tree. Unless this
@@ -1396,9 +1417,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if guest := cannotResolveLocally && request.sandboxGuest; guest || runtime.GOOS == "linux" {
 			operand := target
 			if guest {
-				operand = hookpaths.GuestOwnRootPath(filepath.Clean(target))
+				operand = hookpaths.GuestOwnRootPath(target)
 			}
-			if isProtected(filepath.Join(facts.ActiveHome, ".ssh", filepath.Base(operand))) &&
+			// Only the two POSIX authorized-keys basenames are key files;
+			// config, rc and environment keep their prior ordinary answer.
+			if slices.Contains(hookpaths.AuthorizedKeysFiles[:], filepath.Base(operand)) &&
 				hookpaths.ProcessLinkWriteUnproved(operand, guest) {
 				return unproven(hookpaths.UnprovenTargetUnresolved, target)
 			}

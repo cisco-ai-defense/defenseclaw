@@ -861,33 +861,63 @@ func guestOtherProcessFolder(directory string) bool {
 	return false
 }
 
-// GuestOwnRootPath folds the leading /proc/self/root and
-// /proc/thread-self/root links of a clean absolute path, again and again, to
-// /. A Linux sandbox guest process reads them as its own root, and a Linux
-// gateway reads its own the same way, so a gateway host that is not Linux
-// (no /proc) places the guest's /proc/self/root/sandbox where a Linux
-// gateway does: /sandbox (rel-1-0-10:GAP-2223; RV-2203c P2-1 for a
-// /proc/self/root/proc/<pid>/root chain). /proc/self/task/<tid>/root stays
-// as written: a Linux gateway holds none of the guest's thread ids and
-// places that path as written too.
+// GuestOwnRootPath folds a leading guest-owned root link before any lexical
+// cleanup. Cleaning first would remove the link in root/.. even though the
+// kernel keeps that step at the root reached through the link. The suffix is
+// left raw: a later /proc/<pid>/root/.. must still reach the process-link
+// proof rather than disappear in filepath.Clean (GAP-2223, GAP-2227).
 func GuestOwnRootPath(path string) string {
 	for {
-		folded := ""
-		for _, alias := range []string{"/proc/self/root", "/proc/thread-self/root"} {
-			if path == alias {
-				folded = "/"
-				break
-			}
-			if rest, ok := strings.CutPrefix(path, alias+"/"); ok {
-				folded = "/" + rest
-				break
-			}
-		}
-		if folded == "" {
+		rest, ok := guestOwnRootRest(path)
+		if !ok {
 			return path
 		}
-		path = folded
+		// At the guest root, dot-dot stays at that root. Strip only
+		// leading steps; a later process link and its suffix stay raw.
+		parts := strings.Split(rest, "/")
+		for len(parts) > 0 && (parts[0] == "" || parts[0] == "." || parts[0] == "..") {
+			parts = parts[1:]
+		}
+		path = "/" + strings.Join(parts, "/")
 	}
+}
+
+// guestOwnRootRest recognizes only a leading own-root link. Empty and dot
+// components before it are harmless; ordinary components are not assumed to
+// be directories because they could themselves be links.
+func guestOwnRootRest(path string) (string, bool) {
+	if !strings.HasPrefix(path, "/") {
+		return "", false
+	}
+	parts := strings.Split(path, "/")
+	var prefix []string
+	for i := 1; i < len(parts); i++ {
+		part := parts[i]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(prefix) == 0 {
+				continue
+			}
+			if len(prefix) == 2 && prefix[0] == "proc" && prefix[1] == "self" {
+				prefix = prefix[:1]
+				continue
+			}
+			return "", false
+		default:
+			prefix = append(prefix, part)
+		}
+		if len(prefix) == 3 && prefix[0] == "proc" &&
+			(prefix[1] == "self" || prefix[1] == "thread-self") && prefix[2] == "root" {
+			return strings.Join(parts[i+1:], "/"), true
+		}
+		if len(prefix) > 2 || len(prefix) == 1 && prefix[0] != "proc" ||
+			len(prefix) == 2 && (prefix[0] != "proc" || prefix[1] != "self" && prefix[1] != "thread-self") {
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // directoryCreationFact reports a path fact of a POSIX mkdir call.
