@@ -107,9 +107,9 @@ A certification deployment uses `DefenseClawCertGateway_<run-id>`. Administrator
 CLI status and readiness requests select that service from the CLI executable's
 protected installation root and still verify the connected SCM process. A
 caller-provided service-name environment variable cannot redirect the probe.
-The canonical CM `env_config.json` may remain present during certification
-cleanup; other production-state children continue to prevent shared-runtime
-cleanup. The overlay file is preserved, not read or removed by that check.
+Certification cleanup retains the existing production-state exclusivity guard;
+`env_config.json` has no exception and blocks shared-runtime cleanup like other
+non-IPC production-state children.
 
 ### Destination redaction
 

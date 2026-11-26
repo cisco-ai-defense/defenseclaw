@@ -8387,33 +8387,23 @@ targets:
         Assert-Harness `
             -Condition $productionChildRejected `
             -Message 'shared target cleanup accepted non-IPC production state'
-        # CM keeps this canonical overlay outside the certification state root.
-        # It must neither block rollback nor be removed by the coexistence check.
+        # A remaining production overlay must not bypass cleanup exclusivity.
         Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $productionState -Force | Out-Null
         $overlayPath = [IO.Path]::Combine($productionState, 'env_config.json')
-        [IO.File]::WriteAllText($overlayPath, '{"cisco_ai_defense_endpoint":"https://example.invalid"}')
+        [IO.File]::WriteAllText($overlayPath, '{}')
         $overlay = Microsoft.PowerShell.Management\Get-Item -LiteralPath $overlayPath
         $savedProfile = Get-DefenseClawEnterpriseProfile
         try {
-            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-            Assert-DefenseClawTargetRuntimeProductionChildrenExclusive -ProductionState $productionState -Children @($overlay)
-            Assert-Harness -Condition ([IO.File]::ReadAllText($overlayPath).Contains('example.invalid')) -Message 'coexistence check modified the CM overlay'
-            $standaloneOverlayRejected = $false
-            Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
-            try {
-                Assert-DefenseClawTargetRuntimeProductionChildrenExclusive -ProductionState $productionState -Children @($overlay)
+            foreach ($profile in @('SecureClient', 'Standalone')) {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile $profile
+                $overlayRejected = $false
+                try {
+                    Assert-DefenseClawTargetRuntimeProductionChildrenExclusive -ProductionState $productionState -Children @($overlay)
+                }
+                catch { $overlayRejected = $true }
+                Assert-Harness -Condition $overlayRejected -Message "cleanup accepted production overlay for $profile"
             }
-            catch { $standaloneOverlayRejected = $true }
-            Assert-Harness -Condition $standaloneOverlayRejected -Message 'standalone cleanup accepted a Secure Client overlay exception'
-            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $overlayPath -Force
-            $overlayDirectory = Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $overlayPath
-            $overlayDirectoryRejected = $false
-            try {
-                Assert-DefenseClawTargetRuntimeProductionChildrenExclusive -ProductionState $productionState -Children @($overlayDirectory)
-            }
-            catch { $overlayDirectoryRejected = $true }
-            Assert-Harness -Condition $overlayDirectoryRejected -Message 'cleanup accepted env_config.json as a directory'
+            Assert-Harness -Condition ([IO.File]::ReadAllText($overlayPath) -ceq '{}') -Message 'cleanup check changed production overlay'
         }
         finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile }
         $allCanonicalPlan = [pscustomobject]@{
