@@ -82,10 +82,11 @@ not read their profile configuration directly. The guardian authorization must
 be fresh, and the published record must pass the same trust checks used for MCP
 admission. Missing or unreadable records produce partial
 inventory rather than an authoritative empty server list. Each connector also
-requires an administrator-owned publication receipt: the enumerator invalidates
-it before updating records and marks it ready only after a successful publication.
-A failed publication stays partial even if Windows prevents withdrawing an older
-record. Enumeration reports the publication failure and retries next cycle.
+requires administrator-owned publication state: the enumerator marks the
+connector pending before updating records and publishes a new generation only
+after success. A failed publication stays partial even if Windows prevents
+replacing the previous ready receipt or withdrawing an older record. Enumeration
+reports the publication failure and retries next cycle.
 Project-scoped servers retain separate identities even when their names match;
 user-scoped server identities remain stable. Ambiguous tool-to-server aliases
 are not attributed to an arbitrary project.

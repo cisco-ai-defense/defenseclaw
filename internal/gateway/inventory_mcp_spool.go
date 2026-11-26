@@ -59,12 +59,14 @@ func appendWindowsMCPSpoolInventory(
 			status.markIncomplete(name)
 			continue
 		}
-		if err := enterprisehooks.ReadMCPInventoryPublication(dir, validateManagedGuardianAuthorization); err != nil {
+		generation, err := enterprisehooks.ReadMCPInventoryPublication(dir, validateManagedGuardianAuthorization)
+		if err != nil {
 			status.markIncomplete(name)
 			continue
 		}
 		servers, unreadable := enrolledSpoolMCPServers(dir, name, sid)
-		if unreadable != nil || enterprisehooks.ReadMCPInventoryPublication(dir, validateManagedGuardianAuthorization) != nil {
+		currentGeneration, receiptErr := enterprisehooks.ReadMCPInventoryPublication(dir, validateManagedGuardianAuthorization)
+		if unreadable != nil || receiptErr != nil || currentGeneration != generation {
 			status.markIncomplete(name)
 			continue
 		}

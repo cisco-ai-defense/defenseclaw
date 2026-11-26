@@ -88,7 +88,7 @@ func TestSecureClientWindowsEnumerateReportsMCPPublicationFailure(t *testing.T) 
 	}
 	for _, connector := range mcpasuser.PublishedConnectors() {
 		dir := enterprisehooks.MCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir), connector.Connector)
-		if err := enterprisehooks.ReadMCPInventoryPublication(dir, nil); err == nil {
+		if _, err := enterprisehooks.ReadMCPInventoryPublication(dir, nil); err == nil {
 			t.Fatalf("%s receipt remained ready", connector.Connector)
 		}
 	}

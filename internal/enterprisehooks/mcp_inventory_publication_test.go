@@ -22,7 +22,8 @@ func TestMCPInventoryPublicationRejectsUnwithdrawnRecord(t *testing.T) {
 	if err := PublishMCPInventorySpool(dir, publish, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := ReadMCPInventoryPublication(dir, nil); err != nil {
+	firstGeneration, err := ReadMCPInventoryPublication(dir, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	failed := errors.New("cannot replace, remove, or truncate record")
@@ -32,20 +33,24 @@ func TestMCPInventoryPublicationRejectsUnwithdrawnRecord(t *testing.T) {
 	if _, err := os.Stat(record); err != nil {
 		t.Fatalf("old record should remain for this regression: %v", err)
 	}
-	if err := ReadMCPInventoryPublication(dir, nil); err == nil {
+	if _, err := ReadMCPInventoryPublication(dir, nil); err == nil {
 		t.Fatal("failed publication accepted an older readable record")
 	}
 	if err := PublishMCPInventorySpool(dir, publish, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := ReadMCPInventoryPublication(dir, nil); err != nil {
+	secondGeneration, err := ReadMCPInventoryPublication(dir, nil)
+	if err != nil {
 		t.Fatalf("recovery: %v", err)
+	}
+	if secondGeneration == firstGeneration {
+		t.Fatal("successful republication reused its generation")
 	}
 }
 
 func TestMCPInventoryPublicationRequiresTrustedCompletion(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "codex-mcp")
-	if err := ReadMCPInventoryPublication(dir, nil); err == nil {
+	if _, err := ReadMCPInventoryPublication(dir, nil); err == nil {
 		t.Fatal("missing receipt accepted")
 	}
 	called := false
@@ -56,14 +61,14 @@ func TestMCPInventoryPublicationRequiresTrustedCompletion(t *testing.T) {
 	if called {
 		t.Fatal("publisher ran without invalidating and protecting receipt")
 	}
-	if err := ReadMCPInventoryPublication(dir, nil); err == nil {
+	if _, err := ReadMCPInventoryPublication(dir, nil); err == nil {
 		t.Fatal("incomplete receipt accepted")
 	}
 	if err := PublishMCPInventorySpool(dir, func() error { return nil }, nil); err != nil {
 		t.Fatal(err)
 	}
 	trusted := false
-	if err := ReadMCPInventoryPublication(dir, func(path, root string) error {
+	if _, err := ReadMCPInventoryPublication(dir, func(path, root string) error {
 		trusted = path == dir+".inventory-ready" && root == filepath.Dir(dir)
 		return denied
 	}); !errors.Is(err, denied) || !trusted {
@@ -77,7 +82,7 @@ func TestMCPInventoryPublicationFailedCompletionStaysPending(t *testing.T) {
 	denied := errors.New("final receipt protection failed")
 	err := PublishMCPInventorySpool(dir, func() error { return nil }, func(string) error {
 		protections++
-		if protections == 2 {
+		if protections == 3 {
 			return denied
 		}
 		return nil
@@ -85,7 +90,7 @@ func TestMCPInventoryPublicationFailedCompletionStaysPending(t *testing.T) {
 	if !errors.Is(err, denied) {
 		t.Fatalf("error=%v", err)
 	}
-	if err := ReadMCPInventoryPublication(dir, nil); err == nil {
+	if _, err := ReadMCPInventoryPublication(dir, nil); err == nil {
 		t.Fatal("failed completion became authoritative")
 	}
 }
