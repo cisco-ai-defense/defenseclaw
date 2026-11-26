@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // CurrentProcessOwner names the account (user name and uid) whose processes
@@ -83,7 +85,7 @@ func (s *ContinuousDiscoveryService) perUserOwnHomeRoots() []string {
 	}
 	home = filepath.Clean(home)
 	roots := []string{home}
-	if resolved, err := filepath.EvalSymlinks(home); err == nil && filepath.Clean(resolved) != home {
+	if resolved, err := winpath.EvalLinks(home); err == nil && filepath.Clean(resolved) != home {
 		roots = append(roots, filepath.Clean(resolved))
 	}
 	return roots

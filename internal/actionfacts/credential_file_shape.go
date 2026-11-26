@@ -308,7 +308,7 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 			}
 			relative = value[index:]
 		case row.relative != "":
-			if value != row.relative && !strings.HasSuffix(value, "/"+row.relative) {
+			if value != row.relative && !hasPathSuffix(value, row.relative) {
 				continue
 			}
 			relative = row.relative
@@ -363,14 +363,30 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 
 // folderIndex is where folder starts in value as whole path components, with
 // at least one more component after it, or -1.
+// It builds no string: MatchCredentialFileShape runs it for each table row
+// on every path of every placed reading, and the concatenations it made
+// were most of the allocations of a long copy-mode call (substrate-1
+// GAP-0956).
 func folderIndex(value, folder string) int {
-	if strings.HasPrefix(value, folder+"/") {
-		return 0
-	}
-	if index := strings.Index(value, "/"+folder+"/"); index >= 0 {
-		return index + 1
+	for from := 0; from <= len(value); {
+		index := strings.Index(value[from:], folder)
+		if index < 0 {
+			return -1
+		}
+		index += from
+		end := index + len(folder)
+		if (index == 0 || value[index-1] == '/') && end < len(value) && value[end] == '/' {
+			return index
+		}
+		from = index + 1
 	}
 	return -1
+}
+
+// hasPathSuffix reports value ending in /suffix (strings.HasSuffix(value,
+// "/"+suffix) without building it, folderIndex).
+func hasPathSuffix(value, suffix string) bool {
+	return len(value) > len(suffix) && value[len(value)-len(suffix)-1] == '/' && strings.HasSuffix(value, suffix)
 }
 
 // CredentialFileShapeProbePaths returns, for every row of the credentials-file
@@ -418,17 +434,11 @@ func CredentialFileShapeProbePaths() []string {
 // belowFolder reports a path below folder (components, matched at a component
 // boundary) and returns the folder-relative spelling of the file.
 func belowFolder(value, folder string) (string, bool) {
-	rest := ""
-	switch {
-	case strings.HasPrefix(value, folder+"/"):
-		rest = value[len(folder)+1:]
-	default:
-		index := strings.Index(value, "/"+folder+"/")
-		if index < 0 {
-			return "", false
-		}
-		rest = value[index+len(folder)+2:]
+	index := folderIndex(value, folder)
+	if index < 0 {
+		return "", false
 	}
+	rest := value[index+len(folder)+1:]
 	if rest == "" {
 		return "", false
 	}

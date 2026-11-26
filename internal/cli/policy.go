@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func init() {
@@ -786,7 +787,7 @@ func resolveExistingPolicyPathPrefix(absolute string) (string, error) {
 	candidate := absolute
 	var suffix []string
 	for {
-		resolved, err := filepath.EvalSymlinks(candidate)
+		resolved, err := winpath.EvalLinks(candidate)
 		if err == nil {
 			for index := len(suffix) - 1; index >= 0; index-- {
 				resolved = filepath.Join(resolved, suffix[index])

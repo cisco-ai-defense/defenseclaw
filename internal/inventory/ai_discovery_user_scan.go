@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Per-user scans (standalone enterprise profile, Linux and macOS).
@@ -235,7 +236,7 @@ func scanUserHomeWithSystemBinaryDirs(ctx context.Context, home, account string,
 	home = filepath.Clean(home)
 	// The model file detector reports paths with symlinks resolved.
 	homeRoots := []string{home}
-	if resolved, err := filepath.EvalSymlinks(home); err == nil && filepath.Clean(resolved) != home {
+	if resolved, err := winpath.EvalLinks(home); err == nil && filepath.Clean(resolved) != home {
 		homeRoots = append(homeRoots, filepath.Clean(resolved))
 	}
 	var fallbackDirs []string

@@ -324,6 +324,18 @@ func (k *Counter) TakeN(n int) bool {
 	return false
 }
 
+// Left is how many more items the Counter takes before its next take is past
+// max: 0 once the count is at or past max, and for a Counter that does not
+// count. It changes nothing and records no hit; a walk that can tell its
+// remaining work from it stops where the take would have been refused
+// (substrate-1:GAP-0674).
+func (k *Counter) Left() int {
+	if k.t == nil {
+		return 0
+	}
+	return max(k.max-k.n, 0)
+}
+
 // Action is a guardrail verdict, ordered from the weakest to the strictest.
 type Action uint8
 

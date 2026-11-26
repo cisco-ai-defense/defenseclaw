@@ -67,7 +67,8 @@ type Options struct {
 	// Providers recorded in the attestation.
 	Providers []string
 	// RegistryTokens are the npm registry placeholders of the kit's npmrc
-	// (kit.NPMRegistryTokens of substrate.secrets, GAP-0529).
+	// (kit.NPMRegistryTokens of substrate.secrets, GAP-0529), for launchers
+	// older than 1.0.11: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
 	RegistryTokens []kit.RegistryToken
 }
 

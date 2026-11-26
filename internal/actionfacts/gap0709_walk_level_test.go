@@ -1,6 +1,7 @@
 package actionfacts
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,7 +33,7 @@ func TestGAP0709WalkSkipsTheLevelPastTheBound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	walk := credentialPathWalk(root, root, credentialWalkFilter{}, credentialPathWalkBounds)
+	walk := credentialPathWalk(credentialWalkBudgetUnbounded(), root, root, credentialWalkFilter{}, credentialPathWalkBounds, credentialWalkRoomAll())
 	if want := (credentialPathWalkLimits{folders: 4096, entries: 4146, lookups: 1}); walk.used != want || !walk.cut {
 		t.Fatalf("walk used %+v cut %v, want %+v cut true: the level past the bound was read", walk.used, walk.cut, want)
 	}
@@ -41,7 +42,7 @@ func TestGAP0709WalkSkipsTheLevelPastTheBound(t *testing.T) {
 	}
 	for _, command := range []string{"grep -rn TODO .", "rg TODO", "rg --hidden TODO", "grep -r KEY . d1"} {
 		facts := Analyze(Input{Tool: "exec", Command: command, CWD: root, ActiveHome: t.TempDir()})
-		if caps := facts.CredentialPathReadCaps(); caps.Any() {
+		if caps := facts.CredentialPathReadCaps(context.Background()); caps.Any() {
 			t.Fatalf("%s: a cut walk is a cap of the resolve: %v", command, caps)
 		}
 		if !slices.ContainsFunc(facts.CredentialPathReads(), func(p PathFact) bool { return p.Value == "" }) {

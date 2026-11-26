@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"maps"
@@ -18,8 +19,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -1062,6 +1065,207 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 	return filepath.Clean(name)
 }
 
+// copyModeWholeCallByName reports a copy-mode actor's whole call (not one of
+// its statements, twins or host readings) that runs in a guest folder and
+// that this gateway judges in no folder (substrate-1 GAP-0922). A statement
+// after a cd keeps the call's guest folder, not its own, and the whole
+// call's decision already follows the cd.
+//
+// The reading is a second decision, so it runs only for a call whose words
+// may name the guest's SSH folder (copyModeCallMayNameSSHFolder): the other
+// calls kept their cost (substrate-1 GAP-0999).
+func copyModeWholeCallByName(request trustedActionRequest, input actionfacts.Input, home string) bool {
+	return request.byNameGuestCWD != "" && !request.ProtectedHomeHook &&
+		!request.simpleCommandPass && !request.readingTwin && request.hostTwinDepth == 0 &&
+		input.Command != "" && !filepath.IsAbs(input.CWD) &&
+		copyModeCallMayNameSSHFolder(input.Command, request.byNameGuestCWD, home)
+}
+
+// copyModeByNameGuestCWD is the folder the by-name reading judges a
+// copy-mode actor's call in: a sandbox hook request with no folder on this
+// host (its Input.CWD is no host path). It is the call's guest folder
+// (SandboxGuestCWD), or the guest home when the hook client sent no
+// absolute folder, as the actor's shell starts there (substrate-1
+// GAP-0996). An explicitly supplied workdir the guest resolver cannot
+// place stays unresolved rather than using that fallback (GAP-1024).
+// Every hook path sets SandboxGuestCWD; only Claude Code and
+// Codex also set SkipLocalFilesystemResolution, which the reading needed
+// before, so Amp, OpenCode and Cursor actors never had it (GAP-0993).
+func copyModeByNameGuestCWD(ctx context.Context, request trustedActionRequest) string {
+	if !isSandboxHookRequest(ctx) || request.ProtectedHomeHook || request.guestToolCWDUnresolved || filepath.IsAbs(request.Input.CWD) {
+		return ""
+	}
+	if cwd := request.SandboxGuestCWD; path.IsAbs(cwd) {
+		return cwd
+	}
+	if home := request.Input.ActiveHome; path.IsAbs(home) && !strings.ContainsAny(home, "\\\x00") {
+		return path.Clean(home)
+	}
+	return sandboxauth.SandboxHome
+}
+
+// copyModeCallMayNameSSHFolder is a lexical gate on the by-name reading
+// (GAP-0999): it holds for a call that may name home's SSH folder or a place
+// in it, the only target whose finding the reading adds
+// (appendTrustedHomeResolvedSSHKeyWriteFinding). The gate is there for speed
+// only, so it says no only where the reading, which follows bash, finds
+// nothing (TestFX0999GateNeverSkipsAByNameDecision); anything it cannot
+// read holds. Quotes and backslashes are dropped first, so ~/'.ssh',
+// ~/.s"sh" and .\ssh still name the folder. It holds for:
+//   - a call in the folder itself;
+//   - the folder's or the keys file's name;
+//   - any expansion or a name built at run time: $x, ${x:-s}, ${HOME},
+//     $(...), $'...', `...`, printf, eval, a decoder. x=s; tar cz ~/.s${x}h,
+//     D=~/.s; tar cz ${D}sh and sh -c "x=s; tar cz ~/.s\${x}h" passed the
+//     old gate, and the actor allowed what the laptop blocks
+//     (substrate-1 GAP-1022);
+//   - a nested shell, whose words its shell reads again;
+//   - a pattern in a name that starts with a dot (~/.ss?, ~/.s*, ~/.[s]sh,
+//     ~/.*), a brace expansion ({.s,}sh), and a pattern right under a
+//     folder that may be home (~/*, ./?ssh, /*);
+//   - any pattern in a call that may turn on dotglob, GLOBIGNORE or globdots
+//     (shopt -s dotglob; tar cz *, GAP-1022).
+//
+// Without dotglob bash's * and ? never match a leading dot, so src/* names
+// no SSH folder and passes no second decision.
+func copyModeCallMayNameSSHFolder(command, cwd, home string) bool {
+	if pathWithin(cwd, path.Join(home, ".ssh")) {
+		return true
+	}
+	text := strings.ToLower(strings.Map(func(r rune) rune {
+		switch r {
+		case '\'', '"', '\\':
+			return -1
+		}
+		return r
+	}, command))
+	for _, word := range copyModeRunTimeNames {
+		if strings.Contains(text, word) {
+			return true
+		}
+	}
+	// A bracket class can spell a leading dot without spelling the folder's
+	// name literally. Let the by-name decision settle these uncommon calls.
+	if strings.Contains(text, "[") {
+		return true
+	}
+	// The by-name decision also sees inherited shell options. If they can
+	// expose leading-dot names, no bare pattern is safe to skip here.
+	if strings.ContainsAny(text, "*?") && (hookpaths.CommandMayDotglob(command) ||
+		strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "") {
+		return true
+	}
+	homeBase := strings.ToLower(path.Base(home))
+	component := 0 // where the path component before text[i] starts
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		next := byte(0)
+		if i+1 < len(text) {
+			next = text[i+1]
+		}
+		switch {
+		case c == '.':
+			j := i + 1
+			for j < len(text) && j < i+3 && text[j] == 's' {
+				j++
+			}
+			if j < len(text) && strings.IndexByte("?*[{", text[j]) >= 0 {
+				return true
+			}
+		case (c == '/' || c == '~') && strings.IndexByte("?*[", next) >= 0 && next != 0:
+			if c == '~' {
+				return true
+			}
+			switch folder := text[component:i]; {
+			case folder == "", folder == ".", folder == "..", folder == homeBase, folder[0] == '~':
+				return true
+			}
+		case c == '{' && copyModeBraceExpansion(text[i+1:]):
+			return true
+		}
+		if c == '/' || strings.IndexByte(copyModeWordBreaks, c) >= 0 {
+			component = i + 1
+		}
+	}
+	return copyModeNestedShell(text)
+}
+
+// copyModeRunTimeNames are the gate's words for a name the call may build at
+// run time, or the folder's own (lowercased, quotes dropped). One spec
+// string: $ is every expansion.
+var copyModeRunTimeNames = strings.Fields("ssh authorized $ ` printf eval base64 xxd")
+
+// copyModeWordBreaks end a word or a path component for the gate.
+const copyModeWordBreaks = " \t\n;&|()<>=:,{}"
+
+// copyModeShells are the shells whose -c or script words are read again.
+var copyModeShells = strings.Fields("sh bash zsh dash ksh mksh ash yash fish busybox pwsh powershell")
+
+// copyModeBraceExpansion reports text after a { that bash brace-expands:
+// a word that is not empty, with a comma or .. before its }.
+func copyModeBraceExpansion(text string) bool {
+	if text == "" || strings.IndexByte(" \t\n}", text[0]) >= 0 {
+		return false
+	}
+	for i := 0; i < len(text) && text[i] != '}'; i++ {
+		if text[i] == ',' || text[i] == '.' && i+1 < len(text) && text[i+1] == '.' {
+			return true
+		}
+	}
+	return false
+}
+
+// copyModeNestedShell reports a word of text that runs a shell (sh,
+// /bin/bash, busybox): the words it is given are read again. A shell whose
+// statement is only a here-string of one word (bash <<< true) reads that
+// word, which the gate has read in the text already, and nothing else: no
+// file, no other input, no option. It made the by-name reading run on every
+// 8 KB call that opens with bash <<< 'true' (rel-1-0-10:GAP-2249).
+func copyModeNestedShell(text string) bool {
+	for start := 0; start < len(text); {
+		end := start
+		for end < len(text) && (text[end] >= 'a' && text[end] <= 'z' || text[end] >= '0' && text[end] <= '9' ||
+			strings.IndexByte("_.+-/", text[end]) >= 0) {
+			end++
+		}
+		if end > start {
+			word := text[start:end]
+			if slices.Contains(copyModeShells, word[strings.LastIndexByte(word, '/')+1:]) && !copyModeLiteralHereString(text[end:]) {
+				return true
+			}
+			start = end
+			continue
+		}
+		start++
+	}
+	return false
+}
+
+// copyModeLiteralHereString reports text after a shell word that is only a
+// here-string of one word up to the end of its statement: <<< w and then a
+// newline, ;, &, |, ) or the end. Any other word or redirection (a script
+// file, -s, < file, 0<f) is not. It is sound because the gate drops quotes
+// and backslashes before it reads (copyModeCallMayNameSSHFolder) and reads
+// every later line itself: a change that stops that strip, or a by-name
+// decision that follows fish or pwsh escapes, must read this exception again.
+func copyModeLiteralHereString(text string) bool {
+	text = strings.TrimLeft(text, " \t")
+	rest, ok := strings.CutPrefix(text, "<<<")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	word := 0
+	for word < len(rest) && strings.IndexByte(" \t\n;&|()<>", rest[word]) < 0 {
+		word++
+	}
+	if word == 0 {
+		return false
+	}
+	rest = strings.TrimLeft(rest[word:], " \t")
+	return rest == "" || strings.IndexByte("\n;&|)", rest[0]) >= 0
+}
+
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
 	// The link proof places the links of the call by the hook's folder (its own
 	// walk of the command); a write after a cd is judged by the other readers
@@ -1134,6 +1338,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// copy through the kit's places (substrate-1 GAP-0549).
 			own := request
 			own.guestProtectedWriteCommand, own.guestWriteClaimOnly = "", nil
+			// The by-name reading in the guest folder (copyModeWholeCallByName)
+			// sees no more of the actor than the claim does: it cannot place
+			// the copy's destination either, so the kit's places still decide
+			// (substrate-1 GAP-0922).
+			own.SandboxGuestCWD, own.byNameGuestCWD, own.guestByNameOnly = "", "", nil
 			own.resolvedTarget, own.unprovenTarget, own.unresolvedTarget, own.overBudgetOmission, own.nonWriteMention =
 				nil, nil, nil, nil, nil
 			*request.guestWriteClaimOnly = !trustedExistingAuthorizedKeysSymlinkWrite(own, facts)
@@ -1660,14 +1869,48 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if input.DialectHint != "" {
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
+	// mentionCWD and readMentions are the folder and the reads of the
+	// mention checks below: the decision's own.
+	mentionCWD, readMentions := input.CWD, func(read func()) { read() }
+	if decision == "" && copyModeWholeCallByName(request, input, facts.ActiveHome) {
+		// A copy-mode actor's call has no folder on this host: its files
+		// stay in the actor. The laptop's decision reads the call's words
+		// by name in the hook's folder and says protected for tar cz
+		// ~/.ssh, cd .ssh && tar cz . or a cd chain into ~/.ssh; in no
+		// folder it reads nothing, so the actor allowed what the laptop
+		// blocks (substrate-1 GAP-0922). Only this decision, and the
+		// mention checks of its verdict, run in the guest's folder, by name
+		// alone: no read reaches this host's file system
+		// (fixturefs.Unread), and the rest of the call stays in no folder.
+		// The first fix moved the whole proof to the guest folder: it
+		// opened host files and blocked calls the laptop allows.
+		guestCWD := request.byNameGuestCWD
+		posixShell := trustedPOSIXShellCall(input, facts)
+		readMentions = fixturefs.Unread
+		readMentions(func() {
+			// One memo for every by-name decision of the call, apart from
+			// the host's answers; a repeat is answered once (FIX-F3PERF).
+			decision = request.targetMemo.UnreadCommandDecision(input.Command, guestCWD, facts.ActiveHome, input.DialectHint, globFacts, posixShell)
+		})
+		if decision != "" {
+			mentionCWD = guestCWD
+			if request.guestByNameOnly != nil {
+				*request.guestByNameOnly = true
+			}
+		}
+	}
 	if decision != "" {
 		if request.nonWriteMention != nil && trustedShellCommandInput(request.Input) {
-			readsOnly := hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+			var readsOnly, noKnownWrite bool
+			readMentions(func() {
+				readsOnly = hookpaths.ActionMentionsNoWriteRole(input.Command, mentionCWD, facts.ActiveHome, input.DialectHint, globFacts)
+				noKnownWrite = !readsOnly && request.unknownMention != nil &&
+					hookpaths.ActionMentionsNoKnownWrite(input.Command, mentionCWD, facts.ActiveHome, input.DialectHint, globFacts)
+			})
 			switch {
 			case readsOnly && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook:
 				*request.nonWriteMention = true
-			case !readsOnly && request.unknownMention != nil &&
-				hookpaths.ActionMentionsNoKnownWrite(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) &&
+			case noKnownWrite &&
 				(!request.ProtectedHomeHook || clientMapClearsKeyFiles(clientTargets, facts.ActiveHome)):
 				// The unknown tier (rel-1-0-10:GAP-0843, ONE BOUND RULE): the
 				// shared unknown-tier finding decides, in every pack. A call

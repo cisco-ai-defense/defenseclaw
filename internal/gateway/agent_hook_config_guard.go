@@ -1449,13 +1449,21 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 	}
 	if !whole.Authoritative() {
 		// A call the whole reading did not finish is read in the directories
-		// the guest placement gives its commands (sandboxGuestPlacements):
+		// the guest placement gives its commands (guestPlacementPlan):
 		// after pushd, popd, cd -, { cd x; } or a function body that cds,
 		// and in an Args-only call the POSIX reader rejects, the statement
 		// split declines and the settings write went unnamed where the
 		// laptop alerts (substrate-1 GAP-0378, GAP-0379).
 		placements, _ := request.guestMemo.plan(input, whole).placements(false)
 		dynamic := guestCallRunsUnreadCommand(command, input.ActiveHome)
+		var own *guestShellReadings
+		var walked map[string]bool
+		if dynamic {
+			own, walked = guestOwnShellWalk(command, input.CWD, input.ActiveHome)
+			if target := sandboxAgentHookConfigInlineWrite(command, input.CWD, input.ActiveHome); target != "" {
+				return agentHookConfigWriteRuleID, "", target
+			}
+		}
 		for _, placement := range placements {
 			// A folder the call reaches only as a cd target no command runs
 			// in ((cd ~/.claude || cd /tmp), an uncalled function that cds)
@@ -1463,8 +1471,21 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 			// (cd ~/.claude || cd /tmp) then echo '{}' > settings.json
 			// (substrate-1 GAP-0500). After a command the split cannot read
 			// ($CMD, eval, source), which may change the folder, the laptop
-			// keeps such a folder and alerts; so does this guard.
-			if placement.candidate && !dynamic {
+			// keeps such a folder and alerts; so does this guard, but only
+			// where that command ran first and the call's own shell may
+			// stand in the folder (guestOwnShellWalk). A cd in a subshell
+			// that ended before the command, or one only a later statement
+			// runs, is not where the write runs: (cd .claude || cd /tmp);
+			// $CMD; echo '{}' > settings.json; cd .claude; ls alerted where
+			// the laptop and the rel actor allow (substrate-1 GAP-0888,
+			// RV-SEC10 B43). A text the walk could not place keeps every
+			// candidate folder, as before. The whole call is also read once in
+			// cwd by the laptop's writer (sandboxAgentHookConfigInlineWrite,
+			// as the rel actor reads it), which names the hook file of
+			// (cd ~/.claude || cd /tmp); $CMD; echo '{}' > settings.json and
+			// of an uncalled function that cds, where the laptop alerts.
+			if placement.candidate && (!dynamic || walked[placement.text] &&
+				!own.has(placement.text, path.Clean(placement.cwd))) {
 				continue
 			}
 			if target := sandboxAgentHookConfigPlacedWrite(placement.text, placement.cwd, input.ActiveHome); target != "" {

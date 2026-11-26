@@ -29,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Push sends the local changes made since the last send (the run or an
@@ -279,9 +281,9 @@ func pushPathFilter(project string, paths []string) (func(string) bool, error) {
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(cwd, p)
 		}
-		if r, err := filepath.EvalSymlinks(abs); err == nil {
+		if r, err := winpath.EvalLinks(abs); err == nil {
 			abs = r
-		} else if r, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		} else if r, err := winpath.EvalLinks(filepath.Dir(abs)); err == nil {
 			abs = filepath.Join(r, filepath.Base(abs))
 		}
 		rel, err := filepath.Rel(project, abs)

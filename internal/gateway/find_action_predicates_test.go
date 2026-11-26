@@ -3,7 +3,10 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestFindActionVariants pins that a find call writes only through an
@@ -30,9 +33,9 @@ func TestFindActionVariants(t *testing.T) {
 		}
 	}
 	link := filepath.Join(h.ext, "linked-hook")
-	if err := os.Symlink(hook, link); err != nil {
-		t.Fatal(err)
-	}
+	// A Limited Windows token cannot make the link: only the rows through it
+	// skip there (GAP-2158).
+	linked := testenv.TrySymlink(t, hook, link)
 	rows := []hookConfigShellRow{
 		{"fprint onto the hook", "find . -fprint " + hook, "block"},
 		{"fprint0 onto the hook", "find . -fprint0 " + hook, "block"},
@@ -89,5 +92,17 @@ func TestFindActionVariants(t *testing.T) {
 		{"exec read of the hook root", "find " + hook + " -exec cat {} \\;", "allow"},
 		{"execdir wrapped read of the hook by name", "find . -execdir env cat " + hook + " \\;", "allow"},
 	}
-	checkHookConfigShellRows(t, h, rows)
+	var direct, throughLink []hookConfigShellRow
+	for _, row := range rows {
+		if strings.Contains(row.command, link) {
+			throughLink = append(throughLink, row)
+		} else {
+			direct = append(direct, row)
+		}
+	}
+	checkHookConfigShellRows(t, h, direct)
+	t.Run("through the link", func(t *testing.T) {
+		linked.Require(t)
+		checkHookConfigShellRows(t, h, throughLink)
+	})
 }

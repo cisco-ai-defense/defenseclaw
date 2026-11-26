@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -182,7 +183,7 @@ func TestGAP0344GAP0349CredentialReadForms(t *testing.T) {
 				t.Fatalf("%q in %v: credentials read = %v, want %v (status %s, private %v)",
 					row.cmd, row.files, got, row.read, facts.Parse.Status, facts.CredentialPathReads())
 			}
-			if caps := facts.CredentialPathReadCaps(); caps.Any() {
+			if caps := facts.CredentialPathReadCaps(context.Background()); caps.Any() {
 				t.Fatalf("%q: TRUNCATED %v in a small folder", row.cmd, caps)
 			}
 		})
@@ -231,7 +232,7 @@ func g0344BigTree(t *testing.T, files ...string) string {
 func TestGAP0344WalkCut(t *testing.T) {
 	dir := g0344BigTree(t, ".env")
 	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: "grep -r KEY .", CWD: dir, ActiveHome: t.TempDir()})
-	if caps := facts.CredentialPathReadCaps(); caps.Any() {
+	if caps := facts.CredentialPathReadCaps(context.Background()); caps.Any() {
 		t.Fatalf("a cut walk is a cap of the resolve: %v", caps)
 	}
 	if !credentialFileContentRead(facts) {

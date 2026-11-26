@@ -343,7 +343,7 @@ func projectDirs(workingDir string, homes []string, volumeRoot bool) ([]string, 
 // resolvedPath is path with symlinks resolved, or path itself when it
 // cannot be resolved.
 func resolvedPath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := winpath.EvalLinks(path); err == nil {
 		return filepath.Clean(resolved)
 	}
 	return filepath.Clean(path)
@@ -582,7 +582,7 @@ func (r GuardRequest) ownedCommandFor(command, hookBinary string) bool {
 	if copilotVSCodeLocalCommandOwned(r.goos(), hookBinary, command) {
 		return true
 	}
-	return ownedCommand(command, hookBinary)
+	return ownedCommand(r.goos(), command, hookBinary)
 }
 
 // ownedHookBinaries is the administrator hook binary and, on Windows, each
@@ -670,12 +670,7 @@ func (r GuardRequest) ownedHandlerFor(handler any, fields map[string]any, hookBi
 			}
 		case key == "args":
 			// Exec form carries the admin binary and its arguments separately.
-			command := stringField(handler, "command")
-			matchesBinary := command == hookBinary
-			if r.goos() == "windows" {
-				matchesBinary = strings.EqualFold(command, hookBinary)
-			}
-			if !ownedExecArgs(value) || !matchesBinary {
+			if !ownedExecArgs(value) || !sameHookBinary(r.goos(), stringField(handler, "command"), hookBinary) {
 				return false
 			}
 		case key == "fail_closed":
@@ -724,12 +719,12 @@ func ownedExecArgs(value any) bool {
 	return args[0] == "hook" && args[1] == "--connector" && validConnectorToken(args[2]) && args[3] == "--enterprise-managed"
 }
 
-func ownedCommand(command, hookBinary string) bool {
+func ownedCommand(goos, command, hookBinary string) bool {
 	if command == "" || hookBinary == "" {
 		return false
 	}
 	// Exec-form handlers carry the binary alone in command.
-	if strings.EqualFold(command, hookBinary) {
+	if sameHookBinary(goos, command, hookBinary) {
 		return true
 	}
 	// Copilot commands start with the removed-deployment guard.
@@ -753,6 +748,24 @@ func ownedCommand(command, hookBinary string) bool {
 	}
 	event = strings.TrimSuffix(strings.TrimPrefix(event, "'"), "'")
 	return validConnectorToken(event)
+}
+
+// sameHookBinary reports whether command names the administrator hook
+// binary hookBinary. Every check of whether a handler is DefenseClaw's own
+// uses it: machine-policy verify and status coverage, the guardian and the
+// higher-precedence (HKLM Settings) check. Off Windows the spelling must be
+// exact. On Windows case folds, and an 8.3 short alias of the installed
+// binary counts the way Claude Code enrolment counts it (GAP-2175); a
+// junction, symbolic link or hard link elsewhere does not
+// (winpath.SameNamedFile).
+func sameHookBinary(goos, command, hookBinary string) bool {
+	if command == "" || hookBinary == "" {
+		return false
+	}
+	if goos != "windows" {
+		return command == hookBinary
+	}
+	return strings.EqualFold(command, hookBinary) || winpath.SameNamedFile(command, hookBinary)
 }
 
 func validConnectorToken(value string) bool {

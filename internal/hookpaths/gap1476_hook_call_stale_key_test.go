@@ -15,8 +15,9 @@ import (
 // away, while calls on other goroutines begin, end, and let their thread go
 // and take one back as stillPlain does (rel-1-0-10:GAP-1476). On Windows the
 // key is the OS thread: a lookup that read the key unpinned and then moved
-// off that thread found the call that locked it next. Off Windows the key is
-// the goroutine number, never reused, and the test holds by construction.
+// off that thread found the call that locked it next. Off Windows the key
+// names the goroutine itself, which no other live goroutine has
+// (goroutineKey), and the test holds by construction.
 // The goroutine of each call finds its own call after every retake.
 func TestGAP1476GoroutineWithoutAHookCallFindsNoneByAStaleThreadKey(t *testing.T) {
 	run := 200 * time.Millisecond

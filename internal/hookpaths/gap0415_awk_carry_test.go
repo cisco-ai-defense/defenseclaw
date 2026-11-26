@@ -35,9 +35,7 @@ func TestGAP0415AwkProgramWithoutOutputIsNoWrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "writer.awk"), []byte("BEGIN {print \"x\" >> \"alias\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(project, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(project, "alias"))
 	t.Setenv("HOME", home)
 	for _, tc := range []struct {
 		name, command string

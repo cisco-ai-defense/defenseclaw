@@ -191,6 +191,11 @@ func managedClientCWD(ctx context.Context, cwd string, evidence map[string]strin
 	return filepath.Clean(client)
 }
 
+// The by-name readers read the sandbox HOME as a home whose startup files
+// set no dotglob; any other home this host cannot read may set it
+// (hookpaths.RegisterSandboxGuestHome).
+func init() { hookpaths.RegisterSandboxGuestHome(sandboxauth.SandboxHome) }
+
 // hookActiveHome is the directory "~" names in a request's tool calls: the
 // verified caller's home for host traffic (trustedActiveHome) and the fixed
 // sandbox HOME for a sandbox, whose agent has no access to the host home.

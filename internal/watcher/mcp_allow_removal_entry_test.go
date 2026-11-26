@@ -134,8 +134,11 @@ func TestRestoredAgentEntryIsJudgedAsAListedServerAgain(t *testing.T) {
 		t.Fatalf("revoked and removed: %+v, want failed", status)
 	}
 	f.listed = true
-	if status := f.status(); !status.Pending {
-		t.Fatalf("the entry is back: %+v, want the listed server pending its admission", status)
+	// The listed loopback server is judged again, not by the old allow: its
+	// scan can never run, so it is failed with the address cause from the
+	// first call instead of pending (GAP-2045).
+	if status := f.status(); !status.Failed || status.Pending || status.Revoked || status.ScanIssue != MCPScanIssueAddress {
+		t.Fatalf("the entry is back: %+v, want the listed server judged again (failed: address)", status)
 	}
 	f.w.mcpAdmissionMu.RLock()
 	held := len(f.w.mcpAdmissionDeparted)
@@ -405,8 +408,10 @@ func TestRevokedEarlierDefinitionWinsOverAFailedListedReplacement(t *testing.T) 
 	original := f.server
 	f.admittedByAllowRule()
 	f.server.URL = "http://127.0.0.1:28773/mcp"
-	if status := f.status(); !status.Pending {
-		t.Fatalf("the edited definition: %+v, want it pending its own admission", status)
+	// A loopback definition is failed with the address cause before its own
+	// admission runs: the scan never dials it (GAP-2045).
+	if status := f.status(); !status.Failed || status.Pending || status.ScanIssue != MCPScanIssueAddress {
+		t.Fatalf("the edited definition: %+v, want its own failed admission (address), not pending", status)
 	}
 	f.admitQueued()
 	query := MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home}
@@ -445,8 +450,10 @@ func TestRevokedEarlierDefinitionSurvivesAnUnreadableSource(t *testing.T) {
 	original := f.server
 	f.admittedByAllowRule()
 	f.server.URL = "http://127.0.0.1:28773/mcp"
-	if status := f.status(); !status.Pending {
-		t.Fatalf("the edited definition: %+v, want it pending its own admission", status)
+	// A loopback definition is failed with the address cause before its own
+	// admission runs: the scan never dials it (GAP-2045).
+	if status := f.status(); !status.Failed || status.Pending || status.ScanIssue != MCPScanIssueAddress {
+		t.Fatalf("the edited definition: %+v, want its own failed admission (address), not pending", status)
 	}
 	f.admitQueued()
 	query := MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home}

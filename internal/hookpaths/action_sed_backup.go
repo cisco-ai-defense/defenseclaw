@@ -174,7 +174,8 @@ type sedBackupScope struct {
 const sedBackupDepth = 8
 
 func (r *sedBackupReader) read(command string, scope sedBackupScope, depth int) {
-	file, parsed := parseShell(command)
+	// The reader only reads the tree: both readings of a decision share it.
+	file, parsed := r.memo.parsedShell(command)
 	if !parsed {
 		return
 	}

@@ -38,6 +38,19 @@ _GATEWAY_HERMES_LOCKED_SCRIPTS = (
 )
 
 
+# The product reads the same host settings (user.max_user_namespaces,
+# kernel.unprivileged_userns_clone) before it runs the contained probe and
+# answers "warn" when they refuse it (GAP-1525). The tests below run the real
+# probe, so they skip on such a host (GAP-0891). Read it before the fixture
+# below replaces the check, so the skip uses the product's own answer.
+_PROOF_UNAVAILABLE = cmd_doctor._hermes_execution_proof_unavailable()
+_NEEDS_CONTAINED_PROBE = pytest.mark.skipif(
+    bool(_PROOF_UNAVAILABLE),
+    reason=f"the contained Hermes probe cannot run on this host: {_PROOF_UNAVAILABLE}; "
+    "needs sysctl user.max_user_namespaces > 0 (and kernel.unprivileged_userns_clone where it exists)",
+)
+
+
 @pytest.fixture(autouse=True)
 def _contained_probe_available(monkeypatch):
     """These tests decide the probe outcome themselves; the host's user-namespace
@@ -92,6 +105,7 @@ def _registered_unix_hermes(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_doctor_uses_current_home_after_move(tmp_path, monkeypatch):
     _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
     assert check()["status"] == "pass"
@@ -155,6 +169,7 @@ def _rewrite_locked_scripts(tmp_path, paths):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_doctor_and_fail_mode_accept_the_lock_the_gateway_writes(tmp_path, monkeypatch):
     """GAP-0833: every setup and upgrade sealed this layout and doctor failed it."""
     _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
@@ -166,6 +181,7 @@ def test_hermes_doctor_and_fail_mode_accept_the_lock_the_gateway_writes(tmp_path
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
 @pytest.mark.parametrize("case", ["missing", "other-install", "also-other-install", "twice", "dotdot"])
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_doctor_probes_only_one_hook_sealed_at_this_install(tmp_path, monkeypatch, case):
     script, check = _registered_unix_hermes(tmp_path, monkeypatch)
     assert check()["status"] == "pass"
@@ -191,6 +207,7 @@ def test_hermes_doctor_probes_only_one_hook_sealed_at_this_install(tmp_path, mon
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_upgrade_from_1_0_2_layout_passes_once_the_gateway_reseals(tmp_path, monkeypatch):
     """A 1.0.2 per-user install upgraded in place (GAP-0833).
 
@@ -249,6 +266,7 @@ def test_hermes_upgrade_from_1_0_2_layout_passes_once_the_gateway_reseals(tmp_pa
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_doctor_requires_approval_for_every_event(tmp_path, monkeypatch):
     _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
@@ -378,6 +396,7 @@ def test_hermes_fail_mode_rejects_unresolvable_current_home(tmp_path, monkeypatc
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_doctor_requires_registered_executable_probe(tmp_path, monkeypatch):
     script, check = _registered_unix_hermes(tmp_path, monkeypatch)
     assert check()["status"] == "pass"
@@ -398,6 +417,7 @@ def test_hermes_doctor_requires_registered_executable_probe(tmp_path, monkeypatc
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix stub for the Windows probe helper")
+@_NEEDS_CONTAINED_PROBE
 def test_windows_hermes_probe_requires_active_runtime_response(tmp_path):
     target = tmp_path / "hook"
     check = WindowsHookCheck("healthy", "registered", '"hook" hook --connector hermes', str(target))
@@ -425,6 +445,7 @@ def _probe_stub(tmp_path, body: str):
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell stub")
 @pytest.mark.parametrize("body", list(_OVERSIZED_OUTPUTS.values()), ids=list(_OVERSIZED_OUTPUTS))
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_execution_probe_caps_captured_output(tmp_path, monkeypatch, body):
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", 20.0)
     target = _probe_stub(tmp_path, body)
@@ -445,6 +466,7 @@ def test_hermes_execution_probe_caps_captured_output(tmp_path, monkeypatch, body
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell stub")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_unix_doctor_probe_caps_registered_hook_output(tmp_path, monkeypatch):
     script, check = _registered_unix_hermes(tmp_path, monkeypatch)
     script.write_text("#!/bin/sh\n" + _OVERSIZED_OUTPUTS["proof-then-64MiB"], encoding="utf-8")
@@ -557,6 +579,7 @@ def _descendant_stub(tmp_path, body: str):
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell stub")
 @pytest.mark.parametrize("case", list(_DESCENDANT_CASES), ids=list(_DESCENDANT_CASES))
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_execution_probe_ends_what_the_hook_started(tmp_path, monkeypatch, case):
     body, timeout = _DESCENDANT_CASES[case]
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", timeout)
@@ -792,6 +815,7 @@ def _probe_escape(tmp_path, monkeypatch, body: str, timeout: float = 20.0):
 
 @_needs_perl
 @pytest.mark.parametrize("case", list(_ESCAPE_CASES), ids=list(_ESCAPE_CASES))
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_execution_probe_ends_descendants_that_leave_its_session(tmp_path, monkeypatch, case):
     body, timeout, proves = _ESCAPE_CASES[case]
     if not _LINUX:
@@ -1046,6 +1070,7 @@ def test_hermes_probe_supervisor_fails_closed_without_a_namespace(tmp_path, monk
 
 
 @pytest.mark.skipif(not _LINUX or not shutil.which("perl"), reason="Linux probe supervisor")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_probe_ends_the_tree_when_its_supervisor_is_killed(tmp_path, monkeypatch):
     # Killed from outside, however it dies, the supervisor takes the
     # namespace with it, and the probe cannot pass.
@@ -1099,6 +1124,7 @@ sleep 1
 
 
 @pytest.mark.skipif(not _LINUX or not shutil.which("perl"), reason="Linux probe supervisor")
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_probe_hook_cannot_end_its_supervisors(tmp_path, monkeypatch):
     body = _ESCAPE_CASES["new-session"][0].replace("exit 0\n", _KILL_SUPERVISORS + "exit 0\n")
     returncode, stdout, descendant = _probe_escape(tmp_path, monkeypatch, body)
@@ -1111,6 +1137,7 @@ def test_hermes_probe_hook_cannot_end_its_supervisors(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
 @pytest.mark.parametrize(("body", "want"), [("exit 0\n", 0), ("exit 3\n", 3), ("kill -TERM $$\n", 143)])
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_probe_supervisor_keeps_the_hook_exit_status(tmp_path, monkeypatch, body, want):
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
     returncode, _stdout = cmd_doctor._run_hermes_execution_probe([str(_probe_stub(tmp_path, body))])
@@ -1118,6 +1145,7 @@ def test_hermes_probe_supervisor_keeps_the_hook_exit_status(tmp_path, monkeypatc
 
 
 @_needs_perl
+@_NEEDS_CONTAINED_PROBE
 def test_hermes_doctor_ends_hook_child_in_new_session(tmp_path, monkeypatch):
     script, check = _registered_unix_hermes(tmp_path, monkeypatch)
     pid_file = tmp_path / "escaped.pid"

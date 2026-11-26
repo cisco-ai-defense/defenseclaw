@@ -44,9 +44,7 @@ func TestGAP1606ACutShareAnswerIsNotKeptForTheCall(t *testing.T) {
 	}
 	// The share is also a home whose key file is a link off the share: the
 	// protected key paths list the file it reaches only once it is read.
-	if err := os.Symlink(keys, filepath.Join(share, ".ssh", "authorized_keys")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(share, ".ssh", "authorized_keys"))
 	release := make(chan struct{})
 	var once sync.Once
 	answer := func() { once.Do(func() { close(release) }) }
@@ -233,9 +231,7 @@ func TestGAP1606AReachParentGradedAgainstCutNamesIsNotKept(t *testing.T) {
 		t.Skipf("no symlinks: %v", err)
 	}
 	via := filepath.Join(dir, "via")
-	if err := os.Symlink(inShare, via); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, inShare, via)
 	release := make(chan struct{})
 	var once sync.Once
 	answer := func() { once.Do(func() { close(release) }) }

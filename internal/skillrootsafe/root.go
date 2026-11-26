@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Resolve returns the physical directory behind a configured skill root.
@@ -47,7 +49,7 @@ func resolve(path string, eval func(string) (string, error)) (string, []string, 
 		return "", nil, err
 	}
 	if eval == nil {
-		eval = filepath.EvalSymlinks
+		eval = winpath.EvalLinks
 	}
 	canonical := canonicalSystemPath(absolute)
 	resolved, err := eval(absolute)
@@ -100,7 +102,7 @@ func canonicalSystemPath(path string) string {
 		if path != alias && !strings.HasPrefix(path, alias+string(filepath.Separator)) {
 			continue
 		}
-		resolved, err := filepath.EvalSymlinks(alias)
+		resolved, err := winpath.EvalLinks(alias)
 		if err != nil || resolved != "/private"+alias {
 			return path
 		}

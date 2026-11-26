@@ -6,6 +6,9 @@ package hookpaths
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // TargetMemo keeps the file system answers of one hook evaluation: the
@@ -36,6 +39,9 @@ type TargetMemo struct {
 	// startup is the agent's shell startup for this evaluation, from the
 	// hook client's header (nil: the process's own).
 	startup *ShellStartup
+	// callDots is set when the words of the whole call this evaluation
+	// judges may turn dotglob on (WithCallWords).
+	callDots atomic.Bool
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -71,6 +77,58 @@ type TargetMemo struct {
 	// short (hookCall.keepsSince): the share may answer later in the call,
 	// and an evaluation after that reads it (rel-1-0-10:GAP-1606).
 	owner *hookCall
+	// unread is the memo of this evaluation's decisions that read no file
+	// system (UnreadCommandDecision), and unreadDecisions their answers by
+	// input. Nothing they read is the host's, so they keep apart from this
+	// memo's own answers.
+	unread          *TargetMemo
+	unreadDecisions map[unreadDecisionKey]string
+	// parsed are the trees parsedShell handed out, by command.
+	parsed map[string]memoParse
+}
+
+// memoParse is one parseShell answer kept by a memo.
+type memoParse struct {
+	file *syntax.File
+	ok   bool
+}
+
+// maxMemoParses and maxMemoParseBytes bound the trees a memo keeps: a few
+// commands of the hook payload's size.
+const (
+	maxMemoParses     = 8
+	maxMemoParseBytes = 64 << 10
+)
+
+// parsedShell is parseShell of command for a reader that only reads the
+// tree: the memo parses each command once and hands every such reader the
+// same tree. One decision read the same 8 KB command with the parser four
+// times for the sed backup reader (both readings), the make proof and the
+// POSIX mention scan, most of a copy-mode by-name decision (FIX-F3PERF).
+// Only readers that never change a tree may use it:
+// literalWriteOperandsWithParsedKnown renames the shadowed builtins of its
+// tree in place (knownShadow), so it and the readers that hand it their
+// tree parse their own.
+func (m *TargetMemo) parsedShell(command string) (*syntax.File, bool) {
+	if m == nil || len(command) > maxMemoParseBytes {
+		return parseShell(command)
+	}
+	m.mu.Lock()
+	kept, found := m.parsed[command]
+	m.mu.Unlock()
+	if found {
+		return kept.file, kept.ok
+	}
+	file, ok := parseShell(command)
+	m.mu.Lock()
+	if m.parsed == nil {
+		m.parsed = make(map[string]memoParse)
+	}
+	if len(m.parsed) < maxMemoParses {
+		m.parsed[command] = memoParse{file: file, ok: ok}
+	}
+	m.mu.Unlock()
+	return file, ok
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not
@@ -416,4 +474,31 @@ func (m *TargetMemo) shellStartup() ShellStartup {
 		return *m.startup
 	}
 	return CurrentShellStartup()
+}
+
+// WithCallWords records the whole call the evaluation judges and returns
+// the memo. When its words may turn dotglob or globdots on
+// (CommandMayDotglob), every statement read in this evaluation is read with
+// * and ? matching a leading dot, as the call's own reading is: the gateway
+// judges each statement of an eval body on its own, and the statement
+// rm -rf * of eval 'cd ~; shopt -s dotglob; rm -rf *' does not spell the
+// option its body turned on (rel-1-0-10:GAP-2267). It only turns the
+// reading on.
+func (m *TargetMemo) WithCallWords(command string) *TargetMemo {
+	if m != nil && !m.callDots.Load() && CommandMayDotglob(command) {
+		m.callDots.Store(true)
+	}
+	return m
+}
+
+// callMayDotglob reports a call whose words may turn dotglob on
+// (WithCallWords).
+func (m *TargetMemo) callMayDotglob() bool { return m != nil && m.callDots.Load() }
+
+// withCallDotglobOf gives m the call reading of from and returns m.
+func (m *TargetMemo) withCallDotglobOf(from *TargetMemo) *TargetMemo {
+	if m != nil && from.callMayDotglob() {
+		m.callDots.Store(true)
+	}
+	return m
 }

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const managedBackupVersion = 1
@@ -1156,7 +1157,7 @@ func resolveExistingPrefix(path string) string {
 	path = filepath.Clean(path)
 	rest := ""
 	for cur := path; ; {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+		if resolved, err := winpath.EvalLinks(cur); err == nil {
 			return filepath.Join(resolved, rest)
 		}
 		parent := filepath.Dir(cur)

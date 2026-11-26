@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -1448,8 +1449,8 @@ func (m *v9Migrator) leftOutsideRollbackCopy(path string) bool {
 	if path == "" || m.in.Managed {
 		return false
 	}
-	resolvedPath, pathErr := filepath.EvalSymlinks(path)
-	resolvedHome, homeErr := filepath.EvalSymlinks(DefaultDataPath())
+	resolvedPath, pathErr := winpath.EvalLinks(path)
+	resolvedHome, homeErr := winpath.EvalLinks(DefaultDataPath())
 	if pathErr == nil && homeErr == nil {
 		rel, relErr := filepath.Rel(resolvedHome, resolvedPath)
 		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {

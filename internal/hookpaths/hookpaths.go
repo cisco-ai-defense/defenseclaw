@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
@@ -1575,7 +1576,46 @@ func newProtectedFiles(home string) protectedFiles {
 		}
 		return files
 	}
+	if runtime.GOOS != "windows" && fixturefs.Unreadable() {
+		return unreadProtectedFiles(home)
+	}
 	return newProtectedFilesWith(home, nil)
+}
+
+// unreadProtected keeps, by home, the protected key files of the decisions
+// inside fixturefs.Unread, which keep no hook call memory. No read reaches
+// the file system there (every name does not exist), so the files are the
+// same for each such decision with that home. A copy-mode call's by-name
+// decision read them again for each statement of the call: 1,500 statements
+// after cd .cache walked and stat'ed every key path 1,500 times
+// (rel-1-0-10:GAP-2249). Windows reads them afresh: its list also names a
+// folder of the process environment.
+var unreadProtected struct {
+	sync.Mutex
+	files map[string]protectedFiles
+}
+
+// maxUnreadProtectedHomes bounds the homes unreadProtected keeps.
+const maxUnreadProtectedHomes = 16
+
+// unreadProtectedFiles is newProtectedFilesWith(home, nil) inside Unread, a
+// copy of the files read once for home.
+func unreadProtectedFiles(home string) protectedFiles {
+	unreadProtected.Lock()
+	files, ok := unreadProtected.files[home]
+	unreadProtected.Unlock()
+	if !ok {
+		files = newProtectedFilesWith(home, nil)
+		unreadProtected.Lock()
+		if unreadProtected.files == nil {
+			unreadProtected.files = make(map[string]protectedFiles)
+		}
+		if len(unreadProtected.files) < maxUnreadProtectedHomes {
+			unreadProtected.files[home] = files
+		}
+		unreadProtected.Unlock()
+	}
+	return slices.Clone(files)
 }
 
 func newProtectedFilesWith(home string, memo *TargetMemo) protectedFiles {

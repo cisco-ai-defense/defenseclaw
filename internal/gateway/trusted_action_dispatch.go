@@ -345,6 +345,9 @@ type trustedActionRequest struct {
 	// the authorized-keys proofs and the guest reading
 	// (sandboxGuestPlacedInput) read it, and only to add findings.
 	SandboxGuestCWD string
+	// guestToolCWDUnresolved marks a supplied workdir that the guest path
+	// resolver cannot place. It must not fall back to the guest home.
+	guestToolCWDUnresolved bool
 	// sandboxGuest marks a call of an authenticated sandbox request
 	// (isSandboxHookRequest), set once by dispatchTrustedActionOnce: it runs
 	// in a Linux guest, so a walk this gateway cannot make on the guest's
@@ -365,7 +368,7 @@ type trustedActionRequest struct {
 	// the kit resolved through a link (substrateGuestLinkTwinRequest).
 	guestLinkTwin bool
 	// guestCommandTwin marks the twin of a shell call whose path words the
-	// kit placed through a link (substrateGuestCommandTwinRequest).
+	// kit placed through a link (substrateGuestCommandTwinRequests).
 	guestCommandTwin bool
 	// guestClaimHomePlaces reads, from a Substrate actor's kit facts, which
 	// places of the actor's home only their owner can reach; nil without
@@ -377,6 +380,15 @@ type trustedActionRequest struct {
 	guestClaimHomePlaces homePlaceView
 	guestHomePlaces      homePlaceView
 	guestWriteClaimOnly  *bool
+	// guestByNameOnly receives whether only the by-name reading of a
+	// copy-mode actor's call in its guest folder (copyModeWholeCallByName)
+	// found the protected target (substrate-1 GAP-0922).
+	guestByNameOnly *bool
+	// byNameGuestCWD is the guest folder of a copy-mode actor's call, for
+	// the by-name reading (copyModeByNameGuestCWD); "" for every other call.
+	// The outermost dispatch sets it, so every hook path (Claude Code,
+	// Codex and the shared agent hook) gets it (substrate-1 GAP-0993).
+	byNameGuestCWD string
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
@@ -523,6 +535,18 @@ func dispatchTrustedActionOnce(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	// One wait for walk slots per hook request: the hook route puts it on
+	// ctx (withHookWalkBudget), so the calls of a Copilot envelope, the
+	// members of an artifact and the readings of a shell command, each its
+	// own top-level dispatch, draw on one wait. A dispatch that comes with
+	// none makes its own for the call; the twins and simple-command passes
+	// below copy the request, so they share it (substrate-1:GAP-1083).
+	if request.Input.CredentialWalkBudget == nil {
+		request.Input.CredentialWalkBudget = hookWalkBudgetFrom(parent)
+	}
+	if request.Input.CredentialWalkBudget == nil {
+		request.Input.CredentialWalkBudget = actionfacts.NewCredentialWalkBudget(parent)
+	}
 	request = windowsStatementsOnePerLine(request)
 	request.sandboxGuest = request.sandboxGuest || isSandboxHookRequest(parent)
 	// A call judged as the twin of its data word leaves a detection-only
@@ -559,6 +583,9 @@ func dispatchTrustedActionOnce(
 		}()
 	}
 	request.posixReadingTwin = false
+	if request.byNameGuestCWD == "" {
+		request.byNameGuestCWD = copyModeByNameGuestCWD(parent, request)
+	}
 	if claims := substrateGuestClaimsFrom(parent); claims != nil {
 		// A Substrate actor's kit proved, in the actor's file system, what the
 		// laptop's gateway proves in its own (substrate-1 GAP-0471): a
@@ -648,6 +675,13 @@ func dispatchTrustedActionOnce(
 	}
 	if request.ShellStartup != nil {
 		request.targetMemo.WithShellStartup(request.ShellStartup)
+	}
+	// Each statement of the call is judged with the dotglob its whole call
+	// may turn on: the rm -rf * of an eval body that runs shopt -s dotglob
+	// first reaches .ssh as the call written out does (rel-1-0-10:GAP-2267).
+	request.targetMemo.WithCallWords(request.Input.Command)
+	if request.parentPatch != nil {
+		request.targetMemo.WithCallWords(request.parentPatch.Command)
 	}
 	// A backup file of sed -i or perl -i the readers cannot resolve is a
 	// path target past what they judge: at least the unknown tier
@@ -1113,11 +1147,15 @@ func dispatchTrustedActionOnce(
 	// candidates, work or lookups) is TRUNCATED too: at least the unknown
 	// tier of the pack, and what it resolved before the cap still joins the
 	// chain (rel-1-0-10:GAP-1029).
-	if set := facts.CredentialPathReadCaps(); set.Any() {
+	if set := facts.CredentialPathReadCaps(parent); set.Any() {
 		defer func() {
 			findings = withBoundedTruncation(findings, set, request)
 		}()
 	}
+	// The record is whole only up to here: every later reader of it (the
+	// chain projection, the placement) sees the reads it can tell apart
+	// (substrate-1:GAP-0674).
+	thinCredentialPathReads(facts)
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
@@ -1434,8 +1472,9 @@ func dispatchTrustedActionWith(
 						// substrate-1:GAP-0693, GAP-0694, GAP-0695, GAP-0698).
 						if splitGapUnreadPart(simple) && wholeCommandKnown && !checkedSplitGapEffects {
 							checkedSplitGapEffects = true
-							findings = withSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
-							findings = withSandboxGuestSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
+							var judged *splitGapJudged
+							findings, judged = withSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings, nil)
+							findings = withSandboxGuestSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings, judged)
 						}
 						continue
 					}
@@ -1500,7 +1539,7 @@ func dispatchTrustedActionWith(
 				// A statement the walk placed nowhere is judged as the laptop
 				// judges it, in no folder: the guest placement of the call
 				// already reads it in each directory the guest may be in
-				// (sandboxGuestPlacements). Placed in the guest's directory
+				// (guestPlacementPlan). Placed in the guest's directory
 				// here, its proof there hid the unknown tier of the folder it
 				// may really run in, which the laptop names
 				// (withUnresolvedFolderTier, rel-1-0-10:GAP-0871; substrate-1
@@ -1670,6 +1709,11 @@ func dispatchTrustedActionWith(
 	// on view (projection is its projection) and reports whether the view's
 	// enforcement projection failed, in which case no finding was added
 	// after the failure and the caller decides what that means.
+	// done is ctx.Done(): a closed channel is a non-nil ctx.Err(). The rule
+	// loop reads it for every rule of every view, and ctx.Err() walked the
+	// hook's context chain each time: 1.1 million times a call of 8,000
+	// placed views, 6% of a copy-mode actor's time (rel-1-0-10:GAP-2226).
+	done := ctx.Done()
 	evaluateSemanticRules := func(
 		viewID int,
 		view actionfacts.Facts,
@@ -1683,7 +1727,7 @@ func dispatchTrustedActionWith(
 		enforcementProjected := false
 		projectionCode := semantic.ProjectionOK
 		for _, candidate := range generation.semanticRules {
-			if ctx.Err() != nil {
+			if contextDone(done) {
 				break
 			}
 			if request.stateProofOnly && !loginGuessProvesRule(candidate.rule.ID) {
@@ -1806,19 +1850,19 @@ func dispatchTrustedActionWith(
 	// findings, of every owner for a sandbox and of cwdPlacedRule rules for a
 	// managed peer; all other lanes keep the gateway's original facts.
 	judgePlaced := func() {
-		for index, view := range placed.views() {
+		placedRule := func(candidate compiledSemanticRule) bool {
+			return placed.everyOwner || cwdPlacedRule(candidate.rule.ID)
+		}
+		placed.eachView(func(index int, view *actionfacts.Facts) {
 			if !view.Authoritative() {
-				continue
+				return
 			}
-			if projection, code := semantic.Project(view); code == semantic.ProjectionOK {
+			if projection, code := semantic.Project(*view); code == semantic.ProjectionOK {
 				// Each view has its own pair of budget keys (the view and its
 				// enforcement projection), after the fixed views 0 to 5.
-				evaluateSemanticRules(placedReadingFirstView+2*index, view, projection,
-					func(candidate compiledSemanticRule) bool {
-						return placed.everyOwner || cwdPlacedRule(candidate.rule.ID)
-					}, true, nil)
+				evaluateSemanticRules(placedReadingFirstView+2*index, *view, projection, placedRule, true, nil)
 			}
-		}
+		})
 	}
 	// fallback judges a call no semantic view of the whole call can judge
 	// (dispatchTrustedFallback). A sandbox call's guest placement still
@@ -4764,18 +4808,35 @@ const placedReadingFirstView = 6
 // bound of trustedCallOverStatementBudget) in the guest placement: the
 // distinct simple-command readings of a call the analysis read in full, and
 // the statements of a pass over a call it did not read in full when the call
-// is over that budget (sandboxGuestPlacements); the readings share the call's
+// is over that budget (guestPlacementPlan); the readings share the call's
 // semantic budget. A cap of 16 gave ACTION-COMPOUND-LIMIT to a cd followed by
 // 17 or more distinct commands, a setup script the laptop allows
 // (substrate-1 GAP-0359).
 const maxSandboxGuestPlacedChildren = 128
 
-// views returns the placed facts, then each child's.
-func (placed placedReading) views() []actionfacts.Facts {
+// eachView calls visit with each placed view in order, its index first: the
+// placed facts, then each child's. A call places up to 8,192 children, and
+// copying them into one list for each reading copied megabytes a hook
+// (rel-1-0-10:GAP-2226).
+func (placed placedReading) eachView(visit func(index int, view *actionfacts.Facts)) {
 	if placed.facts == nil {
-		return nil
+		return
 	}
-	return append([]actionfacts.Facts{*placed.facts}, placed.children...)
+	visit(0, placed.facts)
+	for at := range placed.children {
+		visit(at+1, &placed.children[at])
+	}
+}
+
+// contextDone reports a closed done channel (context.Context.Done); a nil
+// channel is never closed.
+func contextDone(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 // provesSSHPrivateKeyContentRead reports a placed view that reads an active
@@ -4784,13 +4845,16 @@ func (placed placedReading) views() []actionfacts.Facts {
 // relative read of the guest home's key (cat .ssh/id_ed25519 from the home,
 // cat ../sandbox/.ssh/id_ed25519 from /work) is then the laptop's block.
 func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
-	for _, view := range slices.Concat(placed.views(), placed.candidates) {
-		if view.Authoritative() && view.EnforcementEligible() &&
-			trustedActionActiveSSHPrivateKeyContentRead(view.EnforcementProjection()) {
-			return true
-		}
+	proves := func(view *actionfacts.Facts) bool {
+		return view.Authoritative() && view.EnforcementEligible() &&
+			trustedActionActiveSSHPrivateKeyContentRead(view.EnforcementProjection())
 	}
-	return false
+	found := false
+	placed.eachView(func(_ int, view *actionfacts.Facts) { found = found || proves(view) })
+	for at := 0; !found && at < len(placed.candidates); at++ {
+		found = proves(&placed.candidates[at])
+	}
+	return found
 }
 
 // sandboxGuestPlacedChildren reads, lexically, each command of a sandbox
@@ -4799,14 +4863,27 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // .profile. The dispatch's own simple-command pass places the command in the
 // request's working directory, which a copy-mode actor does not have, so the
 // cd led nowhere there. The commands and their directories are
-// sandboxGuestPlacements; a call whose readings stop short reports cut
+// guestPlacementPlan; a call whose readings stop short reports cut
 // (bounded.Items): the caller adds the evaluation-limit finding, so a padded
 // chain is never a silent allow (substrate-1 GAP-0304).
 //
 // candidates are the readings in a directory the call reaches only as a cd
 // target no command runs in (guestPlacement.candidate): they count only for
 // the private-key read proof, as the laptop's readers judge a candidate
-// directory (substrate-1 GAP-0379).
+// directory (substrate-1 GAP-0379). After a command the split cannot read
+// ($CMD, eval, source), which may change the folder, the laptop keeps such a
+// folder as one the later commands run in when the call's own shell stands
+// there when that command runs (guestOwnShellFolders, keyed by the
+// statement and the folder): the readings there are children, judged by
+// every owner. A folder only a later cd reaches stays a candidate for the
+// statements before it: (cd ~/.defenseclaw || cd /tmp); $CMD; echo m >
+// config.yaml; cd ~/.defenseclaw && ls blocked in strict where the laptop
+// allows (substrate-1 GAP-0883). cd .cache; bash <<< true; $CMD; cd s0; ...; cd ../.ssh; echo
+// k >> authorized_keys alerted where the laptop blocks (substrate-1
+// GAP-0628). A folder a subshell, an uncalled function or an || alternative
+// cds to stays a candidate: promoting every candidate after $CMD blocked
+// (cd ~/.defenseclaw || cd /tmp); $CMD; echo m > config.yaml where the
+// laptop allows.
 func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	if children, candidates, cut, ok := memo.placedChildren(input, facts); ok {
 		return children, candidates, cut
@@ -4817,17 +4894,70 @@ func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input,
 }
 
 // sandboxGuestPlacedChildrenWalk reads the placed children of a call
-// (sandboxGuestPlacedChildren) afresh.
+// (sandboxGuestPlacedChildren) afresh. A reading in a candidate folder is
+// kept only when its text may read a key (guestCandidateMayReadKey), the one
+// proof it counts for: a cd in each of 64 folders gave every later command
+// 64 candidate readings, each a full analysis that could prove nothing
+// (touch f1, cd /tmp/x), and the copy-mode actor took 2.6 to 5 times the
+// 1.0.10 actor's time (rel-1-0-10:GAP-2226).
 func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	placements, stopped := memo.plan(input, facts).placements(true)
-	for _, placement := range placements {
-		child := input
-		child.Command, child.CWD = placement.text, placement.cwd
-		child.Args, child.Argv = nil, nil
-		if placement.candidate {
-			candidates = append(candidates, actionfacts.Analyze(child))
-		} else {
-			children = append(children, actionfacts.Analyze(child))
+	var folders *guestShellReadings
+	if slices.ContainsFunc(placements, func(placement guestPlacement) bool { return placement.candidate }) {
+		command := input.Command
+		if command == "" {
+			command, _ = trustedBashCommandInput(input)
+		}
+		folders = guestOwnShellFolders(command, input.CWD, input.ActiveHome)
+	}
+	// A candidate in a folder the call's own shell may stand in is read as a
+	// child, but a plain reading in a plain folder stays a candidate, as
+	// before the own-shell folders (guestPlainFolder, rel-1-0-10:GAP-2249).
+	// This only takes back own-shell promotions: a placement is a candidate
+	// here only where the plan made it one (placement.candidate), the set the
+	// 1.0.10 line read as candidates, so the candidate set stays a subset of
+	// that line's and no reading it judged as a child becomes a candidate.
+	var plain map[string]bool
+	isCandidate := func(placement guestPlacement) bool {
+		if !placement.candidate {
+			return false
+		}
+		dir := path.Clean(placement.cwd)
+		if !folders.has(placement.text, dir) {
+			return true
+		}
+		if guestReadingFirst(placement.text) {
+			return false
+		}
+		ok, seen := plain[dir]
+		if !seen {
+			if plain == nil {
+				plain = make(map[string]bool)
+			}
+			ok = guestPlainFolder(dir, input.ActiveHome)
+			plain[dir] = ok
+		}
+		return ok
+	}
+	// Each list is made at its size: a long call places thousands of
+	// readings, and growing the lists copied their facts again and again
+	// (substrate-1 GAP-0956).
+	candidate := make([]bool, len(placements))
+	candidateCount := 0
+	for at, placement := range placements {
+		if candidate[at] = isCandidate(placement); candidate[at] {
+			candidateCount++
+		}
+	}
+	if count := len(placements) - candidateCount; count != 0 {
+		children = make([]actionfacts.Facts, 0, count)
+	}
+	read := memo.placedReader(input)
+	for at, placement := range placements {
+		if !candidate[at] {
+			children = append(children, read(placement))
+		} else if guestCandidateMayReadKey(placement.text) {
+			candidates = append(candidates, read(placement))
 		}
 	}
 	if stopped {
@@ -4870,12 +5000,20 @@ func sandboxGuestPlacedInput(request trustedActionRequest, facts actionfacts.Fac
 	if guestCWD == "" || guestCWD == request.Input.CWD || request.unplacedStatement {
 		return actionfacts.Input{}, false
 	}
-	if facts.Authoritative() && !hasRelativePathOperand(facts) && !hasGitHookMutationCandidate(facts) && !hasGitReadOutputWrite(facts) {
+	if !guestFolderMayChangeJudgment(facts) {
 		return actionfacts.Input{}, false
 	}
 	input := request.Input
 	input.CWD = guestCWD
 	return input, true
+}
+
+// guestFolderMayChangeJudgment reports a call whose judgment the guest's
+// working directory may change (sandboxGuestPlacedInput): one the analysis
+// did not read in full, one with a relative operand, and one with a Git hook
+// or config candidate the git owners place by the working directory itself.
+func guestFolderMayChangeJudgment(facts actionfacts.Facts) bool {
+	return !facts.Authoritative() || hasRelativePathOperand(facts) || hasGitHookMutationCandidate(facts) || hasGitReadOutputWrite(facts)
 }
 
 // hasRelativePathOperand reports a path the call names relative to its

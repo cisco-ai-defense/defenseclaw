@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var errOpenClawScanCopyTooLarge = errors.New("the folder is larger than the separate-user scan limit")
@@ -206,12 +207,12 @@ func openClawPathUnderAny(target string, roots []string) bool {
 	if strings.TrimSpace(target) == "" || !filepath.IsAbs(target) {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(target)
+	resolved, err := winpath.EvalLinks(target)
 	if err != nil {
 		return false
 	}
 	for _, root := range roots {
-		rr, err := filepath.EvalSymlinks(root)
+		rr, err := winpath.EvalLinks(root)
 		if err != nil {
 			continue
 		}

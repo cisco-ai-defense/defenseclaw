@@ -346,7 +346,7 @@ def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
         "internal/gateway"
     ]
     files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 132, seconds)
+    shards = partition_test_files(files, 140, seconds)
     names = [name for _, file_names in files for name in file_names]
     assert check_exact_cover(shards, names) == []
     assert sum("TestAgentHookDispatch_BlockFiresOnBlock" in shard for shard in shards) == 1
@@ -373,7 +373,7 @@ def test_linux_gateway_shard_timeouts_fit_the_job() -> None:
         assert seconds[name] > 30, name
     files = discover_test_files(root / "internal/gateway")
     weigh = go_test_shards.test_weigher(seconds)
-    for index, shard in enumerate(partition_test_files(files, 132, seconds)):
+    for index, shard in enumerate(partition_test_files(files, 140, seconds)):
         planned = sum(weigh(name) for name in shard)
         # No shard reaches the cap: each keeps its 1.5x headroom.
         wanted = planned * go_test_shards.TIMEOUT_HEADROOM + go_test_shards.TIMEOUT_PAD_SECONDS
