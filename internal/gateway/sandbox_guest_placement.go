@@ -411,8 +411,8 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	// (splitRead) is not read again: it was read in the folders known at its
 	// own place. Its cd targets are still kept.
 	scriptCalls, cdpath := guestScriptCalls(command, input.ActiveHome)
-	known := map[string]int{}
-	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keepClean, known, cdMemo)
+	var known map[string]int
+	targets, known = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keepClean, cdMemo)
 	for _, call := range scriptCalls {
 		if !splitRead[call.text] {
 			plan.calls = append(plan.calls, call)
@@ -1770,18 +1770,10 @@ func guestCDJoinClean(operand string, bases []string, home string) []string {
 // D=~/.claude; cd "$D" before a later cd ~/.claude) is known from the first
 // call the split may follow a value in (guestScriptCall.dynamic), or from
 // the start. The walk runs again while a round knows a folder earlier, at
-// most four rounds; past them every folder is known from the start.
+// most four rounds; past them every folder is known from the start. It
+// returns the grown targets and known.
 func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath int,
-	keep func([]string, string) []string, known map[string]int, cdMemo *guestCDMemo) []string {
-	// dirs and targets are clean (newGuestPlacementPlan's keep cleans each),
-	// so every target guestCDJoinClean makes from them is clean, and keep
-	// takes it as it is.
-	listed := slices.Concat(dirs, targets)
-	for _, dir := range listed {
-		if cdpath < 0 || dir == path.Clean(cwd) {
-			known[dir] = -1
-		}
-	}
+	keep func([]string, string) []string, cdMemo *guestCDMemo) ([]string, map[string]int) {
 	type move struct {
 		operand string
 		at      int
@@ -1794,6 +1786,28 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 		}
 		if reading := cdMemo.reading(call.text); reading.moves {
 			moves = append(moves, move{reading.operand, at})
+		}
+	}
+	// known is made at about the size it reaches: a relative cd is joined
+	// to at most every listed folder, an absolute or ~ one names one. An
+	// 8 KB cd chain grew it to 140,000 folders a split at a time
+	// (rel-1-0-10:GAP-2249).
+	listed := slices.Concat(dirs, targets)
+	size := len(listed)
+	for _, move := range moves {
+		if path.IsAbs(move.operand) || move.operand == "~" || strings.HasPrefix(move.operand, "~/") {
+			size++
+		} else {
+			size += len(dirs) + maxSandboxGuestCandidateDirs
+		}
+	}
+	known := make(map[string]int, min(size, guestKnownFoldersSizeMax))
+	// dirs and targets are clean (newGuestPlacementPlan's keep cleans each),
+	// so every target guestCDJoinClean makes from them is clean, and keep
+	// takes it as it is.
+	for _, dir := range listed {
+		if cdpath < 0 || dir == path.Clean(cwd) {
+			known[dir] = -1
 		}
 	}
 	grown := targets
@@ -1813,7 +1827,7 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 			for _, dir := range slices.Concat(listed, grown) {
 				known[dir] = -1
 			}
-			return grown
+			return grown, known
 		}
 		changed := false
 		grown = slices.Clone(targets)
@@ -1873,10 +1887,14 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 			}
 		}
 		if !changed {
-			return grown
+			return grown, known
 		}
 	}
 }
+
+// guestKnownFoldersSizeMax bounds the size guestKnownFolders makes its map
+// at: past it the map grows as it fills.
+const guestKnownFoldersSizeMax = 1 << 17
 
 // guestScriptCall is a simple-command statement of a script
 // (guestScriptCalls): its source text, with its redirections, where it
