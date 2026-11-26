@@ -163,26 +163,35 @@ func (table *guestViewEvalTable) enforcementOf(view *actionfacts.Facts) (actionf
 	return table.enforcement.facts, table.enforcement.projection, table.enforcement.code
 }
 
-// eligibleFor is candidate.owner.eligible(*view), candidate being rule
-// rule of the table's generation.
-func (table *guestViewEvalTable) eligibleFor(rule int, candidate *compiledSemanticRule, view *actionfacts.Facts) bool {
+// eligibility is what the table knows of rule rule's owner on its
+// reading (semanticOwner.eligible): whether it is eligible, and whether it
+// was read; nothing for a nil table. The rule loop reads the owner itself
+// where it was not, on its own copy of the reading, as with no table: a
+// read through the table copied the 1.5 KB reading twice more for each
+// rule of each placed view.
+func (table *guestViewEvalTable) eligibility(rule int) (eligible, read bool) {
+	if table == nil || table.eligible == nil {
+		return false, false
+	}
+	word := table.eligible[(2*rule)/64]
+	bit := uint((2 * rule) % 64)
+	return word&(1<<(bit+1)) != 0, word&(1<<bit) != 0
+}
+
+// keepEligibility notes that rule rule's owner is eligible for the table's
+// reading, or not; a nil table keeps nothing.
+func (table *guestViewEvalTable) keepEligibility(rule int, eligible bool) {
 	if table == nil {
-		return candidate.owner.eligible(*view)
+		return
 	}
 	if table.eligible == nil {
 		table.eligible = make([]uint64, (2*len(table.generation.semanticRules)+63)/64)
 	}
 	word, bit := (2*rule)/64, uint((2*rule)%64)
-	if table.eligible[word]&(1<<bit) == 0 {
-		table.eligible[word] |= 1 << bit
-		// candidate.owner.eligible(*view), with one copy of the reading
-		// for the prerequisite, not a second one for eligible's argument
-		// (TestGAP2226PlacedViewEvalTableIsFresh pins the two together).
-		if prerequisite := candidate.owner.prerequisite; prerequisite == nil || prerequisite(*view) {
-			table.eligible[word] |= 1 << (bit + 1)
-		}
+	table.eligible[word] |= 1 << bit
+	if eligible {
+		table.eligible[word] |= 1 << (bit + 1)
 	}
-	return table.eligible[word]&(1<<(bit+1)) != 0
 }
 
 // result is the complete result kept in slot; false where none is, and for

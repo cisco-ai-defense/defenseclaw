@@ -1742,7 +1742,12 @@ func dispatchTrustedActionWith(
 			if candidateOK != nil && !candidateOK(candidate) {
 				continue
 			}
-			if !kept.eligibleFor(rule, &candidate, &view) {
+			eligible, read := kept.eligibility(rule)
+			if !read {
+				eligible = candidate.owner.eligible(view)
+				kept.keepEligibility(rule, eligible)
+			}
+			if !eligible {
 				if !matchOnly && candidate.owner.suppressFallback != nil &&
 					candidate.owner.suppressFallback(view) {
 					excludeSemanticOwner(excluded, candidate.owner, false)

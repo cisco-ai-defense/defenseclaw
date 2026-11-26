@@ -162,7 +162,14 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 				t.Fatal("a kept enforcement projection differs from a fresh one")
 			}
 			for rule, candidate := range generation.semanticRules {
-				if view.eligibleFor(rule, &candidate, &facts) != candidate.owner.eligible(facts) {
+				eligible, read := view.eligibility(rule)
+				if !read {
+					eligible = candidate.owner.eligible(facts)
+					view.keepEligibility(rule, eligible)
+				} else if view == nil {
+					t.Fatal("a nil table knows an owner's eligibility")
+				}
+				if eligible != candidate.owner.eligible(facts) {
 					t.Fatalf("rule %s: kept eligibility differs from a fresh one", candidate.rule.ID)
 				}
 			}
