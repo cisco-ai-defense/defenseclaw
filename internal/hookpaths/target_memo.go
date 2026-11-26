@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -38,6 +39,9 @@ type TargetMemo struct {
 	// startup is the agent's shell startup for this evaluation, from the
 	// hook client's header (nil: the process's own).
 	startup *ShellStartup
+	// callDots is set when the words of the whole call this evaluation
+	// judges may turn dotglob on (WithCallWords).
+	callDots atomic.Bool
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -470,4 +474,31 @@ func (m *TargetMemo) shellStartup() ShellStartup {
 		return *m.startup
 	}
 	return CurrentShellStartup()
+}
+
+// WithCallWords records the whole call the evaluation judges and returns
+// the memo. When its words may turn dotglob or globdots on
+// (CommandMayDotglob), every statement read in this evaluation is read with
+// * and ? matching a leading dot, as the call's own reading is: the gateway
+// judges each statement of an eval body on its own, and the statement
+// rm -rf * of eval 'cd ~; shopt -s dotglob; rm -rf *' does not spell the
+// option its body turned on (rel-1-0-10:GAP-2267). It only turns the
+// reading on.
+func (m *TargetMemo) WithCallWords(command string) *TargetMemo {
+	if m != nil && !m.callDots.Load() && CommandMayDotglob(command) {
+		m.callDots.Store(true)
+	}
+	return m
+}
+
+// callMayDotglob reports a call whose words may turn dotglob on
+// (WithCallWords).
+func (m *TargetMemo) callMayDotglob() bool { return m != nil && m.callDots.Load() }
+
+// withCallDotglobOf gives m the call reading of from and returns m.
+func (m *TargetMemo) withCallDotglobOf(from *TargetMemo) *TargetMemo {
+	if m != nil && from.callMayDotglob() {
+		m.callDots.Store(true)
+	}
+	return m
 }
