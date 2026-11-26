@@ -51,14 +51,8 @@ type r3TierRoute struct {
 // not, is held to at least its lane-off (1.0.10) verdict; a pending row that
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
-	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-1677":  "alias/peer tilde targets remain Maybe until every row is resolver-known (S4-R3)",
-	"GAP-0443":  "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
-	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
-	"GAP-1678":  "cp destination file/directory ambiguity remains Maybe (S4-R3)",
-	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
-	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
-	"GAP-1556":  "an unknown PowerShell environment folder stays Maybe (S4-R3)",
+	"GAP-0898": "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
+	"GAP-1556": "an unknown PowerShell environment folder stays Maybe (S4-R3)",
 }
 
 // r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and
@@ -142,7 +136,12 @@ func r3TierHome(t *testing.T) (home, login string) {
 func r3PosixTierRows(home, login string) []r3TierRow {
 	rows := []r3TierRow{
 		// home spellings
-		{gap: "GAP-1677 ~other/../login keys", command: `echo k >> ~root/../` + login + `/.ssh/authorized_keys`, want: "maybe"},
+		// GAP-1677: ~root/.. is / here (the test home is a temp folder),
+		// so the word names /<login>/.ssh/authorized_keys, a Known path that
+		// is no account's home: it keeps its 1.0.10 cell. The reach of the
+		// gap (~other/.. a sibling of the active home) is Known and blocks
+		// in TestDET111R3AccountTildeFiveTiers.
+		{gap: "GAP-1677 fp: ~root/.. is not the active home", command: `echo k >> ~root/../` + login + `/.ssh/authorized_keys`, want: "allow"},
 		{gap: "GAP-0948 fp: ~.. is a literal folder", command: `echo k >> ~../x`, want: "allow"},
 		{gap: "GAP-0898 other account credential", command: `cat /srv/homes/bob/.aws/credentials`, want: "maybe"},
 		// GAP-0899: a mounted home the passwd lookup names is
@@ -151,7 +150,10 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		// dot-dot and links
 		{gap: "GAP-1648 find $HOME/.. -delete", command: `find $HOME/.. -type f -delete`, want: "maybe"},
 		{gap: "GAP-1020 x/../ glob", command: `cat proj/../.ss*/id_*`, cwd: ".", want: "maybe"},
-		{gap: "GAP-0443 .. after a wildcard", command: `echo k > u*/../keydir/authorized_keys`, want: "maybe"},
+		// GAP-0443: nothing in proj matches u*, so the shell keeps the word
+		// and the write fails; the gap's link tree is
+		// TestDET111R3GlobDotDotFiveTiers.
+		{gap: "GAP-0443 fp: .. after a wildcard that matches nothing", command: `echo k > u*/../keydir/authorized_keys`, want: "allow"},
 		{gap: "GAP-1573 find -name [s]ettings.json", command: `find ~/.claude -name '[s]ettings.json' -delete`, want: "maybe"},
 		{gap: "GAP-1573c in-call link find root", command: `ln -s ~/.claude d && find d/ -name '*.json' -delete`, want: "maybe"},
 		// working folder
@@ -180,6 +182,7 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		{gap: "GAP-1043 pwd function", command: `pwd() { echo /tmp; }; cat $(pwd)/.ssh/id_rsa`, cwd: ".", want: "maybe"},
 		{gap: "GAP-1608 $(pwd)/../ glob", command: `cat $(pwd)/../.ssh/id_*`, want: "maybe"},
 		{gap: "GAP-1573c fp: in-call link to a project folder", command: `ln -s ~/proj/src d && find d/ -name '*.pyc' -delete`, want: "allow"},
+		{gap: "GAP-1573c fp: in-call link to the hook folder, no member matches", command: `ln -s ~/.claude d && find d/ -name '*.log' -delete`, want: "allow"},
 	}
 	if login != "" {
 		// GAP-1678: ~<login> is the active home for the hook config write as
@@ -232,6 +235,39 @@ func TestDET111R3AccountTildeFiveTiers(t *testing.T) {
 		{gap: "GAP-0898 ~peer aws credential", command: `cat ~dcr3peer/.aws/credentials`, cwd: ".", want: "maybe"},
 		{gap: "GAP-1677 fp: ~peer plain file", command: `echo k >> ~dcr3peer/notes.txt`, cwd: ".", want: "allow"},
 		{gap: "GAP-1677 fp: ~peer/../login project file", command: `echo k >> ~dcr3peer/../` + base + `/proj/notes.txt`, cwd: ".", want: "allow"},
+	})
+}
+
+// GAP-0443: '..' after a wildcard component that matches a link ascends
+// from the link's target, as the kernel walks it. The gap's tree: an
+// outside folder whose up is a link into proj/sub, and proj/keydir a link
+// to ~/.ssh, so u*/../keydir/authorized_keys from out is the account's keys
+// file (the literal up/../keydir spelling is GAP-0400).
+func TestDET111R3GlobDotDotFiveTiers(t *testing.T) {
+	useDefaultEffectsLane(t)
+	home, _ := r3TierHome(t)
+	for _, d := range []string{"out", "proj/sub"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, "proj", "sub"), filepath.Join(home, "out", "up")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(home, "proj", "keydir")); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(home, "out")
+	r3CheckPosixTierRows(t, home, []r3TierRow{
+		{gap: "GAP-0443 u*/.. through a link, relative", command: `echo k > u*/../keydir/authorized_keys`, cwd: "out",
+			want: "ctl:echo k > ~/.ssh/authorized_keys"},
+		{gap: "GAP-0443 u*/.. through a link, absolute", command: `echo k > ` + out + `/u*/../keydir/authorized_keys`, cwd: "out",
+			want: "ctl:echo k > ~/.ssh/authorized_keys"},
+		{gap: "GAP-0443 u*/.. through a link, append", command: `echo k >> u*/../keydir/authorized_keys`, cwd: "out",
+			want: "ctl:echo k >> ~/.ssh/authorized_keys"},
+		// the link's target folder holds only project files
+		{gap: "GAP-0443 fp: u*/.. to a project file", command: `echo k > u*/../notes.txt`, cwd: "out", want: "allow"},
+		{gap: "GAP-0443 fp: u*/.. to a new project file", command: `echo k > u*/../new.txt`, cwd: "out", want: "allow"},
 	})
 }
 
@@ -292,8 +328,12 @@ func r3CheckPosixTierRows(t *testing.T, home string, rows []r3TierRow) {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
 			for _, row := range rows {
 				cwd := filepath.Join(home, "proj")
-				if row.cwd == "." {
+				switch row.cwd {
+				case "":
+				case ".":
 					cwd = home
+				default:
+					cwd = filepath.Join(home, row.cwd)
 				}
 				useEffectsRulesMode(t, "off")
 				offAction, _ := route.decide(t, api, t.Context(), cwd, row.command)
@@ -352,12 +392,12 @@ func r3WindowsRoutes() []r3TierRoute {
 // Windows hook host rows, read on the PowerShell route of two connectors.
 func r3WindowsTierRows() []r3TierRow {
 	return []r3TierRow{
-		{gap: "GAP-1553 SSH~1 short name", command: `Add-Content SSH~1\authorized_keys x`, cwd: `C:\Users\alice`, want: "maybe", needsHome: true},
-		{gap: "GAP-1553 AUTHOR~1 short name", command: `cd .ssh; Add-Content AUTHOR~1 x`, cwd: `C:\Users\alice`, want: "maybe", needsHome: true},
+		// GAP-1553 (8.3 short names of .ssh and authorized_keys) needs a Windows
+		// file system to expand them: TestGAP1553ShortNameTiersNative.
 		{gap: "GAP-1191 dot-dot state write", command: `Set-Content -Path ..\.defenseclaw\config.yaml -Value x`, cwd: `C:\Users\alice\project`,
 			want: `ctl:Set-Content -Path C:\Users\alice\.defenseclaw\config.yaml -Value x`},
 		{gap: "GAP-1556 $env:X folder, keys", command: `Set-Location $env:X; Set-Content -Path authorized_keys -Value x`, cwd: `C:\Users\alice\project`, want: "maybe"},
-		{gap: "GAP-1156 cd in a function body", command: `function g { cd .defenseclaw }; g; Set-Content -Path config.yaml -Value x`, cwd: `C:\Users\alice`, want: "maybe"},
+		{gap: "GAP-1156 cd in a function body", command: `function g { cd .defenseclaw }; g; Set-Content -Path config.yaml -Value x`, cwd: `C:\Users\alice`, want: "maybe", needsHome: true},
 		// PowerShell reads localhost: as a drive name; the effects reading of
 		// the key file behind it is maybe (was allow).
 		{gap: "GAP-1671 localhost:/// key write", command: `Set-Content -Path localhost:///C:/Users/alice/.ssh/authorized_keys -Value k`, cwd: `C:\Users\alice\project`,
@@ -369,12 +409,53 @@ func r3WindowsTierRows() []r3TierRow {
 func TestDET111R3ResolverVerdictFiveTiersWindowsHost(t *testing.T) {
 	useDefaultEffectsLane(t)
 	gap0589WindowsHost(t)
+	r3CheckWindowsTierRows(t, r3WindowsRoutes(), r3WindowsTierRows())
+}
+
+// GAP-1156: the folder a function body or a newline-separated statement
+// leaves is read on every route, the Codex argv form included: a cd to a
+// folder that does not exist fails, so the write lands in the home's
+// .defenseclaw folder (the cd's failure reading), the cell of the plain
+// spelling; a project file keeps allow. The attack rows read the profile
+// (needsHome): on a Linux test gateway only the managed hook peer carries
+// it; the per-user cells are the native Windows readings.
+func TestDET111R3PowerShellFolderMovesFiveTiersWindowsHost(t *testing.T) {
+	useDefaultEffectsLane(t)
+	gap0589WindowsHost(t)
+	routes := append(r3WindowsRoutes(), r3TierRoute{"codex argv powershell", "codex",
+		func(t *testing.T, api *APIServer, ctx context.Context, cwd, command string) (string, []string) {
+			resp := api.evaluateCodexHook(ctx, codexHookRequest{
+				HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+				ToolInput: map[string]interface{}{"command": []interface{}{"powershell.exe", "-NoProfile", "-Command", command}},
+			})
+			return resp.Action, resp.Findings
+		}})
+	const home, project = `C:\Users\alice`, `C:\Users\alice\project`
+	ctl := `ctl:Set-Content -Path C:\Users\alice\.defenseclaw\config.yaml -Value x`
+	r3CheckWindowsTierRows(t, routes, []r3TierRow{
+		{gap: "GAP-1156 f11-fn: cd to a missing folder in a function body", command: "Set-Location " + home + "; function g { cd C:\\zz\\missing }; g; Set-Content -Path .defenseclaw\\config.yaml -Value x",
+			cwd: project, want: ctl, needsHome: true},
+		{gap: "GAP-1156 f3-nl: newline-separated moves", command: "Set-Location " + home + "\ncd C:\\zz\\missing\nSet-Content -Path .defenseclaw\\config.yaml -Value x",
+			cwd: project, want: ctl, needsHome: true},
+		{gap: "GAP-1156 f3-nl: newline-separated moves, type nul >>", command: "Set-Location " + home + "\ncd C:\\zz\\missing\ntype nul >> .defenseclaw\\config.yaml",
+			cwd: project, want: "maybe", needsHome: true},
+		{gap: "GAP-1156 fp: function body cd, then a project file", command: "function g { cd C:\\zz\\missing }; g; Set-Content -Path notes.txt -Value x",
+			cwd: project, want: "allow"},
+		{gap: "GAP-1156 fp: a function never called", command: "function g { cd .defenseclaw }; Set-Content -Path config.yaml -Value x",
+			cwd: home, want: "allow"},
+	})
+}
+
+// r3CheckWindowsTierRows judges Windows hook host rows on routes in every
+// tier (the ratchet of r3CheckPosixTierRows).
+func r3CheckWindowsTierRows(t *testing.T, routes []r3TierRoute, rows []r3TierRow) {
+	t.Helper()
 	probe := os.Getenv("DET111_R3_PROBE") != ""
 	ratchet := newR3Ratchet()
 	defer ratchet.finish(t)
 	for _, tier := range boundedTestTiers {
 		floor := bounded.Unknown(tier.tier)
-		for _, route := range r3WindowsRoutes() {
+		for _, route := range routes {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
 			// A Linux test gateway has no Windows profile of its own: the
 			// managed hook peer carries the account's home. A per-user cell
@@ -383,7 +464,7 @@ func TestDET111R3ResolverVerdictFiveTiersWindowsHost(t *testing.T) {
 			if tier.managed {
 				ctx = withManagedHookPeer(ctx, managedHookPeer{Home: `C:\Users\alice`})
 			}
-			for _, row := range r3WindowsTierRows() {
+			for _, row := range rows {
 				if row.needsHome && !tier.managed {
 					continue
 				}

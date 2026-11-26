@@ -2511,7 +2511,7 @@ func actionExpandGlobWalk(pattern, literal string, hidden, userView bool, dots f
 		}
 		if !strings.ContainsAny(component, "*?[") {
 			for i := range paths {
-				paths[i] = filepath.Join(paths[i], component)
+				paths[i] = actionGlobJoin(paths[i], component)
 			}
 			continue
 		}
@@ -2603,6 +2603,28 @@ func actionExpandGlobWalk(pattern, literal string, hidden, userView bool, dots f
 // directory below it, and with files every other entry below it too. A
 // symlink is a name, never a folder to read; a name with a leading dot is
 // skipped unless dots. reads and entries are the walk's counters.
+// actionGlobJoin joins one literal component of a pattern as the kernel
+// walks it. On a POSIX host a '..' after a name the walk reached that is a
+// link ascends from the link target's folder, not from the
+// folder that holds the link: u*/../keydir/x with u* matching a link up ->
+// project/sub is project/keydir/x (rel-1-0-10:GAP-0443; the literal
+// spelling up/../keydir/x was walked so since GAP-0400). Anything else, a
+// link that does not resolve, and every '..' on Windows are joined by name
+// as before.
+func actionGlobJoin(dir, component string) string {
+	// Windows resolves '..' by name, through junctions and links alike (the
+	// Win32 path is normalized before the file system walks it): the name
+	// join is what it opens there.
+	if component == ".." && runtime.GOOS != "windows" {
+		if info, err := pathLstat(dir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if physical, err := pathEvalSymlinks(dir); err == nil {
+				return filepath.Dir(physical)
+			}
+		}
+	}
+	return filepath.Join(dir, component)
+}
+
 func actionGlobStarTree(root string, files, hidden, userView bool, dots func() bool, reads, entries *int) (out []string, complete, unseen bool) {
 	complete = true
 	if !files {

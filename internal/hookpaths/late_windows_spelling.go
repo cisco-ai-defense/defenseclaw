@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -137,4 +138,44 @@ func lateColonListElements(value string, windows bool) (elements []string, whole
 // unchanged otherwise.
 func lateWindowsDrivePath(word string) string {
 	return actionfacts.MSYSDrivePath(word)
+}
+
+// lateWindowsLongSpelling is the path a Windows host opens for the absolute
+// path p when that differs from its spelling: the trailing dots and spaces
+// Win32 strips from a component removed (.ssh./authorized_keys), then each
+// existing 8.3 short component expanded through the file system
+// (SSH~1\authorized_keys, AUTHOR~1; actionWindowsExpandShortPath, which reads
+// the nearest existing parent and keeps a new final name). ok is false when
+// p reads as spelled or a short component does not expand: that spelling
+// names no file the long spelling would. rel-1-0-10:GAP-1553.
+func lateWindowsLongSpelling(p string) (string, bool) {
+	volume := filepath.VolumeName(p)
+	parts := strings.FieldsFunc(p[len(volume):], func(r rune) bool { return r == '\\' || r == '/' })
+	changed := false
+	for i, part := range parts {
+		if trimmed := strings.TrimRight(part, ". "); trimmed != part && trimmed != "" && part != "." && part != ".." {
+			parts[i], changed = trimmed, true
+		}
+	}
+	long := volume + string(filepath.Separator) + strings.Join(parts, string(filepath.Separator))
+	if strings.Contains(long, "~") {
+		expanded, ok := actionWindowsExpandShortPath(long)
+		if !ok {
+			return "", false
+		}
+		long, changed = filepath.FromSlash(expanded), true
+	}
+	return long, changed
+}
+
+// ExpandWindowsShortPath is the long spelling of the absolute Windows path p
+// with its existing 8.3 short components expanded through the file system
+// of a Windows host (actionWindowsExpandShortPath). ok is false on other
+// hosts and when a short component does not expand.
+func ExpandWindowsShortPath(p string) (string, bool) {
+	long, ok := actionWindowsExpandShortPath(p)
+	if !ok {
+		return "", false
+	}
+	return filepath.FromSlash(long), true
 }

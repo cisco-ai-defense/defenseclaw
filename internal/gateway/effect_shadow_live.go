@@ -294,6 +294,7 @@ func effectShadowFacts(request trustedActionRequest, result effects.Result, opts
 		Flavor:       opts.Flavor,
 		AccountHomes: accountHomes,
 		Resolve:      effectResolverOverride,
+		Lstat:        effectLstatOverride,
 	})
 }
 

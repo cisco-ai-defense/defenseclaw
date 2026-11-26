@@ -64,6 +64,12 @@ type Stmt struct {
 
 // Cmd is one simple command or pipeline stage.
 type Cmd struct {
+	// MayCallFunc marks a call whose program is dynamic (& $name) in a
+	// PowerShell script that defines functions: it may run one, whose body
+	// may move the folder, so the folder after it is unknown
+	// (rel-1-0-10:GAP-1156; a plain call is lowered as the body).
+	MayCallFunc bool
+
 	Assigns []Assign
 	// Words is argv; Words[0] is the program when present.
 	Words  []Word

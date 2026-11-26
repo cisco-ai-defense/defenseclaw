@@ -84,6 +84,11 @@ func effectsRulesTierFor() effectTierMode {
 // has no real user home to follow links through.
 var effectResolverOverride func(string) (string, bool)
 
+// effectLstatOverride, when set, replaces the file-system reads the
+// projection's resolver settles with (effectrules.Env.Lstat): a test pins
+// a host without the files its rows name.
+var effectLstatOverride func(string) (os.FileInfo, error)
+
 type effectTier string
 
 const (

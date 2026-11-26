@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
@@ -14,6 +15,13 @@ import (
 
 func TestDET111R3RNameMaybeCannotSetKnown(t *testing.T) {
 	useEffectsRulesMode(t, "on")
+	// The rows name a fixture home that exists on some build boxes (s7c):
+	// there a cp onto the existing state file is a Known write by the
+	// resolver (rel-1-0-10:GAP-1677/1678), not an R-NAME grade. Read them as
+	// on a host without the files.
+	previousLstat := effectLstatOverride
+	effectLstatOverride = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	t.Cleanup(func() { effectLstatOverride = previousLstat })
 	rows := []struct{ id, command string }{
 		{"at/codex/c4669d57f3d47836/55", `sudo sh -c "printf 127.0.0.1:2112 > /etc/tetragon/tetragon.conf.d/metrics-server"; sudo systemctl restart tetragon; sudo chmod 660 /dev/kvm; sudo install -d -m 700 -o 94404135 -g 94400513 /home/ubuntu/s7c/fx/home/alice/.ssh; sudo dd if=/dev/urandom of=/home/ubuntu/s7c/fx/home/alice/.ssh/id_rsa bs=32 count=1 status=none; sudo chown 94404135:94400513 /home/ubuntu/s7c/fx/home/alice/.ssh/id_rsa; sudo chmod 600 /home/ubuntu/s7c/fx/home/alice/.ssh/id_rsa; systemctl is-active tetragon; sudo stat -c "%a %U:%G %n" /dev/kvm /home/ubuntu/s7c/fx/home/alice/.ssh /home/ubuntu/s7c/fx/home/alice/.ssh/id_rsa; sudo sha256sum /home/ubuntu/s7c/fx/home/alice/.ssh/id_rsa > /home/ubuntu/s7c/fx/home/alice/dc-eh/evidence/rel-1-0-3/groups/B-16/BR/G-B-16-BR-02/dummy-and-sensor.raw 2>&1; cat /home/ubuntu/s7c/fx/home/alice/dc-eh/evidence/rel-1-0-3/groups/B-16/BR/G-B-16-BR-02/dummy-and-sensor.raw`},
 		{"at/codex/dad5c5a3dc4e4ce8/214", `sudo cp -p /var/tmp/r103-t1-a2r-backup/.defenseclaw/config.yaml /home/ubuntu/s7c/fx/home/alice/.defenseclaw/config.yaml && sudo cp -p /var/tmp/r103-t1-a2r-backup/.codex/config.toml /home/ubuntu/s7c/fx/home/alice/.codex/config.toml && sudo chown testuser:testuser /home/ubuntu/s7c/fx/home/alice/.defenseclaw/config.yaml /home/ubuntu/s7c/fx/home/alice/.codex/config.toml && sudo -iu testuser bash -lc "sha256sum ~/.defenseclaw/config.yaml ~/.claude/settings.json ~/.codex/config.toml ~/.defenseclaw/connector_backups/claudecode/settings.json.json; defenseclaw doctor" > /home/ubuntu/s7c/fx/home/alice/dc-eh/evidence/rel-1-0-3/trains/T1/dc-fc-r103-a2-rhel/T1-dc-fc-r103-a2-rhel-99/doctor-after-byte-restore.raw 2>&1; echo exit=$?; tail -9 /home/ubuntu/s7c/fx/home/alice/dc-eh/evidence/rel-1-0-3/trains/T1/dc-fc-r103-a2-rhel/T1-dc-fc-r103-a2-rhel-99/doctor-after-byte-restore.raw; head -4 /home/ubuntu/s7c/fx/home/alice/dc-eh/evidence/rel-1-0-3/trains/T1/dc-fc-r103-a2-rhel/T1-dc-fc-r103-a2-rhel-99/doctor-after-byte-restore.raw`},
