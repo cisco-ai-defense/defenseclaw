@@ -11,6 +11,14 @@ func TestGAP2237ProcessLinkWriteBelowOpenerRelativeLink(t *testing.T) {
 		want bool
 	}{
 		{"/dev/fd/3/.ssh/authorized_keys", true},
+		{"/dev/stdin/.ssh/authorized_keys", true},
+		{"/dev/stdout/.ssh/authorized_keys", true},
+		{"/dev/stderr/.ssh/authorized_keys", true},
+		{"/proc/4242/../4242/root/sandbox/.ssh/authorized_keys", true},
+		{"//proc/4242/root/../sandbox/.ssh/authorized_keys", true},
+		{"/proc/4242/./root/../sandbox/.ssh/authorized_keys", true},
+		{"/proc/self/root/tmp/authorized_keys", false},
+		{"/proc/thread-self/root/tmp/authorized_keys", false},
 		{"/proc/self/fd/3/.ssh/authorized_keys", true},
 		{"/proc/thread-self/fd/3/.ssh/authorized_keys", true},
 		{"/proc/self/task/42/root/home/u/.ssh/authorized_keys", true},

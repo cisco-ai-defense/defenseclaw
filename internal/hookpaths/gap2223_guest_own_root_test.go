@@ -22,6 +22,9 @@ func TestGAP2223GuestOwnRootPathIsTheGuestRoot(t *testing.T) {
 		{"/proc/self/root/proc/1/root", "/proc/1/root"},
 		{"/proc/self/root/proc/self/root/tmp", "/tmp"},
 		{"/proc/self/root/../sandbox", "/sandbox"},
+		{"/tmp/../proc/self/root/../sandbox", "/sandbox"},
+		{"/proc/self/root/sandbox/../proc/self/root/../sandbox", "/sandbox"},
+		{"/proc/self/root/proc/4242/./root/../sandbox", "/proc/4242/root/../sandbox"},
 		{"/proc/./self/root/../../sandbox", "/sandbox"},
 		{"/proc/self/../self/root/../sandbox", "/sandbox"},
 		{"/proc/self/root/proc/1/root/../sandbox", "/proc/1/root/../sandbox"},
@@ -97,5 +100,49 @@ func TestGAP2223GuestAliasTargetsUseLinuxCase(t *testing.T) {
 	links := CommandLinksWithFacts("Bash", command, "", "/sandbox", nil)
 	if aliases := links.GuestAliasTargets("l", false); len(aliases) != 0 {
 		t.Errorf("a Linux guest must not follow a differently cased link: %q", aliases)
+	}
+}
+
+func TestFIX2223CGuestAliasTargetsProcessLinks(t *testing.T) {
+	rows := []struct{ command, want string }{
+		{"ln -s /proc/4242/root/sandbox/.ssh/authorized_keys l && echo k >> l", "/proc/4242/root/sandbox/.ssh/authorized_keys"},
+		{"exec 3< /sandbox && ln -s /dev/fd/3/.ssh/authorized_keys l && echo k >> l", "/dev/fd/3/.ssh/authorized_keys"},
+	}
+	for _, row := range rows {
+		links := CommandLinksWithFacts("Bash", row.command, "/sandbox/app", "/sandbox", nil)
+		aliases := links.GuestAliasTargets("/sandbox/app/l", false)
+		if len(aliases) == 0 {
+			t.Errorf("%q: no aliases", row.command)
+			continue
+		}
+		found := false
+		for _, alias := range aliases {
+			if alias == row.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: aliases %q, want %q", row.command, aliases, row.want)
+		}
+	}
+}
+
+func TestFIX2223CGuestStaticDirectoryPlacesRootBoundWrites(t *testing.T) {
+	key := "authorized_" + "keys"
+	for _, command := range []string{
+		"cd /proc/self/root/.. && echo k >> sandbox/.ssh/" + key,
+		"cd /proc/self/root && cd .. && echo k >> sandbox/.ssh/" + key,
+		"cd /proc/self/root/../sandbox && echo k >> .ssh/" + key,
+	} {
+		ops := GuestStaticDirectoryWriteOperands(command, "/sandbox/app", "/sandbox")
+		found := false
+		for _, op := range ops {
+			if GuestOwnRootPath(op.Path) == "/sandbox/.ssh/"+key {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: placed writes %v", command, ops)
+		}
 	}
 }
