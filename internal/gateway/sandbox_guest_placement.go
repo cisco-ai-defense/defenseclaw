@@ -838,6 +838,12 @@ func (memo *guestReadingMemo) placedReading(input actionfacts.Input) (actionfact
 // from a word of its text (its base name, or less an .exe or .cmd suffix),
 // so a text of plain words that names none of them has no reader command in
 // any folder, and its readings there prove nothing (rel-1-0-10:GAP-2226).
+// That rests on how actionfacts names a program: the lowercased base name of
+// a literal word, with ASCII lowering only and no Unicode folding, so a name
+// the text spells in any case, path or suffix still contains the reader's
+// name once lowered, and a lookalike letter names no reader at all
+// (TestGAP2226CandidateFilterProgramNames). A change to that naming must
+// change this filter with it.
 func guestCandidateMayReadKey(text string) bool {
 	if strings.ContainsAny(text, "'\"\\$`^%!*?[{") {
 		return true
