@@ -433,6 +433,11 @@ type openSecret struct {
 	// with no verdict, as rel does; a run parked at a block end or a tool
 	// switch keeps the GAP-1767 TRUNCATED verdict (rel-1-0-10:GAP-2218).
 	answerParkedOnly bool
+	// parkedOnly: every open run is a parked token or digit run (any park,
+	// any lane), no private-key block and no boundary run: at the held bound
+	// the run is decided by its own bytes, not the non-text events read
+	// while it was parked (rel-1-0-10:GAP-2224).
+	parkedOnly bool
 }
 
 // OpenSecret advances every lane and same-choice check boundary over text
@@ -440,7 +445,7 @@ type openSecret struct {
 // behind a split secret until the existing matcher reads them whole.
 func (r *responseText) OpenSecret() openSecret {
 	var o openSecret
-	var reasoningOpen, otherOpen, blockParked bool
+	var reasoningOpen, otherOpen, blockParked, unparked bool
 	for i, l := range r.lanes {
 		t := l.String()
 		pemOpen, over := r.secret[i].pem(t)
@@ -455,7 +460,7 @@ func (r *responseText) OpenSecret() openSecret {
 				otherOpen = true
 			}
 		} else if tokenOpen || pemOpen {
-			otherOpen = true
+			otherOpen, unparked = true, true
 		}
 	}
 	for i := range r.boundaries {
@@ -466,12 +471,13 @@ func (r *responseText) OpenSecret() openSecret {
 			continue
 		}
 		if b.secret.token(line) {
-			otherOpen = true
+			otherOpen, unparked = true, true
 		}
 	}
 	o.open = reasoningOpen || otherOpen
 	o.reasoningOnly = reasoningOpen && !otherOpen && !o.pem
 	o.answerParkedOnly = o.reasoningOnly && !blockParked
+	o.parkedOnly = o.open && !unparked && !o.pem
 	return o
 }
 
@@ -509,6 +515,15 @@ func (r *responseText) ReleaseOpenSecret() {
 		b := &r.boundaries[i]
 		b.secret.giveUp(r.boundaryLine(b))
 	}
+}
+
+// sumInts is the sum of ns.
+func sumInts(ns []int) int {
+	n := 0
+	for _, v := range ns {
+		n += v
+	}
+	return n
 }
 
 // bufferedBytes is the size of the held chunks.

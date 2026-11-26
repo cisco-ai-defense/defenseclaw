@@ -14,8 +14,10 @@ import (
 // blocks with no text (web_fetch, web_search, code execution results) after
 // thinking that ends in a number never let it go: past streamSecretMaxHeld
 // the bound gave the GAP-1767 TRUNCATED verdict, and strict and
-// managed-strict cut a benign reply that rel sends. Now the bytes of the
-// events that add no typed text count against the park too.
+// managed-strict cut a benign reply that rel sends. Now, at the held bound,
+// a parked run that is over it only by the events read while it was parked
+// that carry no model text goes out with no verdict, as on rel; below the
+// bound the park still holds it (GAP-2250).
 
 const (
 	gap2224End     = "GAP2224-END-MARK"
@@ -80,9 +82,8 @@ func TestGAP2224ServerToolResultsExpireTheThinkingPark(t *testing.T) {
 // passthrough, in every tier, a benign reply whose reasoning summary ends in
 // a number, then an image_generation_call whose image (more than
 // streamSecretMaxHeld of base64) only its output_item.done carries, goes out
-// whole with no TRUNCATED verdict, as on rel. The image is media the walker
-// skips, and output_item.done is a snapshot: the snapshot spends the parked
-// run by the media it carries first, never by repeated text
+// whole with no TRUNCATED verdict, as on rel: the image adds no model text,
+// so the held bound does not count it against the parked summary run
 // (CHK-T23E2224B N1; red at 517024b369: 3 TRUNCATED, strict and
 // managed-strict cut).
 func TestGAP2224ResponsesImageAfterSummaryNumberIsSent(t *testing.T) {
@@ -128,8 +129,8 @@ func TestGAP2224ResponsesImageAfterSummaryNumberIsSent(t *testing.T) {
 // Responses passthrough, in every tier, a benign reply whose reasoning
 // summary ends in a number, then the reasoning item's output_item.done with
 // an encrypted_content over streamSecretMaxHeld, then the answer, goes out
-// whole with no TRUNCATED verdict, as on rel. encrypted_content is a skip
-// scalar the walker does not read: the snapshot spends the parked run by it
+// whole with no TRUNCATED verdict, as on rel: encrypted_content adds no
+// model text, so the held bound does not count it against the parked run
 // (CHK-T23E2224C N1; red at 5ca5483b49: 3 TRUNCATED, strict and
 // managed-strict cut).
 func TestGAP2224ResponsesEncryptedReasoningOverBoundIsSent(t *testing.T) {
