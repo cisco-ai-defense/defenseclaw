@@ -2101,7 +2101,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	// The names are matched in the folder the pattern's dot-dot steps lead
 	// to: rm -f x/../.ssh/* after cd .. names the authorized keys files as
 	// rm -f .ssh/* does (actionGlobPatternPlaced, rel-1-0-10:GAP-1020).
-	placed := actionGlobPatternPlaced(pattern)
+	placed := actionGlobPatternPlaced(pattern, home)
 	for _, target := range append([]string{ssh}, ProtectedAuthorizedKeysPaths(home)...) {
 		// In a POSIX shell * and ? skip a leading dot: at the home folder
 		// echo * names no .ssh unless dotglob may be on (rel-1-0-6:GAP-0211).
