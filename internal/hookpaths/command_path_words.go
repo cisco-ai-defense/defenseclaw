@@ -58,8 +58,8 @@ type commandPathScan struct {
 	loops     [][2]int
 	functions []commandPathFunction
 	calls     []commandPathCall
-	// bodies indexes the function bodies (functionBodies).
-	bodies *commandPathBodies
+	// funcIndex indexes the function bodies (functionBodies).
+	funcIndex *commandPathBodies
 }
 
 // commandPathFunction is a function definition: its name and the byte range
@@ -206,8 +206,8 @@ type commandPathBodies struct {
 // functionBodies is the index of the scan's function bodies, made again
 // when a function was added since.
 func (scan *commandPathScan) functionBodies() *commandPathBodies {
-	if scan.bodies != nil && scan.bodies.count == len(scan.functions) {
-		return scan.bodies
+	if scan.funcIndex != nil && scan.funcIndex.count == len(scan.functions) {
+		return scan.funcIndex
 	}
 	bodies := &commandPathBodies{count: len(scan.functions), nested: true}
 	bodies.order = make([]int, len(scan.functions))
@@ -243,7 +243,7 @@ func (scan *commandPathScan) functionBodies() *commandPathBodies {
 		}
 		open = append(open, position)
 	}
-	scan.bodies = bodies
+	scan.funcIndex = bodies
 	return bodies
 }
 
