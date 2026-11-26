@@ -38,6 +38,7 @@ var (
 	_ = bounded.Register("hookpaths.maxTarPlainBytes", bounded.Bytes, int(maxTarPlainBytes))
 	_ = bounded.Register("hookpaths.maxTarPlainMembers", bounded.Items, int(maxTarPlainMembers))
 	_ = bounded.Register("hookpaths.maxTargetMemoEntries", bounded.Paths, int(maxTargetMemoEntries))
+	_ = bounded.Register("hookpaths.maxUnreadProtectedHomes", bounded.Items, int(maxUnreadProtectedHomes))
 	_ = bounded.Register("hookpaths.maxWalkFactComponents", bounded.Items, int(maxWalkFactComponents))
 	_ = bounded.Register("hookpaths.maxWalkFactWords", bounded.Items, int(maxWalkFactWords))
 	_ = bounded.Register("hookpaths.maxWalkFacts", bounded.Items, int(maxWalkFacts))
