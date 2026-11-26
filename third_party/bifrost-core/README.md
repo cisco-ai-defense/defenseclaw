@@ -14,4 +14,11 @@ also closes it during either step.
 versions. `TestGAP0564RealProviderCancellationReason`,
 `TestGAP0564RealProviderDeadlineDisconnect`, and
 `TestGAP0564RealProviderBenignAnswer` cover the local change.
+A second local change is in `bifrost.go` (`tryRequest`, `handleRequest`): a call
+whose context ended returns while the provider worker still owns the request and
+writes the resolved model into it, so the caller no longer reads the request
+after that point (the timeout error is named from the provider and model read
+before the hand-off, and no fallback decision is made on an ended context).
+`TestGAP0359TimedOutModelCallKeepsItsRequestUntilTheWorkerIsDone` (run it with
+`-race`) covers it.
 The copied Go sources are formatted with the pinned toolchain.

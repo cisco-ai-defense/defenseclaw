@@ -91,6 +91,10 @@ type boundedLaneCap struct {
 	// fixed in this tree; "<tier>/judge" is one of the judge row
 	// (TestBoundRuleJudgeStillDecides). The lane's fix deletes the entry.
 	open map[string]string
+	// decisive maps "<tier>/judge" to the reason the 1.0.10 verdict of the
+	// judge row is a decisive block there: the call must block without the
+	// judge (TestBoundRuleJudgeStillDecides), never fall to the floor.
+	decisive map[string]string
 }
 
 // boundedJudgeOpenShape is the shape name of an OPEN entry for the judge row.
@@ -716,6 +720,13 @@ func TestBoundRuleJudgeStillDecides(t *testing.T) {
 			action, findings := judge(t, api, env, call)
 			got := boundedParse(action)
 			name := tier.name + "/" + lane.lane
+			if reason := lane.decisive[tier.name+"/"+boundedJudgeOpenShape]; reason != "" {
+				if got != bounded.Block || boundedJudgeCalls(mock) != asked {
+					t.Errorf("%s: %s is %s (judge asked %v), want the decisive 1.0.10 block (%s); findings=%v",
+						name, lane.lane, got, boundedJudgeCalls(mock) != asked, reason, findings)
+				}
+				continue
+			}
 			var violations []string
 			// Where the floor alerts the judge must be asked (this also proves
 			// the stub is wired); where it blocks the call is decisive.

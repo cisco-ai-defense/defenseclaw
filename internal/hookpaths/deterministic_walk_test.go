@@ -87,23 +87,39 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 	if err := os.Link(late, alias); err != nil {
 		t.Fatal(err)
 	}
+	// indexNames builds the identity index of the state and lists it. A state
+	// of this many folders is past activeStateViewWatches, so DET111 keeps its
+	// index for one hook call only (never across calls): build it, do not read
+	// a kept one.
+	root := mustResolve(t, filepath.Join(home, ".defenseclaw"))
+	indexNames := func() (names []string, unanswered bool) {
+		files, unanswered := activeStateIdentities(root)
+		for _, file := range files {
+			names = append(names, file.relative)
+		}
+		return names, unanswered
+	}
 	if _, same, _ := ResolveActiveStateHardlinkTarget(alias, home); !same {
 		t.Fatal("the hard link to the last cache entry was not found on an idle box")
 	}
-	idle := gap1789IndexNames(t)
-	if n := len(idle); n == 0 || idle[n-1] != "cache/entry-late" {
-		t.Fatalf("the idle index does not end at the late entry: %d files", n)
+	idle, unanswered := indexNames()
+	if n := len(idle); unanswered || n == 0 || idle[n-1] != "cache/entry-late" {
+		t.Fatalf("the idle index does not end at the late entry: %d files (unanswered %v)", n, unanswered)
 	}
 	networkShareAnswerWait = time.Minute
 	for run := range 3 {
 		resetActiveStateIndex(t)
-		var same bool
-		took := starved(64, func() { _, same, _ = ResolveActiveStateHardlinkTarget(alias, home) })
+		var same, unanswered bool
+		var files []string
+		took := starved(64, func() {
+			_, same, _ = ResolveActiveStateHardlinkTarget(alias, home)
+			files, unanswered = indexNames()
+		})
 		if !same {
 			t.Fatalf("run %d: the hard link to a state file inside the entry bound was not found on a loaded box (walk took %s)", run, took)
 		}
-		if files := gap1789IndexNames(t); !slices.Equal(files, idle) {
-			t.Fatalf("run %d: the index built on a loaded box holds %d files, the idle-box index %d (walk took %s)", run, len(files), len(idle), took)
+		if unanswered || !slices.Equal(files, idle) {
+			t.Fatalf("run %d: the index built on a loaded box holds %d files (unanswered %v), the idle-box index %d (walk took %s)", run, len(files), unanswered, len(idle), took)
 		}
 		t.Logf("run %d: starved walk took %s", run, took)
 	}

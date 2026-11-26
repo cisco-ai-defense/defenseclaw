@@ -103,7 +103,53 @@ func shareBodyUnreadFindings(ctx context.Context, findings []RuleFinding, enforc
 	}
 	return append(findings, RuleFinding{
 		RuleID: shareBodyUnreadRuleID, Severity: "MEDIUM", Confidence: 1,
-		Title:       title,
-		enforcement: findingEnforcementAlertOnly,
+		Title: title,
+		Proof: advisoryProof,
 	})
 }
+
+// artifactUnreadRuleID is the alert the default and permissive tiers raise
+// for a script a tool call runs that the artifact check left unread or
+// unjudged within the hook call: no reader came free, the read did not
+// finish within promotedArtifactReadLimit, or the hook budget ended
+// (readPromotedArtifactBounded, promotedArtifactFindings). The script is
+// unknown, as an unread share body is, and is judged the same way: the
+// strict tier (and managed strict) keeps the evaluation-limit block, the
+// default and permissive tiers allow the call with this visible alert, so a
+// busy or loaded gateway never refuses an ordinary script and never lets a
+// blocking one run unflagged (rel-1-0-10:GAP-2171).
+const artifactUnreadRuleID = "ACTION-ARTIFACT-UNREAD"
+
+// appendArtifactUnreadFindings adds the answer for an unread script to
+// findings, unless they already carry it. enforcementCapable reports
+// whether an unread script was a candidate that may block at this boundary;
+// it bounds the strict tier's evaluation-limit block as for a read script.
+func appendArtifactUnreadFindings(ctx context.Context, findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	has := func(ruleID string) bool {
+		return slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
+	}
+	if has("ACTION-COMPOUND-LIMIT") {
+		return findings
+	}
+	if shareBodyStrictFrom(ctx) {
+		limit := trustedActionLimitFindings(enforcementCapable)
+		for index := range limit {
+			limit[index].Evidence = artifactUnreadReason
+			limit[index].Tags = appendUniqueStrings(limit[index].Tags, "artifact-promotion", "experimental")
+		}
+		return append(findings, limit...)
+	}
+	if has(artifactUnreadRuleID) {
+		return findings
+	}
+	return append(findings, RuleFinding{
+		RuleID: artifactUnreadRuleID, Severity: "MEDIUM", Confidence: 1,
+		Title:    "Script the command runs was not read in time: the hook call could not read and check it, so it is reported unchecked",
+		Evidence: artifactUnreadReason,
+		Tags:     []string{"artifact-promotion", "experimental"},
+		Proof:    advisoryProof,
+	})
+}
+
+// artifactUnreadReason is the evidence of the answer for an unread script.
+const artifactUnreadReason = "artifact_unread_in_time"

@@ -42,8 +42,9 @@ import (
 var effectShadowIdleMu sync.Mutex
 
 // effectShadowIdleWait is how long withEffectShadowIdle waits for the runs in
-// flight; a run is capped at effectShadowTimeCap plus the time a test's own
-// share probe holds it, so this is far above any run that is not stuck.
+// flight; a run is bounded by counted work (DET111 FIX-T19) plus the time a
+// test's own share probe holds it, so this is far above any run that is not
+// stuck.
 const effectShadowIdleWait = 30 * time.Second
 
 // withEffectShadowIdle runs f while no effect-shadow run is in flight and none
@@ -114,9 +115,10 @@ func setIdle[T any](t testing.TB, p *T, v T) (restore func()) {
 	return func() { withEffectShadowIdle(t, func() { *p = prev }) }
 }
 
-// The three gateway variables a shadow run reads (effectResolverOverride,
-// effectShadowFaultHook, effectShadowTimeCap) are set and restored only through
-// these, so a test never writes one while a run of an earlier test reads it.
+// The two gateway variables a shadow run reads (effectResolverOverride,
+// effectShadowFaultHook) are set and restored only through these, so a test
+// never writes one while a run of an earlier test reads it. The run has no
+// time cap variable since DET111 FIX-T19.
 
 func setEffectResolverIdle(t testing.TB, resolver func(string) (string, bool)) func() {
 	t.Helper()
@@ -126,11 +128,6 @@ func setEffectResolverIdle(t testing.TB, resolver func(string) (string, bool)) f
 func setEffectShadowFaultHookIdle(t testing.TB, hook func()) func() {
 	t.Helper()
 	return setIdle(t, &effectShadowFaultHook, hook)
-}
-
-func setEffectShadowTimeCapIdle(t testing.TB, limit time.Duration) func() {
-	t.Helper()
-	return setIdle(t, &effectShadowTimeCap, limit)
 }
 
 // A shadow run in flight keeps an override from being set until it finished,
@@ -196,10 +193,10 @@ func TestGAP1913ConcurrentOverridesDoNotDeadlock(t *testing.T) {
 
 // No gateway test sets a hookpaths test override directly: the override goes
 // through the *Idle wrappers above, or an earlier test's shadow run races it.
-// The same holds for the three gateway variables a shadow run reads
-// (effectResolverOverride, effectShadowFaultHook, effectShadowTimeCap): a test
-// writes them through setEffectResolverIdle, setEffectShadowFaultHookIdle and
-// setEffectShadowTimeCapIdle only. A read of one is fine.
+// The same holds for the two gateway variables a shadow run reads
+// (effectResolverOverride, effectShadowFaultHook): a test writes them through
+// setEffectResolverIdle and setEffectShadowFaultHookIdle only. A read of one
+// is fine.
 // TestMain sets its overrides before any test and marks the line gap1913-ok.
 func TestGAP1913GatewayTestsSetHookpathsOverridesIdle(t *testing.T) {
 	// The only files that may set an override: the wrappers themselves. The
@@ -209,7 +206,7 @@ func TestGAP1913GatewayTestsSetHookpathsOverridesIdle(t *testing.T) {
 		"effect_shadow_idle_unix_test.go": true,
 	}
 	direct := regexp.MustCompile(`hookpaths\.(\w+ForTests?|SetParentStepIsText)\(`)
-	const shadowVars = `(?:effectResolverOverride|effectShadowFaultHook|effectShadowTimeCap)`
+	const shadowVars = `(?:effectResolverOverride|effectShadowFaultHook)`
 	// An assignment (=, :=, +=, ++ and the like) or the address taken for a write.
 	directVar := regexp.MustCompile(`\b` + shadowVars + `\b\s*(?:=[^=]|:=|[-+*/|&^%]=|\+\+|--)|&\s*` + shadowVars + `\b`)
 	files, err := filepath.Glob("*_test.go")

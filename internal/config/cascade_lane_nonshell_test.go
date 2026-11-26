@@ -136,9 +136,9 @@ func TestNonShellLaneLoadFromFile(t *testing.T) {
 	}
 }
 
-// One check for every lane: the shadow-only lanes take the same exact values,
-// read the same way when the loader was skipped, and still refuse on with the
-// not-available reason.
+// One check for every lane: the effects and secret_flow lanes take the same
+// exact values and read the same way when the loader was skipped; the
+// shadow-only secret_flow still refuses on with the not-available reason.
 func TestNonShellLaneParseIsTheRegistryParse(t *testing.T) {
 	for _, v := range []string{"Shadow", " OFF ", "shadow"} {
 		c := CascadeConfig{Lanes: CascadeLaneValues{CascadeLaneEffects: v, CascadeLaneSecretFlow: v}}
@@ -152,8 +152,11 @@ func TestNonShellLaneParseIsTheRegistryParse(t *testing.T) {
 			t.Errorf("%q: EffectsMode() = %q, want %q", v, got, want)
 		}
 	}
-	if err := (CascadeConfig{Lanes: CascadeLaneValues{CascadeLaneEffects: "on"}}).validateCascade(); err == nil || !strings.Contains(err.Error(), "not available in 1.0.10") {
-		t.Errorf("effects on: %v, want not available", err)
+	if err := (CascadeConfig{Lanes: CascadeLaneValues{CascadeLaneSecretFlow: "on"}}).validateCascade(); err == nil || !strings.Contains(err.Error(), "not available in 1.0.10") {
+		t.Errorf("secret_flow on: %v, want not available", err)
+	}
+	if err := (CascadeConfig{Lanes: CascadeLaneValues{CascadeLaneEffects: "on"}}).validateCascade(); err != nil {
+		t.Errorf("effects on: %v, want accepted (the lane ships on)", err)
 	}
 	for _, v := range []string{"ON", " on"} {
 		if err := (CascadeConfig{Lanes: CascadeLaneValues{CascadeLaneEffects: v}}).validateCascade(); err == nil || !strings.Contains(err.Error(), "guardrail.cascade.lanes.effects") {

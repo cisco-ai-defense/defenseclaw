@@ -63,7 +63,7 @@ func applyTrustedActionContextDisposition(
 		findingFacts := enforcementFacts
 		if finding.RuleID == "CMD-WIN-REG-PERSIST" && finding.Severity == "HIGH" &&
 			finding.contributesToEnforcement() {
-			finding.enforcement = findingEnforcementAlertOnly
+			finding.Proof = finding.Proof.Advise()
 			adjusted[index] = finding
 			continue
 		}
@@ -77,7 +77,7 @@ func applyTrustedActionContextDisposition(
 						findingFacts,
 					),
 				)
-				finding.enforcement = findingEnforcementAlertOnly
+				finding.Proof = finding.Proof.Advise()
 			} else {
 				// Merely reading, listing, stating, or lexically mentioning a
 				// runtime socket is useful local telemetry, but it does not prove
@@ -95,7 +95,7 @@ func applyTrustedActionContextDisposition(
 				// Preserve the finding's original severity so parser coverage
 				// uncertainty remains visible, but never let incomplete facts
 				// authorize enforcement.
-				finding.enforcement = findingEnforcementDetectionOnly
+				finding.Proof = finding.Proof.Record()
 			case trustedActionSensitivePathMutation,
 				trustedActionSensitivePathReadEgress:
 				// A typed mutation or read-to-external-network flow remains a
@@ -106,7 +106,7 @@ func applyTrustedActionContextDisposition(
 				)
 			case trustedActionSensitivePathRead:
 				if scope.protectedLocalFileRead &&
-					finding.enforcement != findingEnforcementDetectionOnly &&
+					!finding.Proof.Recorded() &&
 					(slices.Contains(finding.Tags, "credential") || slices.Contains(finding.Tags, "privilege")) {
 					// The Local file tool opens this exact credential or control
 					// target. Keep its path rule enforceable, as for a direct
@@ -125,14 +125,26 @@ func applyTrustedActionContextDisposition(
 					adjusted[index] = finding
 					continue
 				}
+				if (finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY") &&
+					!finding.Proof.Recorded() &&
+					trustedActionOtherHomeSSHPrivateKeyContentRead(findingFacts) {
+					// A proven read of another account's private key alerts in
+					// every non-strict tier. Strict's separate key-read proof blocks.
+					// A detection-only finding keeps the previous advisory path.
+					finding.disposition = findingDispositionAdvisory
+					finding.Proof = finding.Proof.Advise()
+					finding.Severity = "HIGH"
+					adjusted[index] = finding
+					continue
+				}
 				// A local read of a credential path is MEDIUM: alert, do not
 				// block. Detection-only would also hide it from alerts
 				// (GAP-1516); never promote a finding that an earlier
 				// boundary already made detection-only.
-				detectionOnly := finding.enforcement == findingEnforcementDetectionOnly
+				detectionOnly := finding.Proof.Recorded()
 				finding = trustedActionAdvisoryFinding(finding)
 				if !detectionOnly {
-					finding.enforcement = findingEnforcementAlertOnly
+					finding.Proof = finding.Proof.Advise()
 				}
 			default:
 				// A path-shaped string without a matching, command-owned path
@@ -164,12 +176,12 @@ func applyTrustedActionContextDisposition(
 		}
 		if !trustedActionContentFindingHasRiskPair(findingFacts, rule) {
 			if trustedActionCredentialLiteralRule(finding) &&
-				finding.enforcement != findingEnforcementDetectionOnly &&
+				!finding.Proof.Recorded() &&
 				trustedActionPersistsCredentialLiteral(findingFacts, scope.sendDestination) {
 				// A credential value the action writes into a file, a store
 				// or a process alerts: it leaves the context for a place that
 				// keeps it. Without proof of where it goes it never blocks.
-				finding.enforcement = findingEnforcementAlertOnly
+				finding.Proof = finding.Proof.Advise()
 				adjusted[index] = finding
 				continue
 			}
@@ -1278,14 +1290,14 @@ func trustedActionOrdinaryCredentialCopyFindings(
 }
 
 func trustedActionAuditFinding(finding RuleFinding) RuleFinding {
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	finding.disposition = findingDispositionAudit
 	finding.Severity = trustedActionLowerSeverity(finding.Severity, "LOW")
 	return finding
 }
 
 func trustedActionAdvisoryFinding(finding RuleFinding) RuleFinding {
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	finding.disposition = findingDispositionAdvisory
 	finding.Severity = trustedActionLowerSeverity(finding.Severity, "MEDIUM")
 	return finding

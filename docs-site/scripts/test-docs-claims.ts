@@ -2553,7 +2553,7 @@ describe('policy test leaves unblocks out without --sandbox (GAP-2495)', () => {
 describe('a local credential read alerts, an SSH private key read is denied (GAP-2502)', () => {
   it('the gateway still makes a plain credential-path read an alert', () => {
     const disp = source('internal/gateway/trusted_action_context_disposition.go');
-    assert.ok(disp.includes('// A local read of a credential path is MEDIUM: alert, do not') && disp.includes('finding.enforcement = findingEnforcementAlertOnly') && disp.includes('trustedActionActiveSSHPrivateKeyContentRead(findingFacts)'), 'credential-read disposition changed: re-check segmentation.mdx Credential files (GAP-2502)');
+    assert.ok(disp.includes('// A local read of a credential path is MEDIUM: alert, do not') && disp.includes('finding.Proof = finding.Proof.Advise()') && disp.includes('trustedActionActiveSSHPrivateKeyContentRead(findingFacts)'), 'credential-read disposition changed: re-check segmentation.mdx Credential files (GAP-2502)');
   });
 });
 

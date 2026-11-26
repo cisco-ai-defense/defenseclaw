@@ -1,0 +1,8 @@
+# name<TAB>positionals before child<TAB>short flags<TAB>attached options<TAB>valued options<TAB>long flags<TAB>stop options<TAB>shell after skip
+taskset	1	ac			--all-tasks --cpu-list	-p --pid	false
+chrt	1	bdfiorRav		-T -P -D --sched-runtime --sched-period --sched-deadline	--batch --deadline --fifo --idle --other --rr --reset-on-fork --all-tasks --verbose	-p --pid -m --max	false
+flock	1	sxunoF		-w -E --timeout --wait --conflict-exit-code	--shared --exclusive --unlock --nonblock --nb --close --no-fork --verbose		true
+ionice	0	t		-c -n --class --classdata	--ignore	-p -P -u --pid --pgid --uid	false
+setsid	0	cfw			--ctty --fork --wait		false
+stdbuf	0			-i -o -e --input --output --error			false
+xargs	0	0rtpxo	iel	-n -I -P -a -s -L -d -E --max-args --max-procs --arg-file --delimiter --max-chars --process-slot-var	--null --no-run-if-empty --verbose --interactive --exit --open-tty		false

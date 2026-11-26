@@ -4999,6 +4999,13 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		}
 	}
 
+	// A call whose context ended returned while the provider worker may still
+	// hold and write the request (see tryRequest, GAP-0359), and no fallback can run on an
+	// ended context: answer without reading the request again.
+	if primaryErr != nil && ctx.Err() != nil {
+		return primaryResult, primaryErr
+	}
+
 	// Check if we should proceed with fallbacks
 	shouldTryFallbacks := bifrost.shouldTryFallbacks(req, primaryErr)
 	if !shouldTryFallbacks {
@@ -5125,6 +5132,13 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 		if len(fallbacks) > 0 {
 			bifrost.logger.Debug(fmt.Sprintf("check if we should try %d fallbacks", len(fallbacks)))
 		}
+	}
+
+	// A call whose context ended returned while the provider worker may still
+	// hold and write the request (see tryRequest, GAP-0359), and no fallback can run on an
+	// ended context: answer without reading the request again.
+	if primaryErr != nil && ctx.Err() != nil {
+		return primaryResult, primaryErr
 	}
 
 	// Check if we should proceed with fallbacks
@@ -5423,7 +5437,10 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 		// never calls releaseChannelMessage itself, so this message leaks from the
 		// pool and is GC'd. That is intentional: a small pool leak on cancellation
 		// is far safer than corrupting another request's channels.
-		provider, model, _ := req.GetRequestFields()
+		// The worker also still owns the request: it resolves the model alias
+		// into it (SetModel) while it runs, so the request is not read here; the
+		// provider and model read before the hand-off name the call (DefenseClaw
+		// local change, rel-1-0-10:GAP-0359).
 		bifrostErr := newBifrostCtxDoneError(ctx, "waiting for provider response")
 		bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
 		return nil, bifrostErr

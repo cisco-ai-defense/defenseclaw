@@ -132,6 +132,7 @@ func TestDatabaseDestructionProtectionProfileBoundaries(t *testing.T) {
 		want    bool
 	}{
 		{"postgres unbounded delete", "psql -c 'DELETE FROM customers;'", "impact.sql_unbounded_delete", true},
+		{"postgres unbounded update", "psql -c 'UPDATE customers SET active = false;'", "impact.sql_unbounded_delete", true},
 		{"joined short option remains unsupported", "psql '-cDELETE FROM customers;'", "impact.sql_unbounded_delete", false},
 		{"mysql unbounded delete", "mysql --execute='DELETE FROM audit_log' app", "impact.sql_unbounded_delete", true},
 		{"mysql ssl option with value", "mysql --ssl-mode REQUIRED -e 'DELETE FROM audit_log' app", "impact.sql_unbounded_delete", true},

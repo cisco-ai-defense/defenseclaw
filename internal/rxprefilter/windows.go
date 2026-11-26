@@ -11,6 +11,8 @@ import (
 	"regexp/syntax"
 	"sync"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 )
 
 // WindowMinText is the shortest text whose matches are searched in windows:
@@ -222,6 +224,7 @@ func (t *Text) FindStringIndex(re *regexp.Regexp) []int {
 	if t == nil || re == nil {
 		return nil
 	}
+	workcount.AddLarge(workcount.RegexRun, len(t.text))
 	if len(t.text) >= WindowMinText {
 		if spans, ok := t.runsFor(re); ok {
 			for _, span := range spans {
@@ -246,6 +249,7 @@ func (t *Text) FindAllStringIndex(re *regexp.Regexp) [][]int {
 	if t == nil || re == nil {
 		return nil
 	}
+	workcount.AddLarge(workcount.RegexRun, len(t.text))
 	if len(t.text) >= WindowMinText {
 		if spans, ok := t.runsFor(re); ok {
 			var out [][]int

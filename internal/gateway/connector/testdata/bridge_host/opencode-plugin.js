@@ -1397,6 +1397,12 @@ async function defenseclawPostLoadHeartbeat(cwd) {
   }
 }
 
+// The text of a user turn (OpenCode 2.x session.prompt) is the hook's prompt
+// field; no other lifecycle event carries one.
+function defenseclawPromptField(event) {
+  return event.type === "session.prompt" && typeof event.prompt === "string" && event.prompt ? { prompt: event.prompt } : {};
+}
+
 async function defenseclawPostLifecycle(event, cwd) {
   if (!event || !event.type) return;
   let token;
@@ -1426,6 +1432,7 @@ async function defenseclawPostLifecycle(event, cwd) {
         agent_name: properties.agent || info.agent || "",
         status: event.type === "session.error" ? "error" : (properties.status || info.status || ""),
         cwd: cwd || "",
+        ...defenseclawPromptField(event),
         load_heartbeat: true,
         event: properties,
       }),
@@ -1461,7 +1468,7 @@ async function defenseclawHooks({ client, directory, worktree }) {
     event: async ({ event }) => {
       if (!event || ![
         "session.created", "session.status", "session.idle",
-        "session.error", "session.deleted",
+        "session.error", "session.deleted", "session.prompt",
       ].includes(event.type)) return;
       await defenseclawPostLifecycle(event, cwd);
     },
@@ -1687,6 +1694,30 @@ async function defenseclawV2Lifecycle(ctx, event, sessions, hooks) {
   if (type === "session.deleted") sessions.delete(data.sessionID);
 }
 
+// The most prompt text sent to the gateway for one turn: the judge reads the
+// task, not an attachment, and the post is bounded like every other one.
+const OPENCODE_V2_PROMPT_MAX_CHARS = 16 * 1024;
+
+function defenseclawV2PromptText(prompt) {
+  const text = typeof prompt === "string" ? prompt : (prompt && typeof prompt.text === "string" ? prompt.text : "");
+  return text.length > OPENCODE_V2_PROMPT_MAX_CHARS ? text.slice(0, OPENCODE_V2_PROMPT_MAX_CHARS) : text;
+}
+
+// A user turn (OpenCode 2.x session.prompt) is the task the gateway judges the
+// session's tool calls against. Only a root session's turn is the user's own: a
+// child session is started by the parent agent, so its prompt is model output
+// and never replaces the task. The turn is read, never changed or held.
+async function defenseclawV2Prompt(ctx, event, sessions, hooks) {
+  const text = defenseclawV2PromptText(event && event.prompt);
+  if (!text || typeof event.sessionID !== "string" || !event.sessionID) return;
+  const session = await defenseclawV2Bounded(() => ctx.session.get({ sessionID: event.sessionID }));
+  if (session?.id !== event.sessionID || !defenseclawV2SameLocation(ctx, session.location)) return;
+  if (session.parentID) return;
+  defenseclawV2Remember(sessions, event.sessionID, session.location);
+  const messageID = typeof event.messageID === "string" ? event.messageID : "";
+  await hooks.event({ event: { id: messageID, type: "session.prompt", prompt: text, properties: { sessionID: event.sessionID, messageID } } });
+}
+
 async function defenseclawV2Setup(ctx, createHooks) {
   // V2 server plugins have no TUI toast API, and the TUI never shows their
   // console output. A notice raised while a tool call is checked (a gateway
@@ -1743,6 +1774,16 @@ async function defenseclawV2Setup(ctx, createHooks) {
         await hooks["tool.execute.after"](input, defenseclawV2Result(event));
       } catch (_) {}
     }));
+    // The user's turn is telemetry for the judge: delivered without waiting, so
+    // it never delays or changes the prompt. A host without the hook is not
+    // an error; the tool judge then has no task, as before.
+    if (typeof ctx.session?.hook === "function") {
+      try {
+        registrations.push(await ctx.session.hook("prompt", (event) => {
+          void defenseclawV2Prompt(ctx, event, sessions, hooks).catch(() => {});
+        }));
+      } catch (_) {}
+    }
     // In v2 authority comes from the pinned event above, independently of
     // registration order. Initialize the common verdict/heartbeat path with that fact.
     await hooks.initialize();

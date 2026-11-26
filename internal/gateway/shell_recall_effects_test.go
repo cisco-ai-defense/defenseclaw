@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -31,11 +30,7 @@ var shellRecallEffectRuleIDs = []string{
 
 func shellRecallFixtureCommand(t *testing.T, fixture, caseSuffix string) string {
 	t.Helper()
-	_, selfPath, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve caller path")
-	}
-	file, err := os.Open(filepath.Join(filepath.Dir(selfPath), "..", "..", "benchmarks", "fixtures", fixture))
+	file, err := os.Open(filepath.Join(repoRootFromTestFile(t), "benchmarks", "fixtures", fixture))
 	if err != nil {
 		t.Fatal(err)
 	}

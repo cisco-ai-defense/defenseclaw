@@ -1026,7 +1026,7 @@ jobs:
       # bench gate uses drifted from them (rel-1-0-10 GAP-1578, GAP-1581). Stdlib only, about 25 s.
       - name: S7 benchmark tooling tests
         # Explicit files (the CI-strategy guard wants named test files on every pytest line); add new benchmarks/s7 test files here.
-        run: uv run --frozen python -m pytest -q -p no:cacheprovider benchmarks/s7/gate/test_addr_consistency.py benchmarks/s7/gate/test_labelfold_inputs.py benchmarks/s7/gate/test_s7gate_checks.py benchmarks/s7/gate/test_s7gate_failclosed.py benchmarks/s7/gate/test_s7gate_fixtureroot.py benchmarks/s7/gate/test_s7gate_labels.py benchmarks/s7/gate/test_s7gate_one_scorer.py benchmarks/s7/gate/test_s7gate_rework.py benchmarks/s7/wincorpus/test_wincorpus.py
+        run: uv run --frozen python -m pytest -q -p no:cacheprovider benchmarks/s7/gate/test_addr_consistency.py benchmarks/s7/gate/test_labelfold_inputs.py benchmarks/s7/gate/test_s7gate_checks.py benchmarks/s7/gate/test_s7gate_failclosed.py benchmarks/s7/gate/test_s7gate_fixtureroot.py benchmarks/s7/gate/test_s7gate_labels.py benchmarks/s7/gate/test_s7gate_one_scorer.py benchmarks/s7/gate/test_s7gate_rework.py benchmarks/s7/det111/test_det111_noloss.py benchmarks/s7/wincorpus/test_wincorpus.py
 
   python-lint-test:
     # Preserve the existing required-check name while making it the single

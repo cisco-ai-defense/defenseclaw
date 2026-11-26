@@ -2868,7 +2868,7 @@ func TestTrustedActionCustomGitRuleRetainsDisposition(t *testing.T) {
 func TestTrustedActionContextDispositionNeverPromotesDetectionOnly(t *testing.T) {
 	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	facts := actionfacts.Analyze(actionfacts.Input{
 		Tool: "exec",
 		Argv: []string{
@@ -3452,7 +3452,6 @@ func TestTrustedActionWindowsSensitivePathDispositions(t *testing.T) {
 			finding := RuleFinding{
 				RuleID: test.ruleID, Title: test.ruleID,
 				Severity: "CRITICAL", Confidence: 0.96,
-				enforcement: findingEnforcementAllowed,
 			}
 			analyze := func(command string) actionfacts.Facts {
 				return actionfacts.Analyze(actionfacts.Input{
@@ -3589,12 +3588,11 @@ func trustedActionDispositionTestFinding(
 		t.Fatalf("rule %q not found", ruleID)
 	}
 	return RuleFinding{
-		RuleID:      rule.ID,
-		Title:       rule.Title,
-		Severity:    rule.Severity,
-		Confidence:  rule.Confidence,
-		Tags:        append([]string(nil), rule.Tags...),
-		enforcement: findingEnforcementAllowed,
+		RuleID:     rule.ID,
+		Title:      rule.Title,
+		Severity:   rule.Severity,
+		Confidence: rule.Confidence,
+		Tags:       append([]string(nil), rule.Tags...),
 	}
 }
 

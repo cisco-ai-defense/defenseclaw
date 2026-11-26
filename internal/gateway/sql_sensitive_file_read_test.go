@@ -115,6 +115,20 @@ func TestSQLSensitiveServerFileReadAlertsWithoutBlockingInEveryProfile(t *testin
 	}
 }
 
+func TestSQLSensitiveServerFileReadPSQLCLIAlerts(t *testing.T) {
+	input := actionfacts.Input{
+		Tool:    "shell",
+		Command: `psql -d production -c "SELECT pg_read_file('/etc/passwd');"`,
+		CWD:     "/repo",
+	}
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: input, LegacyText: input.Command, EnforcementCapable: true,
+	})
+	if findingWithID(findings, sqlSensitiveServerFileReadRuleID) == nil {
+		t.Fatalf("psql file-read did not alert: %v", FindingStrings(findings))
+	}
+}
+
 func TestSQLSensitiveServerFileReadSourceTextMentionsDoNotCollide(t *testing.T) {
 	mentions := []string{
 		"Documentation example: SELECT LOAD_FILE('/etc/passwd');",

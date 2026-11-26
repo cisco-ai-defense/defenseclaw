@@ -19,9 +19,6 @@ import (
 // runs in the project) in the gateway's folder. Both ran before the Linux
 // MCP scan got its contained runner and must still run with it.
 func TestMCPScannerRunsARelativeScannerBinary(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the fixture is a Unix executable path")
-	}
 	fixture := buildScannerFixture(t, `{"scanner":"mcp-scanner","target":"my-server","findings":[{"id":"f1","severity":"HIGH","title":"t"}]}`+"\n", 0)
 	raw, err := os.ReadFile(fixture)
 	if err != nil {
@@ -36,7 +33,14 @@ func TestMCPScannerRunsARelativeScannerBinary(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(project, "bin"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(project, tc.binary), raw, 0o755); err != nil {
+			// On Windows the fixture is an .exe named without its extension in
+			// the config, as a Windows user writes it: the start path finds it
+			// through PATHEXT, and it runs natively there (rel-1-0-10:GAP-1690).
+			file := tc.binary
+			if runtime.GOOS == "windows" {
+				file += ".exe"
+			}
+			if err := os.WriteFile(filepath.Join(project, file), raw, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			if usesScannerRuntime(tc.binary) {

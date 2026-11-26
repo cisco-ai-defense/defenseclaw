@@ -71,13 +71,17 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 	if facts.Parse.Dialect == actionfacts.DialectPowerShell && facts.Parse.Status == actionfacts.StatusPartial {
 		command, known := trustedBashCommandInput(input)
 		if known {
-			text, changed, cut := psparse.ArgumentCommandReading(command)
+			text, changed, group, cut := psparse.ArgumentCommandReadingWithGroup(command)
 			if changed {
 				twin := windowsReadingTwin(request)
 				twin.Input = input
 				twin.Input.Args, twin.Input.Argv = nil, nil
 				twin.Input.Command, twin.LegacyText = text, text
 				twin.Input.DialectHint = actionfacts.DialectPowerShell
+				// An evaluated loop-header group is a reading 1.0.10 did
+				// not have (GAP-1550): its findings raise only
+				// (actionfacts.Input.FloorRaiseOnly).
+				twin.Input.FloorRaiseOnly = twin.Input.FloorRaiseOnly || group
 				argumentTwins = append(argumentTwins, twin)
 			}
 			if cut.Any() {
@@ -192,13 +196,21 @@ func windowsNestedReadings(request trustedActionRequest) []windowsNestedReading 
 	}
 	var nested []windowsNestedReading
 	if facts.Parse.Dialect == actionfacts.DialectPowerShell {
-		if text, changed, cut := psparse.ArgumentCommandReading(command); changed && !cut.Any() {
+		if text, changed, group, cut := psparse.ArgumentCommandReadingWithGroup(command); changed && !cut.Any() {
 			twin := windowsReadingTwin(request)
 			twin.Input = input
 			twin.Input.Args, twin.Input.Argv = nil, nil
 			twin.Input.Command, twin.LegacyText = text, text
 			twin.Input.DialectHint = actionfacts.DialectPowerShell
-			nested = append(nested, windowsNestedReading{request: twin})
+			// The evaluated group is a reading 1.0.10 did not have
+			// (GAP-1550): its findings raise only, never take an effect
+			// finding (actionfacts.Input.FloorRaiseOnly, foldTargetsFor).
+			twin.Input.FloorRaiseOnly = twin.Input.FloorRaiseOnly || group
+			// The original rule dispatch does not see a pipeline hidden
+			// inside a parsed (group) header. Only that evaluated group
+			// needs the command-rule reading; ordinary argument readings
+			// retain their existing path-effect-only reading.
+			nested = append(nested, windowsNestedReading{request: twin, unjudged: group})
 		}
 	}
 	reading := actionfacts.HostScriptReadings(input, facts, 0, false)

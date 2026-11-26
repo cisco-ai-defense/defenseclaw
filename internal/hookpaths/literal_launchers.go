@@ -371,6 +371,16 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 				names = append(names, name)
 			}
 		}
+		// The file of a w or W command, or of the w flag of s, is opened for
+		// writing by name, so a hard link there writes its file, with or
+		// without -i (rel-1-0-10:GAP-1288, GAP-1318).
+		if scripts, ok := sedScriptTexts(words[1:]); ok {
+			for _, script := range scripts {
+				if files, ok := sedScriptWriteFiles(script); ok {
+					names = append(names, files...)
+				}
+			}
+		}
 		return add(names)
 	case program == "cp" || program == "gcp":
 		if len(words) < 3 {

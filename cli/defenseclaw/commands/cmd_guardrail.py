@@ -6804,12 +6804,17 @@ _SECRET_FLOW_SET_KEYS = {
 
 
 def _cascade_lane(gc, name: str) -> str:
-    """The value of guardrail.cascade.lanes.<name> (shadow when unset). The
-    cascade is kept as written (a mapping, ``GuardrailConfig.cascade``)."""
+    """The value of guardrail.cascade.lanes.<name>, or its shipped default
+    when unset (effects: on; secret_flow: shadow; internal/config
+    cascade_lanes.go). The cascade is kept as written (a mapping,
+    ``GuardrailConfig.cascade``)."""
     cascade = getattr(gc, "cascade", None)
     lanes = cascade.get("lanes") if isinstance(cascade, dict) else None
     value = lanes.get(name) if isinstance(lanes, dict) else None
-    return str(value) if value else "shadow"
+    return str(value) if value else _CASCADE_LANE_DEFAULTS.get(name, "shadow")
+
+
+_CASCADE_LANE_DEFAULTS = {"effects": "on", "secret_flow": "shadow"}
 
 
 def _secret_flow_lane_mode(gc) -> str:

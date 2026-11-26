@@ -25,3 +25,23 @@ func TestDirectoryStackTildeNameIsNoAccount(t *testing.T) {
 		}
 	}
 }
+
+// TestDotSegmentTildeNameIsNoAccount pins that the dot segments . and .. name
+// no account: bash keeps ~. and ~.. literal, and the resolver would otherwise
+// spell <homes folder>/. or <homes folder>/.. (rel-1-0-10:GAP-0948). A name
+// with more dots is a passwd-legal login and still resolves beside the home.
+func TestDotSegmentTildeNameIsNoAccount(t *testing.T) {
+	homes := []string{"/home/alice", "/Users/alice", "/root", "C:/Users/alice"}
+	for _, name := range []string{".", "..", "-x", "+x", "a/b"} {
+		for _, home := range homes {
+			if other, ok := simpleOtherAccountHome(name, home); ok {
+				t.Errorf("~%s with home %s names the account home %s", name, home, other)
+			}
+		}
+	}
+	for name, want := range map[string]string{"...": "/home/...", ".bob": "/home/.bob", "bob.": "/home/bob.", "bob": "/home/bob"} {
+		if other, ok := simpleOtherAccountHome(name, "/home/alice"); !ok || other != want {
+			t.Errorf("~%s with home /home/alice: %q %v, want %q", name, other, ok, want)
+		}
+	}
+}

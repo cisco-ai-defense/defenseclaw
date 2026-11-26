@@ -382,6 +382,7 @@ func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories 
 		return nil
 	}
 	r.pack.Store(rp)
+	publishLatePackTable(rp)
 	r.loaded.Store(compiled)
 	fmt.Fprintf(os.Stderr, "[guardrail] profile %s: rule pack %s loaded; it did not load when the gateway started\n", r.profile, r.scope.key())
 	return compiled
@@ -1646,6 +1647,7 @@ func (set *guardrailProfileSet) lazyScope(profile string, cfg *config.Config, co
 			compiled, err = compileRulePackCategories(rp)
 		}
 		if err == nil {
+			publishLatePackTable(rp)
 			entry.rules, entry.pack = compiled, rp
 			return
 		}

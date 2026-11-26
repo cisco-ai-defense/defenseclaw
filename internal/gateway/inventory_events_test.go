@@ -1958,9 +1958,6 @@ func TestPerConnectorMCPEntriesForbiddenProfileIsPartial(t *testing.T) {
 // must report which person configured each MCP server, not just that the
 // endpoint has one.
 func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("profile ownership on Windows comes from ProfileList, which a temp dir has no entry in")
-	}
 	withManagedEnterprise(t, true)
 	withUserEmailCollection(t, true)
 	// The first pass also reads the gateway's own Claude config: a real
@@ -1973,6 +1970,25 @@ func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
 	}
 
 	home := t.TempDir()
+	if runtime.GOOS == "windows" {
+		// On Windows a profile's owner is its ProfileList entry, and
+		// ProfileList has none for a temporary folder: the lookup answers
+		// for it as ProfileList does for the running user's own profile
+		// (useridentity's tests cover that read). Everything after the
+		// lookup, the row attribution and the address read, runs natively
+		// (rel-1-0-10:GAP-1690). The gateway's own profile is a temporary
+		// folder as HOME is on Unix.
+		t.Setenv("USERPROFILE", t.TempDir())
+		self := useridentity.Current()
+		lookup := inventoryIdentityForHome
+		inventoryIdentityForHome = func(dir string) useridentity.Identity {
+			if strings.EqualFold(filepath.Clean(dir), filepath.Clean(home)) {
+				return self
+			}
+			return lookup(dir)
+		}
+		t.Cleanup(func() { inventoryIdentityForHome = lookup })
+	}
 	claudeConfig := filepath.Join(home, ".claude.json")
 	body := `{"oauthAccount":{"emailAddress":"owner@example.com"},` +
 		`"mcpServers":{"github":{"command":"github-mcp"}}}`

@@ -310,6 +310,12 @@ func TestGAP0198LauncherWorkingDirectoryIsReadAsAMove(t *testing.T) {
 			`Set-Location -LiteralPath 'C:\Users\alice\.defenseclaw'; ` + script},
 		{"home variable", hookShellInput(t, "PowerShell", `pwsh -NoProfile -wd $HOME\.defenseclaw -Command "`+script+`"`),
 			`Set-Location -LiteralPath $HOME\.defenseclaw; ` + script},
+		// rel-1-0-10:GAP-1556: an environment variable alone is one folder
+		// word too; the reading moves to a folder the gateway cannot know.
+		{"environment variable", hookShellInput(t, "PowerShell", `pwsh -NoProfile -wd $env:X -Command "`+script+`"`),
+			`Set-Location -LiteralPath $env:X; ` + script},
+		{"home variable alone", hookShellInput(t, "PowerShell", `pwsh -NoProfile -WorkingDirectory $HOME -Command "`+script+`"`),
+			`Set-Location -LiteralPath $HOME; ` + script},
 		{"argv", Input{Tool: "exec", Argv: []string{"pwsh", "-NoProfile", "-wd", `C:\Users\alice\.defenseclaw`, "-Command", script}},
 			`Set-Location -LiteralPath 'C:\Users\alice\.defenseclaw'; ` + script},
 		{"no switch", hookShellInput(t, "PowerShell", `pwsh -NoProfile -Command "`+script+`"`), script},
@@ -336,5 +342,37 @@ func TestGAP0198LauncherWorkingDirectoryIsReadAsAMove(t *testing.T) {
 	}
 	if !slices.Contains(got, `Set-Location -LiteralPath C:\x; `+script) {
 		t.Fatalf("list readings %q have no launcher reading at its folder", got)
+	}
+}
+
+// TestGAP1556LauncherFolderVariableReadings pins rel-1-0-10:GAP-1556 on the
+// launcher reading: a -WorkingDirectory value that is an environment
+// variable, $HOME or $PWD alone is read as a move to it, and only there. Any
+// other variable (it may hold an array, several words), a splat, or such a
+// variable outside -WorkingDirectory leaves the launcher unread, as before.
+func TestGAP1556LauncherFolderVariableReadings(t *testing.T) {
+	const script = `Set-Content -Path a.txt -Value m`
+	for _, test := range []struct {
+		name, command string
+		read          bool
+	}{
+		{"env", `pwsh -NoProfile -wd $env:X -Command "` + script + `"`, true},
+		{"env, long switch", `powershell -WorkingDirectory $env:BUILD -Command "` + script + `"`, true},
+		{"pwd", `pwsh -wd $PWD -Command "` + script + `"`, true},
+		{"other variable", `pwsh -wd $d -Command "` + script + `"`, false},
+		{"splat", `pwsh -wd @d -Command "` + script + `"`, false},
+		{"member", `pwsh -wd $env:X.Y -Command "` + script + `"`, false},
+		{"variable as another switch value", `pwsh -ExecutionPolicy $env:X -Command "` + script + `"`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := hookShellInput(t, "PowerShell", test.command)
+			read := false
+			for _, twin := range HostScriptReadings(input, Analyze(input), 0, false).Twins {
+				read = read || strings.HasSuffix(strings.TrimSpace(twin.Command), script)
+			}
+			if read != test.read {
+				t.Fatalf("%q read = %v, want %v", test.command, read, test.read)
+			}
+		})
 	}
 }

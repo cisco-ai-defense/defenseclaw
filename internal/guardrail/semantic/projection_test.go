@@ -205,6 +205,28 @@ func TestProjectAcceptsRedirectOnlyEnforcementFact(t *testing.T) {
 	}
 }
 
+func TestProjectSQLFacts(t *testing.T) {
+	facts := validActionFacts()
+	facts.SQLFacts = []actionfacts.SQLFact{{
+		Verbs:          []string{"delete", "select"},
+		Tables:         []string{"users"},
+		Functions:      []string{"pg_read_file"},
+		Database:       "production",
+		StatementCount: 1,
+	}}
+	projected, code := Project(facts)
+	if code != ProjectionOK || len(projected.SqlFacts) != 1 {
+		t.Fatalf("SQL facts projection = %#v, %v", projected, code)
+	}
+	got := projected.SqlFacts[0]
+	if len(got.Verbs) != 2 || got.Verbs[0] != "delete" ||
+		len(got.Tables) != 1 || got.Tables[0] != "users" ||
+		len(got.Functions) != 1 || got.Functions[0] != "pg_read_file" ||
+		got.Database != "production" || got.StatementCount != 1 {
+		t.Fatalf("SQL facts = %#v", got)
+	}
+}
+
 func validActionFacts() actionfacts.Facts {
 	return actionfacts.Facts{
 		Tool:       "exec",

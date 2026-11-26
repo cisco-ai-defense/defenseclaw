@@ -921,7 +921,7 @@ COVERS_MAX_CHARS = 40
 
 # Fields two rules must share for a pack to count as layered into a pack
 # directory that has no manifest (Policy Creator ``equivalentRule``).
-_EQUIVALENT_RULE_FIELDS = ("pattern", "expression", "tool_call_only", "title", "severity", "confidence", "tags")
+_EQUIVALENT_RULE_FIELDS = ("pattern", "expression", "tool_call_only", "title", "severity", "confidence", "tags", "keys")
 
 
 @dataclass(frozen=True)

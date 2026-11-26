@@ -74,14 +74,14 @@ func TestStateGlobTwinCountsWorkNotTime(t *testing.T) {
 		}
 	}
 	command := "cp a.txt " + home + "/.defenseclaw/*/conf*.yaml"
-	want, wantOK := stateGlobTwin(command, home, nil)
+	want, wantOK, _ := stateGlobTwin(command, home, nil)
 	if !wantOK {
 		t.Fatal("the pattern was not expanded on an idle box")
 	}
 	for run := range 3 {
 		var got string
 		var ok bool
-		took := starvedGlob(64, func() { got, ok = stateGlobTwin(command, home, nil) })
+		took := starvedGlob(64, func() { got, ok, _ = stateGlobTwin(command, home, nil) })
 		if !ok || got != want {
 			t.Fatalf("run %d: the twin differs on a loaded box (ok=%t, took %s)", run, ok, took)
 		}

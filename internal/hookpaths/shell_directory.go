@@ -240,6 +240,7 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			// walk does not; only the same operand inherits its safety.
 			if redirectIndex < len(safety) && safety[redirectIndex].Path == keys[i] {
 				occurrence.Safe = safety[redirectIndex].Safe
+				occurrence.Absolute = safety[redirectIndex].Absolute
 			}
 			redirectIndex++
 			writes = append(writes, occurrence)

@@ -3880,7 +3880,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			if req.ContentFromResultField {
 				intentText = ""
 			}
-			a.observeUserTurn(ctx, intentText, scopeText, req.CWD, verdict)
+			// Hermes says which platform the turn came from: a messaging
+			// party's turn is never the task (GAP-1637).
+			sender := hookTurnSender(req.ConnectorName, req.Payload)
+			if sender == judgeTurnSenderRemote {
+				intentText = ""
+			}
+			a.observeUserTurn(withJudgeTurnSender(ctx, req.ConnectorName, sender), intentText, scopeText, req.CWD, verdict)
 			a.observeAlignmentTurn(ctx, req.ConnectorName, intentText, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
@@ -4382,6 +4388,7 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
+	hookTier, hookTiers := configTierTable(a.decisionConfig(ctx), req.ConnectorName)
 	var conflictSource *conflictingToolArgumentSource
 	if bytes.Equal(trustedArgs, shellProjectedArgs) {
 		// The conflicting-keys check reads the arguments as the call
@@ -4394,9 +4401,12 @@ func (a *APIServer) inspectAgentHookToolCall(
 		LegacyText:              string(req.ToolArgs),
 		conflictSource:          conflictSource,
 		Connector:               req.ConnectorName,
+		sessionID:               req.SessionID,
 		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 		EnforcementCapable:      enforcementCapable,
 		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		PolicyTier:              hookTier,
+		Tiers:                   hookTiers,
 		ManagedInstall:          a.managedInstallForHook(ctx),
 		ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 		ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
@@ -5640,7 +5650,7 @@ func isGenericToolInspectionEvent(event string) bool {
 func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "userpromptsubmit", "userpromptsubmitted", "userprompttransformed", "beforesubmitprompt", "preuserprompt", "subagentstart",
-		"prellmcall", "beforeagent", "beforemodel", "agentstart":
+		"prellmcall", "beforeagent", "beforemodel", "agentstart", "sessionprompt":
 		return true
 	default:
 		return false
@@ -5650,13 +5660,14 @@ func isPromptLikeEvent(event string) bool {
 // isToolJudgeIntentEvent identifies the prompt-bearing turn-start event in
 // each supported connector contract. The spellings intentionally mirror the
 // contract-owned correlation lifecycle bindings. Connectors without prompt
-// text on a trusted turn boundary (currently OpenCode and Antigravity) receive
-// tool-call context only; DefenseClaw must not invent user intent from model or
-// tool output.
+// text on a trusted turn boundary (currently Antigravity, and OpenCode 1.x)
+// receive tool-call context only; DefenseClaw must not invent user intent from
+// model or tool output. OpenCode 2.x reports the user's own turn of a root
+// session as session.prompt (GAP-0032).
 func isToolJudgeIntentEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt",
-		"beforeagent", "preuserprompt", "prellmcall", "agentstart":
+		"beforeagent", "preuserprompt", "prellmcall", "agentstart", "sessionprompt":
 		return true
 	default:
 		return false

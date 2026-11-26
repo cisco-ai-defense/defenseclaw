@@ -7,6 +7,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/effects"
 )
 
 // HandedEntries is what the programs a find -exec/-execdir/-ok/-okdir or an
@@ -202,8 +204,9 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 		}
 		return mayChange
 	case "sh", "bash", "dash", "ksh", "mksh", "ash":
-		// `bash -n {}` reads the script and runs none of it (GAP-2404).
-		only = shellOnlyParses(args)
+		// `bash -n {}` reads the script and runs none of it (GAP-2404); a
+		// -c body is read once, by the effects frontend (DET111 one read).
+		only = shellOnlyParses(args) || shellBodyOnlyReads(words)
 	case "uniq":
 		only = len(handedOperands(args, "fsw")) <= 1
 	case "xxd":
@@ -283,6 +286,43 @@ loop:
 // script without running it: a -n (noexec) option among its leading
 // single-letter options, none of -c, -i or -o, and no +option or long
 // option that could turn noexec off or run code.
+// shellBodyOnlyReads reports a shell child whose code the effects frontend
+// reads in full and finds only reading: every effect is a read or the run of
+// a program the program table knows, with no unread part. A body that may
+// write, delete, link, change a mode, send, or that runs something the
+// frontend cannot follow (opaque code, an unmodeled program or option) may
+// change the entries it is handed. find DIR -exec sh -c 'for f do printf
+// "%s " "$f"; sha256sum "$f"; done' sh {} + only reads them; the same find
+// with : > "$f" writes them (rel-1-0-10:GAP-1327). Only a -c body is read:
+// a shell child with none runs code the call does not show (its standard
+// input, or a handed file as a script), and the frontend's empty reading of
+// that argv is no proof it only reads (rel-1-0-10:GAP-1847).
+func shellBodyOnlyReads(words []string) bool {
+	if _, inline := shellScript(words); !inline {
+		return false
+	}
+	res := effects.Extract(effects.Call{Surface: effects.SurfaceArgv, Tool: "find-exec", Argv: words},
+		effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectPOSIX})
+	if len(res.Unknowns) != 0 || len(res.Effects) == 0 {
+		return false
+	}
+	for _, e := range res.Effects {
+		if e.Kind != effects.KindRead && e.Kind != effects.KindExec {
+			return false
+		}
+		for _, r := range e.Reasons {
+			switch r.Code {
+			case effects.ReasonOpaqueCode, effects.ReasonUnmodeledProgram, effects.ReasonUnknownFlag,
+				effects.ReasonProgramShadowed, effects.ReasonLimit, effects.ReasonNestingLimit,
+				effects.ReasonInvalidSyntax, effects.ReasonUnparsedConstruct, effects.ReasonParserFailure,
+				effects.ReasonForeignContext, effects.ReasonOpaqueArchive, effects.ReasonExecutionState:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func shellOnlyParses(args []string) bool {
 	noexec, options := false, true
 	for _, arg := range args {

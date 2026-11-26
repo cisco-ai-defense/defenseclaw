@@ -2995,10 +2995,10 @@ func (m *v9Migrator) embeddedPackDropped() bool {
 }
 
 // v9DirPosture is the posture the gateway gives a rule-pack directory: the
-// manifest posture (defenseclaw-pack.json, guardrail.ReadPackPosture), else
-// the folder-name table (strict, permissive, else default).
+// pack's own tier (guardrail.ReadPackPosture), else the legacy strict folder
+// (packFolderPosture).
 func v9DirPosture(dir string) string {
-	if posture := packManifestPosture(dir); posture != "" {
+	if posture := packOwnPosture(dir); posture != "" {
 		return posture
 	}
 	return packFolderPosture(dir)

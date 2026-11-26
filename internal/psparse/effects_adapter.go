@@ -237,17 +237,54 @@ type ListItem struct {
 // Static flag, and true if e is such a list. Callers must treat each element as
 // a separate word; LiteralString on the same expression is non-static by
 // design, so a comma list can never resolve to one joined value.
-func LiteralList(e Expr) ([]ListItem, bool) {
+func LiteralList(e Expr) ([]ListItem, bool) { return listItems(e, LiteralString) }
+
+// NestedScriptList is LiteralList with each element read by NestedScriptText:
+// the elements of a child command line (Start-Process -ArgumentList a,b).
+func NestedScriptList(e Expr) ([]ListItem, bool) { return listItems(e, NestedScriptText) }
+
+func listItems(e Expr, read func(Expr) (string, bool)) ([]ListItem, bool) {
 	a, ok := e.(*ArrayLit)
 	if !ok {
 		return nil, false
 	}
 	items := make([]ListItem, 0, len(a.Elements))
 	for _, el := range a.Elements {
-		v, st := LiteralString(el)
+		v, st := read(el)
 		items = append(items, ListItem{Text: v, Static: st})
 	}
 	return items, true
+}
+
+// NestedScriptText is the text of a quoted string that a host hands to a child
+// PowerShell or cmd as its command line, which the child parses again
+// (GAP-1941): a LiteralString, or a static quoted string whose only backtick
+// escapes are `" `' and `$ (they decode to that one character in every
+// edition, so the child gets exactly Value) and whose decoded Value is in the
+// quoted-literal class. Any other escape, a here-string, a fused word or an
+// expandable part is not read. A reader that uses it reads more of what a
+// child runs, never less (raise-only); the child's leaves are gated again when
+// the text is parsed.
+func NestedScriptText(e Expr) (string, bool) {
+	if s, ok := LiteralString(e); ok {
+		return s, true
+	}
+	v, ok := e.(*StringLit)
+	if !ok || !v.Static || v.Bare || v.Fused || (v.Kind != StrDouble && v.Kind != StrSingle) || !safeQuotedLiteral(v.Value) {
+		return "", false
+	}
+	for i := 0; i < len(v.Raw); i++ {
+		switch r := v.Raw[i]; {
+		case r == '`':
+			if i+1 >= len(v.Raw) || !strings.ContainsRune(`"'$`, rune(v.Raw[i+1])) {
+				return "", false
+			}
+			i++
+		case r < 0x20 || r > 0x7e:
+			return "", false
+		}
+	}
+	return v.Value, true
 }
 
 // DecodeEncodedCommand decodes a PowerShell -EncodedCommand value: base64 of

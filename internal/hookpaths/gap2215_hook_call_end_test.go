@@ -153,6 +153,18 @@ func checkHookCallEnds(t *testing.T, path string, file *ast.File) int {
 		}
 		return false
 	}
+	// The begins whose end the caller must defer next, and the wrappers that
+	// hand that end to their own caller (BeginHookCall, JoinHookCall and
+	// joinHookCall came with the found-call path of GAP-2197).
+	beginsCall := func(expr ast.Expr) bool {
+		for _, name := range []string{"beginHookCall", "BeginHookCall", "JoinHookCall", "joinHookCall"} {
+			if isBegin(expr, name) {
+				return true
+			}
+		}
+		return false
+	}
+	endReturners := map[string]bool{"HookCall": true, "BeginHookCall": true, "JoinHookCall": true, "joinHookCall": true}
 	sites := 0
 	ast.Inspect(file, func(node ast.Node) bool {
 		decl, ok := node.(*ast.FuncDecl)
@@ -178,11 +190,11 @@ func checkHookCallEnds(t *testing.T, path string, file *ast.File) int {
 			case *ast.BlockStmt:
 				for i, stmt := range node.List {
 					assign, ok := stmt.(*ast.AssignStmt)
-					if !ok || len(assign.Rhs) != 1 || !isBegin(assign.Rhs[0], "beginHookCall") {
+					if !ok || len(assign.Rhs) != 1 || !beginsCall(assign.Rhs[0]) {
 						continue
 					}
 					sites++
-					if decl.Name.Name == "HookCall" {
+					if endReturners[decl.Name.Name] {
 						continue // returns the end to its caller, who defers it
 					}
 					end, _ := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)

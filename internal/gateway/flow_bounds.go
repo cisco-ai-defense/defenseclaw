@@ -14,10 +14,10 @@ import (
 
 // The bounds of the secret-flow lane's work on the hook path (rel-1-0-10 S7,
 // shadow-safety review P3-2). The lane parses the call, extracts its effects
-// and steps a per-session state while the hook waits, so it carries the same
-// three guards as the effect lane's shadow run, expressed with
-// internal/guardrail/bounded so the lane is promotion-ready under the bound
-// rule:
+// and steps a per-session state while the hook waits, so it carries three
+// guards, expressed with internal/guardrail/bounded (the effect lane dropped
+// its wall-clock cap when it went live, DET111 FIX-T19: before this lane
+// leaves shadow its deadline must go the same way):
 //
 //   - input size: a command or argument text past flowLaneMaxBytes, or past
 //     the parser input bound (shellparse.TooDeep), is not read (bounded.Bytes,

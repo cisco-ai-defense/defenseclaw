@@ -114,13 +114,13 @@ func TestProjectTrustedActionChainStepsKeepsDetectionAndEnforcementSeparate(t *t
 	})
 	secret := guardrail.ToolChainProjection{ParseStatus: secretFacts.Parse.Status}
 	projectTrustedActionChainSteps(&secret, secretFacts, []RuleFinding{{
-		RuleID: "PATH-AWS-CREDS", enforcement: findingEnforcementAllowed,
+		RuleID: "PATH-AWS-CREDS",
 	}})
 	assertToolChainStep(t, secret, guardrail.ToolChainSecretReadThenEgress, 1, true)
 
 	fallbackSecret := guardrail.ToolChainProjection{ParseStatus: secretFacts.Parse.Status}
 	projectTrustedActionChainSteps(&fallbackSecret, secretFacts, []RuleFinding{{
-		RuleID: "PATH-AWS-CREDS", enforcement: findingEnforcementDetectionOnly,
+		RuleID: "PATH-AWS-CREDS", Proof: recordProof,
 	}})
 	step, _ := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)
 	if fallbackSecret.EnforcementStepMask&step == 0 {
@@ -202,7 +202,7 @@ func TestProjectTrustedActionChainStepsIncludesExactShadowRead(t *testing.T) {
 	})
 	read := guardrail.ToolChainProjection{ParseStatus: readFacts.Parse.Status}
 	projectTrustedActionChainSteps(&read, readFacts, []RuleFinding{{
-		RuleID: "PATH-ETC-SHADOW", enforcement: findingEnforcementAllowed,
+		RuleID: "PATH-ETC-SHADOW",
 	}})
 	assertToolChainStep(t, read, guardrail.ToolChainSecretReadThenEgress, 1, true)
 

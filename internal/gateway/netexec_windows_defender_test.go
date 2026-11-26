@@ -30,14 +30,18 @@ func TestNetExecWindowsDefenderMultiControlProfilePosture(t *testing.T) {
 		t.Fatalf("bounded fallback contract rejected exact trace facts=%+v", facts)
 	}
 
+	// The default tier asks on the credentialed NetExec call
+	// (credential.directory_ticket_request, rel-1-0-10:GAP-0067): Codex has no
+	// native ask, so the raw confirm answers as the alert.
 	for _, profile := range []struct {
-		name     string
-		action   string
-		severity string
+		name      string
+		action    string
+		rawAction string
+		severity  string
 	}{
-		{name: "default", action: "alert", severity: "HIGH"},
-		{name: "permissive", action: "alert", severity: "HIGH"},
-		{name: "strict", action: "block", severity: "CRITICAL"},
+		{name: "default", action: "alert", rawAction: "confirm", severity: "HIGH"},
+		{name: "permissive", action: "alert", rawAction: "alert", severity: "HIGH"},
+		{name: "strict", action: "block", rawAction: "block", severity: "CRITICAL"},
 	} {
 		profile := profile
 		t.Run(profile.name, func(t *testing.T) {
@@ -64,7 +68,7 @@ func TestNetExecWindowsDefenderMultiControlProfilePosture(t *testing.T) {
 					},
 				)
 				windowsHookHost = previous
-				if response.Action != profile.action || response.RawAction != profile.action ||
+				if response.Action != profile.action || response.RawAction != profile.rawAction ||
 					response.Severity != profile.severity ||
 					!findingStringHasRuleID(
 						response.Findings,

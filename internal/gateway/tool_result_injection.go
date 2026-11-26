@@ -42,6 +42,7 @@ const (
 	toolResultRuleDiscard   = "TOOLRESULT-DISCARD-INSTRUCTIONS"
 	toolResultRuleAddressed = "TOOLRESULT-AGENT-DIRECTIVE"
 	toolResultRuleRole      = "TOOLRESULT-ROLE-SWITCH"
+	toolResultRuleTask      = "TOOLRESULT-TASK-DIRECTIVE"
 )
 
 // toolResultInjectionTags marks every finding of these checks; the
@@ -84,6 +85,33 @@ var (
 // toolResultVerbs are the actions a directive asks the reader to take.
 const toolResultVerbs = `(?:send|transfer|forward|delete|remove|call|invoke|use|run|execute|create|update|change|modify|email|share|post|invite|add|visit|download|upload|pay|book|reserve|write|open|reply|ignore|disregard|forget|say|tell|print|output|reveal|include|insert|append|summari[sz]e|respond|answer|stop|do)`
 
+// toolResultTaskVerbs are toolResultVerbs and the other actions the
+// TRUST-TODO-* pack rules name.
+const toolResultTaskVerbs = `(?:` + toolResultVerbs + `|concatenate|navigate|erase|wire|publish|mail|give)`
+
+// toolResultMoveVerbs are the directives that move data or money to someone:
+// the TRUST-TODO-DATA-MOVE actions.
+const toolResultMoveVerbs = `(?:send|transfer|forward|e-?mail|mail|share|upload|post|publish|wire|pay)`
+
+// A task-list marker (TODO:, FIXME:) turns a sentence of the data into a task
+// for whoever reads it (rel-1-0-10 GAP-0358). The pack rules TRUST-TODO-* read
+// the marker only at the start of the whole text, which is the typed-prompt
+// shape; inside a tool's output the marker opens a clause anywhere. Two
+// structures, so a note written for people stays quiet:
+//
+//   - glued to the prose: right after the end of a sentence or an opening
+//     quote ("... accordingly.TODO: Transfer $30,000 ...", subject:
+//     'TODO: Send ...'), followed by an action. A note for people starts its
+//     own line or follows a comment leader or a list bullet (// TODO: remove,
+//   - TODO: ...), which do not open this clause;
+//   - on a line of its own: only a directive that moves data or money to
+//     someone ("TODO: Send a transaction to US13..."). "TODO: remove this
+//     shim" on its own line is a developer's note.
+var (
+	toolResultTaskInlineRe = lazyregexp.New(`(?i)(?:[.!?]["')\]]?|["'])[ \t]*(?:todo|fixme)[ \t]*:[ \t]*(?:please[ \t,]+)?` + toolResultTaskVerbs + `\b`)
+	toolResultTaskLineRe   = lazyregexp.New(`(?im)^[ \t]*(?:todo|fixme)[ \t]*:[ \t]*(?:please[ \t,]+)?` + toolResultMoveVerbs + `\b`)
+)
+
 const (
 	// toolResultInjectionMaxScan bounds the text the checks read; text past
 	// it is a truncated input under the bound rule (bounded.Bytes).
@@ -120,6 +148,11 @@ func toolResultInjectionFindings(text string) ([]RuleFinding, bounded.CapSet) {
 	}
 	if loc, ok := toolResultAnchoredDirective(&cut, toolResultRoleRe, text); ok {
 		out = append(out, toolResultFinding(toolResultRuleRole, "Tool output opens a chat role and gives an instruction", text, loc[0], loc[1]))
+	}
+	if loc := toolResultTaskInlineRe.Regexp().FindStringIndex(text); loc != nil {
+		out = append(out, toolResultFinding(toolResultRuleTask, "Tool output turns a task-list marker into an instruction for the agent", text, loc[0], loc[1]))
+	} else if loc := toolResultTaskLineRe.Regexp().FindStringIndex(text); loc != nil {
+		out = append(out, toolResultFinding(toolResultRuleTask, "Tool output turns a task-list marker into an instruction for the agent", text, loc[0], loc[1]))
 	}
 	return out, cut.Set()
 }

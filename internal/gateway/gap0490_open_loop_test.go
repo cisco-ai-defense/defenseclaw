@@ -21,7 +21,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -47,7 +46,9 @@ import (
 // right before the baseline, between the baseline and the stream, and after the
 // teardown: a spin on its own OS thread got less than openLoopProbeMinShare of a
 // core, or the Linux CPU pressure of the box was openLoopProbeMaxPressure or
-// more), and so are the two timing outcomes below (unanswered, over the p95
+// more, or over the whole baseline or stream the threads of this process waited
+// for a core openLoopProbeMaxWait of their ready time or more), and so are the
+// two timing outcomes below (unanswered, over the p95
 // budget) on such a box; on a box the probe finds quiet they fail,
 // because the slow real path is then the gateway's own:
 //   - The baseline. Right before the stream the test makes calls one after the
@@ -715,9 +716,13 @@ var openLoopProbeSink atomic.Uint64
 // openLoopProbe is one reading of the box probe: the share of one core a spin
 // on its own OS thread got over openLoopProbeSpin of wall time (thread CPU time
 // over wall time), and the CPU pressure of the box over the same window (-1
-// where the kernel does not report it).
+// where the kernel does not report it). A reading of a phase (window "baseline"
+// or "stream", openLoopProbes.over) has no spin (share 1, pressure -1): wait is
+// the share of the time this process's own threads were ready to run over the
+// whole phase that they spent waiting for a core.
 type openLoopProbe struct {
-	share, pressure float64
+	share, pressure, wait float64
+	window                string
 	// sync is the median write+fsync latency (0 where it cannot be read).
 	sync time.Duration
 }
@@ -762,10 +767,64 @@ func (p *openLoopProbes) take() {
 	}
 }
 
+// openLoopProbeMaxWait is the share of their ready time the threads of this
+// process may spend waiting for a core over a phase before the box counts as
+// short of CPU for it.
+const openLoopProbeMaxWait = 0.2
+
+// over runs one phase of the test and reads how long the threads of this
+// process, the gateway's among them, waited for a core over the whole of it
+// (Linux schedstat). The spin readings between the phases are one fresh
+// thread for 200 ms, and the CPU pressure of a box whose cores are all taken
+// read 0.02: the stream's p95 failed on boxes they found quiet while other
+// lanes' builds kept every core busy (load 60 to 120 on 64 cores,
+// rel-1-0-10:GAP-2129). Where the kernel does not report it, nothing is
+// recorded and the spin readings decide alone.
+func (p *openLoopProbes) over(window string, run func()) {
+	before, ok := openLoopThreadSchedstat()
+	run()
+	after, okAfter := openLoopThreadSchedstat()
+	if !ok || !okAfter {
+		return
+	}
+	var ran, waited int64
+	for tid, a := range after {
+		b := before[tid] // a thread started inside the phase counts from 0
+		ran += a[0] - b[0]
+		waited += a[1] - b[1]
+	}
+	if ran+waited > 0 {
+		*p = append(*p, openLoopProbe{share: 1, pressure: -1, wait: float64(waited) / float64(ran+waited), window: window})
+	}
+}
+
+// openLoopThreadSchedstat is, per thread of this process, the time it ran on
+// a core and the time it waited on a run queue (/proc/self/task/*/schedstat,
+// in nanoseconds), and false where the kernel does not report it.
+func openLoopThreadSchedstat() (map[string][2]int64, bool) {
+	tasks, err := os.ReadDir("/proc/self/task")
+	if err != nil {
+		return nil, false
+	}
+	out := make(map[string][2]int64, len(tasks))
+	for _, task := range tasks {
+		raw, err := os.ReadFile("/proc/self/task/" + task.Name() + "/schedstat")
+		if err != nil {
+			continue // the thread ended
+		}
+		var ran, waited int64
+		if _, err := fmt.Sscan(string(raw), &ran, &waited); err != nil {
+			return nil, false
+		}
+		out[task.Name()] = [2]int64{ran, waited}
+	}
+	return out, len(out) > 0
+}
+
 // starved reports whether any reading found the box short of CPU.
 func (p openLoopProbes) starved() bool {
 	for _, r := range p {
-		if r.share < openLoopProbeMinShare || r.pressure >= openLoopProbeMaxPressure || r.sync >= openLoopProbeMaxSync {
+		if r.share < openLoopProbeMinShare || r.pressure >= openLoopProbeMaxPressure || r.sync >= openLoopProbeMaxSync || r.wait >= openLoopProbeMaxWait {
 			return true
 		}
 	}
@@ -773,18 +832,21 @@ func (p openLoopProbes) starved() bool {
 }
 
 func (p openLoopProbes) String() string {
-	shares := make([]string, len(p))
-	pressures := make([]string, len(p))
-	syncs := make([]string, len(p))
-	for i, r := range p {
-		shares[i] = fmt.Sprintf("%.2f", r.share)
-		syncs[i] = r.sync.Round(100 * time.Microsecond).String()
-		pressures[i] = "n/a"
-		if r.pressure >= 0 {
-			pressures[i] = fmt.Sprintf("%.2f", r.pressure)
+	var shares, pressures, syncs, waits []string
+	for _, r := range p {
+		if r.window != "" {
+			waits = append(waits, fmt.Sprintf("%s=%.2f", r.window, r.wait))
+			continue
 		}
+		pressure := "n/a"
+		if r.pressure >= 0 {
+			pressure = fmt.Sprintf("%.2f", r.pressure)
+		}
+		shares = append(shares, fmt.Sprintf("%.2f", r.share))
+		pressures = append(pressures, pressure)
+		syncs = append(syncs, r.sync.Round(100*time.Microsecond).String())
 	}
-	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f), median write+fsync [%s] (limit %v)", strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure, strings.Join(syncs, " "), openLoopProbeMaxSync)
+	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f), median write+fsync [%s] (limit %v), this process waited for a core [%s] of its ready time (limit %.2f)", strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure, strings.Join(syncs, " "), openLoopProbeMaxSync, strings.Join(waits, " "), openLoopProbeMaxWait)
 }
 
 // The disk-flush probe (substrate-1 GAP-1041). The serialised stage the stream
@@ -1201,9 +1263,12 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	// stream, on the same box in the same state.
 	plan := openLoopPlan{tokens: tokens, perSecond: perSecond, duration: duration, cores: runtime.GOMAXPROCS(0)}
 	baseCtx, baseCancel := context.WithTimeout(ctx, openLoopBaselineDeadline)
-	cpuBefore := openLoopProcessCPU(t)
-	base := driveSingleStream(baseCtx, post, tokens[0], "g490-open-0", openLoopBaselineCalls)
-	base.cpuPerCall = (openLoopProcessCPU(t) - cpuBefore) / openLoopBaselineCalls
+	cpuBefore := processWork(t)
+	var base openLoopResult
+	probes.over("baseline", func() {
+		base = driveSingleStream(baseCtx, post, tokens[0], "g490-open-0", openLoopBaselineCalls)
+	})
+	base.cpuPerCall = (processWork(t) - cpuBefore) / openLoopBaselineCalls
 	baseCancel()
 	probes.take()
 	var got openLoopResult
@@ -1211,7 +1276,7 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		// A baseline that already shows the box cannot carry the plan settles
 		// the run; the stream would only spend the deadline.
 		streamCtx, streamCancel := context.WithTimeout(ctx, duration+openLoopWait+openLoopStreamSlack)
-		got = driveOpenLoop(streamCtx, post, plan)
+		probes.over("stream", func() { got = driveOpenLoop(streamCtx, post, plan) })
 		streamCancel()
 	}
 	closed = true
@@ -1225,16 +1290,6 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	}
 	verdict := judgeOpenLoop(plan, got, base)
 	settleOpenLoop(t, verdict, probes, flush, ctx.Err(), &openLoopTiming{got, openLoopBudget(plan, base)})
-}
-
-// openLoopProcessCPU is the user and system CPU time this process has used.
-func openLoopProcessCPU(t *testing.T) time.Duration {
-	t.Helper()
-	var usage syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
-		t.Fatal(err)
-	}
-	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
 }
 
 // openLoopCapStub stands in for a relay with an account rate cap: it answers a
@@ -1547,5 +1602,49 @@ func TestGAP0490OpenLoopCadenceExplicitReceiptFailureFailsBelowTheAllowance(t *t
 	}
 	if verdict, _ := runOpenLoopAgainst(t, plan, openLoopReceiptStub(t, 0)); verdict.kind != "ok" {
 		t.Fatalf("a relay whose receipts all succeed was judged %s: %s", verdict.kind, verdict.detail)
+	}
+}
+
+// The probe reads the wait of this process's own threads over the baseline
+// and the stream (rel-1-0-10:GAP-2129): a stream whose threads waited for a
+// core is a box short of CPU however quiet the spin readings between the
+// phases were, and a stream that hardly waited leaves them to decide.
+func TestGAP0490OpenLoopPhaseWaitMarksTheBoxShort(t *testing.T) {
+	quiet := openLoopProbes{{share: 1, pressure: 0.02}, {share: 0.98, pressure: 0.02}, {share: 1, pressure: 0.02}}
+	loaded := append(append(openLoopProbes{}, quiet...), openLoopProbe{share: 1, pressure: -1, wait: 0.05, window: "baseline"}, openLoopProbe{share: 1, pressure: -1, wait: 0.41, window: "stream"})
+	if !loaded.starved() {
+		t.Fatalf("a stream whose threads waited 41%% of their ready time was not found short of CPU: %s", loaded)
+	}
+	twin := append(append(openLoopProbes{}, quiet...), openLoopProbe{share: 1, pressure: -1, wait: 0.05, window: "baseline"}, openLoopProbe{share: 1, pressure: -1, wait: 0.06, window: "stream"})
+	if twin.starved() {
+		t.Fatalf("a quiet box whose stream hardly waited was found short of CPU: %s", twin)
+	}
+	if got := loaded.String(); !strings.Contains(got, "stream=0.41") {
+		t.Fatalf("the probe summary does not name the stream's wait: %s", got)
+	}
+	var phase openLoopProbes
+	phase.over("stream", func() {
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				x := uint64(1)
+				for i := 0; i < 2_000_000; i++ {
+					x = x*6364136223846793005 + 1442695040888963407
+				}
+				openLoopProbeSink.Add(x)
+			}()
+		}
+		wg.Wait()
+	})
+	if _, err := os.Stat("/proc/self/task"); err != nil {
+		if len(phase) != 0 {
+			t.Fatalf("a reading without a schedstat: %v", phase)
+		}
+		return
+	}
+	if len(phase) != 1 || phase[0].window != "stream" || phase[0].wait < 0 || phase[0].wait > 1 {
+		t.Fatalf("one stream reading with a wait share in [0, 1] wanted, got %+v", phase)
 	}
 }

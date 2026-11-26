@@ -22,11 +22,17 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
 
 // Project constructs the sole CEL-visible activation from bounded ActionFacts.
-// It never truncates or repairs input; any failure returns no partial message.
+// It never truncates or repairs the sections rules read; any failure there
+// returns no partial message. The fact-only sections (sql_facts, kube) never
+// fail the projection: a call whose SQL or Kubernetes facts are past a bound
+// keeps every other semantic rule (DET111 T20 review P1-1). Their entries
+// past a bound are cut (FactOnlyCuts), and the gateway judges the cut call
+// TRUNCATED.
 func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 	if len(facts.Commands) > maxCommands ||
 		len(facts.Paths) > maxPaths ||
@@ -60,12 +66,16 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 			Issues:  make([]semanticpb.IssueCode, len(facts.Parse.Issues)),
 		},
 		Commands:        make([]*semanticpb.CommandFact, 0, len(facts.Commands)),
+		SqlFacts:        make([]*semanticpb.SQLFact, 0, len(facts.SQLFacts)),
 		Paths:           make([]*semanticpb.PathFact, 0, len(facts.Paths)),
 		Network:         make([]*semanticpb.NetworkFact, 0, len(facts.Network)),
 		DataFlows:       make([]*semanticpb.DataFlowFact, 0, len(facts.DataFlows)),
 		Artifacts:       make([]*semanticpb.ArtifactFact, 0, len(facts.Artifacts)),
 		ArchiveLineages: make([]*semanticpb.ArchiveArtifactLineage, 0),
 	}
+	sqlFacts, _ := factOnlySQL(facts.SQLFacts)
+	projected.SqlFacts = sqlFacts
+
 	for index, issue := range facts.Parse.Issues {
 		mapped, valid := projectIssue(issue)
 		if !valid {
@@ -164,6 +174,34 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 			Scope:          scope,
 			TargetKind:     target,
 			PrefixLength:   fact.PrefixLength,
+		})
+	}
+
+	for _, fact := range facts.KubeRequests {
+		if !knownCommandReference(fact.CommandID, commandIDs) {
+			return nil, ProjectionInvalidReference
+		}
+		if len(projected.Kube) == maxKube || !validKubeFact(fact) {
+			continue // a fact-only cut (FactOnlyCuts), never a failure
+		}
+		source := string(fact.Source)
+		projected.Kube = append(projected.Kube, &semanticpb.KubeFact{
+			CommandId:      fact.CommandID,
+			Source:         source,
+			Verb:           fact.Verb,
+			Group:          fact.Group,
+			Version:        fact.Version,
+			Resource:       fact.Resource,
+			Subresource:    fact.Subresource,
+			Namespace:      fact.Namespace,
+			Name:           fact.Name,
+			AllNamespaces:  fact.AllNamespaces,
+			Stdin:          fact.Stdin,
+			Tty:            fact.TTY,
+			Command:        fact.Command,
+			LabelSelector:  fact.LabelSelector,
+			RevealsContent: fact.RevealsContent,
+			Unknown:        fact.Unknown,
 		})
 	}
 
@@ -432,6 +470,82 @@ func hasStaticRedirect(redirects []actionfacts.RedirectFact) bool {
 		}
 	}
 	return false
+}
+
+// FactOnlyCuts reports the bounds the projection cut the fact-only sections
+// at (sql_facts, kube): more entries than the section holds (bounded.Items),
+// or a value past the scalar bound (bounded.Bytes). A cut is never a clean
+// read: the gateway judges the call TRUNCATED (DET111 T20 review P1-1).
+func FactOnlyCuts(facts actionfacts.Facts) bounded.CapSet {
+	var trunc bounded.Truncated
+	_, cut := factOnlySQL(facts.SQLFacts)
+	trunc.Merge(cut)
+	trunc.Within(bounded.Items, len(facts.KubeRequests), maxKube)
+	for _, fact := range facts.KubeRequests {
+		if !validKubeFact(fact) {
+			trunc.Hit(bounded.Bytes)
+		}
+	}
+	return trunc.Set()
+}
+
+// factOnlySQL projects the SQL facts, cutting what is past a bound: facts
+// past maxSQLFacts, values past maxSQLFactValues per list, a value that is
+// not a valid scalar (dropped, or "" for the database) and a statement count
+// outside 0..maxSQLFactStatements. It never fails.
+func factOnlySQL(facts []actionfacts.SQLFact) ([]*semanticpb.SQLFact, bounded.CapSet) {
+	var trunc bounded.Truncated
+	if !trunc.Within(bounded.Items, len(facts), maxSQLFacts) {
+		facts = facts[:maxSQLFacts]
+	}
+	values := func(in []string) []string {
+		out := make([]string, 0, min(len(in), maxSQLFactValues))
+		for _, value := range in {
+			if !validScalar(value) {
+				trunc.Hit(bounded.Bytes)
+				continue
+			}
+			if !trunc.Within(bounded.Items, len(out)+1, maxSQLFactValues) {
+				break
+			}
+			out = append(out, value)
+		}
+		return out
+	}
+	out := make([]*semanticpb.SQLFact, 0, len(facts))
+	for _, fact := range facts {
+		database := fact.Database
+		if !validScalar(database) {
+			trunc.Hit(bounded.Bytes)
+			database = ""
+		}
+		count := fact.StatementCount
+		if count < 0 || count > maxSQLFactStatements {
+			trunc.Hit(bounded.Items)
+			count = max(0, min(count, maxSQLFactStatements))
+		}
+		out = append(out, &semanticpb.SQLFact{
+			Verbs:          values(fact.Verbs),
+			Tables:         values(fact.Tables),
+			Functions:      values(fact.Functions),
+			Database:       database,
+			StatementCount: int64(count),
+		})
+	}
+	return out, trunc.Set()
+}
+
+// validKubeFact reports a Kubernetes request whose every value is a valid
+// scalar; any other is cut from f.kube whole, never projected with a blank
+// field (a blank resource would read as a request of an unknown kind).
+func validKubeFact(fact actionfacts.KubeRequestFact) bool {
+	for _, value := range []string{string(fact.Source), fact.Verb, fact.Group, fact.Version,
+		fact.Resource, fact.Subresource, fact.Namespace, fact.Name} {
+		if !validScalar(value) {
+			return false
+		}
+	}
+	return true
 }
 
 func validScalar(value string) bool {

@@ -62,7 +62,9 @@ var propTemplates = []propTemplate{
 	{`sed -f s.sed f`, refUnknown},
 	{`sed --file=s.sed f`, refUnknown},
 	{`sed -n -f s.sed f`, refUnknown},
-	{`sed 'e echo hi' f`, refUnknown},
+	{`sed 'e echo hi' f`, refNoWrite},
+	{`sed '1e touch {M}' f`, refWrites},
+	{`sed -n '$e echo x > {M}' f`, refWrites},
 	{`sed 's/a/b/e' f`, refUnknown},
 	{`sed 'r x' f`, refUnknown},
 	{`sed s/a/b/ {M}`, refNoWrite},
@@ -80,7 +82,22 @@ var propTemplates = []propTemplate{
 	{`awk 'BEGIN { "date" | getline x }'`, refUnknown},
 	{`awk '{print $1}' {M}`, refNoWrite},
 	{`awk -F: '{print $1}' {M}`, refNoWrite},
+	// the other awk implementations share the row (DET111 S4-R2)
+	{`gawk '{print > "{M}"}' f`, refWrites},
+	{`mawk 'BEGIN{print "k" >> "{M}"}'`, refWrites},
+	{`nawk '{print $1}' {M}`, refNoWrite},
 	// uniq and xxd: the second operand is written
+	{`printf '1d\nw\nq\n' | ed -s {M}`, refWrites},
+	{`ed -s {M} <<< 'w'`, refWrites},
+	{`printf ',p\nq\n' | ed -s {M}`, refNoWrite},
+	{`ed {M}`, refUnknown},
+	{`printf '!sh\n' | ed {M}`, refUnknown},
+	{`sqlite3 {M} 'delete from t'`, refWrites},
+	{`sqlite3 {M} 'create table t(a); insert into t values (1)'`, refWrites},
+	{`sqlite3 {M} 'select 1'`, refNoWrite},
+	{`sqlite3 -readonly {M} 'delete from t'`, refNoWrite},
+	{`sqlite3 {M}`, refUnknown},
+	{`sqlite3 {M} '.output x'`, refUnknown},
 	{`uniq in {M}`, refWrites},
 	{`uniq -c in {M}`, refWrites},
 	{`uniq -d in {M}`, refWrites},
@@ -256,7 +273,7 @@ var refClass = func() map[string]string {
 		"du", "df", "stat", "file", "readlink", "realpath", "diff", "cmp", "look", "shasum", "grep", "egrep", "fgrep", "ag",
 		"ls", "ll", "la", "dir", "vdir", "exa", "eza", "lsd")
 	// operands are messages, names or shell state, not files they act on
-	add("inert", "echo", "printf", "true", "false", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias",
+	add("inert", "echo", "printf", "true", "false", ":", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias",
 		"ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill",
 		"killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let",
 		"read", "printenv", "logname", "groups", "nproc", "arch", "tr",
@@ -264,15 +281,17 @@ var refClass = func() map[string]string {
 	// writers of their file operands
 	add("writes", "cp", "install", "mv", "rm", "unlink", "shred", "ln", "mkdir", "touch", "mkfifo", "mknod", "chmod", "chown", "chgrp",
 		"setfacl", "dd", "tee", "truncate", "sort", "split", "csplit", "uniq", "xxd", "zip", "gzip", "gunzip", "zcat", "bzip2", "bunzip2",
-		"bzcat", "xz", "unxz", "xzcat", "unzip", "tar", "scp", "rsync", "base64")
+		"bzcat", "xz", "unxz", "xzcat", "unzip", "tar", "scp", "rsync", "base64", "7z", "7za", "7zr")
 	// carry a script, program, format or config in an operand
-	add("text", "sed", "awk", "curl", "wget", "find", "fd", "rg") // rg --pre runs a preprocessor
-	add("shell", "bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "su", "runuser", "python", "python3", "node", "nodejs", "ruby", "perl", "php", "go")
+	add("text", "sed", "awk", "gawk", "mawk", "nawk", "curl", "wget", "find", "fd", "rg", // rg --pre runs a preprocessor
+		"sqlite3", // the SQL decides whether the database file is written (GAP-0506)
+		"ed")      // the stdin script decides whether the file is written (GAP-0506)
+	add("shell", "bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "su", "runuser", "python", "python3", "node", "nodejs", "ruby", "perl", "php", "go", "newgrp")
 	add("special", "git")
 	// Windows table (lower case)
 	add("writes", "copy", "xcopy", "robocopy", "move", "ren", "rename", "del", "erase", "rd", "rmdir", "mklink", "icacls", "cacls", "takeown",
 		"attrib", "certutil", "bitsadmin", "set-content", "add-content", "out-file", "copy-item", "cpi", "move-item", "mi", "remove-item", "ri",
-		"new-item", "ni", "set-acl", "invoke-webrequest", "invoke-restmethod", "iwr", "irm")
+		"new-item", "ni", "set-acl", "invoke-webrequest", "invoke-restmethod", "iwr", "irm", "tee-object")
 	add("reads", "type", "get-content", "gc")
 	add("shell", "cmd", "powershell", "pwsh", "invoke-expression", "iex", "start-process", "saps")
 	return m

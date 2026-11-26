@@ -9,13 +9,16 @@ package gateway
 import (
 	"regexp"
 	"strings"
+	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // secretAssignmentRuleID is the generic credential-in-assignment rule. The
 // provider-prefixed SEC-* rules recognise a token by its issuer prefix; this
 // rule recognises the rest by the context a person writes around one: a
 // credential-named key, a separator, and a value that is random-looking.
-const secretAssignmentRuleID = "SEC-SECRET-ASSIGN"
+const secretAssignmentRuleID = guardrail.SecretAssignmentRuleID
 
 // secretAssignmentParts splits a SEC-SECRET-ASSIGN candidate into the key
 // identifier and the value. The rule pattern in
@@ -25,38 +28,68 @@ const secretAssignmentRuleID = "SEC-SECRET-ASSIGN"
 var secretAssignmentParts = regexp.MustCompile(
 	`^\W?([A-Za-z0-9_-]+)\\*["']?\s*(?:[:=,(]|\s+is\s+|=>)\s*\\*["']?(.+)$`)
 
-// secretAssignmentKeywords are the words, joined, that name a credential.
-var secretAssignmentKeywords = map[string]bool{
-	"password": true, "passwd": true, "pwd": true, "passphrase": true, "secret": true, "token": true,
-	"apikey": true, "privatekey": true, "encryptionkey": true, "signingkey": true, "credential": true,
+// secretAssignmentKeys is the key vocabulary of SEC-SECRET-ASSIGN: the
+// words, joined, that name a credential (password, apikey), the words before
+// one that mark a setting or an identifier, not a credential value
+// (max_tokens, num_tokens, is_secret), and the words after one that make the
+// key describe the credential rather than hold it (token_count,
+// password_field, secret_name, api_key_header). It is rule pack data, the
+// rule's keys block (GAP-0433); the built-in vocabulary is the default
+// pack's (builtinSecretAssignmentKeys).
+type secretAssignmentKeys struct {
+	words, prefixes, suffixes map[string]bool
 }
 
-// secretAssignmentKeySuffixes are words after the credential keyword that
-// make the key describe the credential rather than hold it: token_count,
-// password_field, secret_name, api_key_header.
-var secretAssignmentKeySuffixes = map[string]bool{
-	"count": true, "type": true, "types": true, "length": true, "len": true, "min": true, "max": true,
-	"field": true, "fields": true, "name": true, "names": true, "header": true, "headers": true,
-	"ttl": true, "expiry": true, "expires": true, "expiration": true, "policy": true, "file": true,
-	"path": true, "id": true, "label": true, "prefix": true, "suffix": true, "endpoint": true,
-	"url": true, "uri": true, "ref": true, "regex": true, "pattern": true, "env": true, "var": true,
-	"variable": true, "param": true, "params": true, "arn": true, "version": true, "rotation": true,
-	"required": true, "enabled": true, "disabled": true, "hint": true, "help": true, "placeholder": true,
-	"format": true, "mask": true, "masked": true, "input": true, "prompt": true, "manager": true,
-	"store": true, "provider": true, "source": true, "location": true, "dir": true, "directory": true,
-	"hash": true, "hashed": true, "salt": true, "rules": true, "strength": true, "reset": true,
+// newSecretAssignmentKeys is the vocabulary of the three lists; a nil list
+// leaves its set nil (filled from the built-in one by
+// compileSecretAssignmentKeys).
+func newSecretAssignmentKeys(words, prefixes, suffixes []string) *secretAssignmentKeys {
+	set := func(list []string) map[string]bool {
+		if list == nil {
+			return nil
+		}
+		out := make(map[string]bool, len(list))
+		for _, word := range list {
+			out[word] = true
+		}
+		return out
+	}
+	return &secretAssignmentKeys{words: set(words), prefixes: set(prefixes), suffixes: set(suffixes)}
 }
 
-// secretAssignmentKeyPrefixes are words before the keyword that mark a
-// setting or an identifier, not a credential value: max_tokens, num_tokens,
-// is_secret.
-var secretAssignmentKeyPrefixes = map[string]bool{
-	"max": true, "min": true, "num": true, "total": true, "prompt": true, "completion": true,
-	"input": true, "output": true, "is": true, "has": true, "use": true, "enable": true,
-	"disable": true, "require": true, "show": true, "hide": true, "get": true, "set": true,
-	"confirm": true, "reset": true, "forgot": true, "change": true, "update": true,
-	"invalid": true, "wrong": true, "bad": true, "missing": true, "empty": true, "no": true,
-	"next": true, "page": true,
+// builtinSecretAssignmentKeys is the vocabulary of the built-in catalog's
+// SEC-SECRET-ASSIGN (rules_catalog_generated.go, from the default pack's
+// keys block): what a pack whose rule has no keys block reads, list by list.
+var builtinSecretAssignmentKeys = sync.OnceValue(func() *secretAssignmentKeys {
+	for _, category := range defaultRuleCategories() {
+		for _, rule := range category.Rules {
+			if rule.ID == secretAssignmentRuleID && rule.assignmentKeys != nil {
+				return rule.assignmentKeys
+			}
+		}
+	}
+	return &secretAssignmentKeys{}
+})
+
+// compileSecretAssignmentKeys is the vocabulary a pack rule's keys block
+// gives: each list it names replaces the built-in one, a list it leaves out
+// keeps it. Nil when the rule has no keys block (the built-in vocabulary).
+func compileSecretAssignmentKeys(keys *guardrail.RuleKeysYAML) *secretAssignmentKeys {
+	if keys == nil {
+		return nil
+	}
+	out := newSecretAssignmentKeys(keys.Words, keys.Prefixes, keys.Suffixes)
+	builtin := builtinSecretAssignmentKeys()
+	if out.words == nil {
+		out.words = builtin.words
+	}
+	if out.prefixes == nil {
+		out.prefixes = builtin.prefixes
+	}
+	if out.suffixes == nil {
+		out.suffixes = builtin.suffixes
+	}
+	return out
 }
 
 // secretAssignmentPlaceholderTokens are the words a stand-in value is made of.
@@ -164,35 +197,44 @@ var (
 // credential value and not a name, a reference, a placeholder or an example.
 // It is the precision stage of the rule: the regex only finds the assignment.
 func acceptedSecretAssignment(match string) bool {
+	return acceptedSecretAssignmentWith(nil, match)
+}
+
+// acceptedSecretAssignmentWith is acceptedSecretAssignment under the key
+// vocabulary keys (nil: the built-in one).
+func acceptedSecretAssignmentWith(keys *secretAssignmentKeys, match string) bool {
 	m := secretAssignmentParts.FindStringSubmatch(strings.TrimSpace(match))
 	if m == nil {
 		return false
 	}
-	return secretAssignmentKeyIsCredential(m[1]) && secretAssignmentValueLooksSecret(m[2])
+	if keys == nil {
+		keys = builtinSecretAssignmentKeys()
+	}
+	return keys.credential(m[1]) && secretAssignmentValueLooksSecret(m[2])
 }
 
-// secretAssignmentKeyIsCredential reports an identifier that holds a credential
+// credential reports an identifier that holds a credential
 // and does not merely describe one. The identifier is cut into words at _ and
 // -, at a lower to upper case change and before the last capital of an
 // acronym (dbPassword, SECRET_KEY, apiKey, HTTPToken), so a name is read, not
 // listed. One word, or two or three joined (api + key), must be a credential
 // keyword; no other word of the identifier may mark a setting around it
 // (max_tokens, token_count, isSecret).
-func secretAssignmentKeyIsCredential(key string) bool {
+func (keys *secretAssignmentKeys) credential(key string) bool {
 	words := identifierWords(key)
 	for i := range words {
 		for j := i; j < len(words) && j < i+3; j++ {
 			joined := strings.Join(words[i:j+1], "")
-			if !secretAssignmentKeywords[strings.TrimSuffix(joined, "s")] && !secretAssignmentKeywords[joined] {
+			if !keys.words[strings.TrimSuffix(joined, "s")] && !keys.words[joined] {
 				continue
 			}
 			for _, word := range words[:i] {
-				if secretAssignmentKeyPrefixes[word] {
+				if keys.prefixes[word] {
 					return false
 				}
 			}
 			for _, word := range words[j+1:] {
-				if secretAssignmentKeySuffixes[word] {
+				if keys.suffixes[word] {
 					return false
 				}
 			}

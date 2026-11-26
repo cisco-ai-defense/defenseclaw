@@ -26,8 +26,8 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 		yaml string
 		want map[string]string // lane -> mode; missing lane = refused
 	}{
-		{"on", map[string]string{"nonshell": "on"}},
-		{"\"on\"", map[string]string{"nonshell": "on"}},
+		{"on", map[string]string{"nonshell": "on", "effects": "on"}},
+		{"\"on\"", map[string]string{"nonshell": "on", "effects": "on"}},
 		{"shadow", map[string]string{"nonshell": "shadow", "effects": "shadow", "secret_flow": "shadow", "alignment": "shadow"}},
 		{"off", map[string]string{"nonshell": "off", "effects": "off", "secret_flow": "off", "alignment": "off"}},
 		// The alignment lane's own values (GAP-0823): no other lane takes them.
@@ -56,7 +56,7 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 		{"[on]", nil},
 		{"{on: on}", nil},
 	}
-	defaults := map[string]string{"nonshell": "on", "effects": "shadow", "secret_flow": "shadow", "alignment": "off"}
+	defaults := map[string]string{"nonshell": "on", "effects": "on", "secret_flow": "shadow", "alignment": "off"}
 	// The shipped lanes (cascade_test.go registers test lanes the schema does not name).
 	for _, lane := range []string{CascadeLaneEffects, CascadeLaneNonShell, CascadeLaneSecretFlow, CascadeLaneAlignment} {
 		for _, s := range spellings {
@@ -108,7 +108,7 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 				if got != wantMode {
 					t.Errorf("%s: mode %q, want %q", label, got, wantMode)
 				}
-				if lane != "nonshell" && got == CascadeLaneOn {
+				if lane == CascadeLaneSecretFlow && got == CascadeLaneOn {
 					t.Errorf("%s: shadow-only lane is on", label)
 				}
 				for other, def := range defaults {
@@ -123,7 +123,7 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 
 // TestCascadeLanesUpgradeWithoutTheKey (s7-nscfg): no release before 1.0.10
 // has guardrail.cascade, so an upgraded config has no such key (or an empty
-// block): it loads with nonshell on and the shadow-only lanes shadow.
+// block): it loads with nonshell and effects on and secret_flow shadow.
 func TestCascadeLanesUpgradeWithoutTheKey(t *testing.T) {
 	for _, guardrail := range []string{"  mode: observe\n", "  mode: action\n  cascade: {}\n", "  cascade:\n    lanes: {}\n"} {
 		dir := t.TempDir()
@@ -139,8 +139,8 @@ func TestCascadeLanesUpgradeWithoutTheKey(t *testing.T) {
 				t.Fatalf("%q via %s: %v", guardrail, name, err)
 			}
 			l := cfg.Guardrail.Cascade.Lanes
-			if l.NonShellMode() != CascadeLaneOn || l.EffectsMode() != CascadeLaneShadow || l.SecretFlowMode() != CascadeLaneShadow {
-				t.Errorf("%q via %s: nonshell %q effects %q secret_flow %q, want on shadow shadow", guardrail, name, l.NonShellMode(), l.EffectsMode(), l.SecretFlowMode())
+			if l.NonShellMode() != CascadeLaneOn || l.EffectsMode() != CascadeLaneOn || l.SecretFlowMode() != CascadeLaneShadow {
+				t.Errorf("%q via %s: nonshell %q effects %q secret_flow %q, want on on shadow", guardrail, name, l.NonShellMode(), l.EffectsMode(), l.SecretFlowMode())
 			}
 		}
 	}

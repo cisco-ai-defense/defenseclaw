@@ -97,7 +97,7 @@ func unknownReasonFinding(title, reason string, enforcementCapable bool) RuleFin
 	finding.Title = title + " (" + reason + ")"
 	finding.Evidence = reason
 	if !enforcementCapable {
-		finding.enforcement = findingEnforcementAlertOnly
+		finding.Proof = finding.Proof.Advise()
 	}
 	return finding
 }
@@ -119,19 +119,19 @@ func withBoundedReason(finding *RuleFinding, reason string) {
 
 // boundedLimitIndex is the index of the evaluation-limit finding in
 // findings, or -1. The detection-only record of a data word
-// (RuleFinding.dataWordRecord) is not a limit the call hit and is skipped:
+// (RuleFinding.boundRecord) is not a limit the call hit and is skipped:
 // only an enforcing cap or a truncated reading counts, so a record never
 // makes a call capped or stands in for its limit finding (rel-1-0-10:GAP-0760).
 func boundedLimitIndex(findings []RuleFinding) int {
 	return slices.IndexFunc(findings, func(finding RuleFinding) bool {
-		return !finding.dataWordRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+		return !finding.boundRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	})
 }
 
 // withBoundedTruncation adds the truncation in set to the findings of what
 // was read before the caps, which keep deciding on their own: the profile
 // maps the result to at least the unknown tier of the pack and never below
-// those findings (guardrailActionForProfile). An evaluation-limit finding the
+// those findings (decide.Decide, row truncated). An evaluation-limit finding the
 // call already carries is kept, title included, and gains the bounded reason,
 // so a call has one limit finding; a data-word record beside it is not one
 // and stays detection-only (GAP-0760). The caller's slice is not changed. No cap
@@ -162,7 +162,7 @@ func withUnknownFinding(findings []RuleFinding, bound RuleFinding) []RuleFinding
 	existing.boundedCaps = existing.boundedCaps.Union(bound.boundedCaps)
 	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
 		// A detection-only limit finding would leave the call allowed.
-		existing.enforcement = bound.enforcement
+		existing.Proof.Certainty, existing.Proof.Reach = bound.Proof.Certainty, bound.Proof.Reach
 		existing.proof = bound.proof
 	}
 	return out
@@ -226,7 +226,7 @@ func (v *ToolInspectVerdict) floorBoundedTruncated(set bounded.CapSet, tier boun
 	bound.Severity = "HIGH"
 	if floor == bounded.Alert {
 		bound.Severity = "MEDIUM"
-		bound.enforcement = findingEnforcementAlertOnly
+		bound.Proof = bound.Proof.Advise()
 	}
 	before, known := bounded.ParseAction(v.Action)
 	after := bounded.Floor(before, set, tier)

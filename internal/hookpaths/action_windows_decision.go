@@ -21,6 +21,25 @@ func actionWindowsHome(home string) bool {
 	return len(home) >= 3 && home[1] == ':' && home[2] == '/' || strings.HasPrefix(home, "//")
 }
 
+// actionCmdHomeVariablePath places a value that starts with the cmd spelling
+// of the home, %USERPROFILE% or %HOMEDRIVE%%HOMEPATH% (any case), alone or
+// before a separator: Git Bash leaves that text as it is, and every Windows
+// tool that expands environment strings reads it as the home. It returns the
+// value with the home in place of that spelling, so the path is judged as
+// its plain C:\Users\... form is (rel-1-0-10:GAP-1628: the key named as data
+// through %USERPROFILE% next to an unbound output had no decision on a
+// Windows host, where the plain key path keeps it, GAP-1624). Any other
+// value is not placed (ok false).
+func actionCmdHomeVariablePath(value, home string) (string, bool) {
+	lower := asciifold.Lower(value)
+	for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%"} {
+		if rest, found := strings.CutPrefix(lower, prefix); found && (rest == "" || rest[0] == '\\' || rest[0] == '/') {
+			return home + value[len(prefix):], true
+		}
+	}
+	return "", false
+}
+
 func actionWindowsPath(value, cwd, home string) (string, bool) {
 	return actionWindowsPathWithTrim(value, cwd, home, true)
 }
@@ -39,6 +58,7 @@ func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool
 	if value == "" || strings.ContainsAny(value, "\x00\r\n`") {
 		return "", false
 	}
+	value = actionLocalFileURIPath(value)
 	lower := strings.ToLower(value)
 	for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
@@ -94,6 +114,24 @@ func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool
 		return "/" + path.Clean(value), true
 	}
 	return path.Clean(value), true
+}
+
+// actionLocalFileURIPath reads localhost:///C:/x, the local file URI
+// spelling some Windows tools emit, as the drive path C:/x: no path under the
+// working folder and no share on a server named "C:" (rel-1-0-10:GAP-1671).
+// The effects resolver reads the spelling the same way
+// (effects.localWindowsURIPath); this floor reader keeps its own copy until
+// it is retired. value has forward slashes.
+func actionLocalFileURIPath(value string) string {
+	const prefix = "localhost:///"
+	if len(value) < len(prefix)+3 || !strings.EqualFold(value[:len(prefix)], prefix) {
+		return value
+	}
+	rest := value[len(prefix):]
+	if !asciiLetter(rest[0]) || rest[1] != ':' || rest[2] != '/' {
+		return value
+	}
+	return rest
 }
 
 func asciiLetter(value byte) bool {

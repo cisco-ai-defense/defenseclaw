@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/asciifold"
@@ -1815,8 +1816,8 @@ func tildeProgramText(text, home string) (string, int, bool) {
 	if home == "" || strings.ContainsAny(home, " \t\r\n'\"`$\\") {
 		return "", 0, false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return "", 0, false
 	}
 	var offsets []int
@@ -1859,8 +1860,8 @@ func tildeProgramText(text, home string) (string, int, bool) {
 // of the echo or printf inside. open is true when a substitution holds anything
 // else (a file, a download, a pipeline): its output is not in the text.
 func procSubstScripts(text string) (scripts []string, open bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return nil, false
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -1957,8 +1958,8 @@ type heredoc struct {
 // written to a place a login, a scheduler or a later command of the call runs
 // (GAP-0788).
 func heredocs(text string) []heredoc {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return nil
 	}
 	// A filter that passes its input on (cat <<EOF | sh) feeds the stage that
@@ -2430,8 +2431,8 @@ const maxBashCommands = 4096
 // bashCommands returns the simple commands of a bash parse of text, with a
 // word that holds an expansion as "".
 func bashCommands(text string) []CommandFact {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return nil
 	}
 	var commands []CommandFact

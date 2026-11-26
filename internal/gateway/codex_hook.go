@@ -336,6 +336,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Input:                         actionInput,
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
+			sessionID:                     req.SessionID,
 			EnforcementCapable:            true,
 			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "codex", runtime.GOOS),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
@@ -757,10 +758,13 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 const codexObserveContextMinSeverity = severityMedium
 
 // codexObserveContextEnforcementEligible keeps the in-chat Observe warning
-// coupled to a finding that could actually influence enforcement. Opaque
-// managed/judge verdicts may not carry DetailedFindings, so a MEDIUM-or-higher
-// non-allow verdict with no details remains visible; explicit detection-only
-// details do not.
+// coupled to a finding that decides the call's action: one that could block,
+// or an alert-only (advisory) finding, whose action is the alert itself.
+// Claude Code shows that alert in Observe mode and Codex shows it in Action
+// mode, so a curl | sh HIGH alert that Codex ran silently in Observe mode
+// looked like a missed detection (GAP-1927). Opaque managed/judge verdicts
+// may not carry DetailedFindings, so a MEDIUM-or-higher non-allow verdict
+// with no details remains visible; detection-only (recorded) details do not.
 func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
 	if verdict == nil || guardrailSeverityRank(verdict.Severity) < codexObserveContextMinSeverity {
 		return false
@@ -769,7 +773,7 @@ func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
 		return true
 	}
 	for _, finding := range verdict.DetailedFindings {
-		if finding.contributesToEnforcement() &&
+		if (finding.contributesToEnforcement() || finding.contributesToAlertOnly()) &&
 			guardrailSeverityRank(finding.Severity) >= codexObserveContextMinSeverity {
 			return true
 		}
@@ -782,7 +786,7 @@ type codexAdditionalContextFindingKey struct {
 	Title       string
 	Severity    string
 	Evidence    string
-	Enforcement findingEnforcement
+	Enforcement string
 }
 
 // codexAdditionalContextFirstInWindow returns false only for an identical
@@ -810,7 +814,7 @@ func (a *APIServer) codexAdditionalContextFirstInWindow(
 			Title:       finding.Title,
 			Severity:    finding.Severity,
 			Evidence:    finding.Evidence,
-			Enforcement: finding.enforcement,
+			Enforcement: finding.Proof.String(),
 		})
 	}
 	sort.Slice(details, func(i, j int) bool {

@@ -6,6 +6,7 @@ package effects
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -17,36 +18,79 @@ func extractFileTool(call Call, o Options) Result {
 	res := Result{Surface: SurfaceFileTool, Flavor: o.flavor(), Dialect: DialectNone}
 	m := decodeArgs(call.Args)
 	kind := fileToolKind(call.Tool)
-	pathVal := firstString(m, "file_path", "path", "filePath", "filename", "file", "target", "notebook_path")
-	e := Effect{Kind: kind, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
-		Target: Target{Type: TargetPath, Flavor: o.flavor(), Link: LinkNotChecked},
-		Origin: Origin{Surface: SurfaceFileTool, Command: 1, Program: call.Tool}}
-	if pathVal == "" {
+	// Every path key is read: when several name different paths the tool's
+	// own key precedence decides which it writes, so each is a target whose
+	// role is unknown (S3-PRE security review, DET111 R1).
+	pathVals := distinctStrings(m, "file_path", "path", "filePath", "filename", "file", "target", "notebook_path")
+	mk := func() Effect {
+		return Effect{Kind: kind, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
+			Target: Target{Type: TargetPath, Flavor: o.flavor(), Link: LinkNotChecked},
+			Origin: Origin{Surface: SurfaceFileTool, Command: 1, Program: call.Tool}}
+	}
+	if len(pathVals) == 0 {
+		e := mk()
 		e.Kind = KindOpaque
 		e.addReason(ReasonUnknownTool, ScopeTarget)
 		res.Effects = append(res.Effects, e)
 		return res
 	}
-	e.Target.Spelling = cap4k(pathVal)
-	if abs, ok, reason := placePath(pathVal, o); ok {
-		e.Target.Path = abs
-	} else {
-		e.addReason(reason, ScopeTarget)
-	}
-	if kind == KindWrite {
-		content := firstString(m, "content", "new_string", "newString", "contents", "text", "file_text")
-		e.Data = &Data{Kind: DataLiteral, Bytes: len(content), Text: cap8k(content)}
-	}
 	// Schema accounting (review R5-1): an argument key the file-tool schema does
 	// not expect means the call is not fully understood -> not fully known.
+	unknownKey := false
 	for k := range m {
 		if !fileToolArgKey(k) {
-			e.addReason(ReasonUnknownTool, ScopeRole)
+			unknownKey = true
 			break
 		}
 	}
-	res.Effects = append(res.Effects, e)
+	content := ""
+	if kind == KindWrite {
+		content = firstString(m, "content", "new_string", "newString", "contents", "text", "file_text")
+	}
+	for _, pathVal := range pathVals {
+		e := mk()
+		e.Target.Spelling = cap4k(pathVal)
+		if abs, ok, reason := placePath(pathVal, o); ok {
+			e.Target.Path = abs
+		} else {
+			e.addReason(reason, ScopeTarget)
+		}
+		if kind == KindWrite {
+			e.Data = &Data{Kind: DataLiteral, Bytes: len(content), Text: cap8k(content)}
+		}
+		if unknownKey || len(pathVals) > 1 {
+			e.addReason(ReasonUnknownTool, ScopeRole)
+		}
+		res.Effects = append(res.Effects, e)
+	}
 	return res
+}
+
+// wholeAbsPath reports a string that is one absolute path and nothing else:
+// /x or ~/x on POSIX, C:\x or \\host\x on Windows, no blank or newline.
+func wholeAbsPath(v string, o Options) bool {
+	if len(v) < 2 || len(v) > maxSpellingBytes || strings.ContainsAny(v, " \t\r\n") {
+		return false
+	}
+	if strings.HasPrefix(v, "/") || strings.HasPrefix(v, "~/") {
+		return !strings.HasPrefix(v, "//")
+	}
+	if o.flavor() == FlavorWindows {
+		return len(v) > 2 && v[1] == ':' && (v[2] == '\\' || v[2] == '/') || strings.HasPrefix(v, `\\`)
+	}
+	return false
+}
+
+// distinctStrings is every non-empty string value of keys, in key order, each
+// once.
+func distinctStrings(m map[string]any, keys ...string) []string {
+	var out []string
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // fileToolArgKey reports whether a file-tool argument key is in the expected
@@ -101,7 +145,14 @@ func extractPatch(call Call, o Options) Result {
 			Target: Target{Type: TargetPath, Spelling: cap4k(pt.path), Flavor: o.flavor(), Link: LinkNotChecked},
 			Origin: Origin{Surface: SurfacePatch, Command: 1, Program: "apply_patch"},
 			Data:   &Data{Kind: DataPatchText}}
-		if abs, ok, reason := placePath(pt.path, o); ok {
+		// A $ or % in a header path is not expanded by the patch tool, but a
+		// runner that does would write elsewhere: the target is unknown, and
+		// its spelling stays on the effect so the protected-set grade still
+		// reads the name (a \\host\c$ share to a credential file is the same
+		// name as the file tool's write of it).
+		if strings.ContainsAny(pt.path, "$%") {
+			e.addReason(ReasonDynamicExpansion, ScopeTarget)
+		} else if abs, ok, reason := placePath(pt.path, o); ok {
 			e.Target.Path = abs
 		} else {
 			e.addReason(reason, ScopeTarget)
@@ -114,6 +165,8 @@ func extractPatch(call Call, o Options) Result {
 type patchTarget struct {
 	path string
 	kind Kind
+	// moved marks the targets of an Update File + Move to pair.
+	moved bool
 }
 
 func parsePatchEnvelope(text string) ([]patchTarget, bool) {
@@ -122,23 +175,39 @@ func parsePatchEnvelope(text string) ([]patchTarget, bool) {
 	}
 	var out []patchTarget
 	sawEnd := false
+	inUpdate := false // inside an Update File chunk body
 	for _, line := range strings.Split(text, "\n") {
-		// Match headers only at column 0: a "*** Delete File:" sitting in the
-		// diff body (a context/'+' line) is attacker text, not a real header
-		// (review SF-5).
+		// A "*** Delete File:" sitting in an Update File chunk body (a context
+		// line, leading blank) is attacker text, not a header (review SF-5).
+		// Anywhere else a header the applier trims is one: apply_patch reads a
+		// hunk header with its leading blanks trimmed (S3-PRE security review,
+		// DET111 R1), so an indented header is read there too.
 		l := strings.TrimRight(line, "\r")
 		if !strings.HasPrefix(l, "*** ") {
-			continue
+			t := strings.TrimLeft(l, " \t")
+			if inUpdate || !strings.HasPrefix(t, "*** ") {
+				continue
+			}
+			l = t
 		}
 		switch {
 		case strings.HasPrefix(l, "*** Add File:"):
+			inUpdate = false
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Add File:"):]), kind: KindWrite})
 		case strings.HasPrefix(l, "*** Update File:"):
+			inUpdate = true
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Update File:"):]), kind: KindWrite})
 		case strings.HasPrefix(l, "*** Delete File:"):
+			inUpdate = false
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Delete File:"):]), kind: KindDelete})
 		case strings.HasPrefix(l, "*** Move to:"):
-			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Move to:"):]), kind: KindWrite})
+			// A move after an Update File writes the new name and removes the old
+			// one (GAP-1057).
+			if n := len(out); n > 0 && out[n-1].kind == KindWrite && !out[n-1].moved {
+				out[n-1].moved = true
+				out = append(out, patchTarget{path: out[n-1].path, kind: KindDelete, moved: true})
+			}
+			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Move to:"):]), kind: KindWrite, moved: true})
 		case strings.HasPrefix(l, "*** End Patch"):
 			sawEnd = true
 		}
@@ -147,7 +216,7 @@ func parsePatchEnvelope(text string) ([]patchTarget, bool) {
 		return nil, false // an unterminated or empty envelope: unknown targets
 	}
 	for _, pt := range out {
-		if pt.path == "" || strings.ContainsAny(pt.path, "$%") {
+		if pt.path == "" {
 			return nil, false
 		}
 	}
@@ -203,6 +272,22 @@ func extractMCP(call Call, o Options) Result {
 			}
 			if looksPathKey(key) && looksAbsOrRel(t) {
 				e := Effect{Kind: kindGuess, RoleState: RoleStateGuessed, TargetState: TargetStateKnown,
+					Target: Target{Type: TargetPath, Spelling: cap4k(t), Flavor: o.flavor(), Link: LinkNotChecked},
+					Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
+				if abs, ok, reason := placePath(t, o); ok {
+					e.Target.Path = abs
+				} else {
+					e.addReason(reason, ScopeTarget)
+				}
+				e.addReason(ReasonMCPSemantics, ScopeRole)
+				res.Effects = append(res.Effects, e)
+				return
+			}
+			// A whole absolute path under a key that does not name one (query,
+			// arg, value) may still be what the server opens: a target of
+			// unknown role, never dropped (S3-PRE security review, DET111 R1).
+			if wholeAbsPath(t, o) {
+				e := Effect{Kind: kindGuess, RoleState: RoleStateUnknown, TargetState: TargetStateKnown,
 					Target: Target{Type: TargetPath, Spelling: cap4k(t), Flavor: o.flavor(), Link: LinkNotChecked},
 					Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
 				if abs, ok, reason := placePath(t, o); ok {

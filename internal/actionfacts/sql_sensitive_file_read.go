@@ -37,22 +37,39 @@ func ExactSQLSensitiveServerFileRead(
 	return fact, true
 }
 
-func projectSQLSensitiveServerFileReads(input Input) []SQLSensitiveServerFileReadFact {
-	connection, database, query, ok := exactSQLQueryInput(input)
-	if !ok {
-		return nil
+func projectSQLSensitiveServerFileReads(input Input, sqlReads []exactSQLMutationInput) []SQLSensitiveServerFileReadFact {
+	connection, database, query, structured := exactSQLQueryInput(input)
+	if structured {
+		switch {
+		case exactMySQLConnection(connection, database):
+			return sqlSensitiveServerFileReadFacts("mysql", query)
+		case exactPostgreSQLConnection(connection, database):
+			return sqlSensitiveServerFileReadFacts("postgresql", query)
+		default:
+			return nil
+		}
 	}
-	engine := ""
-	functions := []string(nil)
-	switch {
-	case exactMySQLConnection(connection, database):
-		engine = "mysql"
+	// A psql, mysql or mariadb client in any command of a shell call, each
+	// -c of psql (DET111 T20 review P3-3) and each statement of a query
+	// (sqlCLIReadInputs).
+	for _, candidate := range sqlReads {
+		if candidate.engine != "postgresql" && candidate.engine != "mysql" {
+			continue
+		}
+		if read := sqlSensitiveServerFileReadFacts(candidate.engine, candidate.query); read != nil {
+			return read
+		}
+	}
+	return nil
+}
+
+// sqlSensitiveServerFileReadFacts is the one fact of query reading a
+// sensitive host file through a server-side file function of engine
+// (mysql or postgresql), nil when it reads none.
+func sqlSensitiveServerFileReadFacts(engine, query string) []SQLSensitiveServerFileReadFact {
+	functions := []string{"pg_read_file", "pg_read_binary_file"}
+	if engine == "mysql" {
 		functions = []string{"load_file"}
-	case exactPostgreSQLConnection(connection, database):
-		engine = "postgresql"
-		functions = []string{"pg_read_file", "pg_read_binary_file"}
-	default:
-		return nil
 	}
 	filePath, ok := exactSQLSensitiveFileReadQuery(query, functions)
 	if !ok {
@@ -189,13 +206,50 @@ func exactSQLSensitiveFileReadQuery(query string, functions []string) (string, b
 	return "", false
 }
 
+// exactSQLDirectSensitiveFileReadQuery reads a literal SELECT (no FROM)
+// whose select list holds, as any of its items, the file function of a
+// literal path with an optional AS alias: the server reads the file for that
+// item whatever the other items are (rel-1-0-10:GAP-1961). The other items
+// are skipped whole, to the next comma outside parentheses and quotes; an
+// item the skip cannot read (a comment, an unbalanced parenthesis) leaves the
+// query unread.
 func exactSQLDirectSensitiveFileReadQuery(query string, functions []string) (string, bool) {
 	parser := postgreSQLCopyParser{source: query}
 	parser.space()
 	if !parser.keyword("select") || !parser.requiredSpace() {
 		return "", false
 	}
-	filePath, ok := parseSQLSensitiveFileReadInvocation(&parser, functions)
+	backslash := len(functions) != 0 && functions[0] == "load_file" // MySQL strings
+	filePath := ""
+	for {
+		item := parser.index
+		if path, ok := parseSQLSensitiveFileReadItem(&parser, functions); ok {
+			if filePath == "" {
+				filePath = path
+			}
+		} else {
+			parser.index = item
+			if !skipSQLSelectItem(&parser, backslash) {
+				return "", false
+			}
+		}
+		parser.space()
+		if !parser.take(',') {
+			break
+		}
+		parser.space()
+	}
+	if filePath == "" || !finishSingleSQLStatement(&parser) || !validSQLSensitiveFileLiteral(filePath) {
+		return "", false
+	}
+	return filePath, true
+}
+
+// parseSQLSensitiveFileReadItem reads one select item that is the file
+// function of a literal path with an optional AS alias, ending where the
+// item ends (a comma, a semicolon or the end of the query).
+func parseSQLSensitiveFileReadItem(parser *postgreSQLCopyParser, functions []string) (string, bool) {
+	filePath, ok := parseSQLSensitiveFileReadInvocation(parser, functions)
 	if !ok {
 		return "", false
 	}
@@ -207,10 +261,43 @@ func exactSQLDirectSensitiveFileReadQuery(query string, functions []string) (str
 		}
 		parser.space()
 	}
-	if !finishSingleSQLStatement(&parser) || !validSQLSensitiveFileLiteral(filePath) {
+	if parser.index < len(parser.source) && parser.source[parser.index] != ',' &&
+		parser.source[parser.index] != ';' {
 		return "", false
 	}
 	return filePath, true
+}
+
+// skipSQLSelectItem moves parser past one select item: to the next comma or
+// semicolon outside parentheses and quotes, or the end of the query. false
+// for an item it cannot read with certainty: a comment, an unbalanced
+// parenthesis or an unterminated quote.
+func skipSQLSelectItem(parser *postgreSQLCopyParser, backslash bool) bool {
+	source, depth, start := parser.source, 0, parser.index
+	i := start
+	for ; i < len(source); i++ {
+		switch c := source[i]; {
+		case c == '\'' || c == '"' || c == '`':
+			end := sqlQuotedEnd(source, i, c, backslash && c != '`')
+			if end > len(source) || source[end-1] != c || end == i+1 {
+				return false
+			}
+			i = end - 1
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth--; depth < 0 {
+				return false
+			}
+		case c == '#' || strings.HasPrefix(source[i:], "--") || strings.HasPrefix(source[i:], "/*"):
+			return false
+		case depth == 0 && (c == ',' || c == ';'):
+			parser.index = i
+			return strings.TrimSpace(source[start:i]) != ""
+		}
+	}
+	parser.index = i
+	return depth == 0 && strings.TrimSpace(source[start:i]) != ""
 }
 
 func exactPostgreSQLCopySensitiveFileReadQuery(
@@ -302,10 +389,11 @@ func validStaticAbsolutePOSIXPath(value string) bool {
 }
 
 func sqlSensitiveServerFileClass(value string) string {
-	if value == "" || !strings.HasPrefix(value, "/") ||
-		path.Clean(value) != value || hasUnresolvedPathSyntax(value) {
+	if !validSQLSensitiveFileLiteral(value) || !strings.HasPrefix(value, "/") ||
+		hasUnresolvedPathSyntax(value) {
 		return ""
 	}
+	value = path.Clean(value)
 	switch value {
 	case "/etc/passwd":
 		return SQLSensitiveServerFileAccountDatabase

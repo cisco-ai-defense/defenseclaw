@@ -6,7 +6,6 @@ package actionfacts
 import (
 	"slices"
 	"sync"
-	"time"
 )
 
 // The split of a call into its statements (sequenceStatementDetails) is a
@@ -15,17 +14,22 @@ import (
 // splitter, the statement budget and, for a sandbox call, the guest
 // placement plan each split the whole call again (substrate-1 GAP-1028: two
 // of the guest plan's splits were a third of its CPU). A source of
-// sequenceMemoMinSource bytes or more keeps its split for a short time, and
-// every caller gets its own copy of the statements.
+// sequenceMemoMinSource bytes or more keeps its split for the next
+// sequenceMemoLife splits of large sources, and every caller gets its own
+// copy of the statements. The life counts splits, never time
+// (rel-1-0-10:GAP-2231, DET111 step 2: a reader counts work, so a call gets
+// the same answer and the same cost on a loaded box and an idle one).
 const (
 	// sequenceMemoMinSource is the size from which a split is kept; a short
 	// source is split again, as before.
 	sequenceMemoMinSource = 1 << 10
 	// sequenceMemoEntries bounds how many splits are kept.
 	sequenceMemoEntries = 8
-	// sequenceMemoLife is how long a kept split stays: one hook call, with
-	// room for a retry.
-	sequenceMemoLife = 30 * time.Second
+	// sequenceMemoLife is how many later large-source splits a kept split
+	// stays for: one hook asks for the same split a few dozen times, so this
+	// covers the call, its twins and a retry, and an idle gateway lets the
+	// splits go once other calls come.
+	sequenceMemoLife = 1024
 )
 
 type sequenceMemoKey struct {
@@ -37,12 +41,13 @@ type sequenceMemoEntry struct {
 	key         sequenceMemoKey
 	statements  []sequenceStatement // as split, never handed out
 	reduced, ok bool
-	at          time.Time
+	at          uint64 // sequenceMemo.splits when the split was kept
 }
 
 var sequenceMemo struct {
 	sync.Mutex
 	entries []sequenceMemoEntry
+	splits  uint64 // large-source splits asked for so far
 }
 
 // sequenceStatementDetails is sequenceStatementDetailsWalk, kept for a
@@ -52,11 +57,12 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 		return sequenceStatementDetailsWalk(source, compound, allSimple, straight, walkUncalled)
 	}
 	key := sequenceMemoKey{source, compound, allSimple, straight, walkUncalled}
-	now := time.Now()
 	sequenceMemo.Lock()
+	sequenceMemo.splits++
+	now := sequenceMemo.splits
 	kept := sequenceMemo.entries[:0]
 	for _, entry := range sequenceMemo.entries {
-		if now.Sub(entry.at) < sequenceMemoLife {
+		if now-entry.at < sequenceMemoLife {
 			kept = append(kept, entry)
 		}
 	}

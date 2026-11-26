@@ -284,7 +284,7 @@ func provedHighWriteFindings(
 					// this exact target match must not replace it (GAP-2268,
 					// GAP-2298, GAP-2378: managed observe allowed the write).
 					if !alertOnly {
-						proved[index].enforcement = findingEnforcementAllowed
+						proved[index].Proof = proved[index].Proof.Enforce()
 						if !proved[index].proof.authorizes(rule.ID) {
 							proved[index].proof = proof
 						}
@@ -294,15 +294,15 @@ func provedHighWriteFindings(
 					}
 					continue
 				}
-				enforcement := findingEnforcementAllowed
+				enforcement := enforcingProof
 				if alertOnly {
-					enforcement = findingEnforcementAlertOnly
+					enforcement = advisoryProof
 				}
 				proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
 					RuleID: rule.ID, Title: rule.Title + note, Severity: severity,
 					Confidence: rule.Confidence, Evidence: path.Base(strings.ReplaceAll(resolved, `\`, "/")),
 					Tags:       append([]string(nil), rule.Tags...),
-					LineNumber: 1, enforcement: enforcement,
+					LineNumber: 1, Proof: enforcement,
 					proof: proof,
 				}))
 			}

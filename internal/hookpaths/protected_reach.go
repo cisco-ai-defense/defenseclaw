@@ -93,7 +93,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames,
 		unread = unread || ShareUnanswered(err)
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink, procLinks.unproved, true)
+	resolved, _, _, ok := walkWritePathWithReaders("", parent, 0, false, false, lstat, readlink, procLinks.unproved, true)
 	answer := reachParentAnswer{resolved: resolved}
 	switch {
 	case reached || ok && names.hasCandidate(resolved):
@@ -414,7 +414,7 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		}
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink, procLinks.unproved, false)
+	resolved, _, _, ok := walkWritePathWithReaders("", target, 0, false, false, lstat, readlink, procLinks.unproved, false)
 	if reached || ok && names.has(resolved) {
 		return GradeNamed
 	}
@@ -474,7 +474,7 @@ func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 		}
 		return processRelative
 	}
-	physical, _, _, ok := walkWritePathMemoWithReaders("", raw, 0, false, false, nil, PathLstat, procLinks.readlink, unproved, false)
+	physical, _, _, ok := walkWritePathWithReaders("", raw, 0, false, false, PathLstat, procLinks.readlink, unproved, false)
 	if processRelative {
 		return GradePossible
 	}
