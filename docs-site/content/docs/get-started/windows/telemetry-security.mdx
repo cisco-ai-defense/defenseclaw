@@ -101,6 +101,16 @@ tool invocation alone does not prove that tool inventory was generated or
 delivered. Inspect the inventory discovery summaries and the destination's
 delivery status separately. This does not enable additional MCP server scans.
 
+### Unsigned certification checks
+
+A certification deployment uses `DefenseClawCertGateway_<run-id>`. Administrator
+CLI status and readiness requests select that service from the CLI executable's
+protected installation root and still verify the connected SCM process. A
+caller-provided service-name environment variable cannot redirect the probe.
+The canonical CM `env_config.json` may remain present during certification
+cleanup; other production-state children continue to prevent shared-runtime
+cleanup. The overlay file is preserved, not read or removed by that check.
+
 ### Destination redaction
 
 Connectors capture prompt content so that each destination can apply its own

@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var perUserGatewayClientFactory = hookexec.NewPerUserGatewayHTTPClient
@@ -38,22 +39,22 @@ const managedGatewayStartBudget = 30 * time.Second
 // gateway restarts another account can bind its port; it receives nothing.
 func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Duration) (*http.Client, error) {
 	if c != nil && c.SecureClientIntegration() && hookcli.SecureClientHost() {
-		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), hookcli.ManagedServiceName(true))
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), gatewayPeerServiceName(true))
 	}
 	if _, present := hookcli.ManagedHostWindowsStandalone(); present &&
 		(c == nil || c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
-		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managed.StandaloneWindowsGatewaySvc)
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), gatewayPeerServiceName(false))
 	}
 	// The administrator's scan on a managed Linux or macOS computer loads no
 	// config (GAP-1234): the managed deployment record names the gateway
 	// service, which runs as its own account, not the caller's.
 	if c == nil && runtime.GOOS != "windows" {
 		if _, present := managedHostUnixRecord(nil); present {
-			return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), hookcli.ManagedServiceName(false))
+			return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), gatewayPeerServiceName(false))
 		}
 	}
 	if c != nil && (c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
-		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), hookcli.ManagedServiceName(false))
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), gatewayPeerServiceName(false))
 	}
 	return perUserGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)))
 }
@@ -76,4 +77,19 @@ func localGatewayURLEndpoint(rawURL string) (string, int, error) {
 		return "", 0, fmt.Errorf("gateway target port is invalid")
 	}
 	return target.Hostname(), port, nil
+}
+
+// gatewayPeerServiceForExecutable recognizes only the binary's exact protected
+// production or certification install root. Environment pins cannot select a
+// different scope's peer. winpath also recognizes versioned hook launch bins.
+func gatewayPeerServiceForExecutable(executable string, roots winpath.EnterpriseRoots) string {
+	bin := winpath.EnterpriseInstallBinOf(executable)
+	if bin == "" {
+		return ""
+	}
+	service, err := winpath.EnterpriseGatewayServiceForRoot(roots, bin[:len(bin)-len(`\bin`)])
+	if err != nil {
+		return ""
+	}
+	return service
 }

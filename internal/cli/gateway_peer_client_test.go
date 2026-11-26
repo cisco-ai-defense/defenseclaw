@@ -12,6 +12,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func TestPerUserGatewayClientDoesNotTrustManagedModeFromEnvironment(t *testing.T) {
@@ -92,5 +93,28 @@ func TestSecureClientGatewayClientRequiresVerifiedServiceTransport(t *testing.T)
 	client, err := gatewayPeerClient(c, "127.0.0.1", 18970, time.Second)
 	if !called || client != nil || err == nil {
 		t.Fatalf("Secure Client bypassed service peer check: called=%t client=%v error=%v", called, client, err)
+	}
+}
+
+func TestGatewayPeerServiceForExecutable(t *testing.T) {
+	for _, profile := range []string{winpath.EnterpriseProfileSecureClient, winpath.EnterpriseProfileStandalone} {
+		roots, err := winpath.EnterpriseRootsFor(profile, `C:\Program Files`, `C:\ProgramData`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ path, want string }{
+			{roots.InstallRoot + `\bin\defenseclaw-gateway.exe`, "DefenseClawGateway"},
+			{roots.CertificationInstallBase + `\f330a55401\bin\defenseclaw-gateway.exe`, "DefenseClawCertGateway_f330a55401"},
+			{roots.CertificationInstallBase + `\f330a55401\bin\hooks\0123456789abcdef\defenseclaw-hook.exe`, "DefenseClawCertGateway_f330a55401"},
+			{roots.CertificationInstallBase + `\f330a55401\nested\bin\defenseclaw-gateway.exe`, ""},
+			{roots.CertificationInstallBase + `\not-a-run\bin\defenseclaw-gateway.exe`, ""},
+			{`C:\Users\alice\Desktop\bin\defenseclaw-gateway.exe`, ""},
+		} {
+			t.Run(profile+"/"+tc.path, func(t *testing.T) {
+				if got := gatewayPeerServiceForExecutable(tc.path, roots); got != tc.want {
+					t.Fatalf("service = %q; want %q", got, tc.want)
+				}
+			})
+		}
 	}
 }

@@ -31692,7 +31692,21 @@ function Assert-DefenseClawTargetRuntimeProductionChildrenExclusive {
         $ProductionState,
         'ipc'
     )
+    $expectedCMOverlay = [IO.Path]::Combine($ProductionState, 'env_config.json')
     foreach ($child in $Children) {
+        # CM owns this shared overlay even when no production deployment is
+        # installed. Allow its presence, but never consume or remove it here.
+        if (-not (Test-DefenseClawStandaloneProfile) -and
+            $child -is [IO.FileInfo] -and
+            -not ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+            [string]::Equals(
+                [IO.Path]::GetFullPath([string]$child.FullName),
+                $expectedCMOverlay,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            Assert-DefenseClawNoReparsePath -Path ([string]$child.FullName)
+            continue
+        }
         if (-not [string]::Equals(
                 [IO.Path]::GetFullPath(
                     [string]$child.FullName
