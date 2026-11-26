@@ -294,7 +294,7 @@ type refWord struct {
 	text   string
 	static bool
 	colon  bool
-	folder bool // an expandable string of literal text and $HOME / $PWD / $env: parts
+	folder bool // an expandable string of literal text and $HOME / $PWD / $env: parts, or one such variable
 }
 
 // The reference below is an independent statement of the table in
@@ -355,7 +355,13 @@ func refWordOf(e Expr, colon bool) refWord {
 		}
 		return refWord{folder: folder && vars > 0}
 	}
-	return refWord{colon: colon} // numbers, lists, variables, fused atoms, ...: uncertain
+	if v, ok := e.(*Variable); ok && !colon {
+		// An environment variable, $HOME or $PWD alone is one folder word too
+		// (an environment value is one string, rel-1-0-10:GAP-1556).
+		n := strings.ToLower(v.Name)
+		return refWord{folder: !v.Splat && n != "" && (strings.ToLower(v.Scope) == "env" || v.Scope == "" && (n == "home" || n == "pwd"))}
+	}
+	return refWord{colon: colon} // numbers, lists, other variables, fused atoms, ...: uncertain
 }
 
 // refArgv models the native argv of a host command from its elements: switches

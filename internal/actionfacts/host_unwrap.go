@@ -480,16 +480,22 @@ func cmdJoinPayload(words []string) (string, bool) {
 // launcherWordsArePlain reports a launcher call whose words are switches and
 // string words only. A colon-glued switch value, a number literal or any other
 // expression is not reproduced as the native argv the launcher receives, so such
-// a call is not unwrapped.
+// a call is not unwrapped. One variable is: the value of -WorkingDirectory
+// ($env:X, psparse.FolderValueWord), which the caller's shell expands to the
+// one folder word the launcher receives. The reading moves to it as written
+// (launcherWorkingDirectory: Set-Location -LiteralPath $env:X), a folder the
+// gateway cannot know, so the script's relative paths keep the hook folder's
+// reading and are marked as in an unresolved folder; that launcher had no
+// reading at all before (rel-1-0-10:GAP-1556).
 func launcherWordsArePlain(command *psparse.Command) bool {
-	for _, element := range command.Elements {
+	for index, element := range command.Elements {
 		switch typed := element.(type) {
 		case *psparse.Parameter:
 			if typed.HasColon || typed.Colon != nil {
 				return false
 			}
 		case *psparse.Arg:
-			if _, isString := typed.Value.(*psparse.StringLit); !isString {
+			if _, isString := typed.Value.(*psparse.StringLit); !isString && !launcherWorkingDirectoryVariable(command, index) {
 				return false
 			}
 		case *psparse.StringLit:
@@ -498,6 +504,21 @@ func launcherWordsArePlain(command *psparse.Command) bool {
 		}
 	}
 	return true
+}
+
+// launcherWorkingDirectoryVariable reports a launcher word that is a variable
+// a folder word may be ($env:X, $HOME: psparse.FolderValueWord) given as the
+// value of a -WorkingDirectory switch (-wd or an abbreviation) right before it.
+func launcherWorkingDirectoryVariable(command *psparse.Command, index int) bool {
+	if index == 0 {
+		return false
+	}
+	switchWord, isParameter := command.Elements[index-1].(*psparse.Parameter)
+	if !isParameter || !workingDirectoryWord("-"+switchWord.Name) {
+		return false
+	}
+	variable, isVariable := command.Elements[index].(*psparse.Arg).Value.(*psparse.Variable)
+	return isVariable && psparse.FolderValueWord(variable)
 }
 
 // launcherNestedScripts is psparse.ExtractNestedScripts of script, with the

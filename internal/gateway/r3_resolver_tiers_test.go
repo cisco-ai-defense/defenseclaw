@@ -52,7 +52,6 @@ type r3TierRoute struct {
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
 	"GAP-0898": "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-1556": "an unknown PowerShell environment folder stays Maybe (S4-R3)",
 }
 
 // r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and
@@ -396,13 +395,37 @@ func r3WindowsTierRows() []r3TierRow {
 		// file system to expand them: TestGAP1553ShortNameTiersNative.
 		{gap: "GAP-1191 dot-dot state write", command: `Set-Content -Path ..\.defenseclaw\config.yaml -Value x`, cwd: `C:\Users\alice\project`,
 			want: `ctl:Set-Content -Path C:\Users\alice\.defenseclaw\config.yaml -Value x`},
+		// GAP-1556: a write after a move to $env:X (Set-Location, pwsh -wd,
+		// either inside pwsh -Command) lands in a folder the gateway cannot
+		// know; a named key or credential file there is the unknown tier
+		// (lead ruling 2026-11-26, option 2). Every other name stays allow
+		// (the fp rows below).
 		{gap: "GAP-1556 $env:X folder, keys", command: `Set-Location $env:X; Set-Content -Path authorized_keys -Value x`, cwd: `C:\Users\alice\project`, want: "maybe"},
+		{gap: "GAP-1556 -wd $env:X, keys", command: `pwsh -NoProfile -wd $env:X -Command "Set-Content -Path authorized_keys -Value m"`, cwd: `C:\Users\alice\project`, want: "maybe"},
+		{gap: "GAP-1556 $env:X in pwsh -Command, keys", command: `pwsh -NoProfile -Command "Set-Location $env:X; Set-Content -Path authorized_keys -Value m"`, cwd: `C:\Users\alice\project`, want: "maybe"},
+		{gap: "GAP-1556 $env:X folder, keys2 append", command: `Set-Location $env:X; Add-Content -Path authorized_keys2 -Value x`, cwd: `C:\Users\alice\project`, want: "maybe"},
+		{gap: "GAP-1556 $env:X folder, key name in upper case", command: `Set-Location $env:X; Set-Content -Path AUTHORIZED_KEYS -Value x`, cwd: `C:\Users\alice\project`, want: "maybe"},
+		{gap: "GAP-1556 $env:X folder, private key", command: `Set-Location $env:X; Set-Content -Path id_ed25519 -Value x`, cwd: `C:\Users\alice\project`, want: "maybe"},
+		{gap: "GAP-1556 -wd $env:X, git credentials", command: `pwsh -NoProfile -wd $env:X -Command "Set-Content -Path .git-credentials -Value m"`, cwd: `C:\Users\alice\project`, want: "maybe"},
+		{gap: "GAP-1556 $env:X in pwsh -Command, key in .ssh", command: `pwsh -NoProfile -Command "Set-Location $env:X; Set-Content -Path .ssh\id_rsa -Value m"`, cwd: `C:\Users\alice\project`, want: "maybe"},
 		{gap: "GAP-1156 cd in a function body", command: `function g { cd .defenseclaw }; g; Set-Content -Path config.yaml -Value x`, cwd: `C:\Users\alice`, want: "maybe", needsHome: true},
 		// PowerShell reads localhost: as a drive name; the effects reading of
 		// the key file behind it is maybe (was allow).
 		{gap: "GAP-1671 localhost:/// key write", command: `Set-Content -Path localhost:///C:/Users/alice/.ssh/authorized_keys -Value k`, cwd: `C:\Users\alice\project`,
 			want: "maybe"},
 		{gap: "GAP-1556 fp: unknown folder, ordinary name", command: `Set-Location $env:X; Set-Content -Path notes.txt -Value x`, cwd: `C:\Users\alice\project`, want: "allow"},
+		// The GAP-1556 repro names config.yaml, a file of every project: no
+		// raise after $env:X (balanced defaults). That is the documented
+		// limit of the hook (the gateway never sees the agent's environment);
+		// GAP-1556 stays open for it.
+		{gap: "GAP-1556 limit: -wd $env:X, config.yaml", command: `pwsh -NoProfile -wd $env:X -Command "Set-Content -Path config.yaml -Value m"`, cwd: `C:\Users\alice\project`, want: "allow"},
+		{gap: "GAP-1556 limit: $env:X folder, config.yaml", command: `Set-Location $env:X; Set-Content -Path config.yaml -Value m`, cwd: `C:\Users\alice\project`, want: "allow"},
+		{gap: "GAP-1556 limit: $env:X in pwsh -Command, config.yaml", command: `pwsh -NoProfile -Command "Set-Location $env:X; Set-Content -Path config.yaml -Value m"`, cwd: `C:\Users\alice\project`, want: "allow"},
+		{gap: "GAP-1556 fp: $env:X folder, settings.json", command: `Set-Location $env:X; Set-Content -Path settings.json -Value x`, cwd: `C:\Users\alice\project`, want: "allow"},
+		{gap: "GAP-1556 fp: $env:X folder, README.md", command: `Set-Location $env:X; Set-Content -Path README.md -Value x`, cwd: `C:\Users\alice\project`, want: "allow"},
+		{gap: "GAP-1556 fp: $env:X folder, package.json", command: `Set-Location $env:X; Set-Content -Path package.json -Value x`, cwd: `C:\Users\alice\project`, want: "allow"},
+		{gap: "GAP-1556 fp: -wd $env:X, .env.example", command: `pwsh -NoProfile -wd $env:X -Command "Set-Content -Path .env.example -Value m"`, cwd: `C:\Users\alice\project`, want: "allow"},
+		{gap: "GAP-1556 fp: a key-like name that is another file", command: `Set-Location $env:X; Set-Content -Path authorized_keys.bak -Value x`, cwd: `C:\Users\alice\project`, want: "allow"},
 	}
 }
 
