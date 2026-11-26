@@ -507,11 +507,6 @@ type textWalker struct {
 	cur     *jnode
 	curKey  string
 	payload int
-	// skipped is the bytes of the strings the walker does not read: skip
-	// scalars (walkSkipScalar: ids, encrypted_content, signatures) and
-	// binary media (mediaValue). A stream snapshot spends a parked run by
-	// them, never by the text it repeats (rel-1-0-10:GAP-2224).
-	skipped int
 }
 
 // callHolderKeys are the fields whose object is a tool call or a tool
@@ -593,7 +588,6 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 	switch n.kind {
 	case 's':
 		if w.payload == 0 && walkSkipScalar[normKey(key)] {
-			w.skipped += len(n.s)
 			return
 		}
 		if texts, ok := w.replyTextMedia(key, n.s); ok {
@@ -603,7 +597,6 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 			return
 		}
 		if w.mediaValue(key, n.s) {
-			w.skipped += len(n.s)
 			return
 		}
 		if seg := w.add(n.s); seg != "" && w.redact != nil && w.turn >= 0 {
@@ -1100,10 +1093,6 @@ type replyScan struct {
 	// Ambiguous is why the reply can be read two ways ("" when it cannot):
 	// the reply takes the fail mode, as an ambiguous request does.
 	Ambiguous string
-	// Skipped is the bytes of the strings the walker skipped: skip scalars
-	// (an encrypted_content, an id) and binary media (an image result, a
-	// base64 document).
-	Skipped int
 }
 
 // scanReplyJSON reads one JSON reply or stream event. With stream set, the
@@ -1121,7 +1110,7 @@ func scanReplyJSON(data []byte, stream bool, max int) (replyScan, error) {
 	}
 	w := &textWalker{reply: true, stream: stream}
 	w.walk(root, "", 0)
-	return replyScan{Type: root.str("type"), Segments: w.segs, Calls: w.calls, Ambiguous: w.ambiguous, Skipped: w.skipped}, nil
+	return replyScan{Type: root.str("type"), Segments: w.segs, Calls: w.calls, Ambiguous: w.ambiguous}, nil
 }
 
 // scanReplyBody reads a buffered reply: one JSON value, or newline-delimited

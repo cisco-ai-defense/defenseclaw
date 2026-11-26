@@ -6867,7 +6867,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				}
 			}
 			before := accumulated.Len()
-			accumulated.AddEvent(pieces, len(payload))
+			accumulated.AddAll(pieces)
 			frameHasText = frameHasText || accumulated.Len() > before
 			if len(toolCallDeltas) > 0 {
 				for _, delta := range toolCallDeltas {

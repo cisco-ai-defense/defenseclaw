@@ -61,6 +61,9 @@ type passthroughStream struct {
 	bedrock        *bedrockEventStreamText
 	// ndjson: a native Ollama stream, one JSON event per line (GAP-0370).
 	ndjson bool
+	// eventTyped: the last event eventContent read added typed model text
+	// (rel-1-0-10:GAP-2224).
+	eventTyped bool
 }
 
 // snapshotEvent reports an event whose content repeats what earlier events
@@ -81,6 +84,7 @@ func snapshotEvent(typ string) bool {
 // It returns why the event can be read two ways (a repeated or differently
 // spelled key), "" when it cannot.
 func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *responseText, model *string) string {
+	s.eventTyped = false
 	if !ev.HasData {
 		return ""
 	}
@@ -96,20 +100,13 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	sc, err := scanReplyJSON([]byte(data), true, s.p.maxBodyValues())
 	if err != nil {
 		// Not JSON: the text itself is the content.
-		acc.AddEvent(withWalkerPieces(typed, []string{data}), len(data))
+		acc.AddAll(withWalkerPieces(typed, []string{data}))
 		return ""
 	}
 	calls.AddCalls(sc.Calls)
 	segs := sc.Segments
-	wire := len(data)
 	if snapshotEvent(sc.Type) {
-		// A snapshot repeats what earlier events carried, so its repeated
-		// text does not spend a parked run's budget: an OpenAI .done event
-		// repeats the very part text that is parked. The bytes the walker
-		// skips do (an image_generation_call result or a reasoning item's
-		// encrypted_content, which only output_item.done carries), as rel
-		// sends them (rel-1-0-10:GAP-2224).
-		wire = sc.Skipped
+		// A snapshot repeats what earlier events carried.
 		kept := segs[:0:0]
 		for _, seg := range segs {
 			if !strings.Contains(acc.String(), seg) {
@@ -118,8 +115,19 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 		}
 		segs = kept
 	}
-	acc.AddEvent(withWalkerPieces(typed, segs), wire)
+	acc.AddAll(withWalkerPieces(typed, segs))
+	s.eventTyped = piecesHaveText(typed)
 	return sc.Ambiguous
+}
+
+// piecesHaveText reports a piece with model text.
+func piecesHaveText(ps []responsePiece) bool {
+	for _, p := range ps {
+		if p.text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *passthroughStream) copyHeaders() {
@@ -260,6 +268,7 @@ func (s *passthroughStream) run() {
 	var queueAt []time.Time    // when each event of the queue was read
 	var queueMark []streamMark // the content blocks each event of the queue opens or closes
 	var queueText []int        // the text length once each event of the queue was read (GAP-1306)
+	var queueUntexted []int    // the size of each event of the queue that added no typed model text (GAP-2224)
 	// heldCut: the held bound behind an open token or digit run was passed;
 	// only the first heldCut events may go out, the rest holds the run
 	// (GAP-1306). -1: no cut.
@@ -320,9 +329,9 @@ func (s *passthroughStream) run() {
 			released += len(ev)
 			sent.add(queueMark[i])
 		}
-		queue, queueAt, queueMark, queueText = queue[n:], queueAt[n:], queueMark[n:], queueText[n:]
+		queue, queueAt, queueMark, queueText, queueUntexted = queue[n:], queueAt[n:], queueMark[n:], queueText[n:], queueUntexted[n:]
 		if len(queue) == 0 {
-			queue, queueAt, queueMark, queueText = nil, nil, nil, nil
+			queue, queueAt, queueMark, queueText, queueUntexted = nil, nil, nil, nil, nil
 		}
 		relN -= n
 		if flusher != nil {
@@ -502,12 +511,22 @@ func (s *passthroughStream) run() {
 			// streams behind it), all go out as rel does, with no verdict: a
 			// benign answer over the bound after thinking that ends in a
 			// number is not cut. A run parked at a block end or a tool switch
-			// keeps the verdict (GAP-2218).
-			if k := heldBeforeRun(queueText, accumulated.OpenRunFrom()); k > 0 && queueBytes-bufferedBytes(queue[:k]) <= streamSecretMaxHeld {
+			// keeps the verdict (GAP-2218), unless it is over the bound only
+			// by the events read while it was parked that carry no model text
+			// (server tool results, an image, encrypted reasoning): those go
+			// out as rel sends them, with no verdict (rel-1-0-10:GAP-2224).
+			// Below the bound the park holds the run as before; non-text
+			// bytes never end it.
+			k := heldBeforeRun(queueText, accumulated.OpenRunFrom())
+			runBytes := queueBytes - bufferedBytes(queue[:k])
+			if k > 0 && runBytes <= streamSecretMaxHeld {
 				heldCut = k
 				return false, true
 			}
 			if o.answerParkedOnly {
+				return false, true
+			}
+			if o.parkedOnly && runBytes-sumInts(queueUntexted[k:]) <= streamSecretMaxHeld {
 				return false, true
 			}
 			return false, secretBound(bounded.Bytes, streamRunHeldWhy)
@@ -705,6 +724,11 @@ func (s *passthroughStream) run() {
 		queue = append(queue, ev.Raw)
 		queueAt = append(queueAt, lastRead)
 		queueText = append(queueText, accumulated.Len())
+		untexted := 0
+		if sseCalls != nil && !s.eventTyped {
+			untexted = len(ev.Raw)
+		}
+		queueUntexted = append(queueUntexted, untexted)
 		mark := noStreamMark
 		switch {
 		case s.bedrock != nil:
@@ -923,7 +947,7 @@ read:
 			var events []sseEvent
 			if s.bedrock != nil {
 				textBefore := accumulated.Len()
-				accumulated.AddEvent(s.bedrock.Feed(chunk), len(chunk))
+				accumulated.AddAll(s.bedrock.Feed(chunk))
 				if accumulated.Len()-textBefore > streamLineMaxText {
 					// One read completes at most the frame in progress plus
 					// 4 KiB of others, so the text it adds is that frame's.
