@@ -434,7 +434,9 @@ func claudeCodeWindowsRehomedHandlersReplaced(t *testing.T) {
 	if err := verifyClaudeCodeHookMatrixForSetup(settings["hooks"].(map[string]interface{}), currentCommand, currentArgs, hooksDir, opts); err != nil {
 		t.Fatalf("current hook matrix: %v", err)
 	}
-	t.Logf("old-home launcher still named after reconcile: %v", strings.Contains(decoded, oldHome))
+	if strings.Contains(decoded, oldHome) {
+		t.Fatalf("an old-home launcher registration remains after the reconcile: %s", after)
+	}
 }
 
 func mustMarshalNoEscape(t *testing.T, value interface{}) []byte {
@@ -459,6 +461,10 @@ func gap0322WindowsRegistrationMatrixRefusesTampering(t *testing.T, command stri
 	dataDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(launcher))), ".defenseclaw")
 	opts := SetupOpts{DataDir: dataDir, HookExecutable: launcher}
 	hooksDir := filepath.Join(dataDir, "hooks")
+	// Setup installs the guard chain next to the launcher before it renders.
+	if err := ensureClaudeChain(launcher); err != nil {
+		t.Fatalf("install the guard chain: %v", err)
+	}
 	hooks := map[string]interface{}{}
 	if err := appendClaudeCodeHookMatrixForSetup(hooks, command, args, opts); err != nil {
 		t.Fatal(err)

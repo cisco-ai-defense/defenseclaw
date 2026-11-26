@@ -5612,7 +5612,9 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	}
 	if strings.Contains(string(got), "xhooks") || strings.Contains(string(got), "x"+windowsHookBinaryName) || strings.Contains(string(got), "hooks.state") ||
 		!bytes.Contains(got, []byte("# personal")) {
-		t.Fatalf("edited hooks or trust state survived teardown: %s", got)
+		t.Fatalf("edited hooks or trust state survived teardown (edited path %v, trust state %v, hook tables %d, personal %v)",
+			strings.Contains(string(got), "xhooks") || strings.Contains(string(got), "x"+windowsHookBinaryName),
+			strings.Contains(string(got), "hooks.state"), strings.Count(string(got), "[[hooks."), bytes.Contains(got, []byte("# personal")))
 	}
 }
 
