@@ -6709,11 +6709,7 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 			continue
 		}
 		if !strings.HasPrefix(args[i], "-") {
-			path := args[i]
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(cwd, path)
-			}
-			return filepath.Clean(path)
+			return OperandPath(args[i], cwd)
 		}
 	}
 	return ""

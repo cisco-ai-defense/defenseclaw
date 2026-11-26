@@ -192,6 +192,9 @@ func TestFIX2223ERound2WriterFamiliesActor(t *testing.T) {
 		{"install-thread-cwd-parent", "install /tmp/k /proc/thread-self/cwd/../.ssh/" + key},
 		{"rsync-thread-cwd-parent", "rsync /tmp/k /proc/thread-self/cwd/../.ssh/" + key},
 		{"rsync-cwd-below", "cd /sandbox && rsync /tmp/k /proc/self/cwd/.ssh/" + key},
+		{"mv-target-dir", "mv -t /proc/self/cwd/../.ssh /tmp/" + key},
+		{"install-target-dir", "install -t /proc/self/cwd/../.ssh /tmp/" + key},
+		{"rsync-target-dir", "rsync -a /tmp/" + key + " /proc/self/cwd/../.ssh/"},
 	}
 	for _, pack := range []string{"default", "strict"} {
 		t.Run(pack, func(t *testing.T) {
