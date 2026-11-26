@@ -279,9 +279,11 @@ func traditionalTarCreateArchiveFile(argv []string) (file string, created, compl
 	return argv[fileIndex], true, true
 }
 
-func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
-	parsed := parseOwnedPOSIXOptions(
-		command.Argv,
+// parseZipOptions is the option grammar of a zip argv (the program word
+// first) that classifyZipArchiveProducer and ReadsFolderTree read.
+func parseZipOptions(argv []string) ownedPOSIXOptionParse {
+	return parseOwnedPOSIXOptions(
+		argv,
 		exactOptionSet(
 			"-b", "-n", "-t", "-tt", "-x", "-i", "-P", "-O",
 			"--out", "--output-file",
@@ -292,6 +294,10 @@ func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
 		),
 		exactOptionSet("-h", "-hh", "--help"),
 	)
+}
+
+func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
+	parsed := parseZipOptions(command.Argv)
 	if parsed.preview {
 		command.Effect = EffectPreview
 		return

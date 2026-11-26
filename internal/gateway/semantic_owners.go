@@ -89,8 +89,11 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	},
 	"PATH-AWS-CREDS": {
 		equivalentAliases: []string{"PATH-WIN-AWS-CREDS"},
-		prerequisite:      pathOwnerPrerequisite(matchesAnyHomeAWSCredentials),
-		suppressFallback:  pathOwnerSafeNegative(matchesAWSCredentials, matchesActiveAWSCredentials),
+		prerequisite: pathOwnerPrerequisite(anySemanticPathMatcher(
+			matchesAnyHomeAWSCredentials,
+			credentialFolderTreeMatcher(actionfacts.CredentialFileAWS, true),
+		)),
+		suppressFallback: pathOwnerSafeNegative(matchesAWSCredentials, matchesActiveAWSCredentials),
 	},
 	"PATH-PASSWORD-CRACKER-POTFILE": {
 		prerequisite: passwordCrackerPotfileReadPrerequisite,
@@ -100,13 +103,19 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	},
 	"PATH-KUBE": {
 		equivalentAliases: []string{"PATH-WIN-KUBE-CONFIG"},
-		prerequisite:      pathOwnerPrerequisite(matchesAnyHomeKubeConfig),
-		suppressFallback:  pathOwnerSafeNegative(matchesKubeConfig, matchesActiveKubeConfig),
+		prerequisite: pathOwnerPrerequisite(anySemanticPathMatcher(
+			matchesAnyHomeKubeConfig,
+			credentialFolderTreeMatcher(actionfacts.CredentialFileKubeconfig, true),
+		)),
+		suppressFallback: pathOwnerSafeNegative(matchesKubeConfig, matchesActiveKubeConfig),
 	},
 	"PATH-DOCKER": {
 		equivalentAliases: []string{"PATH-NPMRC", "PATH-PYPIRC"},
-		prerequisite:      pathOwnerPrerequisite(matchesAnyHomePackageCredentialFile),
-		suppressFallback:  pathOwnerSafeNegative(matchesPackageCredentialFile, matchesActivePackageCredentialFile),
+		prerequisite: pathOwnerPrerequisite(anySemanticPathMatcher(
+			matchesAnyHomePackageCredentialFile,
+			credentialFolderTreeMatcher(actionfacts.CredentialFilePackageRegistry, true),
+		)),
+		suppressFallback: pathOwnerSafeNegative(matchesPackageCredentialFile, matchesActivePackageCredentialFile),
 	},
 	"PATH-GIT-CREDS": {
 		equivalentAliases: []string{
@@ -173,7 +182,10 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"secrets.cloud_credential_read": {
-		prerequisite:     pathOwnerPrerequisite(matchesContextualCloudCredentialFile),
+		prerequisite: pathOwnerPrerequisite(anySemanticPathMatcher(
+			matchesContextualCloudCredentialFile,
+			credentialFolderTreeMatcher(actionfacts.CredentialFileCloudCLI, false),
+		)),
 		suppressFallback: pathOwnerSafeNegative(matchesCloudCredentialFallbackCandidate, matchesContextualCloudCredentialFile),
 	},
 	"secrets.cloud_metadata_credential_read": {
@@ -579,6 +591,46 @@ func authoritativeSemanticSafeNegative(facts actionfacts.Facts) bool {
 
 type semanticPathMatcher func(actionfacts.Facts, actionfacts.PathFact) bool
 type semanticPathCandidate func(string) bool
+
+// anySemanticPathMatcher matches a path that one of matchers matches.
+func anySemanticPathMatcher(matchers ...semanticPathMatcher) semanticPathMatcher {
+	return func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		for _, matches := range matchers {
+			if matches(facts, candidate) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// credentialFolderTreeMatcher is the folder side of a credentials-file owner
+// (substrate-1:GAP-0995): a command that reads a folder with every file below
+// it (actionfacts.ReadsFolderTree: tar -c, zip -r, cp -r, rsync -a) reads the
+// credentials files in it, so its read of a credentials folder of a home that
+// holds a file of class (~/.aws, ~/.kube, ~/.docker, ~/.config/gcloud,
+// ~/.config/gh; actionfacts.CredentialFolderTreeHolds) is judged as the read
+// of that file, by the same rule. The home, its shared roots (.config) and a
+// project folder hold none: a backup of the home or of a project is no read
+// of a credentials folder. otherHomes, as for the file side of the AWS, kube
+// and registry owners, also takes the folder in the home of another account
+// (liveHomeRelative); the cloud CLI owner reads the home of the call only.
+func credentialFolderTreeMatcher(class actionfacts.CredentialFileClass, otherHomes bool) semanticPathMatcher {
+	return func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || !actionfacts.ReadsFolderTree(command) {
+			return false
+		}
+		relative, ok := contextualHomeRelative(facts, candidate)
+		if !ok && otherHomes {
+			value := canonicalSemanticPath(semanticPathValue(candidate))
+			if isAbsoluteSemanticPath(value) && !integrityPathHasFixtureSegment(value) {
+				relative, ok = liveHomeRelative(value)
+			}
+		}
+		return ok && actionfacts.CredentialFolderTreeHolds(relative, class)
+	}
+}
 
 func pathOwnerPrerequisite(matches semanticPathMatcher) semanticOwnerPrerequisite {
 	return func(facts actionfacts.Facts) bool {
