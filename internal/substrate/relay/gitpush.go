@@ -16,10 +16,12 @@ import "github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 // names GitCommand: the agent's user only packs the commit out of its
 // checkout (gitPackScript), the relay checks every object against its id
 // (git index-pack --strict) into a folder only the relay can write, and the
-// review and the push read and send only that copy, as the relay's user.
-// So the agent can neither show the review content other than what is
-// pushed, nor edit the refs the review reads, nor rewrite the push
-// repository's config between init and push (GAP-1073).
+// review and the push read and send only that copy, as the relay's user,
+// with an environment of the relay's own (gitRelayEnv: programs only root
+// can change, HOME in the relay's folder). So the agent can neither show
+// the review content other than what is pushed, nor edit the refs, config
+// or attributes the review reads, nor rewrite the push repository's config
+// between init and push (GAP-1073), nor have root run a program it wrote.
 const (
 	// GitCommand is the argv[0] of an exec request that asks a separated
 	// relay to run a git operation of its own: review OBJECTS URL COMMIT
@@ -47,13 +49,17 @@ const (
 // the only protocol (RV-T6A); so are every GIT_SSL_* variable (client
 // certificate and key, ciphers, version, CA), the proxy auth method, and
 // GIT_COMMON_DIR and GIT_ATTR_SOURCE, which would move the refs, config and
-// objects or the attributes the review reads (RV-T6B). g runs git.
+// objects or the attributes the review reads (RV-T6B). No attributes file
+// is read but the repository's own (core.attributesFile=/dev/null,
+// GIT_ATTR_NOSYSTEM): one in the agent's HOME or XDG_CONFIG_HOME could mark
+// every file binary ("-diff"), which empties the patch and the -G scans
+// (GAP-0795 H2). g runs git.
 const GitPrelude = `set -u
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE GIT_COMMON_DIR GIT_ATTR_SOURCE
 unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_CURL_VERBOSE GIT_ALLOW_PROTOCOL GIT_PROTOCOL_FROM_USER GIT_HTTP_PROXY_AUTHMETHOD GIT_ASKPASS SSH_ASKPASS
 for v in $(env | sed -n -e 's/^\(GIT_TRACE[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(GIT_SSL_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 GIT_ALLOW_PROTOCOL=https
-g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false -c credential.helper=` + kit.CredHelper + ` -c credential.useHttpPath=false -c http.sslCAInfo=` + kit.TrustBundle + ` "$@"; }
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_ALLOW_PROTOCOL=https
+g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false -c credential.helper=` + kit.CredHelper + ` -c credential.useHttpPath=false -c http.sslCAInfo=` + kit.TrustBundle + ` "$@"; }
 `
 
 // gitRefuseAlternates refuses a checkout ($objs) that borrows objects
@@ -82,15 +88,17 @@ export GIT_DIR=$snap/g
 // file name can end a part early. A merge is diffed against its first
 // parent (--diff-merges=first-parent, git 2.31+), so content that only the
 // merge commit adds is listed, flagged and scanned. $ph and $rp are the
-// placeholder patterns (git -G, extended regular expressions); $s/pack
-// and $s/snapshot are written before.
+// placeholder patterns (git -G, extended regular expressions); the scans
+// read binary files as text (--text), so a NUL byte in a file does not hide
+// a placeholder from the flags (GAP-0795). $s/pack and $s/snapshot are
+// written before.
 const gitReviewTail = `{ printf '%s\n' "$c"; cut -f1 "$s/refs" | sort -u | g cat-file --batch-check='%(objectname) %(objecttype)' |
   awk '$2 == "commit" || $2 == "tag" { print "^" $1 }'; } > "$s/range" || exit 6
 g rev-list --count --stdin < "$s/range" > "$s/commits" || exit 6
 names() { g log --diff-merges=first-parent --format= --name-only -z --no-renames "$@" --stdin < "$s/range"; }
 names > "$s/file" || exit 6
-names -G"$ph" > "$s/placeholder" || exit 6
-names -G"$rp" > "$s/replaced" || exit 6
+names --text -G"$ph" > "$s/placeholder" || exit 6
+names --text -G"$rp" > "$s/replaced" || exit 6
 : > "$s/patch"
 [ "$(cat "$s/commits")" = 0 ] || g log -p --diff-merges=first-parent --no-color --no-ext-diff --no-textconv --no-renames --format= -U0 --stdin < "$s/range" > "$s/patch" || exit 6
 for f in commits file placeholder replaced patch refs snapshot pack; do

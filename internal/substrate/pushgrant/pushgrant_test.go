@@ -129,3 +129,17 @@ func TestGAP1073ClientOlderLeader(t *testing.T) {
 		t.Fatal("no leader client must be an error")
 	}
 }
+
+// GAP-1073 (RV-REG nit c): a bracketed IPv6 address with a port kept
+// "::1]:443", so a grant for it never matched the callout's host.
+func TestGAP1073HostForms(t *testing.T) {
+	for in, want := range map[string]string{
+		"[::1]:443": "::1", "[::1]": "::1", "::1": "::1", "[FE80::1]:8443": "fe80::1",
+		"Git.Example.Test:443": "git.example.test", "git.example.test.": "git.example.test", " github.com ": "github.com",
+		"[::1]x": "[::1]x",
+	} {
+		if got := Host(in); got != want {
+			t.Errorf("Host(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -26,8 +26,11 @@ import (
 
 // PATH may name any folder: every hook and settings file names
 // DefenseClaw's programs by absolute path, and every process the relay
-// starts, which alone looks a name up on PATH, runs as the agent's user, so
-// a PATH entry the agent can write gives it nothing it does not have. HOME
+// starts with this PATH runs as the agent's user, so a PATH entry the agent
+// can write gives it nothing it does not have. A separated relay's own git
+// review and push run as root with a PATH of their own: only the folders of
+// this one that root alone can write, and programs it checks are root's
+// (relay gitRelayEnv, GAP-0795). HOME
 // is the image's; an ActorTemplate may not move it (GAP-0374,
 // controller.ContainerSpecRefusal). VIRTUAL_ENV and UV_PYTHON_INSTALL_DIR
 // (the uv environment of the OpenShell harness base, GAP-0447) name

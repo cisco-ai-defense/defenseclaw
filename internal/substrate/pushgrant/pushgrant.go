@@ -118,13 +118,17 @@ func ValidID(id string) bool { return idRE.MatchString(id) }
 
 // Host is the form hosts are compared in: lower case, no trailing dot, no
 // brackets and no port (the callout sees no port in the host it decides).
+// A bracketed IPv6 address loses its port too ("[::1]:443" is "::1").
 func Host(h string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
-	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") && strings.Count(h, ":") == 1 {
-		h = h[:i]
+	if rest, ok := strings.CutPrefix(h, "["); ok {
+		if a, port, ok := strings.Cut(rest, "]"); ok && (port == "" || strings.HasPrefix(port, ":")) {
+			return strings.TrimSuffix(a, ".")
+		}
+	} else if strings.Count(h, ":") == 1 {
+		h, _, _ = strings.Cut(h, ":")
 	}
-	h = strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(h, "["), "]"), ".")
-	return h
+	return strings.TrimSuffix(h, ".")
 }
 
 // Repo is the form repository paths are compared in: no leading or

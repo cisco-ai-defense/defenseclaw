@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -49,9 +50,10 @@ var gitTestWrap string
 // in-actor scripts. A separated relay runs the operation with its fixed
 // scripts: only the pack of the commit is made as the agent's user, in
 // dir; everything else runs as the relay's user in a folder only the
-// relay can write, with the relay's environment (never the request's, so
-// nothing the launcher or the agent sets reaches a root process). The
-// exit code is the script's (6 to 14), 2 for a bad request.
+// relay can write, with an environment of its own (gitRelayEnv: never the
+// request's or the image's, so nothing the launcher or the agent sets or
+// writes reaches a root process). The exit code is the script's (6 to 14),
+// 2 for a bad request.
 func runGitOp(ctx context.Context, argv []string, dir string, env map[string]string, sp *separation, stdout, stderr io.Writer) int {
 	if sp == nil || sp.cred == nil {
 		fmt.Fprintln(stderr, "the relay runs as the agent's user")
@@ -64,8 +66,20 @@ func runGitOp(ctx context.Context, argv []string, dir string, env map[string]str
 	if len(argv) < 2 {
 		return bad("no operation")
 	}
+	if argv[1] == "discard" && len(argv) == 3 {
+		root, _ := gitScratchRoot()
+		if snap, ok := gitSnapshot(root, argv[2]); ok {
+			_ = os.RemoveAll(snap)
+		}
+		return 0
+	}
 	root, err := gitScratchRoot()
-	if err != nil && argv[1] != "discard" {
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 6
+	}
+	renv, err := gitRelayEnv(ctx)
+	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 6
 	}
@@ -75,18 +89,13 @@ func runGitOp(ctx context.Context, argv []string, dir string, env map[string]str
 		if !filepath.IsAbs(objs) || !strings.HasPrefix(url, "https://") || !gitCommitRE.MatchString(c) {
 			return bad("review OBJECTS URL COMMIT PLACEHOLDER REPLACED")
 		}
-		return gitReview(ctx, root, objs, url, c, args[3], args[4], dir, env, sp, stdout, stderr)
+		return gitReview(ctx, renv, root, objs, url, c, args[3], args[4], dir, env, sp, stdout, stderr)
 	case op == "push" && len(args) == 8:
 		snap, ok := gitSnapshot(root, args[0])
 		if !ok || !strings.HasPrefix(args[1], "https://") || !gitCommitRE.MatchString(args[2]) {
 			return bad("push SNAPSHOT URL COMMIT BRANCH LABEL PREV SEEN PACK")
 		}
-		return gitRelayRun(ctx, snap, GitPushScript, nil, stdout, stderr, append([]string{snap}, args[1:]...)...)
-	case op == "discard" && len(args) == 1:
-		if snap, ok := gitSnapshot(root, args[0]); ok {
-			_ = os.RemoveAll(snap)
-		}
-		return 0
+		return gitRelayRun(ctx, renv, snap, GitPushScript, nil, stdout, stderr, append([]string{snap}, args[1:]...)...)
 	}
 	return bad("unknown operation or arguments")
 }
@@ -96,7 +105,7 @@ func runGitOp(ctx context.Context, argv []string, dir string, env map[string]str
 // checked object by object into the relay's repository, then the review of
 // that repository only. On success the folder stays for the push (its
 // name is the "snapshot" frame); else it goes.
-func gitReview(ctx context.Context, root, objs, url, c, ph, rp, dir string, env map[string]string, sp *separation, stdout, stderr io.Writer) int {
+func gitReview(ctx context.Context, renv []string, root, objs, url, c, ph, rp, dir string, env map[string]string, sp *separation, stdout, stderr io.Writer) int {
 	sweepGitSnapshots(root)
 	R, err := os.MkdirTemp(root, "gp-")
 	if err != nil {
@@ -109,7 +118,7 @@ func gitReview(ctx context.Context, root, objs, url, c, ph, rp, dir string, env 
 			_ = os.RemoveAll(R)
 		}
 	}()
-	if code := gitRelayRun(ctx, R, gitRelayInitScript, nil, io.Discard, stderr, R, url); code != 0 {
+	if code := gitRelayRun(ctx, renv, R, gitRelayInitScript, nil, io.Discard, stderr, R, url); code != 0 {
 		return code
 	}
 	refs, err := os.ReadFile(filepath.Join(R, "refs"))
@@ -117,10 +126,10 @@ func gitReview(ctx context.Context, root, objs, url, c, ph, rp, dir string, env 
 		fmt.Fprintln(stderr, err.Error())
 		return 6
 	}
-	if code := gitSnapshotPack(ctx, R, objs, c, refs, dir, env, sp, stderr); code != 0 {
+	if code := gitSnapshotPack(ctx, renv, R, objs, c, refs, dir, env, sp, stderr); code != 0 {
 		return code
 	}
-	if code := gitRelayRun(ctx, R, gitRelayReviewScript, nil, stdout, stderr, R, url, c, ph, rp, filepath.Base(R)); code != 0 {
+	if code := gitRelayRun(ctx, renv, R, gitRelayReviewScript, nil, stdout, stderr, R, url, c, ph, rp, filepath.Base(R)); code != 0 {
 		return code
 	}
 	ok = true
@@ -131,7 +140,7 @@ func gitReview(ctx context.Context, root, objs, url, c, ph, rp, dir string, env 
 // origin's refs the checkout holds) into index-pack, run as the relay's
 // user in R/g. The agent's exit codes 12 (alternates) and 13 (missing
 // objects) pass through; a pack index-pack refuses is ExitGitObjects.
-func gitSnapshotPack(ctx context.Context, R, objs, c string, refs []byte, dir string, env map[string]string, sp *separation, stderr io.Writer) int {
+func gitSnapshotPack(ctx context.Context, renv []string, R, objs, c string, refs []byte, dir string, env map[string]string, sp *separation, stderr io.Writer) int {
 	ids := map[string]bool{}
 	for _, l := range strings.Split(string(refs), "\n") {
 		if id, _, ok := strings.Cut(l, "\t"); ok && gitCommitRE.MatchString(id) {
@@ -168,7 +177,7 @@ func gitSnapshotPack(ctx context.Context, R, objs, c string, refs []byte, dir st
 		return 6
 	}
 	lr := &io.LimitedReader{R: pack, N: maxGitSnapshot + 1}
-	icode := gitRelayRun(pctx, R, gitRelayIndexScript, lr, io.Discard, stderr, R)
+	icode := gitRelayRun(pctx, renv, R, gitRelayIndexScript, lr, io.Discard, stderr, R)
 	if icode != 0 || lr.N <= 0 {
 		cancel()
 	}
@@ -198,12 +207,12 @@ func gitSnapshotPack(ctx context.Context, R, objs, c string, refs []byte, dir st
 	return 0
 }
 
-// gitRelayRun runs script as the relay's own user in dir with the relay's
-// environment, TMPDIR in dir, git's prompts off.
-func gitRelayRun(ctx context.Context, dir, script string, stdin io.Reader, stdout, stderr io.Writer, args ...string) int {
-	cmd := exec.CommandContext(ctx, "sh", append([]string{"-c", gitTestWrap + script, "sh"}, args...)...)
+// gitRelayRun runs script as the relay's own user in dir: /bin/sh by its
+// path, the environment renv of gitRelayEnv, HOME and TMPDIR in dir.
+func gitRelayRun(ctx context.Context, renv []string, dir, script string, stdin io.Reader, stdout, stderr io.Writer, args ...string) int {
+	cmd := exec.CommandContext(ctx, gitRelayShell, append([]string{"-c", gitTestWrap + script, "sh"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TMPDIR="+dir, "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(slices.Clip(renv), "HOME="+dir, "TMPDIR="+dir)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	setProcessGroup(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
@@ -221,6 +230,118 @@ func gitRelayRun(ctx context.Context, dir, script string, stdin io.Reader, stdou
 	// Never an answer the launcher reads as an older or unseparated relay.
 	fmt.Fprintln(stderr, err.Error())
 	return 6
+}
+
+// gitRelayShell runs the relay's own scripts. It is named by its path:
+// the image PATH may name a folder the agent can write (GAP-0795 H1).
+const gitRelayShell = "/bin/sh"
+
+// gitSystemPath are the folders the relay's own runs look programs up in
+// after the image PATH's root-only folders (gitRelayEnv).
+var gitSystemPath = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+
+// gitRelayPrograms are the programs the relay's own scripts (gitpush.go)
+// and the kit's credential helper run by name.
+var gitRelayPrograms = []string{"git", "awk", "cat", "cp", "cut", "env", "mkdir", "mktemp", "rm", "sed", "sort", "tr", "wc"}
+
+// gitRelayEnv is the whole environment of the relay's own runs, as root
+// (GAP-0795 H1, H2): an allow-list, never the relay's environment with names
+// taken out. The image PATH may name a folder the agent can write, so PATH
+// keeps only folders that root alone can write (rootOnlyDir), the image's
+// first, then gitSystemPath; /bin/sh, every program of gitRelayPrograms
+// and git's own exec-path folder must resolve to root's files there, else
+// the operation is refused. The agent's HOME and any XDG_* or GIT_* name
+// stay out (git reads attributes and config from them); gitRelayRun sets
+// HOME and TMPDIR to the relay's 0700 folder. Locale C keeps the scripts'
+// sort and awk byte-wise.
+func gitRelayEnv(ctx context.Context) ([]string, error) {
+	var dirs []string
+	seen := map[string]bool{}
+	for _, d := range append(filepath.SplitList(os.Getenv("PATH")), gitSystemPath...) {
+		if r, ok := rootOnlyDir(d); ok && !seen[r] {
+			seen[r] = true
+			dirs = append(dirs, r)
+		}
+	}
+	if !rootOnlyFile(gitRelayShell) {
+		return nil, fmt.Errorf("the relay will not run git as root: %s is not a program only root can change", gitRelayShell)
+	}
+	var git string
+	for _, n := range gitRelayPrograms {
+		p, err := rootOnlyProgram(dirs, n)
+		if err != nil {
+			return nil, err
+		}
+		if n == "git" {
+			git = p
+		}
+	}
+	env := []string{"PATH=" + strings.Join(dirs, ":"), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0"}
+	cmd := exec.CommandContext(ctx, git, "--exec-path")
+	cmd.Env, cmd.Dir = append(slices.Clip(env), "HOME=/"), "/"
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("the relay will not run git as root: %s --exec-path: %v", git, err)
+	}
+	if xp := strings.TrimSpace(string(out)); xp == "" || !isRootOnlyDir(xp) {
+		return nil, fmt.Errorf("the relay will not run git as root: its program folder %q is not one only root can write", xp)
+	}
+	return env, nil
+}
+
+// rootOnlyDir is d with its links resolved when that folder and every one
+// above it are root's (rootOwnedChain) and d itself is writable by root
+// alone (a sticky folder such as /tmp lets anyone add a program).
+func rootOnlyDir(d string) (string, bool) {
+	if !filepath.IsAbs(d) {
+		return "", false
+	}
+	r, err := filepath.EvalSymlinks(d)
+	if err != nil || !isRootOnlyDir(r) {
+		return "", false
+	}
+	return r, true
+}
+
+// isRootOnlyDir reports r (links resolved) as a folder only root can write,
+// in a chain of root's folders.
+func isRootOnlyDir(r string) bool {
+	if !rootOwnedChain(r) {
+		return false
+	}
+	fi, err := os.Lstat(r)
+	return err == nil && fi.Mode().Perm()&0o022 == 0
+}
+
+// rootOnlyFile reports p, links resolved, as a regular file of root's,
+// writable by root alone, in a folder only root can write.
+func rootOnlyFile(p string) bool {
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return false
+	}
+	fi, err := os.Lstat(r)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == 0 && isRootOnlyDir(filepath.Dir(r))
+}
+
+// rootOnlyProgram is the file the shell runs for name, the first one in
+// dirs: it must be a program only root can change.
+func rootOnlyProgram(dirs []string, name string) (string, error) {
+	for _, d := range dirs {
+		p := filepath.Join(d, name)
+		if _, err := os.Lstat(p); err != nil {
+			continue
+		}
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm()&0o111 == 0 || !rootOnlyFile(p) {
+			return "", fmt.Errorf("the relay will not run git as root: %s is not a program only root can change", p)
+		}
+		return p, nil
+	}
+	return "", fmt.Errorf("the relay will not run git as root: no %s in a folder only root can write (%s)", name, strings.Join(dirs, ":"))
 }
 
 // gitScratchRoot is the relay's folder for review repositories: its own
