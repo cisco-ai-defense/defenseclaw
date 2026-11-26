@@ -2700,9 +2700,11 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 		if r.Op == RedirHeredoc || r.Op == RedirHereString {
 			hasStdin = true
 		}
-		// `sh < file`: with no script or -c operand, the interpreter reads its
-		// code from that file, which we cannot see (round 8 R, GAP-0132).
-		if r.Op == RedirRead && stdinFD(r) && !hasCodeOperand(args, entry.ShellCode) {
+		// `sh < file`, `sh <&3`, `sh 0<&3`: with no script or -c operand, the
+		// interpreter reads its code from that file or descriptor, which we
+		// cannot see (round 8 R, GAP-0132; a stdin redirect we do not model
+		// is one too, GAP-2214).
+		if r.Op != RedirHeredoc && r.Op != RedirHereString && stdinRedirect(r) && !hasCodeOperand(args, entry.ShellCode) {
 			hasStdin = true
 		}
 	}
@@ -2766,19 +2768,15 @@ func hasCodeOperand(args []Word, shell bool) bool {
 }
 
 // hasStdinSource reports that the command's standard input comes from a pipe,
-// a `<` redirect, a heredoc or a here-string.
+// a `<` redirect, a heredoc, a here-string or a stdin redirect we do not
+// model (`<&3`, `0<&3`, `<>`: stdinRedirect, GAP-2214).
 func hasStdinSource(c *Cmd) bool {
 	if c.PipeIn {
 		return true
 	}
 	for _, r := range c.Redirs {
-		switch r.Op {
-		case RedirHeredoc, RedirHereString:
+		if r.Op == RedirHeredoc || r.Op == RedirHereString || stdinRedirect(r) {
 			return true
-		case RedirRead:
-			if stdinFD(r) {
-				return true
-			}
 		}
 	}
 	return false
