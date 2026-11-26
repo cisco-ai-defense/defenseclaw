@@ -167,11 +167,11 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("create %s mcp spool: %w", source.connector, err)
+		return withdrawMCPSpoolConnector(dir, fmt.Errorf("create %s mcp spool: %w", source.connector, err))
 	}
 	if setOwnership != nil {
 		if err := setOwnership(dir); err != nil {
-			return fmt.Errorf("set %s mcp spool protection: %w", source.connector, err)
+			return withdrawMCPSpoolConnector(dir, fmt.Errorf("set %s mcp spool protection: %w", source.connector, err))
 		}
 	}
 	keep := map[string]bool{}
@@ -291,6 +291,23 @@ func writeClaudeMCPProjectSkips(dir, name string, note ClaudeMCPProjectSkips, se
 		}
 	}
 	return writeSpoolBytes(dir, name, ".claude-mcp-skipped-*", data, setOwnership)
+}
+
+// withdrawMCPSpoolConnector retires every previous account record if the
+// directory cannot be prepared. Secure Client also leaves its separate
+// publication receipt invalid, even if removal and truncation both fail.
+func withdrawMCPSpoolConnector(dir string, cause error) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("enumerate previous MCP records: %w", err))
+	}
+	failed := cause
+	for _, entry := range entries {
+		if strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			failed = errors.Join(failed, withdrawMCPSpoolRecord(dir, entry.Name(), cause))
+		}
+	}
+	return failed
 }
 
 // withdrawMCPSpoolRecord takes back the record name after its update failed

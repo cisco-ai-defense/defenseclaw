@@ -658,6 +658,7 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 		return nil, status
 	}
 	fingerprintKey := mcpInventoryFingerprintKey(cfg)
+	useWindowsMCPSpool := goos == "windows" && cfg.SecureClientIntegration() && cfg.AIDiscovery.Enabled
 	// homes = daemon's own HOME (via ReadMCPServersForConnector) plus every
 	// configured user home (via direct-path readers). Empty homes list falls
 	// back to the single ReadMCPServersForConnector path.
@@ -704,8 +705,12 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 			// attributes, not identity: rotating the gateway token or updating a
 			// command, arguments, or URL must not replace the server and its tool
 			// history. Connector and home scope separate same-named entries owned
-			// by different agents or users.
+			// by different agents or users. The Windows Secure Client spool also
+			// separates project-scoped definitions without changing user-scope IDs.
 			identity := connectorName + "/" + homeScope + "/" + server.Name
+			if useWindowsMCPSpool && server.Project != "" {
+				identity += "/project/" + endpointInventoryScopeKey(server.Project)
+			}
 			if _, seen := seenComponent[identity]; seen {
 				continue
 			}
@@ -743,7 +748,7 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 	// The Secure Client Windows gateway cannot read user profiles. The hook
 	// enumerator already publishes their MCP definitions in a trusted spool;
 	// use it for inventory too, so observed tools can resolve their parents.
-	if goos == "windows" && cfg.SecureClientIntegration() && cfg.AIDiscovery.Enabled {
+	if useWindowsMCPSpool {
 		status = appendWindowsMCPSpoolInventory(cfg, seenConnector, func(name, home string, owner llmEventUser, servers []config.MCPServerEntry) {
 			owners[name+"\x00"+home] = owner
 			appendServers(name, endpointInventoryScopeKey(home), home, servers)

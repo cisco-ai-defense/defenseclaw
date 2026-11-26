@@ -430,7 +430,9 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	if cfg.SecureClientIntegration() {
 		// Secure Client inventory needs the same trusted server definitions as
 		// standalone admission. The gateway never opens users' profile files.
-		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; retried next cycle
+		if err := publishEnterpriseWindowsMCPServers(cfg, manifest, stderr); err != nil {
+			return fmt.Errorf("enterprise windows enumerate: publish MCP inventory: %w", err)
+		}
 	}
 	if standalone {
 		// The cache keeps signed-out users' last seen group membership;
@@ -1062,7 +1064,15 @@ func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterpriseh
 	incomplete := &mcpasuser.RefreshIncomplete{}
 	for _, spool := range mcpasuser.PublishedConnectors() {
 		dir := enterprisehooks.MCPSpoolDir(authorizationDir, spool.Connector)
-		err := enterpriseWindowsMCPSpoolWriter(dir, spool.Connector, manifest, enterpriseHookAuthorizationOwnershipSetter, logf)
+		publish := func() error {
+			return enterpriseWindowsMCPSpoolWriter(dir, spool.Connector, manifest, enterpriseHookAuthorizationOwnershipSetter, logf)
+		}
+		var err error
+		if cfg.SecureClientIntegration() {
+			err = enterprisehooks.PublishMCPInventorySpool(dir, publish, enterpriseHookAuthorizationOwnershipSetter)
+		} else {
+			err = publish()
+		}
 		if err == nil {
 			continue
 		}

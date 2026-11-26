@@ -6,6 +6,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"testing"
@@ -28,6 +30,9 @@ func TestEnterpriseWindowsMCPInventoryPublicationProfiles(t *testing.T) {
 		{"opensource", "opensource", "", true, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			previousOwner := enterpriseHookAuthorizationOwnershipSetter
+			enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+			t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = previousOwner })
 			previous := enterpriseWindowsMCPSpoolWriter
 			t.Cleanup(func() { enterpriseWindowsMCPSpoolWriter = previous })
 			writes := 0
@@ -52,5 +57,39 @@ func TestEnterpriseWindowsMCPInventoryPublicationProfiles(t *testing.T) {
 				t.Fatalf("spool writes=%d, want %d", writes, want)
 			}
 		})
+	}
+}
+
+func TestSecureClientWindowsEnumerateReportsMCPPublicationFailure(t *testing.T) {
+	previousConfig, previousEnumerator := enterpriseWindowsEnumerateConfigLoader, enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter, previousSpool := enterpriseWindowsEnumerateManifestWriter, enterpriseWindowsMCPSpoolWriter
+	previousOwner := enterpriseHookAuthorizationOwnershipSetter
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader, enterpriseWindowsEnumerateProfileEnumerator = previousConfig, previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter, enterpriseWindowsMCPSpoolWriter = previousWriter, previousSpool
+		enterpriseHookAuthorizationOwnershipSetter = previousOwner
+	})
+	cfg := &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	cfg.AIDiscovery.Enabled = true
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		return enterprisehooks.Manifest{Version: 1}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	enterpriseWindowsMCPSpoolWriter = func(_, _ string, _ enterprisehooks.Manifest, _ func(string) error, _ func(string, ...any)) error {
+		return errors.New("publication denied")
+	}
+	err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), io.Discard, filepath.Join(t.TempDir(), "targets.yaml"))
+	var incomplete *mcpasuser.RefreshIncomplete
+	if !errors.As(err, &incomplete) || len(incomplete.Connectors) != len(mcpasuser.PublishedConnectors()) {
+		t.Fatalf("cycle swallowed publication failures: %v", err)
+	}
+	for _, connector := range mcpasuser.PublishedConnectors() {
+		dir := enterprisehooks.MCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir), connector.Connector)
+		if err := enterprisehooks.ReadMCPInventoryPublication(dir, nil); err == nil {
+			t.Fatalf("%s receipt remained ready", connector.Connector)
+		}
 	}
 }

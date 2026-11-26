@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -53,8 +54,12 @@ func appendWindowsMCPSpoolInventory(
 			status.markIncomplete(name)
 			continue
 		}
+		if err := enterprisehooks.ReadMCPInventoryPublication(dir, validateManagedGuardianAuthorization); err != nil {
+			status.markIncomplete(name)
+			continue
+		}
 		servers, unreadable := enrolledSpoolMCPServers(dir, name, sid)
-		if unreadable != nil {
+		if unreadable != nil || enterprisehooks.ReadMCPInventoryPublication(dir, validateManagedGuardianAuthorization) != nil {
 			status.markIncomplete(name)
 			continue
 		}
