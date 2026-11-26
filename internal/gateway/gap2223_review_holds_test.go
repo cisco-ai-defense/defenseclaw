@@ -178,3 +178,32 @@ func TestFIX2223ELaptopProcessAliasParent(t *testing.T) {
 		})
 	}
 }
+
+func TestFIX2223ERound2WriterFamiliesActor(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX gateway")
+	}
+	key := "authorized_" + "keys"
+	rows := []struct{ name, command string }{
+		{"mv-cwd-parent", "mv /tmp/k /proc/self/cwd/../.ssh/" + key},
+		{"install-cwd-parent", "install /tmp/k /proc/self/cwd/../.ssh/" + key},
+		{"rsync-cwd-parent", "rsync /tmp/k /proc/self/cwd/../.ssh/" + key},
+		{"mv-thread-cwd-parent", "mv /tmp/k /proc/thread-self/cwd/../.ssh/" + key},
+		{"install-thread-cwd-parent", "install /tmp/k /proc/thread-self/cwd/../.ssh/" + key},
+		{"rsync-thread-cwd-parent", "rsync /tmp/k /proc/thread-self/cwd/../.ssh/" + key},
+		{"rsync-cwd-below", "cd /sandbox && rsync /tmp/k /proc/self/cwd/.ssh/" + key},
+	}
+	for _, pack := range []string{"default", "strict"} {
+		t.Run(pack, func(t *testing.T) {
+			api, actor, _, _ := gap0545API(t, "claudecode", pack)
+			for _, row := range rows {
+				t.Run(row.name, func(t *testing.T) {
+					action, _ := gap2227Hook(t, api, actor, sandboxauth.SandboxHome+"/app", row.command, true)
+					if action != "block" {
+						t.Errorf("actor %s: %s, want block", row.name, action)
+					}
+				})
+			}
+		})
+	}
+}
