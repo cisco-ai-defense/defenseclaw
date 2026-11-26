@@ -17,6 +17,7 @@ func TestMain(m *testing.M) {
 	if handled, exitCode := runCodexPolicyFixtureIfRequested(); handled {
 		os.Exit(exitCode)
 	}
+	ownNewObjectsAsTokenUser()
 	// Setup for Claude Code on Windows needs the hook guard a packaged install has.
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
