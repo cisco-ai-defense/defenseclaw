@@ -127,6 +127,7 @@ packaging/windows/DefenseClawEnterprise.psm1 text eol=lf
 # Windows checkouts too.
 internal/config/testdata/*.golden text eol=lf
 internal/openshell/packs/testdata/*.golden text eol=lf
+internal/openshell/profiles/testdata/*.yaml text eol=lf
 internal/openshell/sandboxapi/testdata/*.golden text eol=lf
 
 # enterprise bundle CLI goldens are compared byte-for-byte with the command
