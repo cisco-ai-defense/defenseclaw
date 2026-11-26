@@ -303,7 +303,8 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 	resolvedRoot, rootErr := pathEvalSymlinks(root)
 	if projectSkillRootKey(source) == projectSkillRootKey(root) ||
 		sourceErr == nil && rootErr == nil && projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedRoot) &&
-			projectSkillSourceSelects(home, resolvedRoot, resolvedSource) {
+			projectSkillSourceSelects(home, resolvedRoot, resolvedSource) ||
+		projectSkillSourceIsRootFinal(home, root, source) {
 		return append(projectSkillSelectedFolders(root, name), root)
 	}
 	if child := projectSkillChild(root, source); child != "" {
@@ -447,6 +448,26 @@ func projectSkillIdentityMatches(home, entry string, ids projectSkillIdentities)
 // selection, whichever way a project link reaches it, so the project folder
 // does not claim it. An owner another user can change, or one outside the
 // profile, still counts.
+// projectSkillSourceIsRootFinal reports a Windows source that names the root
+// through a subst or mapped drive letter: pathEvalSymlinks keeps the drive
+// letter (R:\) where the root resolves to the folder the drive maps to, so
+// the two are also compared by their real final paths (winpath.FinalPath,
+// rel-1-0-10:GAP-2210). Elsewhere both spellings are one.
+func projectSkillSourceIsRootFinal(home, root, source string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	finalSource, err := pathFinalPath(source)
+	if err != nil {
+		return false
+	}
+	finalRoot, err := pathFinalPath(root)
+	if err != nil {
+		return false
+	}
+	return projectSkillRootKey(finalSource) == projectSkillRootKey(finalRoot) && projectSkillSourceSelects(home, finalRoot, finalSource)
+}
+
 func projectSkillSourceSelects(home, folder, source string) bool {
 	if projectSkillRootKey(folder) != projectSkillRootKey(source) && !projectSkillPathWithin(folder, source) {
 		return false

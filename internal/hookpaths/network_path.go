@@ -901,6 +901,13 @@ func pathEvalSymlinks(name string) (string, error) {
 	return fixturefs.Unmap(resolved), err
 }
 
+// pathFinalPath is pathEvalSymlinks with the real final path always
+// (winpath.FinalPath): no subst or mapped drive letter kept.
+func pathFinalPath(name string) (string, error) {
+	resolved, _, err := readGated("evalsymlinks", name, winpath.FinalPath, nil)
+	return fixturefs.Unmap(resolved), err
+}
+
 // pathWalkDir is filepath.WalkDir with its root read as pathLstat reads
 // it: a root below a share that has not answered is passed to fn with the
 // share's error, as WalkDir passes a root it cannot read. The walk reads

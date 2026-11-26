@@ -3855,17 +3855,25 @@ func workspaceRootOutsideDataDir(root, dataDir string) bool {
 	}
 	rootAbs = filepath.Clean(rootAbs)
 	dataAbs = filepath.Clean(dataAbs)
-	if realRoot, err := winpath.EvalLinks(rootAbs); err == nil {
-		rootAbs = filepath.Clean(realRoot)
+	// Inside the data folder in any spelling is inside: the drive letter
+	// the path was named through (winpath.EvalLinks) and the real final path
+	// (winpath.FinalPath). Before, a root named through a subst or mapped
+	// drive letter that maps into the data folder was compared across
+	// volumes, filepath.Rel failed, and the root read as outside
+	// (rel-1-0-10:GAP-2210).
+	for _, resolve := range []func(string) (string, error){winpath.EvalLinks, winpath.FinalPath} {
+		root, data := rootAbs, dataAbs
+		if real, err := resolve(root); err == nil {
+			root = filepath.Clean(real)
+		}
+		if real, err := resolve(data); err == nil {
+			data = filepath.Clean(real)
+		}
+		if rel, err := filepath.Rel(data, root); err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			return false
+		}
 	}
-	if realData, err := winpath.EvalLinks(dataAbs); err == nil {
-		dataAbs = filepath.Clean(realData)
-	}
-	rel, err := filepath.Rel(dataAbs, rootAbs)
-	if err != nil {
-		return true
-	}
-	return rel != "." && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	return true
 }
 
 func homePath(parts ...string) string {

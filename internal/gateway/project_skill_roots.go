@@ -232,14 +232,21 @@ func (p *projectSkillRoots) refusalForPath(path string) (root, reason string) {
 			return refusal.path, refusal.reason
 		}
 	}
-	resolvedPath, err := winpath.EvalLinks(path)
-	if err != nil {
-		return "", ""
-	}
-	for _, refusal := range refusals {
-		resolvedRoot, err := winpath.EvalLinks(refusal.path)
-		if err == nil && sameProjectRootOrDescendant(resolvedRoot, resolvedPath) {
-			return refusal.path, refusal.reason
+	// A refusal is a deny-sense check: the path is refused when it lies
+	// under a refused root in either spelling of the resolved place, the
+	// drive letter it was named through (winpath.EvalLinks) or the real
+	// final path (winpath.FinalPath). A subst or mapped drive letter that
+	// maps into a refused C:-spelled root is refused (rel-1-0-10:GAP-2210).
+	for _, resolve := range []func(string) (string, error){winpath.EvalLinks, winpath.FinalPath} {
+		resolvedPath, err := resolve(path)
+		if err != nil {
+			continue
+		}
+		for _, refusal := range refusals {
+			resolvedRoot, err := resolve(refusal.path)
+			if err == nil && sameProjectRootOrDescendant(resolvedRoot, resolvedPath) {
+				return refusal.path, refusal.reason
+			}
 		}
 	}
 	return "", ""
