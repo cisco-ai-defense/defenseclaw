@@ -365,7 +365,7 @@ func openNoFollowOnce(path string) (*os.File, error) {
 	}
 	file, err := winpath.OpenReadShared(path)
 	if err != nil {
-		return nil, err
+		return nil, safefile.NameVanished(err)
 	}
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {

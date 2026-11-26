@@ -223,7 +223,9 @@ func readPolicyFileWith(opts Options, path string, validate func(Options, string
 	}
 	var err error
 	if opts.goos() == "windows" {
-		err = safefile.RetryTransientRead(read)
+		// A policy file that is not installed is an answer, not a
+		// replacement in flight: it costs one confirming look (GAP-2184).
+		err = safefile.RetryOptionalRead(read)
 		if seen && safefile.IsTransientReadError(err) {
 			err = safefile.RetryPublishedRead(read)
 		}
@@ -256,6 +258,9 @@ func readPolicyFileWith(opts Options, path string, validate func(Options, string
 func readPolicyFileOnce(opts Options, path string, validate func(Options, string) error, seen *bool) ([]byte, error) {
 	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
+		if *seen {
+			return nil, safefile.NameVanished(err)
+		}
 		return nil, err
 	}
 	*seen = true
@@ -269,7 +274,7 @@ func readPolicyFileOnce(opts Options, path string, validate func(Options, string
 	}
 	file, err := openNoFollow(path)
 	if err != nil {
-		return nil, err
+		return nil, safefile.NameVanished(err)
 	}
 	defer file.Close()
 	stat, err := file.Stat()
@@ -286,7 +291,7 @@ func readPolicyFileOnce(opts Options, path string, validate func(Options, string
 	if opts.goos() == "windows" {
 		final, err := pathidentity.LstatPinned(path)
 		if err != nil {
-			return nil, err
+			return nil, safefile.NameVanished(err)
 		}
 		if !final.Mode().IsRegular() {
 			return nil, fmt.Errorf("%s is not a regular file", path)
