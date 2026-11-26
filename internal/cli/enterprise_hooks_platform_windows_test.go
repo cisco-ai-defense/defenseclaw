@@ -8,6 +8,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -1137,7 +1138,10 @@ func TestWindowsGuardianSecureClientSeedsMissingCodexStateBeforeExactPublication
 	enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
 		readCount++
 		if readCount == 1 {
-			return connector.WindowsCodexManagedRuntimeRegistry{}, fmt.Errorf("inspect Codex managed runtime state: %w", connector.ErrWindowsCodexManagedRuntimeStateMissing)
+			// Secure Client's fixed-name state reader currently reports the
+			// underlying filesystem absence directly on this first-publication
+			// path rather than the typed registry absence.
+			return connector.WindowsCodexManagedRuntimeRegistry{}, fmt.Errorf("inspect Codex managed runtime state: %w", os.ErrNotExist)
 		}
 		return connector.WindowsCodexManagedRuntimeRegistry{Active: true}, nil
 	}

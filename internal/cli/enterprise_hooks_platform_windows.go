@@ -444,7 +444,8 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		)
 		secureClientFirstPublication := cfg.SecureClientIntegration() &&
 			publishExact && len(desiredCodex) > 0 &&
-			errors.Is(err, connector.ErrWindowsCodexManagedRuntimeStateMissing)
+			(errors.Is(err, connector.ErrWindowsCodexManagedRuntimeStateMissing) ||
+				errors.Is(err, fs.ErrNotExist))
 		// A requirements.toml that ordinary users cannot read is published again
 		// with the read restored by the reconcile below, and that reconcile is
 		// the only step that does it: the target publication after it verifies
