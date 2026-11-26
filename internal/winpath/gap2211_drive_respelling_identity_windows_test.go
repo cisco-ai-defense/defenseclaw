@@ -17,8 +17,8 @@ import (
 // Kelvin sign (U+212A) and a junction on the drive to the k-spelled folder
 // beside it, the final path is not below what the drive maps to: NTFS tells
 // the two names apart, strings.EqualFold does not. Before the fix EvalLinks
-// gave the drive spelling of a file that is not the final one (R:\f, which
-// names the Kelvin folder's f).
+// gave the drive spelling of a place that is not the final one (R:\ for the
+// junction, the Kelvin folder itself).
 func TestGAP2211DriveRespellingNamesTheFinalFile(t *testing.T) {
 	base := t.TempDir()
 	kelvin := filepath.Join(base, "\u212Adir")
@@ -44,6 +44,12 @@ func TestGAP2211DriveRespellingNamesTheFinalFile(t *testing.T) {
 		t.Fatalf("subst %s %s: %v: %s", letter, kelvin, err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("subst.exe", letter, "/d").Run() })
+	// The junction itself: its final path is the k-spelled folder, which
+	// SameWindowsPath took for what the drive maps to, so EvalLinks gave
+	// the drive root, the Kelvin folder.
+	if got, err := EvalLinks(letter + `\j`); err != nil || !sameFileAs(t, got, plain) {
+		t.Errorf("EvalLinks(%s\\j) = %q, %v, which is not the folder the junction leads to", letter, got, err)
+	}
 	got, err := EvalLinks(letter + `\j\f`)
 	if err != nil {
 		t.Fatal(err)
