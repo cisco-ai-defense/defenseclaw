@@ -455,7 +455,16 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 		overBudget = plan.overBudgetSet
 	}
 	type key = guestKey
-	seen := map[key]int{}
+	// seen and placements are made at the size of the passes' lists
+	// (start), which are all known before the first reading is placed: grown
+	// a reading at a time, they were made several times over, a quarter of
+	// what rd-dyn-64-60's walk allocated (rel-1-0-10:GAP-2226).
+	var seen map[key]int
+	hint := 0
+	start := func(size int) {
+		hint = min(size, maxSandboxGuestPlacements)
+		seen = make(map[key]int, hint)
+	}
 	// pass counts the statements and readings of one pass.
 	type pass struct {
 		statements map[string]bool
@@ -477,20 +486,41 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 		}
 		p.read++
 		seen[key{text, cwd}] = len(placements)
+		if placements == nil {
+			// Made at the first reading: a plan that places none still
+			// gives none (nil).
+			placements = make([]guestPlacement, 0, hint)
+		}
 		placements = append(placements, guestPlacement{text: text, cwd: cwd, candidate: candidate})
 		return true
 	}
+	// placeAll places the readings of list that may read protected files
+	// (guestReadingFirst) first, in the pass's order (seq), then the others
+	// in list order. It keeps the positions of the first ones only: the
+	// list copied into two lists and then into one was a sixth of what
+	// rd-dyn-64-60's walk allocated (rel-1-0-10:GAP-2226). The first ones
+	// are sorted from list order with the same comparison, so they come in
+	// the same order as when sorted as copies.
 	placeAll := func(p *pass, list []guestPending) bool {
-		var firsts, plains []guestPending
-		for _, reading := range list {
+		var firsts []int
+		for at, reading := range list {
 			if guestReadingFirst(reading.text) {
-				firsts = append(firsts, reading)
-			} else {
-				plains = append(plains, reading)
+				firsts = append(firsts, at)
 			}
 		}
-		slices.SortFunc(firsts, func(a, b guestPending) int { return a.seq - b.seq })
-		for _, reading := range slices.Concat(firsts, plains) {
+		ordered := slices.Clone(firsts)
+		slices.SortFunc(ordered, func(a, b int) int { return list[a].seq - list[b].seq })
+		for _, at := range ordered {
+			if !place(p, list[at].text, list[at].cwd, list[at].candidate) {
+				return false
+			}
+		}
+		next := 0
+		for at, reading := range list {
+			if next < len(firsts) && firsts[next] == at {
+				next++
+				continue
+			}
 			if !place(p, reading.text, reading.cwd, reading.candidate) {
 				return false
 			}
@@ -499,18 +529,15 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 	}
 	// A cut pass does not end the others: each has its own bound, and the
 	// call is reported cut.
-	simplesCut := !placeAll(&pass{statements: map[string]bool{}}, plan.simples) || plan.simplesDropped
 	if !plan.rest {
+		start(len(plan.simples))
+		simplesCut := !placeAll(&pass{statements: map[string]bool{}}, plan.simples) || plan.simplesDropped
 		return placements, simplesCut
 	}
-	topCut := false
-	top := &pass{statements: map[string]bool{}}
-	for _, reading := range plan.top {
-		if !place(top, reading.text, reading.cwd, false) {
-			topCut = true
-			break
-		}
-	}
+	// The call pass's readings are listed first (they read the plan only,
+	// never seen or placements), and placed after the simples and top passes,
+	// as before.
+	//
 	// The placed children (statementBudget) read each script call by
 	// position; the hook-config guard only a call the laptop guard places
 	// statement by statement (plan.byPosition; see newGuestPlacementPlan,
@@ -579,6 +606,16 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 			if fresh(targetsKnown[at]) {
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
 			}
+		}
+	}
+	start(len(plan.simples) + len(plan.top) + len(callReadings))
+	simplesCut := !placeAll(&pass{statements: map[string]bool{}}, plan.simples) || plan.simplesDropped
+	topCut := false
+	top := &pass{statements: map[string]bool{}}
+	for _, reading := range plan.top {
+		if !place(top, reading.text, reading.cwd, false) {
+			topCut = true
+			break
 		}
 	}
 	callsCut := !placeAll(&pass{statements: map[string]bool{}}, callReadings) || callsDropped
