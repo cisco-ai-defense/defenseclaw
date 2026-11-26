@@ -2083,8 +2083,14 @@ cisco_ai_defense:
 # renders targets.yaml so per-user detectors (~/.claude/skills, ~/.codex/*,
 # etc.) resolve to every eligible local user's home — not just the daemon's
 # HOME (/var/root under root, which has no operator agent state).
+#
+# include_skill_manifests is on by default on the Secure Client profile so AI
+# Defense can show each skill's SKILL.md (once per file version, through the
+# sensitive redaction profile). Set it to false where skill text must stay on
+# the device. The built-in default stays off for every other profile.
 ai_discovery:
   enabled: true
+  include_skill_manifests: true
 EOF
 
   if (( ${#home_dirs[@]} > 0 )); then

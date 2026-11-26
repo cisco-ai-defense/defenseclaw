@@ -3060,6 +3060,12 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('ai_discovery:')
     [void]$sb.AppendLine('  enabled: true')
+    if (-not $standalone) {
+        # Secure Client profile: send each skill's SKILL.md by default (once per
+        # file version, through the sensitive redaction profile). Standalone keeps
+        # the built-in default (off).
+        [void]$sb.AppendLine('  include_skill_manifests: true')
+    }
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('asset_policy:')
     [void]$sb.AppendLine('  enabled: false')

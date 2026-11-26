@@ -169,6 +169,7 @@ t_ai_discovery_enabled_for_endpoint_inventory() {
   local out
   out="$(render_config action cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
   assert_contains "${out}" "$(printf 'ai_discovery:\n  enabled: true')" "ai_discovery block enables the inventory scanner"
+  assert_contains "${out}" "$(printf '  enabled: true\n  include_skill_manifests: true')" "Secure Client sends SKILL.md by default"
 }
 
 t_resolve_aid_endpoint_precedence() {
