@@ -18,3 +18,11 @@ package winpath
 // matches fs.ErrNotExist, as it does for filepath.EvalSymlinks, and a path
 // that cannot be resolved gives an error, never the unresolved path.
 func EvalLinks(path string) (string, error) { return evalLinks(path) }
+
+// FinalPath is EvalLinks with the real final path always: a path named
+// through a subst or mapped drive letter is given as the folder or share the
+// drive maps to, where EvalLinks keeps the drive letter. A deny-sense check
+// (a refused folder, "is it inside the data folder") compares this spelling
+// as well, so a drive letter that maps into the refused folder is refused
+// (rel-1-0-10:GAP-2210). Everywhere but Windows it is EvalLinks.
+func FinalPath(path string) (string, error) { return finalPath(path) }

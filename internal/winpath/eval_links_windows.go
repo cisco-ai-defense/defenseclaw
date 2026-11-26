@@ -13,12 +13,24 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // evalLinks opens path with no data access, following every link, and reads
 // the final path of the handle. The open needs no right on the file and
 // conflicts with no other open of it.
 func evalLinks(path string) (string, error) {
+	final, err := finalPath(path)
+	if err != nil || path == "" {
+		return final, err
+	}
+	return keepDriveSpelling(path, final), nil
+}
+
+// finalPath is the final path of the opened file or folder, without the
+// \\?\ prefix and with no drive letter kept.
+func finalPath(path string) (string, error) {
 	if path == "" {
 		return filepath.EvalSymlinks(path)
 	}
@@ -36,7 +48,7 @@ func evalLinks(path string) (string, error) {
 	if err != nil {
 		return "", &os.PathError{Op: "evallinks", Path: path, Err: err}
 	}
-	return keepDriveSpelling(path, plainWindowsPath(final)), nil
+	return plainWindowsPath(final), nil
 }
 
 // keepDriveSpelling spells final with the drive letter path was named
@@ -46,9 +58,21 @@ func evalLinks(path string) (string, error) {
 // where filepath.EvalSymlinks kept the drive letter, and the hook path share
 // gate reads a \\server\share spelling as a share (review RV-2182 F2). A path
 // whose links lead out of what the drive maps to keeps its real final path.
-// The respelling names the same file: the drive letter reaches the folder it
-// maps to, and the rest of final has no links left.
+// The respelling is kept only when it opens the same file as final
+// (pathidentity.Same): the containment test compares names, and a name NTFS
+// tells apart from final (a Kelvin sign for k, rel-1-0-10:GAP-2211) or a
+// drive letter this session defined to another place names another file.
 func keepDriveSpelling(path, final string) string {
+	respelled := driveSpelling(path, final)
+	if respelled != final && !pathidentity.Same(respelled, final) {
+		return final
+	}
+	return respelled
+}
+
+// driveSpelling is final spelled through the drive letter of path when final
+// lies at or below what that drive maps to, else final.
+func driveSpelling(path, final string) string {
 	abs := path
 	if !filepath.IsAbs(abs) {
 		var err error
