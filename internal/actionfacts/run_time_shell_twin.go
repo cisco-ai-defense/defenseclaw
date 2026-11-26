@@ -19,6 +19,7 @@ package actionfacts
 import (
 	"errors"
 	"io"
+	"path"
 	"sort"
 	"strings"
 
@@ -304,14 +305,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 	}
 	owners := map[*syntax.CallExpr]*syntax.Stmt{}
-	// inputs is the text each stage of a pipeline reads from the stage
-	// before it, when the reading knows it (pipeStageOutput); the first
-	// command of a subshell or group stage reads it too. fed marks the
-	// commands of a stage after one that holds here-document or here-string
-	// text (rel-1-0-10:GAP-1147).
-	inputs := map[*syntax.CallExpr]stageText{}
-	fed := map[*syntax.CallExpr]bool{}
-	flattened := map[*syntax.BinaryCmd]bool{}
+	inputs, fed := pipelineStageInputs(file)
 	fileHereText := holdsHereText(file)
 	// The holding shell has already evaluated assignments outside the document.
 	// A receiving shell cannot be assumed to inherit their values.
@@ -337,26 +331,6 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		if stmt, ok := node.(*syntax.Stmt); ok {
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
 				owners[call] = stmt
-			}
-		}
-		if pipe, ok := node.(*syntax.BinaryCmd); ok && pipelineOp(pipe.Op) && !flattened[pipe] {
-			stages := pipelineStages(pipe, flattened)
-			in, hereText := stageText{}, false
-			for _, stage := range stages {
-				if call := stageFirstCall(stage, 0); call != nil && in.known {
-					inputs[call] = in
-				}
-				if hereText {
-					syntax.Walk(stage, func(node syntax.Node) bool {
-						if call, ok := node.(*syntax.CallExpr); ok {
-							fed[call] = true
-						}
-						return true
-					})
-				}
-				in.text, in.known = pipeStageOutput(stage, in, 0)
-				in.parameters = in.parameters || heredocStageHasParameters(stage)
-				hereText = hereText || holdsHereText(stage)
 			}
 		}
 		return true
@@ -420,6 +394,9 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 		return body, known, hereText, source
 	}
+	// written is the text earlier statements of the call write to the files
+	// they name, for a later statement that runs one (rel-1-0-10:GAP-1502).
+	written := writtenScripts(file, inputs)
 	priorIndex, lastShell := 0, ""
 	var visit func(syntax.Node) bool
 	visit = func(node syntax.Node) bool {
@@ -530,6 +507,24 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			}
 			return true
 		}
+		if target, sourced, runs := writtenScriptRunTarget(call.Args, at, program, found); runs && depth < maxNestedShellStrings {
+			// sh F, . F, ./F of a file an earlier statement of the call wrote
+			// with text the reading knows (cat > F <<'EOF' ... EOF; sh F):
+			// the call runs that text, so the twin runs it in place
+			// (rel-1-0-10:GAP-1502).
+			if text, known := written.latest(target, int(call.Pos().Offset())); known &&
+				(sourced || found || shebangRunsPOSIXShell(text)) {
+				if nested, changed := runTimeShellTwin(text, depth+1, true, reader); changed {
+					text = nested
+				}
+				start, replacement := int(call.Args[at].Pos().Offset()), "bash -c "+posixSingleQuoted(text)
+				if sourced {
+					start, replacement = sourcedGroup(command, call, at, text)
+				}
+				edits = append(edits, edit{start, int(call.End().Offset()), replacement})
+				return false
+			}
+		}
 		if !found {
 			return true
 		}
@@ -620,6 +615,167 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	return out.String(), true
 }
 
+// writtenScript is the text one statement of a call writes to a file it
+// names, through a standard-output redirect (cat > F <<'EOF', echo TEXT >>
+// F) or as a tee operand. known is false for a write whose text the reading
+// does not know: it hides any earlier text of the file.
+type writtenScript struct {
+	end   int
+	text  string
+	known bool
+}
+
+// writtenScriptSet is the writes of one call by file name (path.Clean of the
+// static word), in the order of the call.
+type writtenScriptSet map[string][]writtenScript
+
+// writtenScripts reads the files the statements of file write, with the
+// text each writes when the reading knows it: what the statement would write
+// to its standard output without the redirect (pipeStageOutput: a static
+// echo or printf, a cat or tee of a literal here-document, a here-string or
+// the known output of the stage before it). A write to a file named at run
+// time is not read.
+func writtenScripts(file *syntax.File, inputs map[*syntax.CallExpr]stageText) writtenScriptSet {
+	written := writtenScriptSet{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		var targets []string
+		kept := make([]*syntax.Redirect, 0, len(stmt.Redirs))
+		for _, redir := range stmt.Redirs {
+			fd := ""
+			if redir.N != nil {
+				fd = redir.N.Value
+			}
+			switch redir.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+				if fd == "" || fd == "1" || fd == "&" {
+					if target, static := simpleStaticWord(redir.Word, nil); static && target != "" {
+						targets = append(targets, path.Clean(target))
+					}
+					continue
+				}
+			}
+			kept = append(kept, redir)
+		}
+		if program, static := simpleStaticWord(call.Args[0], nil); static && wrapperProgramName(program) == "tee" {
+			for _, arg := range call.Args[1:] {
+				if value, static := simpleStaticWord(arg, nil); static && value != "" && !strings.HasPrefix(value, "-") {
+					targets = append(targets, path.Clean(value))
+				}
+			}
+		}
+		if len(targets) == 0 {
+			return true
+		}
+		bare := *stmt
+		bare.Redirs = kept
+		text, known := pipeStageOutput(&bare, inputs[call], 0)
+		for _, target := range targets {
+			written[target] = append(written[target], writtenScript{end: int(stmt.End().Offset()), text: text, known: known})
+		}
+		return true
+	})
+	return written
+}
+
+// latest is the text of the last write of target that ends before offset,
+// when the reading knows it.
+func (written writtenScriptSet) latest(target string, before int) (string, bool) {
+	var last *writtenScript
+	for index := range written[path.Clean(target)] {
+		if write := &written[path.Clean(target)][index]; write.end <= before {
+			last = write
+		}
+	}
+	if last == nil || !last.known {
+		return "", false
+	}
+	return last.text, true
+}
+
+// writtenScriptRunTarget returns the file a call runs as a script (args[at]
+// is its program word; shell reports a POSIX shell found by
+// shellCallProgram): the script operand of a shell (sh F, sudo bash F), the
+// file of source F or . F (sourced: it runs in the current shell, also after
+// builtin or command), or a program named by a path (./F, /tmp/F).
+func writtenScriptRunTarget(args []*syntax.Word, at int, program string, shell bool) (target string, sourced, ok bool) {
+	if at >= len(args) {
+		return "", false, false
+	}
+	if shell {
+		argv := []string{"bash"}
+		for _, arg := range args[at+1:] {
+			value := projectPOSIXWord(arg)
+			if value.Expands {
+				return "", false, false
+			}
+			argv = append(argv, value.Value)
+		}
+		invocation := parsePOSIXShellInvocation("bash", argv)
+		if !invocation.valid || invocation.noExec || invocation.mode != posixShellModeScript ||
+			invocation.scriptIndex <= 0 || invocation.scriptIndex >= len(argv) {
+			return "", false, false
+		}
+		return argv[invocation.scriptIndex], false, true
+	}
+	for (program == "builtin" || program == "command") && at+1 < len(args) {
+		at++
+		word := projectPOSIXWord(args[at])
+		if word.Expands {
+			return "", false, false
+		}
+		program = word.Value
+	}
+	if program == "source" || program == "." {
+		at++
+		if at < len(args) {
+			if word := projectPOSIXWord(args[at]); !word.Expands && word.Value == "--" {
+				at++
+			}
+		}
+		if at >= len(args) {
+			return "", false, false
+		}
+		word := projectPOSIXWord(args[at])
+		return word.Value, true, !word.Expands && word.Value != ""
+	}
+	word := projectPOSIXWord(args[at])
+	return word.Value, false, !word.Expands && strings.Contains(word.Value, "/")
+}
+
+// shebangRunsPOSIXShell reports text a POSIX shell runs when it is started
+// as a program: no #! line (the shell runs a file the kernel cannot), or a
+// #! line that names a POSIX shell, also through env.
+func shebangRunsPOSIXShell(text string) bool {
+	if !strings.HasPrefix(text, "#!") {
+		return true
+	}
+	line, _, _ := strings.Cut(text[2:], "\n")
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	name := path.Base(fields[0])
+	if name == "env" {
+		name = ""
+		for _, field := range fields[1:] {
+			if strings.HasPrefix(field, "-") || strings.Contains(field, "=") {
+				continue
+			}
+			name = path.Base(field)
+			break
+		}
+	}
+	return wrappedShellPrograms[name] || posixShellProgram(name)
+}
+
 // sourcedStdinCall reports source FILE or . FILE (args[at] is the program
 // word, source, ., or a builtin or command before it) whose FILE is the standard input of the
 // shell (/dev/stdin, /dev/fd/0, /proc/self/fd/0): the shell runs the text it
@@ -675,6 +831,40 @@ func sourcedGroup(command string, call *syntax.CallExpr, at int, script string) 
 		prefix += "\n"
 	}
 	return start, "{ " + prefix + strings.TrimRight(script, "\n") + "\n}"
+}
+
+// pipelineStageInputs reads the pipelines of file: inputs is the text each
+// stage reads from the stage before it, when the reading knows it
+// (pipeStageOutput); the first command of a subshell or group stage reads
+// it too. fed marks the commands of a stage after one that holds
+// here-document or here-string text (rel-1-0-10:GAP-1147).
+func pipelineStageInputs(file *syntax.File) (inputs map[*syntax.CallExpr]stageText, fed map[*syntax.CallExpr]bool) {
+	inputs, fed = map[*syntax.CallExpr]stageText{}, map[*syntax.CallExpr]bool{}
+	flattened := map[*syntax.BinaryCmd]bool{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if pipe, ok := node.(*syntax.BinaryCmd); ok && pipelineOp(pipe.Op) && !flattened[pipe] {
+			stages := pipelineStages(pipe, flattened)
+			in, hereText := stageText{}, false
+			for _, stage := range stages {
+				if call := stageFirstCall(stage, 0); call != nil && in.known {
+					inputs[call] = in
+				}
+				if hereText {
+					syntax.Walk(stage, func(node syntax.Node) bool {
+						if call, ok := node.(*syntax.CallExpr); ok {
+							fed[call] = true
+						}
+						return true
+					})
+				}
+				in.text, in.known = pipeStageOutput(stage, in, 0)
+				in.parameters = in.parameters || heredocStageHasParameters(stage)
+				hereText = hereText || holdsHereText(stage)
+			}
+		}
+		return true
+	})
+	return inputs, fed
 }
 
 // shellCallProgram returns the index of the program word of a shell that
