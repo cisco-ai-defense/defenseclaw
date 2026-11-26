@@ -273,8 +273,8 @@ func substratePullElsewhere(a api.Actor, why *workspace.NoRecordError) error {
 	return cliusage.WithExitCode(fmt.Errorf("%s/%s: %s. "+
 		"Run pull in a git checkout of the folder you sent (it compares the agent's work with that checkout's last commit), or on the computer you ran \"defenseclaw substrate run\" on. "+
 		"Or connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here. "+
-		"If it was started with run --clone, push the work to its origin as a branch: defenseclaw substrate pull %s --push-branch NAME",
-		a.Atespace, a.Name, why.Error(), a.Name, a.Name), substrateExitRefused)
+		"--push-branch works only on the computer you ran \"defenseclaw substrate run\" on: it pushes to the origin that computer recorded.",
+		a.Atespace, a.Name, why.Error(), a.Name), substrateExitRefused)
 }
 
 // substratePullChoose asks what to do with the changes on a terminal; with
