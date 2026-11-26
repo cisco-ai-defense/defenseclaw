@@ -19,6 +19,11 @@ HOOKS = "/home/u/.defenseclaw/hooks"
         (HOOKS + "/../../bin/x", False),
         (HOOKS + "/../hooks-other/claude-code-hook.sh", False),
         (HOOKS + "/sub/../../x", False),
+        # The whole path is resolved (CHK-RF-ENTWIN): a doubled separator
+        # roots the rest, and a way back into the hooks dir is still ours.
+        (HOOKS + "//../../bin/x", False),
+        (HOOKS + "///../x", False),
+        (HOOKS + "/../hooks/claude-code-hook.sh", True),
     ],
 )
 def test_gap2148_claude_hooks_dir_claim_resolves_dotdot(word: str, owned: bool) -> None:

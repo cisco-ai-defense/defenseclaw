@@ -23,6 +23,15 @@ func TestGAP2148POSIXHooksDirClaimResolvesDotDot(t *testing.T) {
 			{dir + "/../../bin/x --event PreToolUse", false},
 			{dir + "/../hooks-other/claude-code-hook.sh", false},
 			{dir + "/sub/../../x", false},
+			// The whole path is resolved, not the text after dir: a doubled
+			// separator roots that text, where Clean drops a leading ..
+			// (CHK-RF-ENTWIN), and a way back into the hooks dir still names
+			// DefenseClaw's file.
+			{dir + "//../../bin/x", false},
+			{dir + "///../x", false},
+			{dir + "//../../bin/x --event PreToolUse", false},
+			{dir + "/../hooks/claude-code-hook.sh", true},
+			{dir + "/../hooks/claude-code-hook.sh --event PreToolUse", true},
 		} {
 			hook := map[string]interface{}{"type": "command", "command": row.command}
 			if got := isOwnedHookHandler(hook, dir); got != row.owned {

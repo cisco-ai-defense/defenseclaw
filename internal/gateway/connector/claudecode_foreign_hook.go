@@ -218,19 +218,23 @@ func windowsHookCommandInDir(command, volume, dir string) (string, bool) {
 	return name, found && name != ""
 }
 
-// posixHookPathInDir reports whether word, a POSIX path, names a file inside
-// dir once . and .. are resolved: /home/u/.defenseclaw/hooks/../../bin/x is
-// the user's, as the Windows claim reads it (hookCommandInWindowsDir,
-// GAP-2116) and as 1.0.10 did not (GAP-2148). The doctor legs use it with
-// the command's first word (editedHookEntryClaimed, and _posix_path_in_dir
-// in cli/defenseclaw/hook_integrity.py).
+// posixHookPathInDir reports whether word, a POSIX path spelled from dir,
+// names a file inside dir once the whole path is resolved:
+// /home/u/.defenseclaw/hooks/../../bin/x and hooks//../../bin/x are the
+// user's, hooks/../hooks/claude-code-hook.sh is DefenseClaw's, as the Windows
+// claim reads it (windowsResolvedPath, GAP-2116) and as 1.0.10 did not
+// (GAP-2148). Cleaning only the text after dir missed a doubled separator,
+// which roots that text, and Clean drops a .. at a root. The textual dir
+// prefix is still required, so nothing outside the old claim is claimed.
+// The doctor legs use it with the command's first word
+// (editedHookEntryClaimed, and _posix_path_in_dir in
+// cli/defenseclaw/hook_integrity.py).
 func posixHookPathInDir(word, dir string) bool {
-	rel, ok := strings.CutPrefix(word, strings.TrimSuffix(dir, "/")+"/")
-	if !ok {
+	if !strings.HasPrefix(word, strings.TrimSuffix(dir, "/")+"/") {
 		return false
 	}
-	clean := path.Clean(rel)
-	return clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
+	root := strings.TrimSuffix(path.Clean(dir), "/") + "/"
+	return strings.HasPrefix(path.Clean(word), root)
 }
 
 // posixHookCommandInDir is Setup's hooks-dir claim of an unquoted command:

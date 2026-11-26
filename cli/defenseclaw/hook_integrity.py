@@ -2628,16 +2628,19 @@ def _windows_path_parts(name: str) -> tuple[str, str, bool] | None:
 
 
 def _posix_path_in_dir(word: str, directory: str) -> bool:
-    """Whether *word*, a POSIX path, names a file inside *directory* once ``.`` and ``..`` are resolved.
+    """Whether *word*, a POSIX path spelled from *directory*, names a file inside it once the whole path is resolved.
 
-    Mirrors ``posixHookPathInDir`` (GAP-2148): ``<hooks>/../../bin/x`` is the user's.
+    Mirrors ``posixHookPathInDir`` (GAP-2148): ``<hooks>/../../bin/x`` and
+    ``<hooks>//../../bin/x`` are the user's, ``<hooks>/../hooks/<script>`` is
+    DefenseClaw's. The textual prefix is still required.
     """
 
-    prefix = directory.rstrip("/") + "/"
-    if not word.startswith(prefix):
+    if not word.startswith(directory.rstrip("/") + "/"):
         return False
-    clean = posixpath.normpath(word[len(prefix) :])
-    return clean not in (".", "..") and not clean.startswith("../")
+    # normpath keeps a leading "//"; anchor both at one "/".
+    clean = posixpath.normpath("/" + word.lstrip("/"))
+    root = posixpath.normpath("/" + directory.lstrip("/")).rstrip("/") + "/"
+    return clean.startswith(root)
 
 
 def _windows_resolved_path(name: str) -> tuple[str, str] | None:
