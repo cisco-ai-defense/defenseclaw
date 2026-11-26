@@ -674,6 +674,7 @@ type guestChildrenEntry struct {
 	input                actionfacts.Input
 	facts                actionfacts.Facts
 	children, candidates []actionfacts.Facts
+	evals                []*guestViewEvals
 	cut                  bounded.CapSet
 }
 
@@ -682,7 +683,14 @@ type guestChildrenEntry struct {
 // folder.
 type guestPlacedEntry struct {
 	base     actionfacts.Input
-	readings map[guestPlacedKey]actionfacts.Facts
+	readings map[guestPlacedKey]*guestPlacedReading
+}
+
+// guestPlacedReading is one placed reading of a hook: its facts, and what
+// the semantic rules made of them (guestViewEvals).
+type guestPlacedReading struct {
+	facts actionfacts.Facts
+	evals guestViewEvals
 }
 
 type guestPlacedKey struct{ text, cwd string }
@@ -770,26 +778,26 @@ func clippedFacts(facts actionfacts.Facts) actionfacts.Facts {
 // placedChildren is sandboxGuestPlacedChildren(memo, input, facts) for a
 // hook that already read them: every dispatch of the call reads the same
 // children again.
-func (memo *guestReadingMemo) placedChildren(input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet, ok bool) {
+func (memo *guestReadingMemo) placedChildren(input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, evals []*guestViewEvals, cut bounded.CapSet, ok bool) {
 	if memo == nil {
-		return nil, nil, bounded.CapSet{}, false
+		return nil, nil, nil, bounded.CapSet{}, false
 	}
 	memo.mu.Lock()
 	defer memo.mu.Unlock()
 	for _, entry := range memo.children {
 		if reflect.DeepEqual(entry.input, input) && reflect.DeepEqual(entry.facts, facts) {
-			return clippedFactsList(entry.children), clippedFactsList(entry.candidates), entry.cut, true
+			return clippedFactsList(entry.children), clippedFactsList(entry.candidates), entry.evals, entry.cut, true
 		}
 	}
-	return nil, nil, bounded.CapSet{}, false
+	return nil, nil, nil, bounded.CapSet{}, false
 }
 
 // keepPlacedChildren keeps the placed children of input and facts.
-func (memo *guestReadingMemo) keepPlacedChildren(input actionfacts.Input, facts actionfacts.Facts, children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+func (memo *guestReadingMemo) keepPlacedChildren(input actionfacts.Input, facts actionfacts.Facts, children, candidates []actionfacts.Facts, evals []*guestViewEvals, cut bounded.CapSet) {
 	if memo == nil {
 		return
 	}
-	entry := guestChildrenEntry{input: input, facts: facts, children: clippedFactsList(children), candidates: clippedFactsList(candidates), cut: cut}
+	entry := guestChildrenEntry{input: input, facts: facts, children: clippedFactsList(children), candidates: clippedFactsList(candidates), evals: evals, cut: cut}
 	memo.mu.Lock()
 	defer memo.mu.Unlock()
 	if len(memo.children) == guestReadingMemoEntries {
@@ -818,8 +826,9 @@ func clippedFactsList(list []actionfacts.Facts) []actionfacts.Facts {
 // folders: each reading is kept for the hook by text and folder, for every
 // input equal to this one but for its command, folder and arguments, so a
 // later walk reads only what an earlier one did not. The reading depends on
-// the input alone, as analyze's does. A nil memo keeps nothing.
-func (memo *guestReadingMemo) placedReader(input actionfacts.Input) func(guestPlacement) actionfacts.Facts {
+// the input alone, as analyze's does. It comes with what the semantic rules
+// made of it (guestViewEvals), kept with it. A nil memo keeps nothing.
+func (memo *guestReadingMemo) placedReader(input actionfacts.Input) func(guestPlacement) (actionfacts.Facts, *guestViewEvals) {
 	childOf := func(placement guestPlacement) actionfacts.Input {
 		child := input
 		child.Command, child.CWD = placement.text, placement.cwd
@@ -827,7 +836,9 @@ func (memo *guestReadingMemo) placedReader(input actionfacts.Input) func(guestPl
 		return child
 	}
 	if memo == nil {
-		return func(placement guestPlacement) actionfacts.Facts { return actionfacts.Analyze(childOf(placement)) }
+		return func(placement guestPlacement) (actionfacts.Facts, *guestViewEvals) {
+			return actionfacts.Analyze(childOf(placement)), nil
+		}
 	}
 	base := childOf(guestPlacement{})
 	memo.mu.Lock()
@@ -839,30 +850,34 @@ func (memo *guestReadingMemo) placedReader(input actionfacts.Input) func(guestPl
 		}
 	}
 	if entry == nil {
-		entry = &guestPlacedEntry{base: base, readings: map[guestPlacedKey]actionfacts.Facts{}}
+		entry = &guestPlacedEntry{base: base, readings: map[guestPlacedKey]*guestPlacedReading{}}
 		if len(memo.placed) == guestReadingMemoEntries {
 			memo.placed = slices.Delete(memo.placed, 0, 1)
 		}
 		memo.placed = append(memo.placed, entry)
 	}
 	memo.mu.Unlock()
-	return func(placement guestPlacement) actionfacts.Facts {
+	return func(placement guestPlacement) (actionfacts.Facts, *guestViewEvals) {
 		key := guestPlacedKey{placement.text, placement.cwd}
 		memo.mu.Lock()
-		facts, ok := entry.readings[key]
+		reading, ok := entry.readings[key]
 		memo.mu.Unlock()
 		if ok {
-			return clippedFacts(facts)
+			return clippedFacts(reading.facts), &reading.evals
 		}
 		// A placed reading is kept here only: through analyze, each of a
 		// walk's thousands of readings was compared with its sixteen
 		// readings first, and pushed out the call's own (rel-1-0-10:GAP-2226).
 		// analyze still finds it (placedReading).
-		facts = actionfacts.Analyze(childOf(placement))
+		reading = &guestPlacedReading{facts: actionfacts.Analyze(childOf(placement))}
 		memo.mu.Lock()
-		entry.readings[key] = facts
+		if kept, raced := entry.readings[key]; raced {
+			reading = kept
+		} else {
+			entry.readings[key] = reading
+		}
 		memo.mu.Unlock()
-		return clippedFacts(facts)
+		return clippedFacts(reading.facts), &reading.evals
 	}
 }
 
@@ -878,8 +893,8 @@ func (memo *guestReadingMemo) placedReading(input actionfacts.Input) (actionfact
 	base := input
 	base.Command, base.CWD = "", ""
 	for _, entry := range memo.placed {
-		if facts, ok := entry.readings[key]; ok && reflect.DeepEqual(entry.base, base) {
-			return facts, true
+		if reading, ok := entry.readings[key]; ok && reflect.DeepEqual(entry.base, base) {
+			return reading.facts, true
 		}
 	}
 	return actionfacts.Facts{}, false

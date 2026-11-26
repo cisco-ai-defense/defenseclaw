@@ -1233,8 +1233,8 @@ func dispatchTrustedActionOnce(
 	placed := placedReading{}
 	if input, ok := sandboxGuestPlacedInput(request, facts); ok {
 		analyzed := request.guestMemo.analyze(input)
-		children, candidates, cut := sandboxGuestPlacedChildren(request.guestMemo, input, analyzed)
-		placed = placedReading{facts: &analyzed, everyOwner: true, children: children, candidates: candidates}
+		children, candidates, evals, cut := sandboxGuestPlacedViews(request.guestMemo, input, analyzed)
+		placed = placedReading{facts: &analyzed, everyOwner: true, children: children, candidates: candidates, evals: evals}
 		if cut.Any() {
 			// More placed commands than the reading takes: the call is
 			// truncated, judged at the unknown tier of the pack, never a
@@ -1714,12 +1714,13 @@ func dispatchTrustedActionWith(
 		candidateOK func(compiledSemanticRule) bool,
 		matchOnly bool,
 		staticTargetTwin *actionfacts.Facts,
+		kept *guestViewEvalTable,
 	) (projectionFailed bool) {
 		var enforcementFacts actionfacts.Facts
 		var enforcementProjection *semanticpb.Facts
 		enforcementProjected := false
 		projectionCode := semantic.ProjectionOK
-		for _, candidate := range generation.semanticRules {
+		for rule, candidate := range generation.semanticRules {
 			if contextDone(done) {
 				break
 			}
@@ -1741,7 +1742,7 @@ func dispatchTrustedActionWith(
 			if candidateOK != nil && !candidateOK(candidate) {
 				continue
 			}
-			if !candidate.owner.eligible(view) {
+			if !kept.eligibleFor(rule, candidate, view) {
 				if !matchOnly && candidate.owner.suppressFallback != nil &&
 					candidate.owner.suppressFallback(view) {
 					excludeSemanticOwner(excluded, candidate.owner, false)
@@ -1751,7 +1752,7 @@ func dispatchTrustedActionWith(
 			if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
 				continue
 			}
-			result, evalCode, judged := budget.eval(ctx, candidate, viewID, projection)
+			result, evalCode, judged := budget.evalKept(ctx, candidate, viewID, projection, kept.kept(rule, false))
 			if !judged {
 				if budget.evals == nil {
 					break
@@ -1772,14 +1773,13 @@ func dispatchTrustedActionWith(
 			}
 
 			if !enforcementProjected {
-				enforcementFacts = view.EnforcementProjection()
-				enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
+				enforcementFacts, enforcementProjection, projectionCode = kept.enforcement(view)
 				enforcementProjected = true
 			}
 			if projectionCode != semantic.ProjectionOK {
 				return true
 			}
-			enforcementResult, enforcementCode, judged := budget.eval(ctx, candidate, viewID+1, enforcementProjection)
+			enforcementResult, enforcementCode, judged := budget.evalKept(ctx, candidate, viewID+1, enforcementProjection, kept.kept(rule, true))
 			if !judged {
 				if budget.evals == nil {
 					break
@@ -1850,10 +1850,18 @@ func dispatchTrustedActionWith(
 			if !view.Authoritative() {
 				return
 			}
-			if projection, code := semantic.Project(*view); code == semantic.ProjectionOK {
+			// A child's projections and rule results are kept with its
+			// reading for the hook's later judgments (guestViewEvals).
+			var evals *guestViewEvals
+			if index > 0 && index <= len(placed.evals) {
+				evals = placed.evals[index-1]
+			}
+			kept := evals.lock(generation)
+			defer evals.unlock()
+			if projection, code := kept.project(*view); code == semantic.ProjectionOK {
 				// Each view has its own pair of budget keys (the view and its
 				// enforcement projection), after the fixed views 0 to 5.
-				evaluateSemanticRules(placedReadingFirstView+2*index, *view, projection, placedRule, true, nil)
+				evaluateSemanticRules(placedReadingFirstView+2*index, *view, projection, placedRule, true, nil, kept)
 			}
 		})
 	}
@@ -1992,6 +2000,7 @@ func dispatchTrustedActionWith(
 		viewCandidate,
 		matchOnly,
 		staticTargetTwin,
+		nil,
 	) {
 		clear(excluded)
 		semanticFindings = semanticFindings[:0]
@@ -2007,6 +2016,7 @@ func dispatchTrustedActionWith(
 				projection,
 				argvSubsetReductionCandidate,
 				true,
+				nil,
 				nil,
 			)
 		}
@@ -4788,6 +4798,9 @@ type placedReading struct {
 	facts      *actionfacts.Facts
 	everyOwner bool
 	children   []actionfacts.Facts
+	// evals holds, for each child, what the semantic rules made of it
+	// (guestViewEvals); nil, or a nil entry, keeps nothing.
+	evals []*guestViewEvals
 	// candidates are read for the private-key read proof only
 	// (sandboxGuestPlacedChildren).
 	candidates []actionfacts.Facts
@@ -4878,12 +4891,20 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // (cd ~/.defenseclaw || cd /tmp); $CMD; echo m > config.yaml where the
 // laptop allows.
 func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
-	if children, candidates, cut, ok := memo.placedChildren(input, facts); ok {
-		return children, candidates, cut
-	}
-	children, candidates, cut = sandboxGuestPlacedChildrenWalk(memo, input, facts)
-	memo.keepPlacedChildren(input, facts, children, candidates, cut)
+	children, candidates, _, cut = sandboxGuestPlacedViews(memo, input, facts)
 	return children, candidates, cut
+}
+
+// sandboxGuestPlacedViews is sandboxGuestPlacedChildren with, for each
+// child, what the semantic rules made of it (guestViewEvals), kept for the
+// hook with the reading.
+func sandboxGuestPlacedViews(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, evals []*guestViewEvals, cut bounded.CapSet) {
+	if children, candidates, evals, cut, ok := memo.placedChildren(input, facts); ok {
+		return children, candidates, evals, cut
+	}
+	children, candidates, evals, cut = sandboxGuestPlacedChildrenWalk(memo, input, facts)
+	memo.keepPlacedChildren(input, facts, children, candidates, evals, cut)
+	return children, candidates, evals, cut
 }
 
 // sandboxGuestPlacedChildrenWalk reads the placed children of a call
@@ -4893,7 +4914,7 @@ func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input,
 // 64 candidate readings, each a full analysis that could prove nothing
 // (touch f1, cd /tmp/x), and the copy-mode actor took 2.6 to 5 times the
 // 1.0.10 actor's time (rel-1-0-10:GAP-2226).
-func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, evals []*guestViewEvals, cut bounded.CapSet) {
 	placements, stopped := memo.plan(input, facts).placements(true)
 	var folders *guestShellReadings
 	if slices.ContainsFunc(placements, func(placement guestPlacement) bool { return placement.candidate }) {
@@ -4944,19 +4965,27 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 	}
 	if count := len(placements) - candidateCount; count != 0 {
 		children = make([]actionfacts.Facts, 0, count)
+		if memo != nil {
+			evals = make([]*guestViewEvals, 0, count)
+		}
 	}
 	read := memo.placedReader(input)
 	for at, placement := range placements {
 		if !candidate[at] {
-			children = append(children, read(placement))
+			child, childEvals := read(placement)
+			children = append(children, child)
+			if memo != nil {
+				evals = append(evals, childEvals)
+			}
 		} else if guestCandidateMayReadKey(placement.text) {
-			candidates = append(candidates, read(placement))
+			reading, _ := read(placement)
+			candidates = append(candidates, reading)
 		}
 	}
 	if stopped {
-		return children, candidates, bounded.Of(bounded.Items)
+		return children, candidates, evals, bounded.Of(bounded.Items)
 	}
-	return children, candidates, bounded.CapSet{}
+	return children, candidates, evals, bounded.CapSet{}
 }
 
 // sandboxGuestPlacedInput is a sandbox call (every Substrate actor, an
