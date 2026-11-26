@@ -50,9 +50,13 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 	// for output nobody counted: its cost is unknown, never the input-only
 	// (or zero) total. An Anthropic message_start already carries an output
 	// count (1), so the opening usage alone is not final either
-	// (rel-1-0-10:GAP-1715).
+	// (rel-1-0-10:GAP-1715). The provider began answering when the upstream
+	// answered the gateway (answered), never only when the measured TTFB is
+	// above 0: on Windows's coarse clock an answer within one tick measures 0
+	// (substrate-1:GAP-1112). A native record carries only its TTFB.
 	brokenOff := rec.Outcome == "cancelled" || rec.ErrorType == "upstream_error"
-	cutShort := brokenOff && rec.TTFB > 0 && (rec.Usage.Has&HasOutput == 0 || rec.openingUsage)
+	began := rec.answered || rec.TTFB > 0
+	cutShort := brokenOff && began && (rec.Usage.Has&HasOutput == 0 || rec.openingUsage)
 	switch {
 	case cutShort:
 		box.sink.Add(id, f.ChargeKeys, 0, false, rec.EndedAt)
