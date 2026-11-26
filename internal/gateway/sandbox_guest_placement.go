@@ -1546,8 +1546,9 @@ func guestOwnShellFolders(command, cwd, home string) *guestShellReadings {
 // text, whether the walk placed it at every place it comes: true when each
 // is a statement of the call shell, read where the walk knew the folders the
 // shell may stand in (at top level, or on the path an && or a cd X || exit
-// runs); false when one sits inside another command (a subshell, a group,
-// an if, a loop, a function body, a pipeline, an || list) or comes after a
+// runs, or in a { ... } group stepped the same way); false when one sits
+// inside another command (a subshell, an if, a loop, a function body, a
+// pipeline, an || list, a group with a redirection) or comes after a
 // directory change the walk cannot follow. A text missing from it was not
 // read by the walk. The sandbox hook-config guard reads a candidate folder
 // of a placed text only where the walk says the shell may stand in it, and
@@ -1732,6 +1733,21 @@ func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[
 				leftOK, _ := step(pair.X, in)
 				return leftOK, nil
 			}
+		}
+		if group, ok := stmt.Cmd.(*syntax.Block); ok && !stmt.Background && !stmt.Negated && len(stmt.Redirs) == 0 && len(group.Stmts) != 0 {
+			// A { ... } group runs in the call shell: its statements run in
+			// order, as those of the call do, and the group ends where its
+			// last one does. Left unknown, a cd ../.ssh || exit in it made
+			// the authorized_keys write after it an alert where the laptop
+			// blocks (substrate-1 GAP-0948).
+			current := in
+			for at, inner := range group.Stmts {
+				succeeded, failed = step(inner, current)
+				if at < len(group.Stmts)-1 {
+					current = join(succeeded, failed)
+				}
+			}
+			return succeeded, failed
 		}
 		read(stmt, in)
 		defer func() {
