@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,8 +26,8 @@ func TestPerlStageFivePipeForms(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			paths := literalInterpreterWrites(tc.code, "perl", "/tmp", "/tmp")
-			found := slices.ContainsFunc(paths, func(p string) bool { return strings.Contains(p, ".claude/settings.json") })
+			paths := literalInterpreterWrites(tc.code, "perl", os.TempDir(), os.TempDir())
+			found := slices.ContainsFunc(paths, func(p string) bool { return strings.Contains(filepath.ToSlash(p), ".claude/settings.json") })
 			if found != tc.write {
 				t.Fatalf("paths = %v, want write %v", paths, tc.write)
 			}
@@ -51,7 +52,7 @@ func TestPerlSpecSectionTwoFocusedTable(t *testing.T) {
 	raises := 0
 	for _, row := range rows {
 		t.Run(row.Case, func(t *testing.T) {
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			if row.Case == "gap0592_perl:P09 in-place edit" {
 				// The rel -i reader is in the gateway, verified by
 				// TestPerlSpecFocusedP09RelInPlace.
@@ -61,7 +62,7 @@ func TestPerlSpecSectionTwoFocusedTable(t *testing.T) {
 				return
 			}
 			protected := slices.ContainsFunc(paths, func(p string) bool {
-				return strings.Contains(p, ".claude/") || strings.Contains(p, ".ssh/")
+				return strings.Contains(filepath.ToSlash(p), ".claude/") || strings.Contains(filepath.ToSlash(p), ".ssh/")
 			})
 			want := row.Spec == "LB"
 			if protected != want {
@@ -94,7 +95,7 @@ func TestPerlStageFiveOpaqueBindingBarrier(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			paths := literalInterpreterWrites(tc.code, "perl", "/tmp", "/tmp")
+			paths := literalInterpreterWrites(tc.code, "perl", os.TempDir(), os.TempDir())
 			if slices.Contains(paths, "p") != tc.write {
 				t.Fatalf("paths = %v, want write %v", paths, tc.write)
 			}
@@ -115,7 +116,7 @@ func TestPerlSpecSectionTwoThreeVariants(t *testing.T) {
 	for i, code := range cases {
 		t.Run("RVh_"+strconv.Itoa(i), func(t *testing.T) {
 			paths := literalInterpreterWrites(code, "perl", "/tmp", "/tmp")
-			if slices.ContainsFunc(paths, func(p string) bool { return strings.Contains(p, ".claude/settings.json") }) {
+			if slices.ContainsFunc(paths, func(p string) bool { return strings.Contains(filepath.ToSlash(p), ".claude/settings.json") }) {
 				t.Fatalf("read variant raised: %v", paths)
 			}
 		})
@@ -132,8 +133,8 @@ func TestPerlSpecSectionTwoThreeVariants(t *testing.T) {
 	}
 	for _, tc := range other {
 		t.Run(tc.name, func(t *testing.T) {
-			paths := literalInterpreterWrites(tc.code, "perl", "/tmp", "/tmp")
-			got := slices.ContainsFunc(paths, func(p string) bool { return strings.Contains(p, ".claude/settings.json") })
+			paths := literalInterpreterWrites(tc.code, "perl", os.TempDir(), os.TempDir())
+			got := slices.ContainsFunc(paths, func(p string) bool { return strings.Contains(filepath.ToSlash(p), ".claude/settings.json") })
 			if got != tc.write {
 				t.Fatalf("paths=%v, want write %v", paths, tc.write)
 			}

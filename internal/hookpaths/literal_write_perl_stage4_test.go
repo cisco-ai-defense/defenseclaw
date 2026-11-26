@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -42,8 +43,8 @@ func TestPerlStageFourLauncherConstant(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.cmd, func(t *testing.T) {
-			paths := LiteralWriteOperands(tc.cmd, "/tmp", "/tmp")
-			if slices.Contains(paths, "/tmp/p") != tc.write {
+			paths := LiteralWriteOperands(tc.cmd, os.TempDir(), os.TempDir())
+			if slices.Contains(paths, filepath.Join(os.TempDir(), "p")) != tc.write {
 				t.Fatalf("paths = %v, want write %v", paths, tc.write)
 			}
 		})
@@ -121,7 +122,7 @@ func TestPerlSpecStageFourDefinitionRows(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "LB" {
 				t.Fatalf("bad table verdict rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			found := false
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {
@@ -195,7 +196,7 @@ func TestPerlSpecStageFourScalarRows(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "LB" {
 				t.Fatalf("bad table verdict rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			found := false
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {
@@ -233,7 +234,7 @@ func TestPerlSpecStageFourOverrideRows(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "LB" {
 				t.Fatalf("bad table verdict rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			found := false
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {

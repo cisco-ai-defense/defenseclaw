@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -42,11 +43,11 @@ func TestPerlFlagVisibilitySeventeenForms(t *testing.T) {
 				paths = literalInterpreterWrites(tc.code, "perl", "/tmp", "/tmp")
 			} else {
 				cmd := "perl " + tc.moduleSwitch + " -e '" + tc.code + "'"
-				paths = LiteralWriteOperands(cmd, "/tmp", "/tmp")
+				paths = LiteralWriteOperands(cmd, os.TempDir(), os.TempDir())
 			}
 			wantPath := "p"
 			if tc.moduleSwitch != "" {
-				wantPath = "/tmp/p"
+				wantPath = filepath.Join(os.TempDir(), "p")
 			}
 			if slices.Contains(paths, wantPath) != tc.write {
 				t.Fatalf("paths = %v, want write %v", paths, tc.write)
@@ -102,7 +103,7 @@ func TestPerlSpecStageThreeFocusedRows(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "LB" {
 				t.Fatalf("bad table verdict rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			found := false
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {
@@ -140,7 +141,7 @@ func TestPerlSpecStageThreeCorpusRows(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "LB" {
 				t.Fatalf("bad table verdict rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			found := false
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {

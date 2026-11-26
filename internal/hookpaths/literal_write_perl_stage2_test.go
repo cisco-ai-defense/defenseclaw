@@ -118,7 +118,7 @@ func TestPerlSpecStageTwoFocusedRows(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "LB" {
 				t.Fatalf("bad table verdict: rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			found := false
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {
@@ -156,7 +156,7 @@ func TestPerlSpecStageTwoBenignControls(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "AA" {
 				t.Fatalf("bad table verdict: rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {
 					t.Fatalf("%s: benign control raised: %v rule=%s", row.Case, paths, row.Rule)
@@ -204,7 +204,7 @@ func TestPerlSpecStageTwoCorpusRows(t *testing.T) {
 			if row.Rel != "AA" || row.Spec != "LB" {
 				t.Fatalf("bad table verdict: rel=%s spec=%s", row.Rel, row.Spec)
 			}
-			paths := LiteralWriteOperands(row.Cmd, "/tmp", "/tmp")
+			paths := LiteralWriteOperands(row.Cmd, os.TempDir(), os.TempDir())
 			found := false
 			for _, path := range paths {
 				if strings.Contains(path, ".claude") {
