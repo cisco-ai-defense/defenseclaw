@@ -236,10 +236,6 @@ func appendExtractedPatch(out *extractedInput, text, cwd string) {
 	out.markApplicable()
 }
 
-func parsePatchEnvelope(text string) patchEnvelopeResult {
-	return readPatchEnvelope(text, patchView{})
-}
-
 // patchView is how a reader reads the header names of an envelope: in the
 // text a shell shows of a here-document it expands (shellView), and with the
 // working folder of the call (cwd) that a drive-relative name is placed
@@ -323,9 +319,10 @@ func patchHeaderTarget(name string, view patchView) (string, bool) {
 	return name, patchNamePlaced(name, view)
 }
 
-// readPatchEnvelope is parsePatchEnvelope for the text of the envelope, or
-// for the text a shell shows of a here-document it expands (shellView), whose
-// header names may change when the shell expands them (patchNamePlaced).
+// readPatchEnvelope reads an apply_patch envelope as the tool reads it: the
+// text of the envelope, or the text a shell shows of a here-document it
+// expands (shellView), whose header names may change when the shell expands
+// them (patchNamePlaced).
 func readPatchEnvelope(text string, view patchView) patchEnvelopeResult {
 	fail := func(status ParseStatus, issue IssueCode) patchEnvelopeResult {
 		return patchEnvelopeResult{status: status, issue: issue}

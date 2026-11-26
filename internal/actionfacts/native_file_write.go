@@ -367,7 +367,7 @@ func nativePatchWrites(object map[string]any, cwd string) []nativeFileWrite {
 }
 
 // nativePatchEnvelopeWrites reads the files and the added and removed lines of
-// an apply_patch envelope that parsePatchEnvelope read complete (its
+// an apply_patch envelope that readPatchEnvelope read complete (its
 // canonical form; shellView as readPatchEnvelope read it). A file no reader
 // places (patchHeaderTarget) is no write
 // the content rules can judge by its name, as it is no path fact: its lines

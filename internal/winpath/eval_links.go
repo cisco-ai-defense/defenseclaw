@@ -3,6 +3,8 @@
 
 package winpath
 
+import "runtime"
+
 // EvalLinks is path with every link on the way followed, as the system
 // opens it: the place a check that a path lies under a root must judge.
 // filepath.EvalSymlinks follows symbolic links only. Since Go 1.23 it leaves
@@ -26,3 +28,17 @@ func EvalLinks(path string) (string, error) { return evalLinks(path) }
 // as well, so a drive letter that maps into the refused folder is refused
 // (rel-1-0-10:GAP-2210). Everywhere but Windows it is EvalLinks.
 func FinalPath(path string) (string, error) { return finalPath(path) }
+
+// DenySenseResolvers are the resolvers a deny-sense check compares a path
+// with, each spelling in turn: EvalLinks and, on Windows, FinalPath. Off
+// Windows FinalPath is EvalLinks, so the list holds EvalLinks once and a
+// check does not resolve every path twice. The caller must not change the
+// slice.
+func DenySenseResolvers() []func(string) (string, error) { return denySenseResolvers }
+
+var denySenseResolvers = func() []func(string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return []func(string) (string, error){EvalLinks, FinalPath}
+	}
+	return []func(string) (string, error){EvalLinks}
+}()

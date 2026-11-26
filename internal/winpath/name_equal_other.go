@@ -10,8 +10,13 @@ import (
 	"unicode/utf8"
 )
 
-// equalNames compares rune by rune through the simple uppercase mapping, the
-// rule the NTFS uppercase table follows; invalid UTF-8 compares by byte.
+// equalNames compares rune by rune through the simple uppercase mapping
+// (unicode.ToUpper); invalid UTF-8 compares by byte. It reads Windows names
+// off Windows (tests, planning) and is close to, not the same as, the NTFS
+// uppercase table: a few runes compare equal here that NTFS keeps apart
+// (U+017F against S, case pairs above the Basic Multilingual Plane, which
+// NTFS does not map). On Windows the file system's own table decides
+// (name_equal_windows.go).
 func equalNames(a, b string) bool {
 	if a == b {
 		return true

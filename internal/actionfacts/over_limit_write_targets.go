@@ -665,7 +665,7 @@ func compactPatchSectionLines(lines []string) (kept []string, dropped bool) {
 // whose bounded text is itself over maxBoundedPatchSectionBytes (or over what
 // is left of the budget), and every file when bounded is false, is compacted:
 // of consecutive "+", "-", " " or "@@" lines one marker is kept, which
-// parsePatchEnvelope reads the same, since it reads each line only by that
+// readPatchEnvelope reads the same, since it reads each line only by that
 // class. The header paths of the files so compacted are returned as
 // elided; unscoped is set when a hunk line outside any file was dropped.
 // Files that were not compacted lose nothing.
@@ -701,7 +701,7 @@ func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string
 	previous := ""
 	for _, line := range strings.Split(normalized, "\n") {
 		// The tool reads a file header without the white space around it
-		// (parsePatchEnvelope), so the header is kept in that form.
+		// (readPatchEnvelope), so the header is kept in that form.
 		if header := strings.TrimSpace(line); header != line &&
 			isPatchFileHeader(header) && (!inUpdate || line[0] != ' ') {
 			line = header

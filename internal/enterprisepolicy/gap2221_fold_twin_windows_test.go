@@ -45,3 +45,20 @@ func TestGAP2221FoldTwinOfTheHookPathIsNotOwned(t *testing.T) {
 		t.Error("a missing fold twin of the hook path counted as owned")
 	}
 }
+
+// The hook path spelled as written is the hook path itself, even when its
+// file cannot be inspected: a name Stat refuses with neither not-exist nor
+// permission (an invalid name character, ERROR_INVALID_NAME) must not turn
+// DefenseClaw's own handler into a foreign one (CHK-RF-WINPATH N4).
+func TestGAP2221HookPathAsWrittenIsOwnedWithoutAStat(t *testing.T) {
+	hook := filepath.Join(t.TempDir(), "a<b", "defenseclaw-hook.exe")
+	if _, err := os.Stat(hook); err == nil || os.IsNotExist(err) || os.IsPermission(err) {
+		t.Skipf("Stat of an invalid name gave %v, not the error this row needs", err)
+	}
+	if !sameHookBinary("windows", hook, hook) {
+		t.Fatal("the hook path as written counted as foreign when its file could not be inspected")
+	}
+	if sameHookBinary("windows", strings.ToUpper(hook), hook) {
+		t.Error("another spelling of a name that cannot be inspected counted as owned")
+	}
+}

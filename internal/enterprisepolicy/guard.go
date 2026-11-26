@@ -763,12 +763,18 @@ func ownedCommand(goos, command, hookBinary string) bool {
 // folder a user can create counted as owned without naming the hook file
 // (rel-1-0-10:GAP-2221). A Windows layout read on another host (tests,
 // planning) has no files to compare: the names decide (winpath.EqualNames).
+// The same spelling is the hook path itself and needs no file system: it is
+// owned even when the file cannot be inspected (a sharing or I/O error that
+// is neither not-exist nor permission), and it costs no stat.
 func sameHookBinary(goos, command, hookBinary string) bool {
 	if command == "" || hookBinary == "" {
 		return false
 	}
+	if command == hookBinary {
+		return true
+	}
 	if goos != "windows" {
-		return command == hookBinary
+		return false
 	}
 	if runtimeGOOS() != "windows" {
 		return winpath.EqualNames(command, hookBinary)

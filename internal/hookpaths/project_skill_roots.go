@@ -440,14 +440,6 @@ func projectSkillIdentityMatches(home, entry string, ids projectSkillIdentities)
 	return err == nil && !projectSkillPrivateFolder(home, final)
 }
 
-// projectSkillSourceSelects reports whether a resolved source selects the
-// resolved project folder: the source is the folder, its manifest or a path
-// in it that no other skill folder owns. The nearest skill folder holding the
-// source, the project folder itself included, is its owner. When the caller
-// profile holds that owner privately, manifest included, the source is that user skill's own
-// selection, whichever way a project link reaches it, so the project folder
-// does not claim it. An owner another user can change, or one outside the
-// profile, still counts.
 // projectSkillSourceIsRootFinal reports a Windows source that names the root
 // through a subst or mapped drive letter: pathEvalSymlinks keeps the drive
 // letter (R:\) where the root resolves to the folder the drive maps to, so
@@ -468,6 +460,14 @@ func projectSkillSourceIsRootFinal(home, root, source string) bool {
 	return projectSkillRootKey(finalSource) == projectSkillRootKey(finalRoot) && projectSkillSourceSelects(home, finalRoot, finalSource)
 }
 
+// projectSkillSourceSelects reports whether a resolved source selects the
+// resolved project folder: the source is the folder, its manifest or a path
+// in it that no other skill folder owns. The nearest skill folder holding the
+// source, the project folder itself included, is its owner. When the caller
+// profile holds that owner privately, manifest included, the source is that user skill's own
+// selection, whichever way a project link reaches it, so the project folder
+// does not claim it. An owner another user can change, or one outside the
+// profile, still counts.
 func projectSkillSourceSelects(home, folder, source string) bool {
 	if projectSkillRootKey(folder) != projectSkillRootKey(source) && !projectSkillPathWithin(folder, source) {
 		return false

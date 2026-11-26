@@ -237,7 +237,7 @@ func (p *projectSkillRoots) refusalForPath(path string) (root, reason string) {
 	// drive letter it was named through (winpath.EvalLinks) or the real
 	// final path (winpath.FinalPath). A subst or mapped drive letter that
 	// maps into a refused C:-spelled root is refused (rel-1-0-10:GAP-2210).
-	for _, resolve := range []func(string) (string, error){winpath.EvalLinks, winpath.FinalPath} {
+	for _, resolve := range winpath.DenySenseResolvers() {
 		resolvedPath, err := resolve(path)
 		if err != nil {
 			continue

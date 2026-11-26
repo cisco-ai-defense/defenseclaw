@@ -3861,7 +3861,7 @@ func workspaceRootOutsideDataDir(root, dataDir string) bool {
 	// drive letter that maps into the data folder was compared across
 	// volumes, filepath.Rel failed, and the root read as outside
 	// (rel-1-0-10:GAP-2210).
-	for _, resolve := range []func(string) (string, error){winpath.EvalLinks, winpath.FinalPath} {
+	for _, resolve := range winpath.DenySenseResolvers() {
 		root, data := rootAbs, dataAbs
 		if real, err := resolve(root); err == nil {
 			root = filepath.Clean(real)

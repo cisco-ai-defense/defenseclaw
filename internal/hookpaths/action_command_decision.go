@@ -1442,6 +1442,18 @@ func actionGlobPatternPlaced(pattern, home string) string {
 	}
 	separator := string(filepath.Separator)
 	byName := runtime.GOOS == "windows"
+	// The home is resolved at most once per pattern, at the first step out
+	// of a link, however many link steps the pattern has.
+	var realHome string
+	var realHomeErr error
+	homeResolved := false
+	resolvedHome := func() (string, error) {
+		if !homeResolved {
+			realHome, realHomeErr = pathEvalSymlinks(home)
+			homeResolved = true
+		}
+		return realHome, realHomeErr
+	}
 	var kept []string
 	for _, part := range parts {
 		switch part {
@@ -1457,7 +1469,7 @@ func actionGlobPatternPlaced(pattern, home string) string {
 					return pattern
 				}
 				if info.Mode()&fs.ModeSymlink != 0 {
-					above, ok := actionLinkParentPlaced(dir, home)
+					above, ok := actionLinkParentPlaced(dir, home, resolvedHome)
 					if !ok || filepath.VolumeName(above) != volume {
 						return pattern
 					}
@@ -1483,8 +1495,9 @@ func actionGlobPatternPlaced(pattern, home string) string {
 // actionLinkParentPlaced is the folder a step out of the link at link leads
 // to on POSIX: the folder above the link's resolved target. A target inside
 // the home is spelled through home, the spelling the protected paths are
-// matched in. A link that does not resolve to a folder has no step (false).
-func actionLinkParentPlaced(link, home string) (string, bool) {
+// matched in; resolvedHome gives the home with its links followed. A link
+// that does not resolve to a folder has no step (false).
+func actionLinkParentPlaced(link, home string, resolvedHome func() (string, error)) (string, bool) {
 	target, err := pathEvalSymlinks(link)
 	if err != nil {
 		return "", false
@@ -1496,7 +1509,7 @@ func actionLinkParentPlaced(link, home string) (string, bool) {
 	if home == "" {
 		return above, true
 	}
-	realHome, err := pathEvalSymlinks(home)
+	realHome, err := resolvedHome()
 	if err != nil {
 		return above, true
 	}
