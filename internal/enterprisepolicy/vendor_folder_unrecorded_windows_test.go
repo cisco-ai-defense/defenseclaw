@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0930. A purge keeps a policy file another account can change
@@ -351,9 +352,7 @@ func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
 			if err := os.Remove(file); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(target, file); err != nil {
-				t.Skipf("creating a symbolic link needs the privilege: %v", err)
-			}
+			testenv.Symlink(t, target, file)
 			// An administrator's link: the owner is the Administrators group
 			// whoever ran the test (a runner account owns what it creates).
 			ownAs(t, file, wellKnownSID(t, windows.WinBuiltinAdministratorsSid))
