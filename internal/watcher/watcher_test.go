@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -1565,7 +1566,7 @@ func TestPublishedQuarantineFailureAuditDoesNotClaimSourceRemains(t *testing.T) 
 }
 
 func TestUncertainQuarantineCopyKeepsItsRecord(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("needs POSIX permissions as a non-root user")
 	}
 	root := t.TempDir()
@@ -1582,18 +1583,31 @@ func TestUncertainQuarantineCopyKeepsItsRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(skillsRoot, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(skillsRoot, 0o755) })
+	// The source cannot be removed once the copy is published: mode 0o555 on
+	// its folder on POSIX, an open handle without delete sharing on Windows.
+	holdOriginalUndeletable(t, skillsRoot, source)
 	moveErr := enforce.ExecuteAssetQuarantine(plan, "rec-published")
 	if !errors.Is(moveErr, enforce.ErrQuarantinePublished) {
 		t.Fatalf("source removal failure = %v, want it marked published", moveErr)
 	}
-	if err := os.Chmod(quarantineRoot, 0); err != nil {
-		t.Fatal(err)
+	// The destination cannot be inspected: mode 0 on the quarantine folder on
+	// POSIX; on Windows the process bypasses traverse checking, so the
+	// inspection itself fails (the quarantineLstat seam).
+	if runtime.GOOS == "windows" {
+		previous := quarantineLstat
+		quarantineLstat = func(path string) (os.FileInfo, error) {
+			if path == plan.QuarantinePath {
+				return nil, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrPermission}
+			}
+			return previous(path)
+		}
+		t.Cleanup(func() { quarantineLstat = previous })
+	} else {
+		if err := os.Chmod(quarantineRoot, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(quarantineRoot, 0o700) })
 	}
-	t.Cleanup(func() { _ = os.Chmod(quarantineRoot, 0o700) })
 	if quarantineUnmaterialized(plan, moveErr, true) {
 		t.Fatal("rolled back the record of a published copy whose destination cannot be inspected")
 	}
@@ -2325,14 +2339,17 @@ func denyReadOfFolder(t *testing.T, dir string) func() error {
 	return func() error { return os.Chmod(dir, 0o700) }
 }
 
-// holdOriginalUndeletable makes the skill folder at path impossible to rename
+// holdOriginalUndeletable makes the skill folder (or file) at path impossible to rename
 // or delete for the test user until the returned release runs: mode 0o500 on
 // its parent on POSIX, an open handle without delete sharing on its SKILL.md on
 // Windows.
 func holdOriginalUndeletable(t *testing.T, parent, path string) func() {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		return holdOpenForTest(t, filepath.Join(path, "SKILL.md"))
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			path = filepath.Join(path, "SKILL.md")
+		}
+		return holdOpenForTest(t, path)
 	}
 	if err := os.Chmod(parent, 0o500); err != nil {
 		t.Fatal(err)
