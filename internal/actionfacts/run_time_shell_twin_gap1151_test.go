@@ -85,6 +85,10 @@ func TestGAP1151SourcedTwinKeepsOperands(t *testing.T) {
 		// A pending document the shell expands is not respelled: the call
 		// keeps its operands and the group follows the delimiter line.
 		{"cat > y <<EOF; . /dev/stdin <<<'make clean'\nhome $HOME\nEOF", []string{"cat > y <<EOF; :", "\nhome $HOME\nEOF\n{ make clean\n}"}},
+		// A -c script or eval text on a pending line is read on a line of
+		// its own too.
+		{"cat > x <<'EOF'; bash -c 'make clean'\nhello\nEOF", []string{"cat > x <<< 'hello'; bash -c 'make clean'\n"}},
+		{"cat > x <<'EOF'; eval 'make clean'\nhello\nEOF", []string{"cat > x <<< 'hello'; eval 'make clean'\n"}},
 	} {
 		got, ok, _, _ := RunTimeShellTwin(row.command)
 		if !ok {

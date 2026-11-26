@@ -36,6 +36,13 @@ func TestGAP1502WrittenScriptRunLaterIsJudgedByItsBody(t *testing.T) {
 		"echo 'BODY' > run.sh; sh run.sh",
 		"printf '%s\\n' 'BODY' > run.sh && bash ./run.sh",
 		"cat <<< 'BODY' > run.sh; sh run.sh",
+		// An append after the body, a write in a branch that may not run
+		// and a run on the write's own line still run the body
+		// (CHK-RF-HOOKSHELL F4).
+		"cat > run.sh <<'EOF'\nBODY\nEOF\ncat >> run.sh <<'EOF'\necho ok\nEOF\nsh run.sh",
+		"cat > run.sh <<'EOF'\nBODY\nEOF\nif false; then echo 'echo ok' > run.sh; fi\nsh run.sh",
+		"cat > run.sh <<'EOF'\nBODY\nEOF\ntest -f y && echo 'echo ok' > run.sh; sh run.sh",
+		"cat > run.sh <<'EOF'; sh run.sh\nBODY\nEOF",
 	}
 	shellTextTiers(t, func(tier string, decide func(string) (string, []string), oracle func(string, bool) (string, []string)) {
 		for _, body := range bodies {

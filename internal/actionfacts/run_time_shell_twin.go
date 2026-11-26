@@ -477,6 +477,13 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 		return offset, offset >= 0
 	}
+	// unpendCall respells the here-documents pending where call starts, if
+	// any (unpend).
+	unpendCall := func(call *syntax.CallExpr) {
+		if _, ok := afterPending(int(call.Pos().Offset())); ok {
+			unpend(int(call.Pos().Offset()))
+		}
+	}
 	// keepOperands reads the assignments of call and its operands after
 	// args[fileAt] as any other words of the call: the twin keeps them in
 	// place, so a command they run is still read (CHK-RF-HOOKSHELL F1).
@@ -560,6 +567,13 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 		at, shell, found := shellCallProgram(reader, call.Args, zeroIsShell, lastShell)
 		program := wrapperProgramName(projectPOSIXWord(call.Args[at]).Value)
+		// eval TEXT or a shell's -c STRING on a line whose here-document is
+		// still pending runs script text the line holds: the twin respells
+		// the pending literal document as a here-string, so that text is
+		// read on a line of its own (CHK-RF-HOOKSHELL F2).
+		if _, isString := shellCommandStringIndex(call.Args, at); program == "eval" && len(call.Args) > at+1 || found && isString {
+			unpendCall(call)
+		}
 		if program == "eval" {
 			body, _, nested, static := simpleNestedScript(&syntax.CallExpr{Args: call.Args[at:]}, nil, nil, nil)
 			if nested && static && depth < maxNestedShellStrings {
@@ -651,6 +665,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			// (sh F) and the reading is TRUNCATED (the one bound rule).
 			if text, known := written.latest(target, int(call.Pos().Offset())); known &&
 				(sourced || found || shebangRunsPOSIXShell(text)) && reader.copied.TakeN(len(text)) {
+				unpendCall(call)
 				if nested, changed := runTimeShellTwin(text, depth+1, true, reader); changed {
 					text = nested
 				}
@@ -794,11 +809,18 @@ func withoutOverlappedSoftEdits[E any](edits []E, span func(E) (int, int, int)) 
 // writtenScript is the text one statement of a call writes to a file it
 // names, through a standard-output redirect (cat > F <<'EOF', echo TEXT >>
 // F) or as a tee operand. known is false for a write whose text the reading
-// does not know: it hides any earlier text of the file.
+// does not know: it hides any earlier text of the file. end is the end of
+// the statement (a here-document body included); at is where the write
+// takes effect for a later run: the end of the statement's line part,
+// before a pending here-document body, which the shell has read by then
+// (cat > F <<'EOF'; sh F runs the body). appended reports >>, &>> or tee -a;
+// conditional a write that may not run (in an if, case or loop, after &&
+// or ||, in a function body).
 type writtenScript struct {
-	end   int
-	text  string
-	known bool
+	end, at               int
+	text                  string
+	known                 bool
+	appended, conditional bool
 }
 
 // writtenScriptSet is the writes of one call by file name (path.Clean of the
@@ -813,6 +835,7 @@ type writtenScriptSet map[string][]writtenScript
 // time is not read.
 func writtenScripts(file *syntax.File, inputs map[*syntax.CallExpr]stageText) writtenScriptSet {
 	written := writtenScriptSet{}
+	always := unconditionalStmts(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
@@ -822,9 +845,17 @@ func writtenScripts(file *syntax.File, inputs map[*syntax.CallExpr]stageText) wr
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		var targets []string
+		type writeTarget struct {
+			name     string
+			appended bool
+		}
+		var targets []writeTarget
 		kept := make([]*syntax.Redirect, 0, len(stmt.Redirs))
+		at := int(call.End().Offset())
 		for _, redir := range stmt.Redirs {
+			if redir.Word != nil && int(redir.Word.End().Offset()) > at {
+				at = int(redir.Word.End().Offset())
+			}
 			fd := ""
 			if redir.N != nil {
 				fd = redir.N.Value
@@ -833,7 +864,7 @@ func writtenScripts(file *syntax.File, inputs map[*syntax.CallExpr]stageText) wr
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
 				if fd == "" || fd == "1" || fd == "&" {
 					if target, static := simpleStaticWord(redir.Word, nil); static && target != "" {
-						targets = append(targets, path.Clean(target))
+						targets = append(targets, writeTarget{path.Clean(target), redir.Op == syntax.AppOut || redir.Op == syntax.AppAll})
 					}
 					continue
 				}
@@ -841,10 +872,20 @@ func writtenScripts(file *syntax.File, inputs map[*syntax.CallExpr]stageText) wr
 			kept = append(kept, redir)
 		}
 		if program, static := simpleStaticWord(call.Args[0], nil); static && wrapperProgramName(program) == "tee" {
+			appended := false
+			var names []string
 			for _, arg := range call.Args[1:] {
-				if value, static := simpleStaticWord(arg, nil); static && value != "" && !strings.HasPrefix(value, "-") {
-					targets = append(targets, path.Clean(value))
+				value, static := simpleStaticWord(arg, nil)
+				switch {
+				case !static || value == "":
+				case value == "--append" || strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "--") && strings.Contains(value, "a"):
+					appended = true
+				case !strings.HasPrefix(value, "-"):
+					names = append(names, path.Clean(value))
 				}
+			}
+			for _, name := range names {
+				targets = append(targets, writeTarget{name, appended})
 			}
 		}
 		if len(targets) == 0 {
@@ -854,26 +895,79 @@ func writtenScripts(file *syntax.File, inputs map[*syntax.CallExpr]stageText) wr
 		bare.Redirs = kept
 		text, known := pipeStageOutput(&bare, inputs[call], 0)
 		for _, target := range targets {
-			written[target] = append(written[target], writtenScript{end: int(stmt.End().Offset()), text: text, known: known})
+			written[target.name] = append(written[target.name], writtenScript{
+				end: int(stmt.End().Offset()), at: at, text: text, known: known,
+				appended: target.appended, conditional: !always[stmt],
+			})
 		}
 		return true
 	})
 	return written
 }
 
-// latest is the text of the last write of target that ends before offset,
-// when the reading knows it.
-func (written writtenScriptSet) latest(target string, before int) (string, bool) {
-	var last *writtenScript
-	for index := range written[path.Clean(target)] {
-		if write := &written[path.Clean(target)][index]; write.end <= before {
-			last = write
+// unconditionalStmts is the statements of file that run whenever the call
+// runs: the top-level statements, the statements of a group or subshell
+// among them, the stages of a pipeline and the first command of an && or
+// || list. A statement in an if, case, loop or function body, or after &&
+// or ||, may not run.
+func unconditionalStmts(file *syntax.File) map[*syntax.Stmt]bool {
+	always := map[*syntax.Stmt]bool{}
+	var mark func(stmts []*syntax.Stmt)
+	var markStmt func(stmt *syntax.Stmt)
+	markStmt = func(stmt *syntax.Stmt) {
+		if stmt == nil || always[stmt] {
+			return
+		}
+		always[stmt] = true
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.Block:
+			mark(cmd.Stmts)
+		case *syntax.Subshell:
+			mark(cmd.Stmts)
+		case *syntax.BinaryCmd:
+			markStmt(cmd.X)
+			if cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll {
+				markStmt(cmd.Y)
+			}
 		}
 	}
-	if last == nil || !last.known {
-		return "", false
+	mark = func(stmts []*syntax.Stmt) {
+		for _, stmt := range stmts {
+			markStmt(stmt)
+		}
 	}
-	return last.text, true
+	mark(file.Stmts)
+	return always
+}
+
+// latest is the text the file target holds when a statement at offset
+// before runs it, when the reading knows it: the writes that take effect
+// before it in order. A write replaces the text and an append adds to it; a
+// write that may not run (conditional) adds its text to the text before it,
+// so neither is read as the only content (both may run). A write the
+// reading does not know hides the text before it, unless it may not run.
+func (written writtenScriptSet) latest(target string, before int) (string, bool) {
+	text, known, any := "", false, false
+	for _, write := range written[path.Clean(target)] {
+		if write.at > before {
+			continue
+		}
+		switch {
+		case !write.known && write.conditional:
+		case !write.known:
+			text, known = "", false
+		case write.appended || write.conditional:
+			if known || !any {
+				text, known = text+write.text, true
+			} else {
+				text, known = write.text, true
+			}
+		default:
+			text, known = write.text, true
+		}
+		any = true
+	}
+	return text, known
 }
 
 // writtenScriptRunTarget returns the file a call runs as a script (args[at]

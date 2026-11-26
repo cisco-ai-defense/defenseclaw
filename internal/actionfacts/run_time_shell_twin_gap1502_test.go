@@ -27,6 +27,15 @@ func TestGAP1502WrittenScriptTwin(t *testing.T) {
 		{"tee x <<< make >/dev/null; sh x", "bash -c 'make\n'"},
 		{"cat > x <<'EOF'\n#!/bin/bash\nmake\nEOF\n./x", "bash -c '#!/bin/bash\nmake\n'"},
 		{"echo ls > x; echo make > x; sh x", "bash -c 'make\n'"},
+		// An append adds to the text; a write that may not run adds its
+		// text to the text before it; a run on the write's own line runs
+		// the document the shell read with the line (CHK-RF-HOOKSHELL F4).
+		{"cat > x <<'EOF'\nmake\nEOF\ncat >> x <<'EOF'\nmake install\nEOF\nsh x", "bash -c 'make\nmake install\n'"},
+		{"echo make > x; echo 'make install' | tee -a x >/dev/null; sh x", "bash -c 'make\nmake install\n'"},
+		{"cat > x <<'EOF'\nmake\nEOF\nif false; then echo ls > x; fi\nsh x", "bash -c 'make\nls\n'"},
+		{"echo make > x; test -f y && echo ls > x; sh x", "bash -c 'make\nls\n'"},
+		{"echo make > x; if c; then cat f > x; fi; sh x", "bash -c 'make\n'"},
+		{"cat > x <<'EOF'; sh x\nmake\nEOF", "cat > x <<< 'make'; bash -c 'make\n'\n"},
 	}
 	for _, row := range rows {
 		got, ok, _, _ := RunTimeShellTwin(row.command)
