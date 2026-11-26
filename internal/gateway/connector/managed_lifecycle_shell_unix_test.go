@@ -156,6 +156,7 @@ func TestManagedShellHooksCloseWhileTheLifecycleRuns(t *testing.T) {
 				name = conn.Name() + "/per-user (control)"
 			}
 			t.Run(name, func(t *testing.T) {
+				parallelHookCase(t)
 				invoke := hookArgvConnectorCase(t, conn.Name())
 				data := t.TempDir()
 				hooks := filepath.Join(data, "hooks")

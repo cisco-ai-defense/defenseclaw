@@ -126,6 +126,7 @@ func TestPerUserHooksIgnoreAnInheritedManagedMarker(t *testing.T) {
 	}
 	for _, run := range runs {
 		t.Run(run.name, func(t *testing.T) {
+			parallelHookCase(t)
 			home := t.TempDir()
 			hookDir := filepath.Join(home, "hooks")
 			opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: "open"}

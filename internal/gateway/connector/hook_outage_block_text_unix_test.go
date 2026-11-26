@@ -20,6 +20,7 @@ import (
 func TestPerUserStrictOutageBlockNamesTheStoppedGatewayAndTheStartStep(t *testing.T) {
 	codexPrompt := hookArgvCase{script: "codex-hook.sh", args: codexBoundShellHookArgsForTest(t, "codex-hook.sh", "UserPromptSubmit")[1:],
 		stdin: `{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"echo strict"}`}
+	warmNativeGatewayForHookTests(t)
 	for _, tc := range []struct {
 		name    string
 		conn    Connector
@@ -34,6 +35,7 @@ func TestPerUserStrictOutageBlockNamesTheStoppedGatewayAndTheStartStep(t *testin
 		{"claude code prompt, gateway not running", NewClaudeCodeConnector(), hookArgvConnectorCase(t, "claudecode"), false, "run defenseclaw-gateway start"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			parallelHookCase(t)
 			home := t.TempDir()
 			installNativeGatewayForHookTest(t, home)
 			writeOutageTierConfig(t, home, outageStrictTierConfig)

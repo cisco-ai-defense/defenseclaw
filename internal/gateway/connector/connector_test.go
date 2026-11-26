@@ -10227,6 +10227,7 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
+	warmNativeGatewayForHookTests(t)
 	for _, agent := range []struct {
 		conn    Connector
 		script  string
@@ -10252,6 +10253,7 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 			{"open", "open", "strict", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
+				parallelHookCase(t)
 				home := t.TempDir()
 				hookDir := filepath.Join(home, "hooks")
 				opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: tc.installed}
