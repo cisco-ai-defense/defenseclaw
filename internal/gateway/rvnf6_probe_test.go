@@ -90,7 +90,9 @@ func TestRVNF6Probe(t *testing.T) {
 			expected := verdictClassNF7(laptop)
 			// No-copy scalar/member fragments cannot prove their key context.
 			// Broken-file Write is also ambiguous without its original bytes.
-			if !withFacts {
+			// An Edit that creates the file has a known before-state (empty)
+			// and gets the laptop verdict (substrate-1 GAP-0617).
+			if !withFacts && r.input["old_string"] != "" {
 				expected = agentHookConfigDisableRuleID + "/CRITICAL"
 			}
 			if verdictClassNF7(actor) != expected {
