@@ -338,8 +338,8 @@ func TestGAP2249FolderTreeLookup(t *testing.T) {
 	for _, dir := range dirs {
 		ids[dir] = tree.folder(dir)
 	}
-	ids["/a/b/d"] = tree.child(ids["/a/b"], "d")
-	ids["/e"] = tree.child(0, "e")
+	ids["/a/b/d"] = tree.child(ids["/a/b"], "d", false)
+	ids["/e"] = tree.child(0, "e", false)
 	for dir, id := range ids {
 		if got := tree.path(id); got != dir {
 			t.Errorf("path(%d) = %q, want %q", id, got, dir)
@@ -354,7 +354,7 @@ func TestGAP2249FolderTreeLookup(t *testing.T) {
 		}
 	}
 	// A collision: a second folder filed under the hash of the first.
-	other := tree.child(0, "zz")
+	other := tree.child(0, "zz", false)
 	hash := tree.hashes[ids["/a"]]
 	tree.more = map[uint64][]int32{hash: {other}}
 	tree.byHash[hash] = other

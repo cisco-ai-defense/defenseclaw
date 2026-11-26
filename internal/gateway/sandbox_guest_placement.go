@@ -1237,15 +1237,13 @@ func (readings *guestShellReadings) add(text string, in []int32) {
 // absolute, as ids: 0 is /, and any other folder is a name (no slash, not .
 // or ..) in its parent folder, made once (child), so two folders are two
 // ids and a folder's string is its parents' names joined by slashes (path).
-// A folder is found by its string through a 64-bit FNV-1a hash of it,
-// checked name by name against the tree (lookup), so a hash that two
-// strings share never answers for the other. Once the walk ends, only
-// lookup and path read it.
+// A folder is found by a 64-bit FNV-1a hash of its string, checked against
+// the tree (child by its parent and name, lookup name by name), so a hash
+// that two strings share never answers for the other. Once the walk ends,
+// only lookup and path read it.
 type guestFolderTree struct {
-	nodes []guestFolderNode
-	// edges and hashes are the walk's while it makes folders.
-	edges  map[guestFolderNode]int32
-	hashes []uint64
+	nodes  []guestFolderNode
+	hashes []uint64 // each folder's hash, the walk's while it makes folders
 	byHash map[uint64]int32
 	more   map[uint64][]int32 // the folders whose hash an earlier one has
 }
@@ -1267,19 +1265,16 @@ func newGuestFolderTree() *guestFolderTree {
 	root = (root ^ '/') * guestFolderHashPrime
 	return &guestFolderTree{
 		nodes:  []guestFolderNode{{parent: -1}},
-		edges:  map[guestFolderNode]int32{},
 		hashes: []uint64{root},
 		byHash: map[uint64]int32{root: 0},
 	}
 }
 
 // child is the folder name in folder parent: the parent's string, a slash
-// unless the parent is /, and name.
-func (tree *guestFolderTree) child(parent int32, name string) int32 {
-	edge := guestFolderNode{parent: parent, name: name}
-	if id, ok := tree.edges[edge]; ok {
-		return id
-	}
+// unless the parent is /, and name. A folder of the same parent and name has
+// the same string and so the same hash, so it is found under that hash. A
+// folder it makes holds a copy of name when keep is set.
+func (tree *guestFolderTree) child(parent int32, name string, keep bool) int32 {
 	hash := tree.hashes[parent]
 	if parent != 0 {
 		hash = (hash ^ '/') * guestFolderHashPrime
@@ -1287,11 +1282,24 @@ func (tree *guestFolderTree) child(parent int32, name string) int32 {
 	for at := 0; at < len(name); at++ {
 		hash = (hash ^ uint64(name[at])) * guestFolderHashPrime
 	}
+	first, taken := tree.byHash[hash]
+	if taken {
+		if node := tree.nodes[first]; node.parent == parent && node.name == name {
+			return first
+		}
+		for _, id := range tree.more[hash] {
+			if node := tree.nodes[id]; node.parent == parent && node.name == name {
+				return id
+			}
+		}
+	}
+	if keep {
+		name = strings.Clone(name)
+	}
 	id := int32(len(tree.nodes))
-	tree.nodes = append(tree.nodes, edge)
+	tree.nodes = append(tree.nodes, guestFolderNode{parent: parent, name: name})
 	tree.hashes = append(tree.hashes, hash)
-	tree.edges[edge] = id
-	if _, taken := tree.byHash[hash]; !taken {
+	if !taken {
 		tree.byHash[hash] = id
 	} else {
 		if tree.more == nil {
@@ -1308,11 +1316,7 @@ func (tree *guestFolderTree) folder(dir string) int32 {
 	id := int32(0)
 	for rest := dir[1:]; rest != ""; {
 		name, after, _ := strings.Cut(rest, "/")
-		if next, ok := tree.edges[guestFolderNode{parent: id, name: name}]; ok {
-			id = next
-		} else {
-			id = tree.child(id, strings.Clone(name))
-		}
+		id = tree.child(id, name, true)
 		rest = after
 	}
 	return id
@@ -1390,7 +1394,7 @@ func (tree *guestFolderTree) cdTargets(text string, bases []int32, home string) 
 		}
 		targets := make([]int32, len(bases))
 		for at, base := range bases {
-			targets[at] = tree.child(base, operand)
+			targets[at] = tree.child(base, operand, false)
 		}
 		return targets
 	}
@@ -1414,7 +1418,7 @@ func (tree *guestFolderTree) cdTargets(text string, bases []int32, home string) 
 
 // done drops what only the walk that makes folders reads.
 func (tree *guestFolderTree) done() {
-	tree.edges, tree.hashes = nil, nil
+	tree.hashes = nil
 }
 
 // guestOwnShellFolders returns, lexically, each simple command of the call
