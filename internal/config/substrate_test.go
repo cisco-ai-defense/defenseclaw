@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -275,6 +276,9 @@ func TestSubstrateValidate(t *testing.T) {
 		"ask timeout":               func(s *SubstrateConfig) { s.Unattended.AskTimeout = "48h" },
 		"sampling":                  func(s *SubstrateConfig) { r := 1.5; s.Unattended.TelemetrySampling = &r },
 		"rps":                       func(s *SubstrateConfig) { s.RateLimits.PerActorRPS = -1 },
+		"extproc rps nan":           func(s *SubstrateConfig) { s.Extproc.RateLimits.PerActorRPS = math.NaN() },
+		"extproc rps +inf":          func(s *SubstrateConfig) { s.Extproc.RateLimits.PerActorRPS = math.Inf(1) },
+		"extproc rps -inf":          func(s *SubstrateConfig) { s.Extproc.RateLimits.PerActorRPS = math.Inf(-1) },
 		"failure mode":              func(s *SubstrateConfig) { s.Extproc.FailureMode = "ignore" },
 		"body mode":                 func(s *SubstrateConfig) { s.Extproc.BodyInspection = "always" },
 		"chain failure mode":        func(s *SubstrateConfig) { s.Extproc.Chain.FailureMode = "sometimes" },

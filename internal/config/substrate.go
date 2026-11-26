@@ -19,6 +19,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"path"
@@ -1408,7 +1409,7 @@ func (s *SubstrateConfig) Validate() error {
 	default:
 		bad("extproc.body_inspection", "%q must be auto, on or off", s.Extproc.BodyInspection)
 	}
-	if n := s.Extproc.RateLimits.PerActorRPS; n < 0 || n > 1e6 {
+	if n := s.Extproc.RateLimits.PerActorRPS; math.IsNaN(n) || n < 0 || n > 1e6 {
 		bad("extproc.rate_limits.per_actor_rps", "%v is outside 0-1000000 (0 is the callout's default)", n)
 	}
 	if n := s.Extproc.BodyMaxBytes; n < 0 || n > DefaultSubstrateBodyMaxBytes {
