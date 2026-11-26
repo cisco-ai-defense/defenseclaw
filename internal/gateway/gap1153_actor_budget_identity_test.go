@@ -85,7 +85,7 @@ func gap1153Corpus(n int) []string {
 		for k := r.Intn(4); k > 0; k-- {
 			picked = append(picked, rows[r.Intn(len(rows))])
 		}
-		body := padding
+		var body string
 		switch r.Intn(3) {
 		case 0:
 			body = strings.Join(append(picked, padding), "; ")
