@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -194,6 +195,29 @@ func TestFIX2223CGuestStaticDirectoryPlacesRootBoundWrites(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%q: placed writes %v", command, ops)
+		}
+	}
+}
+
+// TestFIX2223EPhysicalGuestAlias records the host spelling a macOS path
+// resolver supplies for a link created under the guest's /tmp.
+func TestFIX2223EPhysicalGuestAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS /tmp has a physical /private/tmp spelling")
+	}
+	key := "authorized_" + "keys"
+	command := "cd /tmp && ln -s ../sandbox/.ssh d && echo k >> d/" + key
+	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
+	for _, operand := range []string{"/tmp/d/" + key, "/private/tmp/d/" + key} {
+		aliases := links.GuestAliasTargets(operand, false)
+		found := false
+		for _, alias := range aliases {
+			if filepath.Clean(GuestOwnRootPath(alias)) == "/sandbox/.ssh/"+key {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: alias targets %q, want guest protected path", operand, aliases)
 		}
 	}
 }

@@ -127,3 +127,54 @@ func TestFIX2223CBenignSelfRootMatchesPlainPath(t *testing.T) {
 		})
 	}
 }
+
+func TestFIX2223EReviewHoldsActor(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX gateway")
+	}
+	key := "authorized_" + "keys"
+	rows := []struct{ name, command string }{
+		{"cp-cwd-parent", "cp /tmp/k /proc/self/cwd/../.ssh/" + key},
+		{"gcp-cwd-parent", "gcp /tmp/k /proc/self/cwd/../.ssh/" + key},
+		{"wrapped-cp-cwd-parent", "env cp /tmp/k /proc/self/cwd/../.ssh/" + key},
+		{"relative-dir-link", "cd /tmp && ln -s ../sandbox/.ssh d && echo k >> d/" + key},
+		{"relative-dir-link-cp", "cd /tmp && ln -s ../sandbox/.ssh d && cp /tmp/"+key+" d/"+key},
+		{"relative-dir-link-tee", "cd /tmp && ln -s ../sandbox/.ssh d && tee -a d/"+key+" < /tmp/k"},
+		{"cwd-alias-parent", "ln -s /proc/self/cwd c && echo k >> c/../.ssh/" + key},
+		{"cwd-alias-parent-dd", "ln -s /proc/self/cwd c && dd if=/tmp/k of=c/../.ssh/" + key},
+	}
+	for _, pack := range []string{"default", "strict"} {
+		t.Run(pack, func(t *testing.T) {
+			api, actor, _, _ := gap0545API(t, "claudecode", pack)
+			for _, row := range rows {
+				t.Run(row.name, func(t *testing.T) {
+					action, _ := gap2227Hook(t, api, actor, sandboxauth.SandboxHome+"/app", row.command, true)
+					if action != "block" {
+						t.Errorf("actor %s: %s, want block", row.name, action)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestFIX2223ELaptopProcessAliasParent(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("Linux unprivileged laptop")
+	}
+	for _, pack := range []string{"default", "strict"} {
+		t.Run(pack, func(t *testing.T) {
+			api, _, _, app := gap0545API(t, "claudecode", pack)
+			key := "authorized_" + "keys"
+			for _, command := range []string{
+				"cp /tmp/k /proc/self/cwd/../.ssh/" + key,
+				"ln -s /proc/self/cwd c && echo k >> c/../.ssh/" + key,
+			} {
+				action, _ := gap2227Hook(t, api, context.Background(), app, command, false)
+				if action != "block" {
+					t.Errorf("laptop %q: %s, want block", command, action)
+				}
+			}
+		})
+	}
+}
