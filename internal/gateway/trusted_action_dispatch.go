@@ -4895,7 +4895,7 @@ func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input,
 // 1.0.10 actor's time (rel-1-0-10:GAP-2226).
 func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	placements, stopped := memo.plan(input, facts).placements(true)
-	var folders map[guestShellReading]bool
+	var folders *guestShellReadings
 	if slices.ContainsFunc(placements, func(placement guestPlacement) bool { return placement.candidate }) {
 		command := input.Command
 		if command == "" {
@@ -4904,7 +4904,7 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 		folders = guestOwnShellFolders(command, input.CWD, input.ActiveHome)
 	}
 	isCandidate := func(placement guestPlacement) bool {
-		return placement.candidate && !folders[guestShellReading{placement.text, path.Clean(placement.cwd)}]
+		return placement.candidate && !folders.has(placement.text, path.Clean(placement.cwd))
 	}
 	// Each list is made at its size: a long call places thousands of
 	// readings, and growing the lists copied their facts again and again

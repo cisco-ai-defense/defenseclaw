@@ -50,7 +50,7 @@ func TestGAP0628OwnShellFoldersOnlyFollowTheShellItself(t *testing.T) {
 			last = statement
 		}
 		var got []string
-		for reading := range guestOwnShellFolders(row.command, cwd, home) {
+		for reading := range guestOwnShellFolders(row.command, cwd, home).pairs() {
 			if reading.text == last {
 				got = append(got, reading.dir)
 			}

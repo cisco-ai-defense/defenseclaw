@@ -1456,7 +1456,7 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 		// laptop alerts (substrate-1 GAP-0378, GAP-0379).
 		placements, _ := request.guestMemo.plan(input, whole).placements(false)
 		dynamic := guestCallRunsUnreadCommand(command, input.ActiveHome)
-		var own map[guestShellReading]bool
+		var own *guestShellReadings
 		var walked map[string]bool
 		if dynamic {
 			own, walked = guestOwnShellWalk(command, input.CWD, input.ActiveHome)
@@ -1485,7 +1485,7 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 			// (cd ~/.claude || cd /tmp); $CMD; echo '{}' > settings.json and
 			// of an uncalled function that cds, where the laptop alerts.
 			if placement.candidate && (!dynamic || walked[placement.text] &&
-				!own[guestShellReading{placement.text, path.Clean(placement.cwd)}]) {
+				!own.has(placement.text, path.Clean(placement.cwd))) {
 				continue
 			}
 			if target := sandboxAgentHookConfigPlacedWrite(placement.text, placement.cwd, input.ActiveHome); target != "" {

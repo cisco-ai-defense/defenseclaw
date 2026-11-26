@@ -1041,6 +1041,68 @@ func guestCallUnread(call *syntax.CallExpr, home string) bool {
 // folder the call's own shell may stand in when it runs (guestOwnShellFolders).
 type guestShellReading struct{ text, dir string }
 
+// guestShellReadings are the readings of guestOwnShellWalk: for each simple
+// command text, the folder lists the walk read it in. A list is one the walk
+// made and never changes, so a text keeps its lists, not an entry per
+// folder: a call of 900 cds after $CMD made 230,000 entries a walk, a third
+// of a copy-mode actor's time on it (rel-1-0-10:GAP-2226). A long list gets
+// its folder set on its first lookup (sets), once, as many texts share it.
+// A nil *guestShellReadings has no reading. It is only read once made.
+type guestShellReadings struct {
+	texts map[string][]int
+	lists [][]string
+	sets  []guestFolderSet
+}
+
+// guestFolderSet is the folders of one list of a guestShellReadings.
+type guestFolderSet struct {
+	once sync.Once
+	dirs map[string]bool
+}
+
+// guestFolderSetMin is the length from which a list is looked up through a
+// set rather than read through.
+const guestFolderSetMin = 16
+
+// has reports the reading of text in folder dir.
+func (readings *guestShellReadings) has(text, dir string) bool {
+	if readings == nil {
+		return false
+	}
+	for _, at := range readings.texts[text] {
+		list := readings.lists[at]
+		if len(list) < guestFolderSetMin {
+			if slices.Contains(list, dir) {
+				return true
+			}
+			continue
+		}
+		set := &readings.sets[at]
+		set.once.Do(func() {
+			set.dirs = make(map[string]bool, len(list))
+			for _, folder := range list {
+				set.dirs[folder] = true
+			}
+		})
+		if set.dirs[dir] {
+			return true
+		}
+	}
+	return false
+}
+
+// add notes text read in each folder of in, a list the walk never changes.
+func (readings *guestShellReadings) add(text string, in []string) {
+	at := len(readings.lists) - 1
+	if at < 0 || len(readings.lists[at]) != len(in) || &readings.lists[at][0] != &in[0] {
+		readings.lists = append(readings.lists, in)
+		at++
+	}
+	if kept := readings.texts[text]; len(kept) == 0 || kept[len(kept)-1] != at {
+		readings.texts[text] = append(kept, at)
+	}
+}
+
 // guestOwnShellFolders returns, lexically, each simple command of the call
 // that runs after a command the statement split cannot read ($CMD, eval,
 // source; guestCallRunsUnreadCommand), with each folder the call's own shell
@@ -1069,7 +1131,7 @@ type guestShellReading struct{ text, dir string }
 // (guestDirFirst). The walk reads each statement once, so its cost grows
 // with the statements times the folders followed (substrate-1 GAP-0885).
 // nil when the script does not parse or runs no unread command.
-func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool {
+func guestOwnShellFolders(command, cwd, home string) *guestShellReadings {
 	readings, _ := guestOwnShellWalk(command, cwd, home)
 	return readings
 }
@@ -1085,7 +1147,7 @@ func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool 
 // of a placed text only where the walk says the shell may stand in it, and
 // keeps every candidate folder of a text the walk did not place
 // (agent_hook_config_guard.go, substrate-1 GAP-0888, B43).
-func guestOwnShellWalk(command, cwd, home string) (map[guestShellReading]bool, map[string]bool) {
+func guestOwnShellWalk(command, cwd, home string) (*guestShellReadings, map[string]bool) {
 	if len(command) > agentHookConfigMaxPlacedBytes {
 		return guestOwnShellWalkText(command, cwd, home)
 	}
@@ -1120,12 +1182,12 @@ var guestWalks struct {
 // guestWalk is one walk kept in guestWalks.
 type guestWalk struct {
 	command, cwd, home string
-	readings           map[guestShellReading]bool
+	readings           *guestShellReadings
 	placed             map[string]bool
 }
 
 // guestOwnShellWalkText walks the script (guestOwnShellWalk).
-func guestOwnShellWalkText(command, cwd, home string) (map[guestShellReading]bool, map[string]bool) {
+func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[string]bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil || !path.IsAbs(cwd) {
 		return nil, nil
@@ -1146,12 +1208,15 @@ func guestOwnShellWalkText(command, cwd, home string) (map[guestShellReading]boo
 		}
 		return command[start:end]
 	}
+	// seen is join's, cleared for each join: a fresh map for each statement
+	// was most of the walk's allocations on a long call (rel-1-0-10:GAP-2226).
+	seen := map[string]bool{}
 	join := func(sets ...[]string) []string {
 		var out []string
-		seen := map[string]bool{}
+		clear(seen)
 		for _, set := range sets {
 			for _, dir := range set {
-				if dir = path.Clean(dir); path.IsAbs(dir) && !seen[dir] {
+				if dir = guestCleanAbs(dir); dir != "" && !seen[dir] {
 					seen[dir] = true
 					out = append(out, dir)
 				}
@@ -1172,7 +1237,7 @@ func guestOwnShellWalkText(command, cwd, home string) (map[guestShellReading]boo
 		return out
 	}
 	unread := false
-	var readings map[guestShellReading]bool
+	var readings *guestShellReadings
 	placed := map[string]bool{}
 	// mark keys every simple command of node (one statement, run from the
 	// folders in) with each of those folders, once a command before it may
@@ -1197,11 +1262,9 @@ func guestOwnShellWalkText(command, cwd, home string) (map[guestShellReading]boo
 			}
 			if unread && len(in) != 0 {
 				if readings == nil {
-					readings = map[guestShellReading]bool{}
+					readings = &guestShellReadings{texts: map[string][]int{}}
 				}
-				for _, dir := range in {
-					readings[guestShellReading{span, dir}] = true
-				}
+				readings.add(span, in)
 			}
 			return true
 		})
@@ -1260,7 +1323,32 @@ func guestOwnShellWalkText(command, cwd, home string) (map[guestShellReading]boo
 		succeeded, failed := step(stmt, current)
 		current = join(succeeded, failed)
 	}
+	if readings != nil {
+		readings.sets = make([]guestFolderSet, len(readings.lists))
+	}
 	return readings, placed
+}
+
+// guestCleanAbs is path.Clean(dir) when that is absolute, else "". A folder
+// the walk made is clean already, and is checked, not cleaned again.
+func guestCleanAbs(dir string) string {
+	if dir == "" || dir[0] != '/' {
+		return "" // path.Clean keeps a relative path relative
+	}
+	for start := 1; start < len(dir); {
+		end := start
+		for end < len(dir) && dir[end] != '/' {
+			end++
+		}
+		if segment := dir[start:end]; segment == "" || segment == "." || segment == ".." {
+			return path.Clean(dir)
+		}
+		start = end + 1
+		if start == len(dir) {
+			return path.Clean(dir) // a trailing slash
+		}
+	}
+	return dir
 }
 
 // guestStmtLeaves reports, lexically, a statement that is a plain exit or
