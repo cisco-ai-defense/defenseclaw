@@ -34,6 +34,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 
 	"golang.org/x/term"
@@ -374,6 +376,10 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 		if err != nil {
 			return err
 		}
+		// GAP-0476: the cluster's chain state marks the restore point, so
+		// an undo to it forgets only what came after. Quiet when it fails:
+		// the undo says what that means.
+		_, _ = s.Client.ReportWorkspace(ctx, a.Atespace, a.Name, api.WorkspaceEvent{Event: "checkpoint", Checkpoint: info.Commit})
 		// GAP-0410: the restore point is a file in the agent. Only a
 		// snapshot the cluster stores brings it back after the agent's
 		// worker goes away; without one a crash returns the agent to its
@@ -550,6 +556,7 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	substrateReportUndo(ctx, cmd, s.Client, a, info)
 	if info.Pushes > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "It also took back %d push(es) made after that point.\n", info.Pushes)
 	}
@@ -559,6 +566,42 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		fmt.Fprintf(cmd.ErrOrStderr(), "Closed %d pending question(s) of %s.\n", n, a.Name)
 	}
 	return nil
+}
+
+// substrateReportUndo tells the cluster's chain state which files the undo
+// removed and put back, as path digests, so a download into one of them
+// after the restore point no longer joins a later run of that path
+// (GAP-0476). Downloads outside the folder, and from before the restore
+// point, still do. When the report fails (an older gateway or leader) or
+// the leader has no mark for the restore point, the undo stands and the
+// launcher says what the chain may still report.
+func substrateReportUndo(ctx context.Context, cmd *cobra.Command, cl *api.Client, a api.Actor, info *workspace.UndoInfo) {
+	cut := false
+	digests := func(paths []string) []string {
+		var out []string
+		for _, p := range paths {
+			if len(out) == chainstate.MaxUndoFiles {
+				cut = true
+				break
+			}
+			if d, ok := guardrail.ToolChainPOSIXPathDigest(p); ok {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+	ev := api.WorkspaceEvent{Event: "undo", Checkpoint: info.Commit, Removed: digests(info.Removed), Restored: digests(info.Restored)}
+	const may = "running a file the undo %s may still be reported as a download that is run (chain.download_then_execute_same_artifact, an alert, never a block)"
+	res, err := cl.ReportWorkspace(ctx, a.Atespace, a.Name, ev)
+	switch {
+	case err != nil:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: the cluster was not told about this undo (%v), so "+may+".\n", err, "removed or put back")
+	case !res.CheckpointKnown && len(ev.Restored) > 0:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: the cluster has no mark for restore point %s (saved before it could keep one), so "+may+".\n", info.ID, "put back")
+	}
+	if cut {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: the undo changed more than %d files of a kind; for the others, "+may+".\n", chainstate.MaxUndoFiles, "changed")
+	}
 }
 
 // substrateFolderLost is the undo of an agent that came back from a crash

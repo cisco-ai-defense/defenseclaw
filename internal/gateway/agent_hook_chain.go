@@ -2463,12 +2463,7 @@ func exactPathDigest(candidate actionfacts.PathFact) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return pathIdentityDigest(identity), true
-}
-
-func pathIdentityDigest(identity string) string {
-	digest := sha256.Sum256([]byte("defenseclaw/tool-chain/path-identity/v1\x00" + identity))
-	return hex.EncodeToString(digest[:])
+	return guardrail.ToolChainPathIdentityDigest(identity), true
 }
 
 // exactArtifactIntentPathDigest is exactPathDigest for the artifact of a
@@ -2479,7 +2474,7 @@ func pathIdentityDigest(identity string) string {
 // (rel-1-0-6:GAP-0182). Other chains keep exactPathDigest.
 func exactArtifactIntentPathDigest(candidate actionfacts.PathFact) (string, bool) {
 	if identity, ok := gitBashDriveLetterIdentity(candidate); ok {
-		return pathIdentityDigest("windows\x00" + identity), true
+		return guardrail.ToolChainPathIdentityDigest("windows\x00" + identity), true
 	}
 	return exactPathDigest(candidate)
 }
@@ -2871,7 +2866,7 @@ func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 		selected = identity
 	}
 	if exact && selected != "" {
-		return pathIdentityDigest(selected), true
+		return guardrail.ToolChainPathIdentityDigest(selected), true
 	}
 	return guardrail.ToolChainFileUnknownDigest, true
 }
@@ -2930,7 +2925,7 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 	case !found:
 		return "", false
 	case exact && selected != "" && !credentialFileReadDerivesFile(facts):
-		return pathIdentityDigest(selected), true
+		return guardrail.ToolChainPathIdentityDigest(selected), true
 	default:
 		return guardrail.ToolChainFileUnknownDigest, true
 	}
