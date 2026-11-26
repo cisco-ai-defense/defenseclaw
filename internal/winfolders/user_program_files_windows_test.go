@@ -28,7 +28,8 @@ func TestUserProgramFilesIgnoresProcessEnvironmentOverrides(t *testing.T) {
 	} {
 		t.Setenv(name, value)
 	}
-	got, err := UserProgramFiles()
+	// Ask the shell again: UserProgramFiles keeps its first answer.
+	got, err := resolveUserProgramFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
