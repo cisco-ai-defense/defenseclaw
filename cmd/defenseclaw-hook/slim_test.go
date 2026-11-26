@@ -300,6 +300,14 @@ func TestSlimHookSizeBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the hook for two platforms")
 	}
+	if runtime.GOOS == "windows" {
+		// A native Windows run has no go tool or module source, so it cannot
+		// build the hook: it measures the defenseclaw-hook.exe the native build
+		// shipped next to the test binaries (built with the release flags, as
+		// the Linux run cross-builds it). It fails, never skips, without one.
+		slimHookPrebuiltWindowsBudget(t)
+		return
+	}
 	if runtime.GOOS != "linux" {
 		// One check is enough: the Linux run cross-builds both targets.
 		t.Skip("the size budget is checked on Linux, for the Windows and Linux builds")
@@ -326,6 +334,40 @@ func TestSlimHookSizeBudget(t *testing.T) {
 			t.Logf("%s/%s: %d bytes", target.goos, target.goarch, info.Size())
 		})
 	}
+}
+
+// slimHookPrebuiltExeEnv names the prebuilt Windows hook executable a native
+// run measures. Without it the run looks for defenseclaw-hook.exe in the folders
+// above the test's own, where the native build zip carries it (its root).
+const slimHookPrebuiltExeEnv = "DEFENSECLAW_SLIM_HOOK_EXE"
+
+func slimHookPrebuiltWindowsBudget(t *testing.T) {
+	t.Helper()
+	exe := os.Getenv(slimHookPrebuiltExeEnv)
+	if exe == "" {
+		dir, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 8 && exe == ""; i++ {
+			candidate := filepath.Join(dir, "defenseclaw-hook.exe")
+			if _, err := os.Stat(candidate); err == nil {
+				exe = candidate
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
+	if exe == "" {
+		t.Fatalf("no prebuilt defenseclaw-hook.exe: set %s, or have the native build ship it at the root of its zip", slimHookPrebuiltExeEnv)
+	}
+	info, err := os.Stat(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > slimHookMaxBytes {
+		t.Fatalf("windows/amd64 defenseclaw-hook is %d bytes, budget %d", info.Size(), slimHookMaxBytes)
+	}
+	t.Logf("windows/amd64: %d bytes", info.Size())
 }
 
 // slimHookForbiddenEntry returns the slimHookForbidden entry dep matches,
