@@ -13,11 +13,6 @@ import (
 
 // Actors are Linux: a relay elsewhere is never separated, so the launcher
 // runs the in-actor review and push scripts.
-var (
-	gitScratchParents []string
-	gitTestWrap       string
-)
-
 func runGitOp(_ context.Context, _ []string, _ string, _ map[string]string, _ *separation, _, stderr io.Writer) int {
 	fmt.Fprintln(stderr, "the relay runs as the agent's user")
 	return ExitGitUnseparated
