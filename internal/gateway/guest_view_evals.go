@@ -25,7 +25,9 @@ import (
 // (rel-1-0-10:GAP-2226, substrate-1 GAP-0502). Each of these is a function
 // of the reading's facts alone, and a placed reading's facts are the ones
 // the memo keeps for its text and folder, so a later judgment of the same
-// reading takes them from here. Everything else runs as before: the budget
+// reading in the same hook takes them from here. The memo lives for one
+// hook (trustedToolCallFindingsOf makes one a hook): nothing is kept from
+// one call of the agent to the next. Everything else runs as before: the budget
 // is charged the same cost for a kept result, and the rules already
 // matched, the owners a finding excludes and the budget's end are read
 // live. A nil *guestViewEvals keeps nothing.

@@ -635,6 +635,10 @@ type guestReadingMemo struct {
 	// placed keeps the placed readings of the hook's walks
 	// (placedReader).
 	placed []*guestPlacedEntry
+	// viewEvalsOff keeps no rule results with the placed readings
+	// (guestViewEvals): every judgment of them is made afresh. Tests set
+	// it for the baseline the kept results are compared with.
+	viewEvalsOff bool
 	// relative keeps the relative-operand answers of every split of the
 	// hook (actionfacts.RelativeOperandMemo).
 	relative actionfacts.RelativeOperandMemo

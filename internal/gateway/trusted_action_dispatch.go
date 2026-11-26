@@ -4970,7 +4970,7 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 	}
 	if count := len(placements) - candidateCount; count != 0 {
 		children = make([]actionfacts.Facts, 0, count)
-		if memo != nil {
+		if memo != nil && !memo.viewEvalsOff {
 			evals = make([]*guestViewEvals, 0, count)
 		}
 	}
@@ -4979,7 +4979,7 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 		if !candidate[at] {
 			child, childEvals := read(placement)
 			children = append(children, child)
-			if memo != nil {
+			if memo != nil && !memo.viewEvalsOff {
 				evals = append(evals, childEvals)
 			}
 		} else if guestCandidateMayReadKey(placement.text) {

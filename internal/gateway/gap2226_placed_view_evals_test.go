@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"slices"
@@ -38,63 +39,131 @@ func gap2226PlacedViewCommands() []string {
 		"cd .cache\nbash <<< 'true'\n" + lines(8, "ls d%d\n") + "rm ../.defenseclaw/audit.db",
 		"cd .cache\n$CMD\n" + lines(7, "cd s%d\n") + "cd ../" + ssh + "\necho k >> " + keys,
 		"cd project && bash <<< 'true'\ncat ../" + ssh + "/" + key + "\nls",
+		// Placed readings with a command whose effect is not proven (a
+		// program by a relative path): the enforcement projection drops it,
+		// so a rule's result on it can differ from the reading's.
+		"cd .cache\nbash <<< 'true'\ncat ../" + ssh + "/" + key + " | ./up\nls",
+		"cd .cache\n$CMD\n./prep && cat ../" + ssh + "/" + key + "\nls",
+		"cd .cache\nbash <<< 'true'\nrm ../.defenseclaw/audit.db; ./after\nls",
 	}
 }
 
+// gap2226FreshMemo is a memo whose placed readings keep no rule results
+// (guestReadingMemo.viewEvalsOff): a hook given none makes its own, and
+// that one keeps them, so a baseline without it would compare kept results
+// with kept results (CHK-T6-GPERF3 N1).
+func gap2226FreshMemo() *guestReadingMemo { return &guestReadingMemo{viewEvalsOff: true} }
+
+// gap2226KeptResults counts the placed readings of memo with a kept rule
+// result.
+func gap2226KeptResults(memo *guestReadingMemo) int {
+	kept := 0
+	for _, entry := range memo.placed {
+		for _, reading := range entry.readings {
+			if len(reading.evals.first.results) != 0 || len(reading.evals.more) != 0 {
+				kept++
+			}
+		}
+	}
+	return kept
+}
+
 // TestGAP2226PlacedViewEvalsKeepEveryFinding pins the placed readings' kept
-// rule results (guestViewEvals) to fresh ones: a hook that judges the same
-// placed readings again (a repeat, a twin, a call between) gets the same
-// findings and spends the same budget as a hook with no memo, under each
-// shipped pack (rel-1-0-10:GAP-2226, substrate-1 GAP-0502).
+// rule results (guestViewEvals) to fresh ones. A memo lives for one hook
+// (trustedToolCallFindingsOf), and within it the call's dispatches and its
+// twins judge the same placed readings; the rounds here judge a call again,
+// another call and a longer one through one memo, as a hook's dispatches
+// would, alternating the shipped generation with one whose rules come in
+// another order. Each round gets the findings and spends the budget of a
+// hook that keeps no result at all (gap2226FreshMemo), also under budgets
+// that end among the readings (rel-1-0-10:GAP-2226, substrate-1 GAP-0502).
 func TestGAP2226PlacedViewEvalsKeepEveryFinding(t *testing.T) {
 	home := "/home/alice"
-	generation := snapshotRulePackGeneration("")
-	request := func(command string, memo *guestReadingMemo) trustedActionRequest {
-		return trustedActionRequest{Input: actionfacts.Input{Tool: "shell", Command: command, ActiveHome: home},
+	shipped := snapshotRulePackGeneration("")
+	categories := slices.Clone(shipped.categories)
+	slices.Reverse(categories)
+	reordered, err := compileRulePackGeneration(categories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reordered.semanticRules) != len(shipped.semanticRules) || reordered.semanticRules[0].rule.ID == shipped.semanticRules[0].rule.ID {
+		t.Fatal("the reordered generation does not reorder the semantic rules: the generations are not told apart")
+	}
+	// A strictest combination's members judge the same placed readings in
+	// one dispatch, each with its own rules: one reading keeps a table per
+	// member.
+	meet := meetRuleGeneration([]*compiledRulePackCategories{shipped, reordered})
+	generations := []*compiledRulePackCategories{shipped, reordered, meet}
+	// The twins of a call take their rules from the generation pinned on
+	// the request's context, so each judgment pins its own; the readings
+	// of one generation are not those of another (the placed entries
+	// differ), so only the members of a combination share one.
+	pinned := map[*compiledRulePackCategories]context.Context{}
+	for _, generation := range generations {
+		pinned[generation] = withPinnedGeneration(t.Context(), &Generation{activeRules: generation,
+			connectorRules: map[string]*compiledRulePackCategories{}, registeredRules: map[string]*compiledRulePackCategories{}})
+	}
+	judge := func(command string, memo *guestReadingMemo, generation *compiledRulePackCategories) (string, uint64) {
+		r := trustedActionRequest{Input: actionfacts.Input{Tool: "shell", Command: command, ActiveHome: home},
 			LegacyText: command, Connector: "claudecode", EnforcementCapable: true,
 			SkipLocalFilesystemResolution: true, SandboxGuestCWD: home,
 			generation: generation, budget: newTrustedActionBudget(false), guestMemo: memo}
-	}
-	judge := func(command string, memo *guestReadingMemo) (string, uint64) {
-		r := request(command, memo)
-		findings := dispatchTrustedAction(t.Context(), r)
+		findings := dispatchTrustedAction(pinned[generation], r)
 		return fmt.Sprintf("%+v", findings), r.budget.consumed
 	}
+	fresh := func(command string, generation *compiledRulePackCategories) (string, uint64) {
+		memo := gap2226FreshMemo()
+		got, cost := judge(command, memo, generation)
+		if kept := gap2226KeptResults(memo); kept != 0 {
+			t.Fatalf("a memo that keeps no rule results kept %d", kept)
+		}
+		return got, cost
+	}
 	commands := gap2226PlacedViewCommands()
-	judgedSome, kept := false, 0
+	judgedSome, kept, both := false, 0, 0
 	for at, command := range commands {
-		want, wantCost := judge(command, nil)
+		type answer struct {
+			findings string
+			cost     uint64
+		}
+		want := map[*compiledRulePackCategories]answer{}
+		for _, generation := range generations {
+			findings, cost := fresh(command, generation)
+			want[generation] = answer{findings, cost}
+			if strings.Contains(findings, "RuleID:") {
+				judgedSome = true
+			}
+		}
 		memo := &guestReadingMemo{}
 		other := commands[(at+1)%len(commands)]
-		for round, text := range []string{command, command, other, command, command + "\nls"} {
-			got, cost := judge(text, memo)
+		for round, text := range []string{command, command, other, command, command, command + "\nls", command} {
+			generation := generations[round%len(generations)]
+			got, cost := judge(text, memo, generation)
 			if text != command {
 				continue
 			}
-			if got != want || cost != wantCost {
-				t.Fatalf("call %d round %d: findings or cost differ with kept results:\n got %s (cost %d)\nwant %s (cost %d)", at, round, got, cost, want, wantCost)
+			if w := want[generation]; got != w.findings || cost != w.cost {
+				t.Fatalf("call %d round %d: findings or cost differ with kept results:\n got %s (cost %d)\nwant %s (cost %d)", at, round, got, cost, w.findings, w.cost)
 			}
 		}
-		if strings.Contains(want, "RuleID:") {
-			judgedSome = true
-		}
+		kept += gap2226KeptResults(memo)
 		for _, entry := range memo.placed {
 			for _, reading := range entry.readings {
-				if len(reading.evals.first.results) != 0 {
-					kept++
+				if len(reading.evals.more) != 0 {
+					both++
 				}
 			}
 		}
 	}
-	if !judgedSome || kept == 0 {
-		t.Fatalf("the calls gave no finding (%v) or kept no result (%d): the test reads nothing", judgedSome, kept)
+	if !judgedSome || kept == 0 || both == 0 {
+		t.Fatalf("the calls gave no finding (%v), kept no result (%d) or no reading kept results of both generations (%d): the test reads nothing", judgedSome, kept, both)
 	}
-	t.Logf("%d calls, %d placed readings with kept results", len(commands), kept)
+	t.Logf("%d calls, %d placed readings with kept results, %d of them for both generations", len(commands), kept, both)
 	// A budget that ends among the placed readings ends at the same rule:
 	// a kept result is charged its cost as a fresh one is.
 	full := map[string]string{}
 	for _, command := range commands {
-		full[command], _ = judge(command, nil)
+		full[command], _ = fresh(command, shipped)
 	}
 	saved := trustedActionDispatchMaxCost
 	t.Cleanup(func() { trustedActionDispatchMaxCost = saved })
@@ -110,13 +179,13 @@ func TestGAP2226PlacedViewEvalsKeepEveryFinding(t *testing.T) {
 				continue // the two long cost shapes, at a third of the budgets
 			}
 			judged++
-			want, _ := judge(command, nil)
+			want, _ := fresh(command, shipped)
 			if want != full[command] {
 				cut++
 			}
 			memo := &guestReadingMemo{}
 			for round := range 3 {
-				if got, _ := judge(command, memo); got != want {
+				if got, _ := judge(command, memo, shipped); got != want {
 					t.Fatalf("budget %d, call %d round %d: findings differ with kept results:\n got %s\nwant %s", limit, at, round, got, want)
 				}
 			}
