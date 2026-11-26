@@ -358,13 +358,6 @@ func currentHookCall() *hookCall {
 	return hookCalls.calls[id]
 }
 
-// networkPathUnanswered reports a path below a network share that has not
-// answered in time. A local path is never reported and costs no probe.
-func networkPathUnanswered(path string) bool {
-	unanswered, _ := networkPathRead(path)
-	return unanswered
-}
-
 // shareReadCut is why a read of a path that did not answer is not final.
 type shareReadCut uint8
 
@@ -383,16 +376,10 @@ const (
 	shareReadRemote
 )
 
-// linkUnanswered is networkPathUnanswered for a read that opens no link at
-// the end of the path (lstat, readlink, a directory walk).
-func linkUnanswered(path string) bool {
-	unanswered, _ := networkPathReadAs(path, false)
-	return unanswered
-}
-
-// networkPathRead is networkPathUnanswered that also reports whether the
-// call budget, not the own wait of the share, ended the wait for a share
-// that did not answer (it might have answered had the call had more
+// networkPathRead reports a path below a network share that has not
+// answered in time (a local path is never reported and costs no probe), and
+// whether the call budget, not the own wait of the share, ended the wait for
+// a share that did not answer (it might have answered had the call had more
 // budget), or the link bound stopped the walk to the path.
 func networkPathRead(path string) (unanswered bool, cut shareReadCut) {
 	return networkPathReadAs(path, true)
@@ -848,10 +835,11 @@ const pathReadDirChunk = 1024
 // first n in directory order made a key link that sorts early drop out of a
 // directory past the cap (rel-1-0-10:GAP-1468).
 func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("readdir", name)
-	}
-	dir, err := os.Open(fixturefs.Map(name))
+	// The directory is opened as pathOpen opens it, on the path the share
+	// gate read under its hold; every entry below is read through that
+	// handle. Asking the gate and then opening the name looked the name up
+	// again after the share decision (rel-1-0-10:GAP-1264).
+	dir, err := pathOpen(name)
 	if err != nil {
 		return nil, err
 	}

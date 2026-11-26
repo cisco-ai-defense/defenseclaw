@@ -155,6 +155,7 @@ func TestCXRV1074SwapBetweenGateAndRead(t *testing.T) {
 		{"export-evalsymlinks", false, finalName(EvalSymlinks)},
 		{"readdir", true, readDir(pathReadDir)},
 		{"export-readdir", true, readDir(ReadDir)},
+		{"readdir-limit", true, readDir(func(path string) ([]os.DirEntry, error) { return pathReadDirLimit(path, 10) })},
 		{"openroot", true, func(path string) string {
 			root, err := pathOpenRoot(path)
 			if err != nil {
@@ -266,8 +267,8 @@ func TestCXRV1074SwapBetweenGateAndRead(t *testing.T) {
 			}
 		}
 	}
-	if rows != 66 {
-		t.Fatalf("ran %d rows, want 66", rows)
+	if rows != 72 {
+		t.Fatalf("ran %d rows, want 72", rows)
 	}
 	if n := asked.Load(); n != 0 {
 		t.Fatalf("the share on another machine was asked %d times; the gate never asks one", n)

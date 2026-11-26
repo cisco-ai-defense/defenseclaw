@@ -103,6 +103,7 @@ func TestGAP1263FolderAboveSwappedBetweenGateAndRead(t *testing.T) {
 		{"export-readfile", false, func(p string) string { return body(ReadFile(p)) }},
 		{"readbounded", false, func(p string) string { return body(ReadRegularFileBounded(p, 1<<10)) }},
 		{"readdir", true, func(p string) string { return listing(pathReadDir(p)) }},
+		{"readdir-limit", true, func(p string) string { return listing(pathReadDirLimit(p, 10)) }},
 	}
 	for _, level := range []string{"above1", "above2"} {
 		for _, moment := range []string{"after-walk", "at-read", "control"} {
