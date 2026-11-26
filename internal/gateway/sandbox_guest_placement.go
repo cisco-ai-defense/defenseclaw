@@ -1005,6 +1005,10 @@ func guestDirFirst(dir, home string) bool {
 // ~/AppData or ~/bin (the macOS and Windows agent and startup folders and
 // the user's own commands), a folder outside the home (/etc, /tmp) or one
 // the credentials table keeps whole (appdata/roaming/gcloud/legacy_credentials).
+// Library and AppData are matched in any case, as macOS and Windows, whose
+// file systems fold case, spell them in any case; bin is matched as written:
+// it is the commands folder a profile puts on the PATH of the Linux guest,
+// whose names do not fold, so ~/Bin there is a plain folder.
 // Promoting each plain reading of fan-out shapes (cd .cache; bash <<< true;
 // $CMD; 7 cds; touch f0 ... f1000) made every semantic owner judge 8,125
 // placed views a call where the 1.0.10 line judged 133, and the copy-mode

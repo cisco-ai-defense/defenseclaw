@@ -28,7 +28,10 @@ type placedCalls struct {
 	dirs         map[*syntax.CallExpr][]string
 	// renamed marks a tree a reader renames while it asks (knownShadow): each
 	// call then reads the hidden directory changes before it afresh. Any
-	// other tree reads them once (hidden).
+	// other tree reads them once (hidden), which holds only while the tree
+	// does not change as its calls are read: today only knownShadow renames,
+	// and only in frames with an include (literal_write.go), so a new reader
+	// that changes a tree with no include must set renamed too.
 	renamed bool
 	hidden  *hiddenChanges
 }

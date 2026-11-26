@@ -1244,7 +1244,10 @@ func copyModeNestedShell(text string) bool {
 // copyModeLiteralHereString reports text after a shell word that is only a
 // here-string of one word up to the end of its statement: <<< w and then a
 // newline, ;, &, |, ) or the end. Any other word or redirection (a script
-// file, -s, < file, 0<f) is not.
+// file, -s, < file, 0<f) is not. It is sound because the gate drops quotes
+// and backslashes before it reads (copyModeCallMayNameSSHFolder) and reads
+// every later line itself: a change that stops that strip, or a by-name
+// decision that follows fish or pwsh escapes, must read this exception again.
 func copyModeLiteralHereString(text string) bool {
 	text = strings.TrimLeft(text, " \t")
 	rest, ok := strings.CutPrefix(text, "<<<")

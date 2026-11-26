@@ -4906,6 +4906,10 @@ func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.In
 	// A candidate in a folder the call's own shell may stand in is read as a
 	// child, but a plain reading in a plain folder stays a candidate, as
 	// before the own-shell folders (guestPlainFolder, rel-1-0-10:GAP-2249).
+	// This only takes back own-shell promotions: a placement is a candidate
+	// here only where the plan made it one (placement.candidate), the set the
+	// 1.0.10 line read as candidates, so the candidate set stays a subset of
+	// that line's and no reading it judged as a child becomes a candidate.
 	var plain map[string]bool
 	isCandidate := func(placement guestPlacement) bool {
 		if !placement.candidate {
