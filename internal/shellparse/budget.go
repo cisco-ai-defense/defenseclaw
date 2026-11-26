@@ -122,26 +122,38 @@ func TooDeep(command string) bool {
 // remembered for the next ask: the proofs of one hook call ask it for the
 // same text on every parse and every reader.
 func BudgetExceeded(command string) string {
+	reason, _, _ := budgetExceeded(command, false)
+	return reason
+}
+
+// budgetExceeded is BudgetExceeded. With keepTree set it also returns the
+// tree the second stage parsed to measure a text within the budget, for
+// parseCommand to use instead of parsing the same text again: the measure
+// only reads the tree, which no one else holds. bash tells whether the Bash
+// grammar read that tree (the parse cache keeps it for ParseBash). It
+// returns no tree when the answer was remembered or the text was not parsed
+// to be measured.
+func budgetExceeded(command string, keepTree bool) (reason string, file *syntax.File, bash bool) {
 	if len(command) < budgetMemoMin {
-		return computeBudget(command)
+		return computeBudgetTree(command, keepTree)
 	}
 	budgetMemo.Lock()
 	for _, entry := range budgetMemo.entries {
 		if len(entry.command) == len(command) && entry.command == command {
 			reason := entry.reason
 			budgetMemo.Unlock()
-			return reason
+			return reason, nil, false
 		}
 	}
 	budgetMemo.Unlock()
-	reason := computeBudget(command)
+	reason, file, bash = computeBudgetTree(command, keepTree)
 	budgetMemo.Lock()
 	if len(budgetMemo.entries) >= budgetMemoEntries {
 		budgetMemo.entries = append(budgetMemo.entries[:0], budgetMemo.entries[1:]...)
 	}
 	budgetMemo.entries = append(budgetMemo.entries, budgetMemoEntry{command, reason})
 	budgetMemo.Unlock()
-	return reason
+	return reason, file, bash
 }
 
 const (
@@ -196,35 +208,45 @@ func (n *budgetCounts) feed(command string, i int) {
 }
 
 func computeBudget(command string) string {
+	reason, _, _ := computeBudgetTree(command, false)
+	return reason
+}
+
+// computeBudgetTree is computeBudget; with keepTree set it also returns the
+// measured tree of a text within the budget (budgetExceeded).
+func computeBudgetTree(command string, keepTree bool) (string, *syntax.File, bool) {
 	if len(command) > MaxCommandBytes {
-		return BudgetBytes
+		return BudgetBytes, nil, false
 	}
 	raw, aware, braces, reason := scanCounts(command)
 	if reason != "" {
-		return reason
+		return reason, nil, false
 	}
 	if braces && BraceExpansionTooLarge(command) {
-		return BudgetBraces
+		return BudgetBraces, nil, false
 	}
 	switch {
 	case aware.chain > MaxChainBytes || raw.chain > rawChainBytes:
-		return BudgetChain
+		return BudgetChain, nil, false
 	case aware.tokens > MaxTokens || raw.tokens > rawTokens:
-		return BudgetTokens
+		return BudgetTokens, nil, false
 	case aware.chain <= softChainBytes && len(command) <= softBytes:
-		return ""
+		return "", nil, false
 	}
-	file, ok := parseUnbudgeted(command)
+	file, ok, bash := parseUnbudgeted(command)
 	if !ok {
 		// Text that does not parse has no tree to count. Past the soft
 		// chain bound it may be a chain with a syntax error (GAP-0284); other
 		// text is bounded by MaxTokens and MaxCommandBytes.
 		if aware.chain > softChainBytes {
-			return BudgetUnparsed
+			return BudgetUnparsed, nil, false
 		}
-		return ""
+		return "", nil, false
 	}
-	return measureTree(file)
+	if reason := measureTree(file); reason != "" || !keepTree {
+		return reason, nil, false
+	}
+	return "", file, bash
 }
 
 // scanCounts is the one linear pass over the raw bytes: the nesting of ( {
@@ -430,22 +452,64 @@ func nestingBound(command string) string {
 }
 
 // parseUnbudgeted is the parse of a text the first stage has bounded: the
-// Bash grammar, then POSIX, as parseCommand reads it.
-func parseUnbudgeted(command string) (*syntax.File, bool) {
+// Bash grammar, then POSIX, as parseCommand reads it, with the same parser
+// options (no comments kept), so the tree is the one parseCommand would
+// build for the same text. bash tells whether the Bash grammar read it.
+func parseUnbudgeted(command string) (*syntax.File, bool, bool) {
 	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err == nil {
-			return file, true
+			return file, true, variant == syntax.LangBash
 		}
 	}
-	return nil, false
+	return nil, false, false
 }
 
-var nodeType = reflect.TypeFor[syntax.Node]()
+var (
+	nodeType      = reflect.TypeFor[syntax.Node]()
+	binaryCmdType = reflect.TypeFor[*syntax.BinaryCmd]()
+)
 
 type measureFrame struct {
 	value reflect.Value
 	depth int
+}
+
+// measureShape is what measureTree reads of one type: for a pointer,
+// whether it is a node and whether it is a *syntax.BinaryCmd; for a struct,
+// its exported fields of a kind the walk follows (pointer, interface, slice,
+// struct), in field order. Asked of the type on every value, these checks
+// were most of the measure of an 8 KB call (reflect.Type.Field and
+// Implements; substrate-1 GAP-1153); each type has one answer.
+type measureShape struct {
+	node, binary bool
+	fields       []int
+}
+
+var measureShapes sync.Map // reflect.Type -> *measureShape
+
+func measureShapeOf(t reflect.Type) *measureShape {
+	if shape, ok := measureShapes.Load(t); ok {
+		return shape.(*measureShape)
+	}
+	shape := &measureShape{}
+	switch t.Kind() {
+	case reflect.Pointer:
+		shape.node, shape.binary = t.Implements(nodeType), t == binaryCmdType
+	case reflect.Struct:
+		for i := range t.NumField() {
+			field := t.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			switch field.Type.Kind() {
+			case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Struct:
+				shape.fields = append(shape.fields, i)
+			}
+		}
+	}
+	kept, _ := measureShapes.LoadOrStore(t, shape)
+	return kept.(*measureShape)
 }
 
 // measureTree counts the nodes, the depth and the chain operators of file
@@ -467,15 +531,15 @@ func measureTree(file *syntax.File) string {
 			if value.IsNil() {
 				continue
 			}
-			if value.Type().Implements(nodeType) {
+			if shape := measureShapeOf(value.Type()); shape.node {
 				if nodes++; nodes > MaxParsedNodes {
 					return BudgetNodes
 				}
 				if depth++; depth > MaxTreeDepth {
 					return BudgetDepth
 				}
-				if binary, ok := value.Interface().(*syntax.BinaryCmd); ok {
-					switch binary.Op {
+				if shape.binary {
+					switch value.Interface().(*syntax.BinaryCmd).Op {
 					case syntax.Pipe, syntax.PipeAll, syntax.AndStmt, syntax.OrStmt:
 						if chain++; chain > MaxChainOperators {
 							return BudgetChain
@@ -493,14 +557,8 @@ func measureTree(file *syntax.File) string {
 				stack = append(stack, measureFrame{value.Index(i), depth})
 			}
 		case reflect.Struct:
-			for i := range value.NumField() {
-				if !value.Type().Field(i).IsExported() {
-					continue
-				}
-				switch value.Field(i).Kind() {
-				case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Struct:
-					stack = append(stack, measureFrame{value.Field(i), depth})
-				}
+			for _, i := range measureShapeOf(value.Type()).fields {
+				stack = append(stack, measureFrame{value.Field(i), depth})
 			}
 		}
 	}
