@@ -158,6 +158,14 @@ const gitPushRulePrefix = "git_push:"
 // host, such as team/app) at the pushed commit head.
 func GitPushRule(repo, head string) string { return gitPushRulePrefix + repo + "@" + head }
 
+const mcpCallRulePrefix = "mcp_call:"
+
+// MCPCallRule is the Rule of the tool ask of one held MCP bridge call:
+// digest names the call's method, tool and arguments, so a pending ask is
+// joined only by an identical call and its approval covers that call alone,
+// never another call of the same tool (GAP-0840).
+func MCPCallRule(digest string) string { return mcpCallRulePrefix + digest }
+
 // BindingID is the binding a secret_binding ask is about, "" for any
 // other ask.
 func (a Ask) BindingID() string {
@@ -805,7 +813,9 @@ func firstNonEmpty(a, b string) string {
 // whole host (an ask_hosts rule, or no rule named): such an approval joins
 // the actor's approved hosts. A url_rules ask asks about some methods and a
 // path prefix only, so its approval covers that rule alone (GAP-0177). A
-// git_push ask is about one push, never the host's egress.
+// git_push ask is about one push, and an MCP call ask about one call,
+// never the host's egress.
 func HostWide(rule string) bool {
-	return !strings.HasPrefix(rule, "url_rules:") && !strings.HasPrefix(rule, gitPushRulePrefix)
+	return !strings.HasPrefix(rule, "url_rules:") && !strings.HasPrefix(rule, gitPushRulePrefix) &&
+		!strings.HasPrefix(rule, mcpCallRulePrefix)
 }
