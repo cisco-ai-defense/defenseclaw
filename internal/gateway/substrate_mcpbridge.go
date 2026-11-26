@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -491,38 +492,27 @@ func substrateMCPArgName(v any) (string, bool) {
 // A call judges at most substrateMCPReadingsPerArgs readings per argument
 // reading, including projections and distinct alias values (RV-0841b F6).
 func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substrateMCPJudgedCall) SubstrateCalloutVerdict {
-	if b.st != nil && substrateMCPOverCap(c) {
-		key := "mcp-judge:" + b.reg.Atespace + "/" + b.reg.UID
-		release, ok := b.st.streams.take(key, 1)
-		if !ok {
-			timer := time.NewTimer(substrateMCPOverCapWait)
-			tick := time.NewTicker(10 * time.Millisecond)
-			defer timer.Stop()
-			defer tick.Stop()
-			for !ok {
-				select {
-				case <-ctx.Done():
-					return substrateMCPBusyVerdict()
-				case <-timer.C:
-					return substrateMCPBusyVerdict()
-				case <-tick.C:
-					release, ok = b.st.streams.take(key, 1)
-				}
-			}
-		}
-		defer release()
-	}
 	readings := c.args
 	if c.params != nil {
 		readings = append(slices.Clip(c.args), c.params)
 	}
+	scans := substrateMCPScanReadings(readings)
+	if b.st != nil && scans.overCap() {
+		release, ok := b.admitOverCap(ctx)
+		if !ok {
+			return substrateMCPBusyVerdict()
+		}
+		defer release()
+	}
 	left := substrateMCPReadingsPerArgs*max(len(c.args), 1) - len(readings)
 	extraBytes := substrateMCPExtraBytesPerCall
+	judged := make(map[string]bool)
 	var out SubstrateCalloutVerdict
 	for i, args := range readings {
 		req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: c.tool, Transport: "stdio", Method: method}, Args: args}
 		req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
-		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left, extraBytes: &extraBytes}
+		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left, extraBytes: &extraBytes,
+			scan: scans.scan(i), judged: judged}
 		v := substrateMCPJudge(b.a, withSubstrateMCPReading(ctx, rd), b.reg, req)
 		if i == 0 {
 			out = v
@@ -536,18 +526,120 @@ func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substra
 	return out
 }
 
-// substrateMCPOverCap admits any call that reaches a shared reader limit
-// through the one-active-call actor budget. Ordinary calls do not wait.
-func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
-	if actionfacts.ArgsLimitIssue(c.params) != "" {
-		return true
+// substrateMCPReadingScans are the argument scans of a call's readings. A
+// reading past the reader's bounds is scanned only once admitted (scan).
+type substrateMCPReadingScans struct {
+	readings []json.RawMessage
+	over     []bool
+	scans    []*substrateMCPArgumentScan
+}
+
+func substrateMCPScanReadings(readings []json.RawMessage) substrateMCPReadingScans {
+	s := substrateMCPReadingScans{readings: readings, over: make([]bool, len(readings)),
+		scans: make([]*substrateMCPArgumentScan, len(readings))}
+	for i, r := range readings {
+		if s.over[i] = actionfacts.ArgsLimitIssue(r) != ""; !s.over[i] {
+			scan := substrateMCPScanArguments(r)
+			s.scans[i] = &scan
+		}
 	}
-	for _, args := range c.args {
-		if actionfacts.ArgsLimitIssue(args) != "" {
+	return s
+}
+
+func (s substrateMCPReadingScans) scan(i int) *substrateMCPArgumentScan {
+	if s.scans[i] == nil {
+		scan := substrateMCPScanArguments(s.readings[i])
+		s.scans[i] = &scan
+	}
+	return s.scans[i]
+}
+
+// overCap: a reading past a shared reader bound, at the reader's envelope
+// depth, or with more than substrateMCPFreeCandidates hidden actions is
+// judged under the over-cap admission (GAP-1105, GAP-1141). Ordinary calls
+// do not wait.
+func (s substrateMCPReadingScans) overCap() bool {
+	for i := range s.readings {
+		if s.over[i] || s.scans[i].depthLimited || len(s.scans[i].candidates) > substrateMCPFreeCandidates {
 			return true
 		}
 	}
 	return false
+}
+
+// substrateMCPOverCap is whether judging c takes the over-cap admission.
+func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
+	readings := c.args
+	if c.params != nil {
+		readings = append(slices.Clip(c.args), c.params)
+	}
+	return substrateMCPScanReadings(readings).overCap()
+}
+
+// substrateMCPOverCapGateway is the most over-cap judgments the gateway
+// runs at once across every actor and owner (GAP-1124).
+var substrateMCPOverCapGateway = max(2, runtime.GOMAXPROCS(0)/2)
+
+const (
+	substrateMCPOverCapPerActor = 1
+	substrateMCPOverCapPerOwner = 2
+)
+
+// admitOverCap takes the over-cap permits of the call's actor (one at a
+// time), owner (the verified person, or the atespace of an attributed
+// actor: two at a time, so many registrations of one owner cannot hold
+// them all) and the gateway (substrateMCPOverCapGateway), all or none,
+// waiting at most substrateMCPOverCapWait.
+func (b *substrateMCPBridge) admitOverCap(ctx context.Context) (func(), bool) {
+	owner := "atespace:" + b.reg.Atespace
+	if p := b.reg.Person; p.Subject != "" {
+		owner = "person:" + p.Issuer + "\x00" + p.Subject
+	}
+	permits := []struct {
+		key   string
+		limit int
+	}{
+		{"mcp-judge:" + b.reg.Atespace + "/" + b.reg.UID, substrateMCPOverCapPerActor},
+		{"mcp-judge-owner:" + owner, substrateMCPOverCapPerOwner},
+		{"mcp-judge-gateway", substrateMCPOverCapGateway},
+	}
+	try := func() (func(), bool) {
+		var held []func()
+		for _, p := range permits {
+			release, ok := b.st.streams.take(p.key, p.limit)
+			if !ok {
+				for _, r := range held {
+					r()
+				}
+				return nil, false
+			}
+			held = append(held, release)
+		}
+		return func() {
+			for _, r := range held {
+				r()
+			}
+		}, true
+	}
+	if release, ok := try(); ok {
+		return release, true
+	}
+	timer := time.NewTimer(substrateMCPOverCapWait)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer timer.Stop()
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-timer.C:
+			return nil, false
+		case <-tick.C:
+			if release, ok := try(); ok {
+				return release, true
+			}
+		}
+	}
 }
 
 func substrateMCPBusyVerdict() SubstrateCalloutVerdict {

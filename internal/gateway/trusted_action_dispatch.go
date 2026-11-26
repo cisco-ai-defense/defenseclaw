@@ -11806,15 +11806,12 @@ func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool)
 	return command, found, true
 }
 
+// trustedCommandFieldName is whether the reader reads name as the command:
+// the reader decides, so its aliases cannot drift from this check
+// (substrate-1:GAP-1132, the GAP-1128 class).
 func trustedCommandFieldName(name string) bool {
-	switch name {
-	case "command", "cmd", "script", "rawcommand", "raw_command",
-		"raw-command", "shellcommand", "shell_command", "shell-command",
-		"commandline", "command_line", "command-line":
-		return true
-	default:
-		return false
-	}
+	field, known := actionfacts.ReadArgumentField(name)
+	return known && field == "command"
 }
 
 func appendTrustedBashFallbackFindings(
