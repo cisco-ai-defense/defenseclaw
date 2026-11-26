@@ -82,24 +82,11 @@ func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.P
 	if value == "." || value == ".." || strings.HasPrefix(value, "/") {
 		return false
 	}
-	base := path.Base(value)
-	named := func(name string) bool {
-		return slices.Contains(unresolvedFolderReadNames, name) ||
-			access != actionfacts.PathAccessRead && slices.Contains(unresolvedFolderWriteNames, name)
+	if unresolvedFolderNamesKeyFile(value, access) {
+		return true
 	}
 	if !strings.Contains(value, "/") {
-		return named(value)
-	}
-	if path.Base(path.Dir(value)) == ".ssh" {
-		// A key or authorized_keys in a folder named .ssh is one wherever
-		// that folder is: the name and its folder are distinctive together.
-		if named(base) {
-			return true
-		}
-		shape, ok := actionfacts.MatchCredentialFileShape(value)
-		if ok && shape.Class == actionfacts.CredentialFileSSHPrivateKey {
-			return true
-		}
+		return false
 	}
 	if strings.HasPrefix(value, "../") {
 		return false
@@ -115,6 +102,97 @@ func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.P
 	candidate := path.Join(home, value)
 	shape, ok := actionfacts.MatchCredentialFileShape(candidate)
 	return ok && shape.HomeFile && candidate == path.Join(home, shape.Relative)
+}
+
+// unresolvedFolderNamed reports a file name of the name lists protected
+// against the access.
+func unresolvedFolderNamed(name string, access actionfacts.PathAccess) bool {
+	return slices.Contains(unresolvedFolderReadNames, name) ||
+		access != actionfacts.PathAccessRead && slices.Contains(unresolvedFolderWriteNames, name)
+}
+
+// unresolvedFolderNamesKeyFile reports a cleaned relative operand (/
+// separators) that is a file of the name lists alone, or a key or
+// authorized_keys in a folder named .ssh: that is one wherever the folder is,
+// the name and its folder are distinctive together.
+func unresolvedFolderNamesKeyFile(value string, access actionfacts.PathAccess) bool {
+	if !strings.Contains(value, "/") {
+		return unresolvedFolderNamed(value, access)
+	}
+	if path.Base(path.Dir(value)) != ".ssh" {
+		return false
+	}
+	if unresolvedFolderNamed(path.Base(value), access) {
+		return true
+	}
+	shape, ok := actionfacts.MatchCredentialFileShape(value)
+	return ok && shape.Class == actionfacts.CredentialFileSSHPrivateKey
+}
+
+// powerShellUnresolvedFolderNamesKeyFile reports a PowerShell call that
+// writes, appends to or removes a relative operand after a move to a folder
+// the gateway cannot know (Set-Location $env:X, a -WorkingDirectory of a
+// variable: the agent's environment never reaches the hook) when that operand
+// is a file of the name lists, alone or in a folder named .ssh
+// (unresolvedFolderNamesKeyFile, the names a POSIX call is read so by). Case
+// does not matter on Windows. A read, an operand spelled from the home or the
+// credentials table, DefenseClaw state and every other name keep their
+// reading in the hook's folder: config.yaml, settings.json and the like are
+// files of every project, so a write of config.yaml after Set-Location $env:X
+// stays allowed, the documented limit of the hook (lead ruling 2026-11-26 on
+// rel-1-0-10:GAP-1556).
+func powerShellUnresolvedFolderNamesKeyFile(facts actionfacts.Facts) bool {
+	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if !candidate.UnresolvedFolder() || candidate.Access == actionfacts.PathAccessRead || !unresolvedFolderOperand(candidate) {
+			continue
+		}
+		value := strings.ToLower(strings.ReplaceAll(candidate.Value, `\`, "/"))
+		if strings.HasPrefix(value, "/") || strings.Contains(value, ":") {
+			continue // a drive, a provider or a share path names its own folder
+		}
+		if value = path.Clean(value); value == "." || value == ".." {
+			continue
+		}
+		if unresolvedFolderNamesKeyFile(value, candidate.Access) {
+			return true
+		}
+	}
+	return false
+}
+
+// powerShellHostReadingsNameKeyFile reports a call one of whose script
+// readings (the body of pwsh -Command or of pwsh -wd $env:X -Command, a
+// statement list) is such a PowerShell write. A reading is judged as a twin of
+// the call, and a twin adds only its proven blocks to the call
+// (withHostTwinFindings), so the unknown tier of the reading is the call's
+// own. Only the first-level readings are asked, and only those whose text
+// holds one of the names.
+func powerShellHostReadingsNameKeyFile(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if request.hostScriptTwinOff || facts.Parse.Dialect != actionfacts.DialectPowerShell && len(request.Input.Argv) == 0 ||
+		!unresolvedFolderTextHoldsName(request.Input.Command+" "+string(request.Input.Args)+" "+strings.Join(request.Input.Argv, " ")) {
+		return false
+	}
+	for _, input := range actionfacts.HostScriptReadings(request.Input, facts, 0, false).Twins {
+		if input.Command != "" && !unresolvedFolderTextHoldsName(input.Command) {
+			continue
+		}
+		if powerShellUnresolvedFolderNamesKeyFile(actionfacts.Analyze(input)) {
+			return true
+		}
+	}
+	return false
+}
+
+// unresolvedFolderTextHoldsName is the cheap screen of
+// powerShellHostReadingsNameKeyFile: text (any case) that holds no name of
+// the name lists names none of those files.
+func unresolvedFolderTextHoldsName(text string) bool {
+	text = strings.ToLower(text)
+	holds := func(name string) bool { return strings.Contains(text, name) }
+	return slices.ContainsFunc(unresolvedFolderReadNames, holds) || slices.ContainsFunc(unresolvedFolderWriteNames, holds)
 }
 
 // fromHomeSpelling drops the folder names that lead from a parent of the home
@@ -289,7 +367,8 @@ func withUnresolvedFolderTier(findings []RuleFinding, request trustedActionReque
 		// A proven finding decides on its own; the unknown tier adds nothing.
 		return findings
 	}
-	names := unresolvedFolderMayNameProtectedFile(facts, noFolder || statement)
+	names := unresolvedFolderMayNameProtectedFile(facts, noFolder || statement) ||
+		powerShellUnresolvedFolderNamesKeyFile(facts) || powerShellHostReadingsNameKeyFile(request, facts)
 	var truncated bounded.CapSet
 	if !names {
 		names, truncated = unresolvedFolderGlobMayNameProtectedFile(request, facts, noFolder || statement)
