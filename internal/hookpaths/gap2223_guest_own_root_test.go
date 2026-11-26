@@ -132,6 +132,18 @@ func TestFIX2223DGuestRelativeDirectoryAliasAfterChange(t *testing.T) {
 	t.Errorf("relative directory alias targets %q", aliases)
 }
 
+func TestFIX2223EGuestAbsoluteAliasAfterDirectoryChange(t *testing.T) {
+	command := "cd /tmp && ln -s /proc/self/root/sandbox/.ssh/authorized_keys l && echo k >> l"
+	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
+	aliases := links.GuestAliasTargets("/tmp/l", false)
+	for _, alias := range aliases {
+		if GuestOwnRootPath(alias) == "/sandbox/.ssh/authorized_keys" {
+			return
+		}
+	}
+	t.Errorf("absolute guest alias targets %q", aliases)
+}
+
 func TestFIX2223DGuestRelativeAliasBelowLink(t *testing.T) {
 	command := "ln -s /proc/self/root/sandbox l1 && ln -s l1/.ssh l2 && echo k >> l2/authorized_keys"
 	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)

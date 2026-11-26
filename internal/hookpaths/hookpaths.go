@@ -6526,7 +6526,8 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 			// deriving relative text from that physical name changes what
 			// a Linux guest would open.
 			next := alias.target
-			if logical := logicalNames[name]; logical != "" && logical != name && alias.text != "" {
+			if logical := logicalNames[name]; logical != "" && logical != name &&
+				alias.text != "" && !filepath.IsAbs(alias.text) {
 				// Host-walk aliases may be rooted in the host's physical
 				// directory. Rebase relative link text on the guest's
 				// logical name, including a suffix below the link.
