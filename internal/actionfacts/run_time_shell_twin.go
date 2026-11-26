@@ -361,6 +361,65 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 		return true
 	})
+	// stdinText is the script a call reads on its standard input when the
+	// reading knows it: its here-string or here-document, what a process
+	// substitution it redirects from writes, or the known output of the
+	// pipeline stage before it. hereText reports here-document or here-string
+	// text the script comes from (rel-1-0-10:GAP-1147). source is the
+	// here-string or here-document that supplied the script, which the twin
+	// leaves out (GAP-1088). A shell and source /dev/stdin read it the same
+	// way (rel-1-0-10:GAP-1151).
+	stdinText := func(call *syntax.CallExpr, program, shell string) (body string, known, hereText bool, source *syntax.Redirect) {
+		body, known, hereText = inputs[call].text, inputs[call].known, fed[call]
+		// The twin hands the text of source to -c (or to a group) instead,
+		// so it is not stdin of the twin any more and is left out of it:
+		// kept, the twin would be judged as a stdin script call again,
+		// which re-derives every reading of the call it was made from.
+		if stmt := owners[call]; stmt != nil {
+			for _, redir := range stmt.Redirs {
+				if redir.N != nil && redir.N.Value != "0" {
+					continue
+				}
+				switch redir.Op {
+				case syntax.WordHdoc:
+					body, known = hereStringText(redir.Word)
+					hereText = holdsHereText(redir.Word)
+					source = redir
+				case syntax.Hdoc, syntax.DashHdoc:
+					body, known = heredocScriptText(redir)
+					if known && heredocHasParameters(redir) &&
+						(!heredocReadingShellKnown(program, shell) || heredocTextMentionsBoundName(body, outerBound) ||
+							strings.Contains(command, "\\\n")) {
+						known = false
+					}
+					hereText = true
+					source = redir
+				case syntax.RdrIn:
+					// sh < <(cat <<EOF ... EOF) reads what the process
+					// substitution writes.
+					body, known = procSubstOutput(redir.Word)
+					hereText = holdsHereText(redir.Word)
+					source = nil
+				case syntax.DplIn:
+					// bash <&3 after exec 3<<EOF: the reading does not
+					// follow descriptors.
+					body, known, source = "", false, nil
+					hereText = fileHereText
+				case syntax.RdrInOut:
+					body, known, hereText, source = "", false, false, nil
+				}
+			}
+			if source != nil && stdinRedirectCount(stmt) != 1 {
+				source = nil
+			}
+		}
+		if known && inputs[call].parameters &&
+			(!heredocReadingShellKnown(program, shell) || heredocTextMentionsBoundName(body, outerBound) ||
+				strings.Contains(command, "\\\n")) {
+			known = false
+		}
+		return body, known, hereText, source
+	}
 	priorIndex, lastShell := 0, ""
 	var visit func(syntax.Node) bool
 	visit = func(node syntax.Node) bool {
@@ -406,7 +465,14 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 				script = nested
 			}
 			start, end := int(call.Args[at].Pos().Offset()), int(call.End().Offset())
-			edits = append(edits, edit{start, end, "bash -c " + posixSingleQuoted(script)})
+			text := "bash -c " + posixSingleQuoted(script)
+			if sourced && !found {
+				// source <(...) and . <(...) run the text in the current
+				// shell, so a cd in it moves the statements after it
+				// (rel-1-0-10:GAP-1151).
+				start, text = sourcedGroup(command, call, at, script)
+			}
+			edits = append(edits, edit{start, end, text})
 			return false
 		}
 		if !known && (sourced || program == "eval" && len(call.Args)-at == 2) && holdsHereText(call.Args[at+1]) {
@@ -414,6 +480,38 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			// ... EOF)" of a document the reading cannot know
 			// (rel-1-0-10:GAP-1147, GAP-1193).
 			reader.unread = true
+		}
+		if sourceAt, sourced := sourcedStdinCall(call.Args, at, program); sourced {
+			at = sourceAt
+			// source /dev/stdin, . /dev/fd/0: the current shell runs the
+			// text it reads on its standard input, as a shell reading its
+			// script there does (rel-1-0-10:GAP-1151). Known text is the
+			// group of its statements; text the reading does not know is
+			// judged as the stdin shell that runs it.
+			body, known, hereText, source := stdinText(call, program, "bash")
+			if !known && hereText {
+				reader.unread = true
+			}
+			if !known {
+				replace(call.Args[at], "bash")
+				for _, arg := range call.Args[at+1:] {
+					replace(arg, "")
+				}
+				return false
+			}
+			if depth < maxNestedShellStrings {
+				if nested, changed := runTimeShellTwin(body, depth+1, true, reader); changed {
+					body = nested
+				}
+			}
+			start, text := sourcedGroup(command, call, at, body)
+			edits = append(edits, edit{start, int(call.End().Offset()), text})
+			if source != nil {
+				if start, end, ok := stdinSourceSpan(command, source); ok {
+					edits = append(edits, edit{start: start, end: end, text: ""})
+				}
+			}
+			return false
 		}
 		if program == "find" || program == "gfind" {
 			argv := make([]string, len(call.Args)-at)
@@ -452,56 +550,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			// hereText: the script comes from here-document or here-string
 			// text, which the reading reads or reports as unread
 			// (rel-1-0-10:GAP-1147).
-			body, known, hereText := inputs[call].text, inputs[call].known, fed[call]
-			// source is the here-string or here-document that supplied the
-			// script: the twin hands that text to -c instead, so it is not
-			// stdin of the twin any more and is left out of it (GAP-1088).
-			// Kept, the twin would be judged as a stdin script call again,
-			// which re-derives every reading of the call it was made from.
-			var source *syntax.Redirect
-			if stmt := owners[call]; stmt != nil {
-				for _, redir := range stmt.Redirs {
-					if redir.N != nil && redir.N.Value != "0" {
-						continue
-					}
-					switch redir.Op {
-					case syntax.WordHdoc:
-						body, known = hereStringText(redir.Word)
-						hereText = holdsHereText(redir.Word)
-						source = redir
-					case syntax.Hdoc, syntax.DashHdoc:
-						body, known = heredocScriptText(redir)
-						if known && heredocHasParameters(redir) &&
-							(!heredocReadingShellKnown(program, shell) || heredocTextMentionsBoundName(body, outerBound) ||
-								strings.Contains(command, "\\\n")) {
-							known = false
-						}
-						hereText = true
-						source = redir
-					case syntax.RdrIn:
-						// sh < <(cat <<EOF ... EOF) reads what the process
-						// substitution writes.
-						body, known = procSubstOutput(redir.Word)
-						hereText = holdsHereText(redir.Word)
-						source = nil
-					case syntax.DplIn:
-						// bash <&3 after exec 3<<EOF: the reading does not
-						// follow descriptors.
-						body, known, source = "", false, nil
-						hereText = fileHereText
-					case syntax.RdrInOut:
-						body, known, hereText, source = "", false, false, nil
-					}
-				}
-				if source != nil && stdinRedirectCount(stmt) != 1 {
-					source = nil
-				}
-			}
-			if known && inputs[call].parameters &&
-				(!heredocReadingShellKnown(program, shell) || heredocTextMentionsBoundName(body, outerBound) ||
-					strings.Contains(command, "\\\n")) {
-				known = false
-			}
+			body, known, hereText, source := stdinText(call, program, shell)
 			if !known && hereText {
 				reader.unread = true
 			}
@@ -569,6 +618,63 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	}
 	out.WriteString(command[last:])
 	return out.String(), true
+}
+
+// sourcedStdinCall reports source FILE or . FILE (args[at] is the program
+// word, source, ., or a builtin or command before it) whose FILE is the standard input of the
+// shell (/dev/stdin, /dev/fd/0, /proc/self/fd/0): the shell runs the text it
+// reads there as statements of its own (rel-1-0-10:GAP-1151). Operands after
+// FILE only set the positional parameters of the text. The index of the
+// source word is returned.
+func sourcedStdinCall(args []*syntax.Word, at int, program string) (int, bool) {
+	// builtin source and command . run the builtin itself.
+	for (program == "builtin" || program == "command") && at+1 < len(args) {
+		at++
+		word := projectPOSIXWord(args[at])
+		if word.Expands {
+			return 0, false
+		}
+		program = word.Value
+	}
+	if program != "source" && program != "." {
+		return 0, false
+	}
+	source := at
+	at++
+	if at < len(args) {
+		if word := projectPOSIXWord(args[at]); !word.Expands && word.Value == "--" {
+			at++
+		}
+	}
+	if at >= len(args) {
+		return 0, false
+	}
+	file := projectPOSIXWord(args[at])
+	return source, !file.Expands && posixStdinFilePath(file.Value)
+}
+
+// sourcedGroup is the twin text of a call that sources script (args[at] is
+// its source word): a group that runs the statements of script in the
+// current shell, as source does, so a cd or an assignment in it holds for
+// the statements after it. The call's own assignments, which a special
+// builtin keeps, open the group; a builtin or command word before source is
+// dropped with them. start is the offset the text replaces from.
+func sourcedGroup(command string, call *syntax.CallExpr, at int, script string) (start int, text string) {
+	start = int(call.Args[at].Pos().Offset())
+	prefix := ""
+	if len(call.Assigns) > 0 {
+		from := int(call.Pos().Offset())
+		if from >= 0 && from < start && start <= len(command) {
+			prefix = strings.TrimSpace(command[from:start])
+			start = from
+		}
+	} else if at > 0 {
+		start = int(call.Args[0].Pos().Offset())
+	}
+	if prefix != "" {
+		prefix += "\n"
+	}
+	return start, "{ " + prefix + strings.TrimRight(script, "\n") + "\n}"
 }
 
 // shellCallProgram returns the index of the program word of a shell that
