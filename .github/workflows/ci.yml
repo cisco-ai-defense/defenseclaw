@@ -254,6 +254,10 @@ jobs:
           echo "${HELM_SHA256}  $dir/helm.tar.gz" | sha256sum -c -
           tar -xzf "$dir/helm.tar.gz" -C "$dir" --strip-components=1 linux-amd64/helm
           echo "$dir" >> "$GITHUB_PATH"
+      # The Kind E2E scripts run only in substrate-kind-e2e.yml, so a mistake in
+      # them would otherwise show up there first (GAP-1133).
+      - name: Lint the Kind E2E scripts
+        run: shellcheck -S warning test/substrate-e2e/*.sh
       - name: Lint and render the chart
         env:
           DEFENSECLAW_HELM_REQUIRED: "1"
