@@ -8,6 +8,7 @@ package gateway
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -79,7 +80,7 @@ func TestGAP2226PlacedViewEvalsKeepEveryFinding(t *testing.T) {
 		}
 		for _, entry := range memo.placed {
 			for _, reading := range entry.readings {
-				if len(reading.evals.tables) != 0 && len(reading.evals.tables[0].results) != 0 {
+				if len(reading.evals.first.results) != 0 {
 					kept++
 				}
 			}
@@ -148,7 +149,7 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 			if code != wantCode || !reflect.DeepEqual(fmt.Sprint(projection), fmt.Sprint(wantProjection)) {
 				t.Fatal("a kept projection differs from a fresh one")
 			}
-			enforcement, _, _ := view.enforcement(facts)
+			enforcement, _, _ := view.enforcementOf(facts)
 			if !reflect.DeepEqual(enforcement, facts.EnforcementProjection()) {
 				t.Fatal("a kept enforcement projection differs from a fresh one")
 			}
@@ -159,7 +160,8 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 			}
 		}
 	}
-	if none.kept(0, false) != nil {
+	none.keep(0, semantic.Result{Matched: true})
+	if _, found := none.result(0); found {
 		t.Fatal("a nil table keeps a result")
 	}
 	// A kept result is the fresh one and is charged the same cost.
@@ -168,14 +170,14 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 	for rule, candidate := range generation.semanticRules {
 		fresh, kept := newTrustedActionBudget(false), newTrustedActionBudget(false)
 		want, wantCode, wantOK := fresh.eval(t.Context(), candidate, 0, projection)
-		slot := table.kept(rule, false)
+		slot := guestKeptSlot(rule, false)
 		for round := range 2 {
-			got, code, ok := kept.evalKept(t.Context(), candidate, 0, projection, slot)
+			got, code, ok := kept.evalKept(t.Context(), candidate, 0, projection, table, slot)
 			if got != want || code != wantCode || ok != wantOK || kept.consumed != fresh.consumed*uint64(round+1) {
 				t.Fatalf("rule %s round %d: kept eval %+v %s %v cost %d, fresh %+v %s %v cost %d", candidate.rule.ID, round, got, code, ok, kept.consumed, want, wantCode, wantOK, fresh.consumed)
 			}
 		}
-		if wantCode == semantic.EvalOK && !slot.ok {
+		if _, found := table.result(slot); wantCode == semantic.EvalOK && !found {
 			t.Fatalf("rule %s: a complete result was not kept", candidate.rule.ID)
 		}
 		if fresh.consumed != 0 {
@@ -185,7 +187,37 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 	if charged == 0 {
 		t.Fatal("no rule charged a cost: the check reads nothing")
 	}
-	if table.kept(3, true) != table.kept(3, true) || table.kept(3, true) == table.kept(3, false) {
-		t.Fatal("kept slots are not one per rule and projection")
+	// One slot per rule and projection, whatever order the results come
+	// in; a table per generation.
+	probe := &guestViewEvalTable{generation: generation}
+	want := map[int]uint64{}
+	for _, put := range []struct {
+		rule        int
+		enforcement bool
+		cost        uint64
+	}{{3, true, 7}, {5, false, 5}, {1, false, 3}, {3, false, 4}, {3, true, 9}, {0, true, 1}} {
+		slot := guestKeptSlot(put.rule, put.enforcement)
+		probe.keep(slot, semantic.Result{Cost: put.cost})
+		want[slot] = put.cost
 	}
+	for slot := range 12 {
+		got, found := probe.result(slot)
+		if cost, kept := want[slot]; found != kept || got.Cost != cost {
+			t.Fatalf("slot %d: kept %v cost %d, want %v cost %d", slot, found, got.Cost, kept, cost)
+		}
+	}
+	if len(probe.results) != len(want) || !slices.IsSortedFunc(probe.results, func(a, b guestKeptEval) int { return a.slot - b.slot }) {
+		t.Fatalf("kept results are not one per slot in slot order: %+v", probe.results)
+	}
+	other := &compiledRulePackCategories{}
+	otherTable := evals.lock(other)
+	evals.unlock()
+	if otherTable == table || evals.lock(generation) != table {
+		t.Fatal("two generations share a table")
+	}
+	evals.unlock()
+	if evals.lock(other) != otherTable {
+		t.Fatal("a second lock gives another table for the same second generation")
+	}
+	evals.unlock()
 }

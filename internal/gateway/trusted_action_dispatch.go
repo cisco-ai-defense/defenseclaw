@@ -1752,7 +1752,7 @@ func dispatchTrustedActionWith(
 			if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
 				continue
 			}
-			result, evalCode, judged := budget.evalKept(ctx, candidate, viewID, projection, kept.kept(rule, false))
+			result, evalCode, judged := budget.evalKept(ctx, candidate, viewID, projection, kept, guestKeptSlot(rule, false))
 			if !judged {
 				if budget.evals == nil {
 					break
@@ -1773,13 +1773,13 @@ func dispatchTrustedActionWith(
 			}
 
 			if !enforcementProjected {
-				enforcementFacts, enforcementProjection, projectionCode = kept.enforcement(view)
+				enforcementFacts, enforcementProjection, projectionCode = kept.enforcementOf(view)
 				enforcementProjected = true
 			}
 			if projectionCode != semantic.ProjectionOK {
 				return true
 			}
-			enforcementResult, enforcementCode, judged := budget.evalKept(ctx, candidate, viewID+1, enforcementProjection, kept.kept(rule, true))
+			enforcementResult, enforcementCode, judged := budget.evalKept(ctx, candidate, viewID+1, enforcementProjection, kept, guestKeptSlot(rule, true))
 			if !judged {
 				if budget.evals == nil {
 					break

@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -27,9 +29,17 @@ import (
 // is charged the same cost for a kept result, and the rules already
 // matched, the owners a finding excludes and the budget's end are read
 // live. A nil *guestViewEvals keeps nothing.
+//
+// Keeping must cost next to nothing where a reading is judged once (a
+// here-string fan's one placed list): the first table lives in the
+// reading, eligibility is two bits a rule, the enforcement projection is
+// made only for a matched rule, and the results are a sorted array of
+// small values, so a first judgment adds a few allocations a reading, not
+// one a rule.
 type guestViewEvals struct {
-	mu     sync.Mutex
-	tables []*guestViewEvalTable
+	mu    sync.Mutex
+	first guestViewEvalTable
+	more  []*guestViewEvalTable
 }
 
 // guestViewEvalTable is a guestViewEvals for one rule generation, by rule
@@ -37,29 +47,43 @@ type guestViewEvals struct {
 // is made afresh.
 type guestViewEvalTable struct {
 	generation *compiledRulePackCategories
-	// eligible is 0 where the rule's owner was not read yet, 1 eligible, 2
-	// not.
-	eligible []uint8
+	// eligible holds two bits a rule: the owner was read, and it is
+	// eligible. Made at the first read.
+	eligible []uint64
 
 	projected      bool
 	projection     *semanticpb.Facts
 	projectionCode semantic.ProjectionCode
 
-	enforcementProjected  bool
-	enforcementFacts      actionfacts.Facts
-	enforcementProjection *semanticpb.Facts
-	enforcementCode       semantic.ProjectionCode
+	enforcement *guestKeptEnforcement
 
-	results []*guestKeptEval
+	// results are the complete results (semantic.EvalOK) by slot
+	// (guestKeptSlot), in slot order.
+	results []guestKeptEval
 }
 
-// guestKeptEval is one rule's complete result (semantic.EvalOK) on one of a
-// reading's projections.
+// guestKeptEnforcement is a reading's enforcement projection
+// (actionfacts.Facts.EnforcementProjection) and its semantic projection.
+type guestKeptEnforcement struct {
+	facts      actionfacts.Facts
+	projection *semanticpb.Facts
+	code       semantic.ProjectionCode
+}
+
+// guestKeptEval is one rule's complete result on one of a reading's
+// projections.
 type guestKeptEval struct {
-	rule        int
-	enforcement bool
-	ok          bool
-	result      semantic.Result
+	slot   int
+	result semantic.Result
+}
+
+// guestKeptSlot is the slot of rule rule's result on a reading's
+// projection, or on its enforcement projection.
+func guestKeptSlot(rule int, enforcement bool) int {
+	if enforcement {
+		return 2*rule + 1
+	}
+	return 2 * rule
 }
 
 // lock returns the table of generation, locked; unlock it with unlock. nil
@@ -69,13 +93,19 @@ func (evals *guestViewEvals) lock(generation *compiledRulePackCategories) *guest
 		return nil
 	}
 	evals.mu.Lock()
-	for _, table := range evals.tables {
+	if evals.first.generation == nil {
+		evals.first.generation = generation
+	}
+	if evals.first.generation == generation {
+		return &evals.first
+	}
+	for _, table := range evals.more {
 		if table.generation == generation {
 			return table
 		}
 	}
-	table := &guestViewEvalTable{generation: generation, eligible: make([]uint8, len(generation.semanticRules))}
-	evals.tables = append(evals.tables, table)
+	table := &guestViewEvalTable{generation: generation}
+	evals.more = append(evals.more, table)
 	return table
 }
 
@@ -98,19 +128,19 @@ func (table *guestViewEvalTable) project(view actionfacts.Facts) (*semanticpb.Fa
 	return table.projection, table.projectionCode
 }
 
-// enforcement is view.EnforcementProjection() and its projection.
-func (table *guestViewEvalTable) enforcement(view actionfacts.Facts) (actionfacts.Facts, *semanticpb.Facts, semantic.ProjectionCode) {
+// enforcementOf is view.EnforcementProjection() and its projection.
+func (table *guestViewEvalTable) enforcementOf(view actionfacts.Facts) (actionfacts.Facts, *semanticpb.Facts, semantic.ProjectionCode) {
 	if table == nil {
 		facts := view.EnforcementProjection()
 		projection, code := semantic.Project(facts)
 		return facts, projection, code
 	}
-	if !table.enforcementProjected {
-		table.enforcementFacts = view.EnforcementProjection()
-		table.enforcementProjection, table.enforcementCode = semantic.Project(table.enforcementFacts)
-		table.enforcementProjected = true
+	if table.enforcement == nil {
+		kept := &guestKeptEnforcement{facts: view.EnforcementProjection()}
+		kept.projection, kept.code = semantic.Project(kept.facts)
+		table.enforcement = kept
 	}
-	return table.enforcementFacts, table.enforcementProjection, table.enforcementCode
+	return table.enforcement.facts, table.enforcement.projection, table.enforcement.code
 }
 
 // eligibleFor is candidate.owner.eligible(view), candidate being rule rule
@@ -119,37 +149,57 @@ func (table *guestViewEvalTable) eligibleFor(rule int, candidate compiledSemanti
 	if table == nil {
 		return candidate.owner.eligible(view)
 	}
-	if table.eligible[rule] == 0 {
-		table.eligible[rule] = 2
+	if table.eligible == nil {
+		table.eligible = make([]uint64, (2*len(table.generation.semanticRules)+63)/64)
+	}
+	word, bit := (2*rule)/64, uint((2*rule)%64)
+	if table.eligible[word]&(1<<bit) == 0 {
+		table.eligible[word] |= 1 << bit
 		if candidate.owner.eligible(view) {
-			table.eligible[rule] = 1
+			table.eligible[word] |= 1 << (bit + 1)
 		}
 	}
-	return table.eligible[rule] == 1
+	return table.eligible[word]&(1<<(bit+1)) != 0
 }
 
-// kept is the slot of rule rule's result on the reading's projection, or
-// on its enforcement projection; nil for a nil table.
-func (table *guestViewEvalTable) kept(rule int, enforcement bool) *guestKeptEval {
+// result is the complete result kept in slot; false where none is, and for
+// a nil table.
+func (table *guestViewEvalTable) result(slot int) (semantic.Result, bool) {
 	if table == nil {
-		return nil
+		return semantic.Result{}, false
 	}
-	for _, kept := range table.results {
-		if kept.rule == rule && kept.enforcement == enforcement {
-			return kept
-		}
+	at, found := slices.BinarySearchFunc(table.results, slot, func(kept guestKeptEval, slot int) int { return cmp.Compare(kept.slot, slot) })
+	if !found {
+		return semantic.Result{}, false
 	}
-	kept := &guestKeptEval{rule: rule, enforcement: enforcement}
-	table.results = append(table.results, kept)
-	return kept
+	return table.results[at].result, true
 }
 
-// evalKept is eval with kept, the slot of the same rule's result on the
-// same projection of a placed reading (guestViewEvals): a complete result
-// already there stands for a new evaluation, and the budget is charged its
-// cost as for a new one; a new complete result is put there. A done ctx
-// is always evaluated afresh, as eval does.
-func (b *trustedActionBudget) evalKept(ctx context.Context, candidate compiledSemanticRule, view int, projection *semanticpb.Facts, kept *guestKeptEval) (result semantic.Result, code semantic.EvalCode, ok bool) {
+// keep puts a complete result in slot; a nil table keeps nothing.
+func (table *guestViewEvalTable) keep(slot int, result semantic.Result) {
+	if table == nil {
+		return
+	}
+	if n := len(table.results); n == 0 || table.results[n-1].slot < slot {
+		// A first judgment reads the rules in order.
+		table.results = append(table.results, guestKeptEval{slot: slot, result: result})
+		return
+	}
+	at, found := slices.BinarySearchFunc(table.results, slot, func(kept guestKeptEval, slot int) int { return cmp.Compare(kept.slot, slot) })
+	if found {
+		table.results[at].result = result
+		return
+	}
+	table.results = slices.Insert(table.results, at, guestKeptEval{slot: slot, result: result})
+}
+
+// evalKept is eval with kept, the table of a placed reading
+// (guestViewEvals), and slot, the slot of the same rule's result on the
+// same projection: a complete result already there stands for a new
+// evaluation, and the budget is charged its cost as for a new one; a new
+// complete result is put there. A done ctx is always evaluated afresh, as
+// eval does. A nil kept is eval.
+func (b *trustedActionBudget) evalKept(ctx context.Context, candidate compiledSemanticRule, view int, projection *semanticpb.Facts, kept *guestViewEvalTable, slot int) (result semantic.Result, code semantic.EvalCode, ok bool) {
 	if kept == nil {
 		return b.eval(ctx, candidate, view, projection)
 	}
@@ -160,12 +210,12 @@ func (b *trustedActionBudget) evalKept(ctx context.Context, candidate compiledSe
 	if b.spent() {
 		return semantic.Result{}, code, false
 	}
-	if kept.ok && !contextDone(ctx.Done()) {
-		result, code = kept.result, semantic.EvalOK
+	if hit, found := kept.result(slot); found && !contextDone(ctx.Done()) {
+		result, code = hit, semantic.EvalOK
 	} else {
 		result, code = candidate.program.EvalBool(ctx, projection)
 		if code == semantic.EvalOK {
-			kept.ok, kept.result = true, result
+			kept.keep(slot, result)
 		}
 	}
 	b.consumed += result.Cost
