@@ -353,8 +353,9 @@ type SubstrateIdentityConfig struct {
 	Issuer               string `mapstructure:"issuer"                 yaml:"issuer,omitempty"`
 	Audience             string `mapstructure:"audience"               yaml:"audience,omitempty"`
 	TokenLifetimeSeconds int64  `mapstructure:"token_lifetime_seconds" yaml:"token_lifetime_seconds,omitempty"`
-	// ActorCertOID is the ActorIdentity extension OID in actor
-	// certificates (it changes after the CNCF donation).
+	// ActorCertOID is retired (GAP-0723): nothing reads it. A config that
+	// still sets it loads, with a warning (warnRetiredSubstrateKeys), and
+	// the field is removed in 1.0.14 so those configs keep loading until then.
 	ActorCertOID string `mapstructure:"actor_cert_oid" yaml:"actor_cert_oid,omitempty"`
 	// KeysURL is where the gateway reads the keys that sign actor tokens
 	// (a JWK set). Empty: the in-cluster idp Service,
@@ -643,7 +644,6 @@ const (
 	// by actor name, so a recreated same-name actor gets the old one until
 	// it expires (GAP-0133); 300 s is the upstream minimum.
 	DefaultSubstrateTokenLifetime = 300
-	DefaultSubstrateActorCertOID  = "1.3.6.1.4.1.11129.2.12.2"
 	// DefaultSubstrateNamespace is where Substrate runs when the API
 	// address does not name another namespace.
 	DefaultSubstrateNamespace = "ate-system"
@@ -1156,7 +1156,6 @@ func (s SubstrateConfig) LauncherAtespace(atespace string) (string, bool) {
 }
 
 var (
-	substrateOIDRe          = regexp.MustCompile(`^[0-2](\.(0|[1-9][0-9]*))+$`)
 	substratePlaceholderRe  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 	substrateProfileRe      = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]-]+$`)
 	substrateAtespaceGlobRe = regexp.MustCompile(`^[a-z0-9*?\[\]-]{1,63}$`)
@@ -1264,9 +1263,6 @@ func (s *SubstrateConfig) Validate() error {
 	}
 	if aud := id.Audience; aud != "" && len(aud) > 512 {
 		bad("identity.audience", "is longer than 512 bytes")
-	}
-	if oid := id.ActorCertOID; oid != "" && !substrateOIDRe.MatchString(oid) {
-		bad("identity.actor_cert_oid", "%q is not a dotted OID", oid)
 	}
 	if u := id.KeysURL; u != "" && (!httpsURL(u) || strings.TrimSpace(u) != u) {
 		bad("identity.keys_url", "%q must be an https URL with no query or fragment", u)
