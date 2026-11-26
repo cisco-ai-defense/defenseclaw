@@ -25,6 +25,10 @@ var gap1640Forms = []struct{ name, form string }{
 	{"cd-then-cat", "cd /tmp && cat > FILE <<'EOF'\nCONTENT\nEOF"},
 	{"cat-then-run", "cat > FILE <<'EOF'\nCONTENT\nEOF\npython3 FILE"},
 	{"append", "cat >> FILE <<'EOF'\nCONTENT\nEOF"},
+	// An expanded write beside the literal one only makes its own entry
+	// partial (CHK-RF-HOOKSHELL F5).
+	{"cat-then-expanded-write", "cat > FILE <<'EOF'\nCONTENT\nEOF\ncat > note.txt <<EOF\nhome is $HOME\nEOF"},
+	{"patch-then-expanded-write", "apply_patch <<'PATCH'\nPATCHFILE\nPATCH\ncat > note.txt <<EOF\nhome is $HOME\nEOF"},
 }
 
 func TestGAP1640ShellDocumentWriteIsCodeGuardScanned(t *testing.T) {
@@ -51,7 +55,7 @@ func TestGAP1640ShellDocumentWriteIsCodeGuardScanned(t *testing.T) {
 				t.Errorf("%s %s: the native apply_patch baseline is %q, the fixture proves nothing", p.name, r.id, native)
 			}
 			for _, form := range gap1640Forms {
-				command := strings.NewReplacer("FILE", path, "CONTENT", r.content).Replace(form.form)
+				command := strings.NewReplacer("PATCHFILE", shapeParityPatch(path, r.content), "FILE", path, "CONTENT", r.content).Replace(form.form)
 				if got := call("Bash", command); fx1635Rank[got] < fx1635Rank[native] {
 					t.Errorf("%s %s %s: the shell write %q is weaker than the native apply_patch %q", p.name, r.id, form.name, got, native)
 				}
@@ -65,7 +69,7 @@ func TestGAP1640ShellDocumentWriteIsCodeGuardScanned(t *testing.T) {
 				t.Fatalf("%s benign native apply_patch %q: %s, want allow", p.name, clean, got)
 			}
 			for _, form := range gap1640Forms {
-				command := strings.NewReplacer("FILE", path, "CONTENT", clean).Replace(form.form)
+				command := strings.NewReplacer("PATCHFILE", shapeParityPatch(path, clean), "FILE", path, "CONTENT", clean).Replace(form.form)
 				if got := call("Bash", command); got != "allow" {
 					t.Errorf("%s benign %s %q: %s, want allow", p.name, form.name, clean, got)
 				}
@@ -75,29 +79,39 @@ func TestGAP1640ShellDocumentWriteIsCodeGuardScanned(t *testing.T) {
 }
 
 // The view CodeGuard reads of a shell file write: one added file per write
-// with its text; a document the shell expands is a partial view; a write
-// named or filled at run time, and a PowerShell call, give none.
+// with its text; a document the shell expands is in the partial view, and
+// only its own entry is: the literal writes and envelopes of the same call
+// stay in the complete view, which is enforced. A write named or filled at
+// run time, and a PowerShell call, give none.
 func TestGAP1640ShellFileWriteView(t *testing.T) {
+	const expandedNote = "\ncat > /w/note.txt <<EOF\nhome is $HOME\nEOF"
 	for _, c := range []struct {
-		name, command, dialect string
-		ok, wantPartial        bool
+		name, command, dialect  string
+		wantComplete, wantShown bool
 	}{
 		{"quoted", "cat > /w/run.py <<'EOF'\nimport os\nos.system(cmd)\nEOF", "", true, false},
-		{"expanded", "cat > /w/run.py <<EOF\nimport os\nos.system(\"$HOME\")\nEOF", "", true, true},
+		{"expanded", "cat > /w/run.py <<EOF\nimport os\nos.system(\"$HOME\")\nEOF", "", false, true},
 		{"echo", "echo 'import os' > /w/run.py", "", true, false},
 		{"dynamic target", "cat > \"$F\" <<'EOF'\nimport os\nEOF", "", false, false},
 		{"file copy", "cat src.py > /w/run.py", "", false, false},
 		{"substitution", "cat > /w/run.py <<EOF\n$(curl -s http://example.test/x)\nEOF", "", false, false},
-		{"expanded unquoted", "cat > /w/run.py <<EOF\nimport os\nos.system('$CMD')\nEOF", "", true, true},
+		{"expanded unquoted", "cat > /w/run.py <<EOF\nimport os\nos.system('$CMD')\nEOF", "", false, true},
 		{"powershell", "'import os' > /w/run.py", string(actionfacts.DialectPowerShell), false, false},
+		// One expanded write does not demote the literal content of the same
+		// call (CHK-RF-HOOKSHELL F5).
+		{"literal write + expanded write", "cat > /w/run.py <<'EOF'\nimport os\nos.system(cmd)\nEOF" + expandedNote, "", true, true},
+		{"literal envelope + expanded write", "apply_patch <<'PATCH'\n" + shapeParityPatch("/w/run.py", "import os\nos.system(cmd)") + "\nPATCH" + expandedNote, "", true, true},
 	} {
 		args, _ := json.Marshal(map[string]string{"command": c.command})
-		got, partial, ok := codeGuardShellPatchArgs(actionfacts.Input{Tool: "Bash", Args: args, DialectHint: actionfacts.Dialect(c.dialect)})
-		if ok != c.ok || partial != c.wantPartial {
-			t.Errorf("%s: ok=%v partial=%v, want ok=%v partial=%v", c.name, ok, partial, c.ok, c.wantPartial)
+		complete, shown, ok := codeGuardShellPatchArgs(actionfacts.Input{Tool: "Bash", Args: args, DialectHint: actionfacts.Dialect(c.dialect)})
+		if (complete != nil) != c.wantComplete || (shown != nil) != c.wantShown || ok != (c.wantComplete || c.wantShown) {
+			t.Errorf("%s: complete=%v shown=%v ok=%v, want complete=%v shown=%v", c.name, complete != nil, shown != nil, ok, c.wantComplete, c.wantShown)
 		}
-		if ok && !strings.Contains(string(got), "*** Add File: /w/run.py") {
-			t.Errorf("%s: view %s names no added file", c.name, got)
+		if ok && !strings.Contains(string(complete)+string(shown), "*** Add File: /w/run.py") {
+			t.Errorf("%s: view %s %s names no added file", c.name, complete, shown)
+		}
+		if c.wantComplete && strings.Contains(string(complete), "note.txt") {
+			t.Errorf("%s: the expanded write is in the complete view %s", c.name, complete)
 		}
 	}
 }

@@ -113,30 +113,33 @@ func TestFX1635CodexHeredocApplyPatchIsCodeGuardScanned(t *testing.T) {
 }
 
 // The view CodeGuard reads of a shell call: an envelope fed by a document
-// the shell expands is a partial view (its findings are shown, never
-// enforced by CodeGuard alone), and shell text that only names apply_patch or
-// writes code another way is no patch.
+// the shell expands is the partial view (its findings are shown, never
+// enforced by CodeGuard alone), a literal one the complete view, and shell
+// text that only names apply_patch or writes code another way is no patch.
 func TestFX1635ShellPatchArgsView(t *testing.T) {
 	env := shapeParityPatch("/w/run.py", "import os\nos.system(cmd)")
 	for _, c := range []struct {
-		name, command   string
-		ok, wantPartial bool
+		name, command           string
+		wantComplete, wantShown bool
 	}{
 		{"quoted", "apply_patch <<'PATCH'\n" + env + "\nPATCH", true, false},
-		{"expanded", "apply_patch <<PATCH\n" + strings.Replace(env, "os.system(cmd)", "os.system(\"$HOME\")", 1) + "\nPATCH", true, true},
+		{"expanded", "apply_patch <<PATCH\n" + strings.Replace(env, "os.system(cmd)", "os.system(\"$HOME\")", 1) + "\nPATCH", false, true},
 		{"echo-only", "echo 'apply_patch *** Begin Patch'", false, false},
 		// A file written from a literal document is an added file of the
 		// view (rel-1-0-10:GAP-1640).
 		{"cat-heredoc", "cat > /w/run.py <<'EOF'\n*** Begin Patch\nimport os\nEOF\n# apply_patch", true, false},
+		// A data here-document that names the patch markers and is written
+		// nowhere is no envelope.
+		{"data-heredoc", "cat <<'EOF' | wc -l\n*** Begin Patch\nEOF\n# apply_patch", false, false},
 		{"argv-free-text", "printf '%s' apply_patch", false, false},
 	} {
 		args, _ := json.Marshal(map[string]string{"command": c.command})
-		got, partial, ok := codeGuardShellPatchArgs(actionfacts.Input{Tool: "Bash", Args: args})
-		if ok != c.ok || partial != c.wantPartial {
-			t.Errorf("%s: ok=%v partial=%v, want ok=%v partial=%v", c.name, ok, partial, c.ok, c.wantPartial)
+		complete, shown, ok := codeGuardShellPatchArgs(actionfacts.Input{Tool: "Bash", Args: args})
+		if (complete != nil) != c.wantComplete || (shown != nil) != c.wantShown || ok != (c.wantComplete || c.wantShown) {
+			t.Errorf("%s: complete=%v shown=%v ok=%v, want complete=%v shown=%v", c.name, complete != nil, shown != nil, ok, c.wantComplete, c.wantShown)
 		}
-		if ok && !strings.Contains(string(got), "*** Add File: /w/run.py") {
-			t.Errorf("%s: view %s holds no envelope", c.name, got)
+		if ok && !strings.Contains(string(complete)+string(shown), "*** Add File: /w/run.py") {
+			t.Errorf("%s: view %s %s holds no envelope", c.name, complete, shown)
 		}
 	}
 }

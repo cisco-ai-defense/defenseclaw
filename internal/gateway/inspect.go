@@ -102,11 +102,13 @@ type ToolInspectRequest struct {
 	// toolUseID is set by a connector adapter, never from the wire (see
 	// contentScope below).
 	toolUseID string
-	// codeGuardPartial marks the CodeGuard view of a shell here-document
-	// patch the shell expands (codeGuardShellPatchArgs): its findings are
-	// shown and never enforced, as for any scan that did not read the
-	// whole content. Never from the wire.
-	codeGuardPartial bool
+	// codeGuardShownArgs is the partial CodeGuard view of a shell call
+	// (codeGuardShellPatchArgs): the here-document patches and file writes
+	// the shell expands before they land. Its findings are shown and never
+	// enforced, as for any scan that did not read the whole content; Args
+	// keeps the complete content of the same call, which is enforced. Never
+	// from the wire.
+	codeGuardShownArgs json.RawMessage
 	// toolArgsAreHookEnvelope marks args the connector did not project from a
 	// tool payload: the whole hook envelope, session and event keys included.
 	toolArgsAreHookEnvelope bool
@@ -1358,7 +1360,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		if !isWrite {
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
-		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, cgReq); len(cg.findings) > 0 {
+		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, cgReq); len(cg.findings)+len(cg.shown) > 0 {
 			return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
 		}
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
@@ -1574,6 +1576,10 @@ func isWriteToolName(tool string) bool {
 type codeGuardArgsScan struct {
 	findings []scanner.Finding
 	complete bool
+	// shown is the findings of a partial view of the same call (content
+	// the shell expands first): shown, never enforced, whatever complete
+	// says of findings.
+	shown []scanner.Finding
 }
 
 // codeGuardWriteRequest is the request CodeGuard scans for a file-write
@@ -1593,9 +1599,9 @@ func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest)
 	if isWriteToolName(strings.ToLower(req.Tool)) {
 		return req, true
 	}
-	if args, partial, ok := codeGuardShellPatchArgs(action.Input); ok {
+	if args, shown, ok := codeGuardShellPatchArgs(action.Input); ok {
 		view := *req
-		view.Tool, view.Args, view.codeGuardPartial = "apply_patch", args, partial
+		view.Tool, view.Args, view.codeGuardShownArgs = "apply_patch", args, shown
 		return &view, true
 	}
 	return req, false
@@ -1608,41 +1614,93 @@ func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest)
 // tool's envelope, so the same patch raised CG-* findings as apply_patch and
 // none as the shell call (rel-1-0-10:GAP-1635). Only a call whose command
 // text or arguments (the hook routes give the command in the shell tool's
-// arguments) hold an envelope is parsed. partial is true for a document the
-// shell expands. A file the call writes with text the reading knows (cat >
-// x.py <<'EOF', tee x.py <<'EOF', echo TEXT > x.py;
-// actionfacts.ShellDocumentFileWrites) is one more added file of the
-// envelope, so its content gets the CodeGuard verdict of a Write of the same
-// content (rel-1-0-10:GAP-1640).
-func codeGuardShellPatchArgs(input actionfacts.Input) (args json.RawMessage, partial, ok bool) {
+// arguments) hold an envelope is parsed. A file the call writes with text
+// the reading knows (cat > x.py <<'EOF', tee x.py <<'EOF', echo TEXT > x.py;
+// actionfacts.ShellDocumentFileWrites) is one more added file, so its
+// content gets the CodeGuard verdict of a Write of the same content
+// (rel-1-0-10:GAP-1640).
+//
+// complete is the view CodeGuard enforces: the envelopes of literal
+// documents and the files written with literal text. shown is the partial
+// view, the envelopes and file writes the shell expands before they land:
+// its findings are shown, never enforced. Each entry is partial on its own;
+// an expanded write never demotes the complete content of the same call
+// (rel-1-0-10:GAP-1640). ok is false when the call has neither.
+func codeGuardShellPatchArgs(input actionfacts.Input) (complete, shown json.RawMessage, ok bool) {
 	if len(input.Argv) != 0 {
-		return nil, false, false
+		return nil, nil, false
 	}
-	var envelopes []string
+	var literal, expanded []string
 	if codeGuardMayHoldShellPatch(input.Command) || codeGuardMayHoldShellPatch(string(input.Args)) {
-		envelopes, partial = actionfacts.CommandPatchEnvelopes(actionfacts.Analyze(input))
-	}
-	if writes := actionfacts.ShellDocumentFileWrites(codeGuardShellCommand(input)); len(writes) != 0 {
-		var patch strings.Builder
-		patch.WriteString("*** Begin Patch\n")
-		for _, write := range writes {
-			patch.WriteString("*** Add File: " + write.Path + "\n")
-			for _, line := range strings.SplitAfter(strings.TrimSuffix(write.Text, "\n"), "\n") {
-				patch.WriteString("+" + strings.TrimSuffix(line, "\n") + "\n")
-			}
-			partial = partial || write.Expanded
+		envelopes, partial := actionfacts.CommandPatchEnvelopes(actionfacts.Analyze(input))
+		if partial {
+			expanded = append(expanded, envelopes...)
+		} else {
+			literal = append(literal, envelopes...)
 		}
-		patch.WriteString("*** End Patch")
-		envelopes = append(envelopes, patch.String())
 	}
+	var literalWrites, expandedWrites []actionfacts.ShellFileWrite
+	for _, write := range actionfacts.ShellDocumentFileWrites(codeGuardShellCommand(input)) {
+		if write.Expanded {
+			expandedWrites = append(expandedWrites, write)
+		} else {
+			literalWrites = append(literalWrites, write)
+		}
+	}
+	if patch, ok := codeGuardFileWritePatch(literalWrites); ok {
+		literal = append(literal, patch)
+	}
+	if patch, ok := codeGuardFileWritePatch(expandedWrites); ok {
+		expanded = append(expanded, patch)
+	}
+	complete, shown = codeGuardPatchArgsOf(literal), codeGuardPatchArgsOf(expanded)
+	return complete, shown, complete != nil || shown != nil
+}
+
+// codeGuardFileWritePatch is the apply_patch envelope that adds each written
+// file with its text.
+func codeGuardFileWritePatch(writes []actionfacts.ShellFileWrite) (string, bool) {
+	if len(writes) == 0 {
+		return "", false
+	}
+	var patch strings.Builder
+	patch.WriteString("*** Begin Patch\n")
+	for _, write := range writes {
+		patch.WriteString("*** Add File: " + write.Path + "\n")
+		for _, line := range strings.SplitAfter(strings.TrimSuffix(write.Text, "\n"), "\n") {
+			patch.WriteString("+" + strings.TrimSuffix(line, "\n") + "\n")
+		}
+	}
+	patch.WriteString("*** End Patch")
+	return patch.String(), true
+}
+
+// codeGuardPatchArgsOf is the apply_patch argument object of envelopes, nil
+// for none.
+func codeGuardPatchArgsOf(envelopes []string) json.RawMessage {
 	if len(envelopes) == 0 {
-		return nil, false, false
+		return nil
 	}
 	args, err := json.Marshal(map[string]string{"command": strings.Join(envelopes, "\n")})
 	if err != nil {
-		return nil, false, false
+		return nil
 	}
-	return args, partial, true
+	return args
+}
+
+// codeGuardScanShellView scans the complete view of a call (args, enforced
+// as its own scan reads it) and its partial view (shown, whose findings are
+// shown and never enforced; codeGuardShellPatchArgs).
+func codeGuardScanShellView(rulesDir, tool string, args, shown json.RawMessage) codeGuardArgsScan {
+	var scan codeGuardArgsScan
+	if len(args) != 0 {
+		scan = codeGuardScanWriteArgs(rulesDir, tool, args)
+	}
+	if len(shown) != 0 {
+		partial := codeGuardScanWriteArgs(rulesDir, tool, shown)
+		scan.shown = append(append(scan.shown, partial.findings...), partial.shown...)
+	}
+	return scan
 }
 
 // codeGuardShellCommand is the POSIX command text of a shell tool call
@@ -1684,9 +1742,7 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *T
 	if cfg := a.decisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	scan := codeGuardScanWriteArgs(rulesDir, req.Tool, req.Args)
-	scan.complete = scan.complete && !req.codeGuardPartial
-	return scan
+	return codeGuardScanShellView(rulesDir, req.Tool, req.Args, req.codeGuardShownArgs)
 }
 
 // codeGuardPatchTools are the tools whose arguments carry an apply_patch
@@ -2005,13 +2061,22 @@ func codeGuardRuleFindings(
 	trustedBoundary bool,
 	enforcementCapable bool,
 ) []RuleFinding {
-	if len(scan.findings) == 0 {
+	if len(scan.findings)+len(scan.shown) == 0 {
 		return nil
 	}
-	result := make([]RuleFinding, 0, len(scan.findings))
-	for _, finding := range scan.findings {
+	result := make([]RuleFinding, 0, len(scan.findings)+len(scan.shown))
+	enforced := make(map[string]bool, len(scan.findings))
+	for index, finding := range append(scan.findings[:len(scan.findings):len(scan.findings)], scan.shown...) {
 		ruleID := firstNonEmpty(finding.RuleID, finding.ID)
 		if ruleID == "" {
+			continue
+		}
+		// A finding of the partial view is shown, never enforced; one the
+		// complete view raised already is not repeated.
+		complete := index < len(scan.findings) && scan.complete
+		if index < len(scan.findings) {
+			enforced[ruleID] = true
+		} else if enforced[ruleID] {
 			continue
 		}
 		title := strings.TrimSpace(finding.Title)
@@ -2027,7 +2092,7 @@ func codeGuardRuleFindings(
 		}.withTrustedActionProof(newExactCodeGuardFindingProof(
 			ruleID,
 			trustedBoundary,
-			scan.complete,
+			complete,
 			builtinMatch,
 		))
 		result = append(result, converted)
