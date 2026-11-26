@@ -1266,12 +1266,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
-	// A sandbox guest judged on a POSIX gateway host that is not Linux:
-	// its paths follow the Linux guest layout, never this host's
-	// (rel-1-0-10:GAP-2203, GAP-2223). A Linux gateway reads the same
-	// layout from its own file system; a Windows one spells no POSIX path.
-	guestLayoutHost := cannotResolveLocally && request.sandboxGuest &&
-		runtime.GOOS != "linux" && runtime.GOOS != "windows"
+	// Judge the Linux guest's root and same-command links in its own
+	// namespace on every POSIX gateway host.
+	guestRootProof := cannotResolveLocally && request.sandboxGuest && runtime.GOOS != "windows"
 	if !request.ProtectedHomeHook {
 		// Only the managed hook client walks the user's home for the gateway.
 		opaqueFacts = nil
@@ -1374,11 +1371,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
-			if guestLayoutHost && filepath.IsAbs(request.SandboxGuestCWD) &&
+			if guestRootProof && filepath.IsAbs(request.SandboxGuestCWD) &&
 				guestProtected(request.SandboxGuestCWD+"/"+target) {
 				return confirmed()
 			}
-			if guestLayoutHost && guestAliasProtected(target) {
+			if guestRootProof && guestAliasProtected(target) {
 				return confirmed()
 			}
 			if cannotResolveLocally && request.sandboxGuest && guestAliasUnproved(target, true) {
@@ -1435,7 +1432,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return confirmed()
 		}
-		if guestLayoutHost && (guestProtected(target) || guestAliasProtected(target)) {
+		if guestRootProof && (guestProtected(target) || guestAliasProtected(target)) {
 			return confirmed()
 		}
 		if runtime.GOOS == "linux" && guestAliasUnproved(target, cannotResolveLocally && request.sandboxGuest) {
@@ -1740,7 +1737,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD] = start
 		}
 	}
-	if guestLayoutHost && filepath.IsAbs(request.SandboxGuestCWD) &&
+	if guestRootProof && filepath.IsAbs(request.SandboxGuestCWD) &&
 		strings.Contains(input.Command, "/proc/") && strings.Contains(input.Command, "cd ") {
 		// The host cwd is not the guest cwd. A concrete write after a
 		// guest directory change can still be proved protected; an
@@ -1748,7 +1745,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		placed := hookpaths.GuestStaticDirectoryWriteOperands(
 			input.Command, request.SandboxGuestCWD, facts.ActiveHome)
 		for _, write := range placed {
-			if guestProtected(write.Path) {
+			if guestProtected(write.Path) || guestAliasProtected(write.Path) {
 				return confirmed()
 			}
 		}

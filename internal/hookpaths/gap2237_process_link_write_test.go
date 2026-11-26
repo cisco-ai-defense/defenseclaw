@@ -5,6 +5,21 @@ package hookpaths
 
 import "testing"
 
+func TestFIX2223DProcessLinkBoundary(t *testing.T) {
+	for _, path := range []string{
+		"/proc/thread-self/cwd/.ssh/authorized_keys",
+		"/proc/self/cwd/../.ssh/authorized_keys",
+		"/proc/self/fd/3/../../root/../.ssh/authorized_keys",
+	} {
+		if !ProcessLinkWriteUnproved(path, true) {
+			t.Errorf("process link below path %q must remain unproved", path)
+		}
+	}
+	if ProcessLinkWriteUnproved("/proc/self/root/tmp/authorized_keys", false) {
+		t.Error("own root benign path should be judged as its plain path")
+	}
+}
+
 func TestGAP2237ProcessLinkWriteBelowOpenerRelativeLink(t *testing.T) {
 	rows := []struct {
 		path string

@@ -835,8 +835,10 @@ func openerRelativeLinkBelow(path string) bool {
 		entry = 3
 	}
 	switch parts[entry] {
-	case "root", "cwd", "exe":
+	case "root":
 		return entry > 1 && len(parts) > entry+1 && parts[entry+1] != ""
+	case "cwd", "exe":
+		return len(parts) > entry+1 && parts[entry+1] != ""
 	case "fd", "map_files":
 		return len(parts) > entry+2 && allDigits(parts[entry+1]) && parts[entry+2] != ""
 	}

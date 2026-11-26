@@ -53,6 +53,58 @@ func TestFIX2223CReviewHoldsActor(t *testing.T) {
 	}
 }
 
+func TestFIX2223DProcessLinkAndGuestRootHolds(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX gateway")
+	}
+	key := "authorized_" + "keys"
+	rows := []struct{ name, command string }{
+		{"thread-cwd-below", "cd /sandbox && echo k >> /proc/thread-self/cwd/.ssh/" + key},
+		{"cwd-dot-dot", "echo k >> /proc/self/cwd/../.ssh/" + key},
+		{"fd-dot-dot", "mkdir -p /sandbox/app/x /sandbox/root && exec 3< /sandbox/app/x && echo k >> /proc/self/fd/3/../../root/../.ssh/" + key},
+		{"self-root-rc", "echo m > /proc/self/root/sandbox/.ssh/rc"},
+		{"relative-link-after-cd", "cd /tmp && ln -s ../proc/self/root/sandbox/.ssh/" + key + " l && echo k >> l"},
+		{"ordinary-prefix-root", "echo k >> /tmp/x/../../proc/self/root/../sandbox/.ssh/" + key},
+	}
+	for _, pack := range []string{"default", "strict"} {
+		t.Run(pack, func(t *testing.T) {
+			api, actor, _, _ := gap0545API(t, "claudecode", pack)
+			for _, row := range rows {
+				t.Run(row.name, func(t *testing.T) {
+					action, _ := gap2227Hook(t, api, actor, sandboxauth.SandboxHome+"/app", row.command, true)
+					if action != "block" {
+						t.Errorf("actor %s: %s, want block", row.name, action)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestFIX2223DLaptopProcessLinkGiveback(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("Linux unprivileged laptop")
+	}
+	for _, pack := range []string{"default", "strict"} {
+		t.Run(pack, func(t *testing.T) {
+			api, _, home, app := gap0545API(t, "claudecode", pack)
+			key := "authorized_" + "keys"
+			for _, row := range []struct{ name, command string }{
+				{"cwd-dot-dot", "echo k >> /proc/self/cwd/../.ssh/" + key},
+				{"thread-cwd", "cd " + home + " && echo k >> /proc/thread-self/cwd/.ssh/" + key},
+				{"fd-dot-dot", "mkdir -p " + home + "/app/x " + home + "/root && exec 3< " + home + "/app/x && echo k >> /proc/self/fd/3/../../root/../.ssh/" + key},
+			} {
+				t.Run(row.name, func(t *testing.T) {
+					action, _ := gap2227Hook(t, api, context.Background(), app, row.command, false)
+					if action != "block" {
+						t.Errorf("laptop %s: %s, want block", row.name, action)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestFIX2223CBenignSelfRootMatchesPlainPath(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
 		t.Skip("Linux unprivileged laptop")

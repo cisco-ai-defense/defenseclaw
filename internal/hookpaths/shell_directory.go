@@ -884,8 +884,8 @@ func guestOtherProcessFolder(directory string) bool {
 }
 
 // GuestOwnRootPath folds guest-owned root links while walking the raw path.
-// A dot-dot after root stays at the guest root. The suffix after a different
-// process or descriptor link stays raw for the process-link proof.
+// A dot-dot after root stays at the guest root. The suffix after any other
+// process link stays raw for the process-link proof.
 // (GAP-2223, GAP-2227).
 func GuestOwnRootPath(path string) string {
 	if !strings.HasPrefix(path, "/") || !strings.Contains(path, "proc") {
@@ -912,8 +912,8 @@ func GuestOwnRootPath(path string) string {
 			folded = true
 			continue
 		}
-		if folded && processLinkHead(parts) {
-			// Another process or descriptor link owns its raw suffix.
+		if processLinkHead(parts) {
+			// A process link owns its raw suffix even before any root fold.
 			prefix := "/" + strings.Join(parts, "/")
 			if i+1 < len(input) {
 				return prefix + "/" + strings.Join(input[i+1:], "/")

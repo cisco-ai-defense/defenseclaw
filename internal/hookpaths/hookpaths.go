@@ -6431,7 +6431,42 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 	var out []string
 	seen := map[string]bool{filepath.Clean(path): true}
 	queue := []string{filepath.Clean(path)}
-	for first := true; len(queue) > 0 && len(out) < maxLinkAliasSteps; first = false {
+	logicalNames := map[string]string{queue[0]: queue[0]}
+	// The host link walker may place a guest link under the host's physical
+	// spelling of its directory (for example /private/tmp on macOS). Match
+	// that spelling at the link component, even when the write goes below
+	// the link. Keep the guest spelling for relative target text.
+	if filepath.IsAbs(path) {
+		for _, alias := range l.links.aliases {
+			if alias.text == "" {
+				continue
+			}
+			marker := string(filepath.Separator) + filepath.Base(alias.name)
+			for offset := 0; offset < len(path) && len(queue) < maxLinkAliasSteps; {
+				at := strings.Index(path[offset:], marker)
+				if at < 0 {
+					break
+				}
+				at += offset
+				end := at + len(marker)
+				offset = end
+				if end < len(path) && path[end] != filepath.Separator {
+					continue
+				}
+				if dir, ok := ResolveWriteTarget(filepath.Dir(path[:end])); ok {
+					physical := filepath.Join(dir, filepath.Base(alias.name)) + path[end:]
+					if !seen[physical] {
+						seen[physical] = true
+						queue = append(queue, physical)
+						logicalNames[physical] = queue[0]
+					}
+				}
+			}
+		}
+	}
+	roots := len(queue)
+	for step := 0; len(queue) > 0 && len(out) < maxLinkAliasSteps; step++ {
+		first := step < roots
 		name := queue[0]
 		queue = queue[1:]
 		for _, alias := range l.links.aliases {
@@ -6446,6 +6481,16 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 				continue
 			}
 			next := alias.target
+			if alias.text != "" {
+				// A relative link is read from its guest directory, not
+				// the host's physical spelling of that directory. Drop
+				// any suffix below the link before finding its parent.
+				logicalLink := logicalNames[name]
+				if rest != "" {
+					logicalLink = strings.TrimSuffix(logicalLink, string(filepath.Separator)+rest)
+				}
+				next = filepath.Dir(logicalLink) + string(filepath.Separator) + alias.text
+			}
 			if rest != "" {
 				next += string(filepath.Separator) + rest
 			}
@@ -6455,6 +6500,7 @@ func (l Links) GuestAliasTargets(path string, entry bool) []string {
 			if !seen[clean] {
 				seen[clean] = true
 				queue = append(queue, clean)
+				logicalNames[clean] = clean
 			}
 			if len(out) >= maxLinkAliasSteps {
 				break

@@ -92,6 +92,57 @@ func TestGAP2223GuestAliasTargetsFoldLinkText(t *testing.T) {
 	}
 }
 
+func TestFIX2223DGuestOwnRootKeepsProcessLinkBoundary(t *testing.T) {
+	for _, path := range []string{
+		"/proc/self/cwd/../.ssh/authorized_keys",
+		"/proc/thread-self/cwd/.ssh/authorized_keys",
+		"/proc/self/fd/3/../../root/../.ssh/authorized_keys",
+	} {
+		if got := GuestOwnRootPath(path); got != path {
+			t.Errorf("GuestOwnRootPath(%q) = %q; suffix crossed process link", path, got)
+		}
+	}
+}
+
+func TestFIX2223DGuestRelativeAliasAfterDirectoryChange(t *testing.T) {
+	command := "cd /tmp && ln -s ../proc/self/root/sandbox/.ssh/authorized_keys l && echo k >> l"
+	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
+	aliases := links.GuestAliasTargets("/tmp/l", false)
+	found := false
+	for _, alias := range aliases {
+		if GuestOwnRootPath(alias) == "/sandbox/.ssh/authorized_keys" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("relative guest alias targets %q", aliases)
+	}
+}
+
+func TestFIX2223DGuestRelativeDirectoryAliasAfterChange(t *testing.T) {
+	command := "cd /tmp && ln -s ../proc/self/root/sandbox/.ssh l && echo k >> l/authorized_keys"
+	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
+	aliases := links.GuestAliasTargets("/tmp/l/authorized_keys", false)
+	for _, alias := range aliases {
+		if GuestOwnRootPath(alias) == "/sandbox/.ssh/authorized_keys" {
+			return
+		}
+	}
+	t.Errorf("relative directory alias targets %q", aliases)
+}
+
+func TestFIX2223DGuestRelativeAliasBelowLink(t *testing.T) {
+	command := "ln -s /proc/self/root/sandbox l1 && ln -s l1/.ssh l2 && echo k >> l2/authorized_keys"
+	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
+	aliases := links.GuestAliasTargets("/sandbox/app/l2/authorized_keys", false)
+	for _, alias := range aliases {
+		if GuestOwnRootPath(alias) == "/sandbox/.ssh/authorized_keys" {
+			return
+		}
+	}
+	t.Errorf("relative alias below link targets %q", aliases)
+}
+
 func TestGAP2223GuestAliasTargetsUseLinuxCase(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("guest POSIX alias parser is not used on Windows")
