@@ -5562,6 +5562,8 @@ env_key = "OPENAI_API_KEY"
 	}
 }
 
+const editedWindowsHookBinaryName = "defenseclaw-hook-edited.exe"
+
 func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -5582,7 +5584,9 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 		}
 		defer func() { codexPolicyInspector = previousInspector }()
 		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
-		registered, edited = windowsHookBinaryName, "x"+windowsHookBinaryName
+		// An edited launcher name: a defenseclaw-* executable beside the
+		// launcher is DefenseClaw's own edited entry (isRenamedDefenseClawHookExecutable).
+		registered, edited = windowsHookBinaryName, editedWindowsHookBinaryName
 	}
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw"), APIAddr: "127.0.0.1:18970"}
@@ -5610,10 +5614,10 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(got), "xhooks") || strings.Contains(string(got), "x"+windowsHookBinaryName) || strings.Contains(string(got), "hooks.state") ||
+	if strings.Contains(string(got), "xhooks") || strings.Contains(string(got), editedWindowsHookBinaryName) || strings.Contains(string(got), "hooks.state") ||
 		!bytes.Contains(got, []byte("# personal")) {
 		t.Fatalf("edited hooks or trust state survived teardown (edited path %v, trust state %v, hook tables %d, personal %v)",
-			strings.Contains(string(got), "xhooks") || strings.Contains(string(got), "x"+windowsHookBinaryName),
+			strings.Contains(string(got), "xhooks") || strings.Contains(string(got), editedWindowsHookBinaryName),
 			strings.Contains(string(got), "hooks.state"), strings.Count(string(got), "[[hooks."), bytes.Contains(got, []byte("# personal")))
 	}
 }

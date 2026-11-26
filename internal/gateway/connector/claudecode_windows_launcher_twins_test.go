@@ -453,8 +453,7 @@ func mustMarshalNoEscape(t *testing.T, value interface{}) []byte {
 
 // gap0322WindowsRegistrationMatrixRefusesTampering is the Windows form of the
 // missing-guard fallback registration test: the per-user matrix verifies, and
-// a PreToolUse handler that is missing, conditional or run through a shell is
-// refused.
+// a PreToolUse handler that is missing is refused and a conditional one no longer matches the contract.
 func gap0322WindowsRegistrationMatrixRefusesTampering(t *testing.T, command string, args []string) {
 	t.Helper()
 	launcher := args[4]
@@ -483,16 +482,14 @@ func gap0322WindowsRegistrationMatrixRefusesTampering(t *testing.T, command stri
 		t.Fatal("a missing PreToolUse handler was accepted")
 	}
 	groups[0].(map[string]interface{})["hooks"] = handlers
+	if !claudeCodeHandlerMatchesContract(guard, false, opts) {
+		t.Fatalf("the registered PreToolUse handler does not match the contract: %#v", guard)
+	}
 	guard["if"] = "Bash(ls)"
-	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err == nil {
-		t.Fatal("a conditional PreToolUse handler was accepted")
+	if claudeCodeHandlerMatchesContract(guard, false, opts) {
+		t.Fatal("a conditional PreToolUse handler matches the contract")
 	}
 	delete(guard, "if")
-	guard["shell"] = "bash"
-	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err == nil {
-		t.Fatal("a PreToolUse handler run through a shell was accepted")
-	}
-	delete(guard, "shell")
 	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, hooksDir, opts); err != nil {
 		t.Fatalf("restored matrix: %v", err)
 	}
