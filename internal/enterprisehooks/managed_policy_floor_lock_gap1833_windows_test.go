@@ -13,7 +13,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-1833: the fourth guardian-pass user of the Claude Code managed policy
@@ -22,14 +21,6 @@ import (
 // from the acquire through the floor body. The other three users are timed in
 // TestGAP1833UnchangedPassesHoldTheClaudePolicyLockUnderTheSmokeBar.
 const gap1833FloorRealLockBar = 10 * time.Millisecond
-
-// gap1833FloorRealLockSmokeBar is the live smoke bar for one hold of a pass
-// that writes the floor, judged by testenv.HoldsUnderBar (GAP-2201): a pass
-// whose snapshot goes stale reads everything again under the lock, about
-// 230 ms of retries on the absent managed-settings.json, and a scanner on the
-// just-written file adds a write retry, so one hold of twenty can be slow on a
-// shared box while the median stays near 12 ms.
-const gap1833FloorRealLockSmokeBar = 200 * time.Millisecond
 
 func TestGAP1833VersionFloorPassHoldsTheRealClaudePolicyLockUnderTheBar(t *testing.T) {
 	programFiles, holds := enterprisehooks.GAP1833RealLockFixtureForTest(t)
@@ -85,15 +76,12 @@ func TestGAP1833VersionFloorPassHoldsTheRealClaudePolicyLockUnderTheBar(t *testi
 	if worst := unchanged[len(unchanged)-1]; worst >= gap1833FloorRealLockBar {
 		t.Errorf("the version floor reconcile held the real Claude managed policy lock %s on an unchanged pass, at or above the %s bar", worst, gap1833FloorRealLockBar)
 	}
-	written, ok, report := testenv.HoldsUnderBar(gap1833FloorRealLockSmokeBar, func() []time.Duration {
-		return run("version floor written", func() {
-			if err := os.Remove(floor); err != nil {
-				t.Fatal(err)
-			}
-		}, true)
-	})
-	t.Logf("GAP1833 version floor written, against the %s smoke bar:\n%s", gap1833FloorRealLockSmokeBar, report)
-	if !ok {
-		t.Errorf("the version floor reconcile held the real Claude managed policy lock %s at worst writing the floor, over the %s smoke bar:\n%s", written[len(written)-1], gap1833FloorRealLockSmokeBar, report)
+	written := run("version floor written", func() {
+		if err := os.Remove(floor); err != nil {
+			t.Fatal(err)
+		}
+	}, true)
+	if worst := written[len(written)-1]; worst >= 200*time.Millisecond {
+		t.Errorf("the version floor reconcile held the real Claude managed policy lock %s writing the floor, at or above the 200ms smoke bar", worst)
 	}
 }
