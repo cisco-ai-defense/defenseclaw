@@ -206,6 +206,21 @@ var gnuLongOptions = map[string]string{
 	"sha512sum": "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
 	"b2sum":     "--binary --check --help --ignore-missing --length --quiet --status --strict --tag --text --version --warn --zero",
 	"cksum":     "--algorithm --base64 --check --debug --help --ignore-missing --length --quiet --raw --status --strict --tag --untagged --version --warn --zero",
+	"comm":      "--check-order --help --nocheck-order --output-delimiter --total --version --zero-terminated",
+	"join":      "--check-order --header --help --ignore-case --nocheck-order --version --zero-terminated",
+	"paste":     "--delimiters --help --serial --version --zero-terminated",
+	"fold":      "--bytes --help --spaces --version --width",
+	"fmt":       "--crown-margin --goal --help --prefix --split-only --tagged-paragraph --uniform-spacing --version --width",
+	"expand":    "--help --initial --tabs --version",
+	"unexpand":  "--all --first-only --help --tabs --version",
+	"od":        "--address-radix --endian --format --help --output-duplicates --read-bytes --skip-bytes --strings --traditional --version --width",
+	"df":        "--all --block-size --exclude-type --help --human-readable --inodes --local --no-sync --output --portability --print-type --si --sync --total --type --version",
+	"rev":       "--help --version",
+	"column":    "--fillrows --help --json --keep-empty-lines --output-separator --output-width --separator --table --table-column --table-columns --table-columns-limit --table-header-repeat --table-hide --table-maxout --table-name --table-noextreme --table-noheadings --table-order --table-right --table-truncate --table-wrap --tree --tree-id --tree-parent --version",
+	"hexdump":   "--canonical --color --format --format-file --help --length --no-squeezing --one-byte-char --one-byte-octal --skip --two-bytes-decimal --two-bytes-hex --two-bytes-octal --version",
+	"look":      "--alphanum --alternative --help --ignore-case --terminate --version",
+	"strings":   "--all --bytes --data --encoding --help --include-all-whitespace --output-separator --print-file-name --radix --target --unicode --version",
+	"file":      "--apple --brief --checking-printout --compile --debug --dereference --exclude --exclude-quiet --extension --files-from --help --keep-going --list --magic-file --mime --mime-encoding --mime-type --no-buffer --no-dereference --no-pad --no-sandbox --parameter --preserve-date --print0 --raw --separator --special-files --uncompress --uncompress-noreport --version",
 }
 
 // posixShellBuiltins is the union of common Bash and Zsh builtins. The oracle
@@ -896,12 +911,6 @@ func buildPOSIXTable() {
 	// values, not files they act on (review R5-2 InertOperands).
 	add(Program{Names: []string{"true", "false", ":", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias", "ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill", "killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let", "read", "printenv", "logname", "groups", "nproc", "arch"}, Pos: PosNone, InertOperands: true,
 		Flags: fl(nil, "-n", "-e", "-E", "-l", "-a", "-h", "-c", "-v", "-f", "-r", "-s", "-t", "-u", "-p", "-i", "-w", "-x", "-z", "-d", "-k", "-m", "-b", "-o", "-g", "-L", "-P", "-H", "-9", "-1")})
-	// Programs that read their file operands. The valued flags below are inert
-	// data (a count, a delimiter, a field list); none of these programs writes a
-	// file named by a flag. uniq and xxd take an OUTPUT operand and are split out.
-	readerFlags := fl(map[string]Flag{"-o": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-w": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}},
-		"-l", "-m", "-L", "-h", "-a", "-b", "-s", "-k", "-v", "-i", "-r", "-u", "-z", "-x", "-p", "-g", "-H", "-P", "-A", "-B", "-C", "-D", "-q", "-y", "-e")
-	add(Program{Names: []string{"comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "look"}, Pos: PosAllRead, Flags: readerFlags})
 	// The readers below have their own rows: the tool's own option grammar
 	// (GNU coreutils 9.4 and diffutils --help on the build box; shasum is the
 	// Perl tool), long options and value arity included, so a long spelling
@@ -963,11 +972,6 @@ func buildPOSIXTable() {
 			"--ignore-file-name-case", "--no-ignore-file-name-case", "-i", "--ignore-case", "-E", "--ignore-tab-expansion", "-Z", "--ignore-trailing-space",
 			"-b", "--ignore-space-change", "-w", "--ignore-all-space", "-B", "--ignore-blank-lines", "-a", "--text", "--strip-trailing-cr",
 			"-d", "--minimal", "--speed-large-files", "--help", "-v", "--version")})
-	// Metadata-only programs: they report a file's size, type, inode data or
-	// resolved name, never its bytes, so an operand is accounted but carries no
-	// content-read effect (DET111 ruling 3a: stat of a credential file is not a
-	// credential read). file reads magic bytes but prints only a type label.
-	add(Program{Names: []string{"df", "file"}, Pos: PosAllRead, MetadataOnly: true, Flags: readerFlags})
 	add(Program{Names: []string{"du"}, Pos: PosAllRead, MetadataOnly: true,
 		Flags: fl(map[string]Flag{"-B": inertValue, "--block-size": inertValue, "-d": inertValue, "--max-depth": inertValue,
 			"-t": inertValue, "--threshold": inertValue, "--time": attachedValue, "--time-style": inertValue, "--exclude": inertValue},
@@ -984,6 +988,94 @@ func buildPOSIXTable() {
 		Flags: fl(map[string]Flag{"--relative-to": inertValue, "--relative-base": inertValue},
 			"-e", "--canonicalize-existing", "-m", "--canonicalize-missing", "-L", "--logical", "-P", "--physical",
 			"-q", "--quiet", "-s", "--strip", "--no-symlinks", "-z", "--zero", "--help", "--version")})
+	// The text readers (GNU coreutils 9.4, util-linux 2.39, GNU binutils
+	// strings and file 5.45 on the build box, --help and man) each have their
+	// own row too, so a switch never takes the next word (column -t, od -c,
+	// strings -d, fmt -t, look -d) and an option value never reads as a file
+	// (column -s SEP, hexdump -n LEN) (GAP-2280). They shared one short-only
+	// set before, written for no tool in particular. A file the option names
+	// for its own input is a read: hexdump -f FORMATFILE, file -m MAGIC and
+	// file -f NAMEFILE (the names in it are printed). An option only the BSD
+	// (macOS) tool takes is in the row too (comm -i; fmt -d, -l, -m, -n; df
+	// -b, -c, -g, -I, -m, -n, -Y; file -I, -D, -M; strings -arch), as cmp has
+	// -h, -x and -z; where the two differ in arity (BSD fmt -t, -p, df -T)
+	// the row is the GNU tool's. TestReaderRowsMatchTheTools checks every row
+	// against the tools.
+	digitSwitches := []string{"-0", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9"} // the obsolete -NUM width / length form
+	textReaders := []Program{
+		{Names: []string{"comm"}, Flags: fl(map[string]Flag{"--output-delimiter": inertValue},
+			"-1", "-2", "-3", "-z", "-i", "--check-order", "--nocheck-order", "--total", "--zero-terminated", "--help", "--version")},
+		{Names: []string{"join"}, Flags: fl(map[string]Flag{"-a": inertValue, "-e": inertValue, "-j": inertValue, "-o": inertValue,
+			"-t": inertValue, "-v": inertValue, "-1": inertValue, "-2": inertValue},
+			"-i", "--ignore-case", "-z", "--zero-terminated", "--check-order", "--nocheck-order", "--header", "--help", "--version")},
+		{Names: []string{"paste"}, Flags: fl(map[string]Flag{"-d": inertValue, "--delimiters": inertValue},
+			"-s", "--serial", "-z", "--zero-terminated", "--help", "--version")},
+		{Names: []string{"fold"}, Flags: fl(map[string]Flag{"-w": inertValue, "--width": inertValue},
+			append([]string{"-b", "--bytes", "-s", "--spaces", "--help", "--version"}, digitSwitches...)...)},
+		{Names: []string{"fmt"}, Flags: fl(map[string]Flag{"-p": inertValue, "--prefix": inertValue, "-w": inertValue, "--width": inertValue,
+			"-g": inertValue, "--goal": inertValue, "-d": inertValue, "-l": inertValue},
+			append([]string{"-c", "--crown-margin", "-s", "--split-only", "-t", "--tagged-paragraph", "-u", "--uniform-spacing",
+				"-m", "-n", "--help", "--version"}, digitSwitches...)...)},
+		{Names: []string{"rev"}, Flags: fl(nil, "-h", "--help", "-V", "--version")},
+		{Names: []string{"column"}, Flags: fl(map[string]Flag{"-n": inertValue, "--table-name": inertValue, "-O": inertValue, "--table-order": inertValue,
+			"-C": inertValue, "--table-column": inertValue, "-N": inertValue, "--table-columns": inertValue,
+			"-l": inertValue, "--table-columns-limit": inertValue, "-E": inertValue, "--table-noextreme": inertValue,
+			"-H": inertValue, "--table-hide": inertValue, "-R": inertValue, "--table-right": inertValue,
+			"-T": inertValue, "--table-truncate": inertValue, "-W": inertValue, "--table-wrap": inertValue,
+			"-r": inertValue, "--tree": inertValue, "-i": inertValue, "--tree-id": inertValue, "-p": inertValue, "--tree-parent": inertValue,
+			"-c": inertValue, "--output-width": inertValue, "-o": inertValue, "--output-separator": inertValue, "-s": inertValue, "--separator": inertValue},
+			"-t", "--table", "-d", "--table-noheadings", "-m", "--table-maxout", "-e", "--table-header-repeat",
+			"-L", "--keep-empty-lines", "-J", "--json", "-x", "--fillrows", "-h", "--help", "-V", "--version")},
+		{Names: []string{"expand"}, Flags: fl(map[string]Flag{"-t": inertValue, "--tabs": inertValue},
+			append([]string{"-i", "--initial", "--help", "--version"}, digitSwitches...)...)},
+		{Names: []string{"unexpand"}, Flags: fl(map[string]Flag{"-t": inertValue, "--tabs": inertValue},
+			append([]string{"-a", "--all", "--first-only", "--help", "--version"}, digitSwitches...)...)},
+		{Names: []string{"strings"}, Flags: fl(map[string]Flag{"-n": inertValue, "--bytes": inertValue, "-t": inertValue, "--radix": inertValue,
+			"-e": inertValue, "--encoding": inertValue, "-T": inertValue, "--target": inertValue, "-U": inertValue, "--unicode": inertValue,
+			"-s": inertValue, "--output-separator": inertValue, "-arch": inertValue},
+			append([]string{"-a", "--all", "-d", "--data", "-f", "--print-file-name", "-w", "--include-all-whitespace", "-o",
+				"-h", "--help", "-v", "-V", "--version"}, digitSwitches...)...)},
+		// od: -w[BYTES] and --strings[=BYTES] take an attached value only; the
+		// one-letter formats (-a -b -c -d -f -i -l -o -s -x and the legacy -B
+		// -D -e -F -H -h -I -L -O -X, also BSD od's) are switches.
+		{Names: []string{"od"}, Flags: fl(map[string]Flag{"-A": inertValue, "--address-radix": inertValue, "-j": inertValue, "--skip-bytes": inertValue,
+			"-N": inertValue, "--read-bytes": inertValue, "-S": inertValue, "--strings": attachedValue, "-t": inertValue, "--format": inertValue,
+			"-w": attachedValue, "--width": attachedValue, "--endian": inertValue},
+			"-v", "--output-duplicates", "--traditional", "-a", "-b", "-c", "-d", "-f", "-i", "-l", "-o", "-s", "-x",
+			"-B", "-D", "-e", "-F", "-H", "-h", "-I", "-L", "-O", "-X", "--help", "--version")},
+		{Names: []string{"hexdump"}, Flags: fl(map[string]Flag{"-e": inertValue, "--format": inertValue,
+			"-f": {Value: true, Role: RoleRead}, "--format-file": {Value: true, Role: RoleRead},
+			"-n": inertValue, "--length": inertValue, "-s": inertValue, "--skip": inertValue, "-L": attachedValue, "--color": attachedValue},
+			"-b", "--one-byte-octal", "-c", "--one-byte-char", "-C", "--canonical", "-d", "--two-bytes-decimal",
+			"-o", "--two-bytes-octal", "-x", "--two-bytes-hex", "-v", "--no-squeezing", "-h", "--help", "-V", "--version")},
+		{Names: []string{"look"}, Flags: fl(map[string]Flag{"-t": inertValue, "--terminate": inertValue},
+			"-a", "--alternative", "-d", "--alphanum", "-f", "--ignore-case", "-h", "--help", "-V", "--version")},
+	}
+	for _, p := range textReaders {
+		p.Pos = PosAllRead
+		add(p)
+	}
+	// Metadata-only programs: they report a file's size, type, inode data or
+	// resolved name, never its bytes, so an operand is accounted but carries no
+	// content-read effect (DET111 ruling 3a: stat of a credential file is not a
+	// credential read). file reads magic bytes but prints only a type label;
+	// the magic file and the file of names it is given are reads.
+	add(Program{Names: []string{"df"}, Pos: PosAllRead, MetadataOnly: true,
+		Flags: fl(map[string]Flag{"-B": inertValue, "--block-size": inertValue, "-t": inertValue, "--type": inertValue,
+			"-x": inertValue, "--exclude-type": inertValue, "--output": attachedValue},
+			"-a", "--all", "-h", "--human-readable", "-H", "--si", "-i", "--inodes", "-k", "-l", "--local", "-P", "--portability",
+			"-T", "--print-type", "-v", "--sync", "--no-sync", "--total", "--help", "--version",
+			"-b", "-c", "-g", "-I", "-m", "-n", "-Y")})
+	fileRead := Flag{Value: true, Role: RoleRead}
+	add(Program{Names: []string{"file"}, Pos: PosAllRead, MetadataOnly: true,
+		Flags: fl(map[string]Flag{"-m": fileRead, "--magic-file": fileRead, "-M": fileRead, "-f": fileRead, "--files-from": fileRead,
+			"-e": inertValue, "--exclude": inertValue, "--exclude-quiet": inertValue, "-F": inertValue, "--separator": inertValue,
+			"-P": inertValue, "--parameter": inertValue},
+			"-b", "--brief", "-c", "--checking-printout", "-C", "--compile", "-d", "--debug", "-E", "-h", "--no-dereference",
+			"-L", "--dereference", "-i", "--mime", "--mime-type", "--mime-encoding", "--apple", "--extension", "-k", "--keep-going",
+			"-l", "--list", "-n", "--no-buffer", "-N", "--no-pad", "-0", "--print0", "-p", "--preserve-date", "-r", "--raw",
+			"-s", "--special-files", "-S", "--no-sandbox", "-z", "--uncompress", "-Z", "--uncompress-noreport", "-I", "-D",
+			"-v", "--version", "--help")})
 	// uniq and xxd get their own exact flag sets: the union above makes -c a
 	// valued flag, which for uniq (a count switch) would swallow the next operand.
 	inert := func(names ...string) map[string]Flag {

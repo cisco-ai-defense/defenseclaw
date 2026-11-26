@@ -3485,10 +3485,15 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 		if fl.Optional {
 			// -iSUFFIX: the rest of the token is the optional value, never the
 			// next word and never more flags (sed -ie is -i with suffix "e").
+			// An attached value of a switch that only selects the output
+			// layout (od -w16, hexdump -Lalways) is accounted as its long
+			// --width=16 form is (GAP-2280).
 			if rest := body[j+1:]; rest != "" {
-				if fn == p.InPlace {
+				switch {
+				case fn == p.InPlace:
 					*inPlaceSuffix = rest
-				} else {
+				case fl.Role == RoleNone && fl.Text == TextNone && p.InPlace == "":
+				default:
 					unknownFlag = true
 				}
 			}
