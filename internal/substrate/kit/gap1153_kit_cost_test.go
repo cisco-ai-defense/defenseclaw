@@ -6,8 +6,6 @@
 package kit
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -16,31 +14,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
-
-// gap1153Fit repeats unit ({k} counts up) between prefix and suffix up to
-// 8190 bytes: the BISECT-1153 S1..S8 scripts.
-func gap1153Fit(prefix, unit, suffix string) string {
-	var out strings.Builder
-	out.WriteString(prefix)
-	for k := 0; ; k++ {
-		piece := strings.ReplaceAll(unit, "{k}", fmt.Sprint(k))
-		if out.Len()+len(piece)+len(suffix) > 8190 {
-			break
-		}
-		out.WriteString(piece)
-	}
-	return out.String() + suffix
-}
-
-func gap1153Bash(t *testing.T, command, cwd string) []byte {
-	t.Helper()
-	payload, err := json.Marshal(map[string]any{"session_id": "s", "cwd": cwd, "hook_event_name": "PreToolUse",
-		"tool_name": "Bash", "tool_input": map[string]any{"command": command}, "tool_use_id": "t"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return payload
-}
 
 // TestGAP1153KitOverBudgetCost bounds the hook facts cost by the live
 // headroom left by the published 1.0.10 actor baseline. The gateway and
