@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,24 @@ import (
 // of TestGAP0299LargeHeredocCostStaysBounded's text rows.
 func gap0299ProseHereDocument() string {
 	line := "Meeting notes: the team reviewed the plan and agreed on the next steps.\n"
-	return fmt.Sprintf("cat > notes.txt <<'EOF'\nrow %d\n", time.Now().UnixNano()) +
+	return fmt.Sprintf("cat > notes.txt <<'EOF'\nrow %s\n", gap0299RowMark()) +
 		strings.Repeat(line, 1000000/len(line)) + "EOF\n"
+}
+
+// gap0299RowMark makes each call's text new (no answer kept from an earlier
+// call serves it) without digits: the clock's nanoseconds spelled in ten
+// consonants. A digit mark made the count depend on the clock: a run of 19
+// digits passes the card number pre-checks (ENT-CC-VISA and others) for
+// some values and not for others, so the same tree counted 8, 10 or 12
+// regex runs (rel-1-0-10:GAP-2220). A run of these letters spells no
+// command or rule keyword.
+func gap0299RowMark() string {
+	const letters = "bdfghjklmq"
+	mark := []byte(strconv.FormatInt(time.Now().UnixNano(), 10))
+	for i, c := range mark {
+		mark[i] = letters[c-'0']
+	}
+	return string(mark)
 }
 
 // TestGAP0299ProseHereDocumentRegexRuns bounds the regex runs over the large
@@ -60,7 +77,10 @@ func TestGAP0299ProseHereDocumentRegexRuns(t *testing.T) {
 	}
 }
 
-// gap0299MaxProseRegexRuns is the bound of one cold prose call: the rule
-// regexes only. At befff79e53 it was 16 with the gate expression counted at
-// its lines (6 runs of it over the 1 MiB text).
-const gap0299MaxProseRegexRuns = 10
+// gap0299MaxProseRegexRuns is the bound of one cold prose call. The text
+// has no digit (gap0299RowMark), so no rule regex passes its pre-check: 0
+// runs at 0859b551d4 in 24 of 24 runs. At befff79e53 the gate expression
+// ran 6 times over the 1 MiB text; were it back, the bound fails. (With
+// the old digit mark the rule regexes the digits woke made it 8, 10 or 12,
+// bound 10, rel-1-0-10:GAP-2220.)
+const gap0299MaxProseRegexRuns = 2
