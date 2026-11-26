@@ -3590,10 +3590,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	// That header is the gateway's own, sent before the provider is called:
-	// the usage record counts the provider as answered from its first chunk
-	// or its answer, never from this header (rel-1-0-10:GAP-2233).
+	// the usage record counts the provider as answered when the adapter says
+	// the provider answered and with what status (markUpstreamAnswered), or
+	// from its first chunk or its answer, never from this header
+	// (rel-1-0-10:GAP-2233).
 	usageAnswer := usageOwnHeader(w)
 	var answerOnce sync.Once
+	answered := func(status int) {
+		answerOnce.Do(func() { usageAnswer.upstreamAnswered(status) })
+	}
 	w.WriteHeader(http.StatusOK)
 	// The headers carry no model text: the client has them at once, also
 	// while the initial buffer waits (GAP-0628).
@@ -3890,11 +3895,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var err error
 	var streamPanic any
 	chunks := make(chan StreamChunk)
+	providerCtx := streamCtx
+	if usageAnswer != nil {
+		providerCtx = withUpstreamAnswered(streamCtx, answered)
+	}
 	go func() {
 		defer close(chunks)
 		defer func() { streamPanic = recover() }()
-		usage, err = upstream.ChatCompletionStream(streamCtx, req, func(chunk StreamChunk) {
-			answerOnce.Do(usageAnswer.upstreamAnswered)
+		usage, err = upstream.ChatCompletionStream(providerCtx, req, func(chunk StreamChunk) {
+			answered(http.StatusOK)
 			select {
 			case chunks <- chunk:
 			case <-streamCtx.Done():
@@ -3965,9 +3974,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		panic(streamPanic)
 	}
 	// An adapter that returned without an error, or with the provider's
-	// usage, had the provider's answer even with no chunk (GAP-2233).
+	// usage, had the provider's answer even with no chunk (GAP-2233). With
+	// the first chunk, this backs up adapters that do not call
+	// markUpstreamAnswered.
 	if err == nil || usage != nil {
-		answerOnce.Do(usageAnswer.upstreamAnswered)
+		answered(http.StatusOK)
 	}
 	// Bifrost parsed the usage (it always asks for include_usage): hand it
 	// to the usage record of this call.

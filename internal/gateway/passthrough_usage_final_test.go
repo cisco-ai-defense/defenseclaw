@@ -262,6 +262,144 @@ func TestTranslatedChatStreamNoAnswerIsNotUnknownCost(t *testing.T) {
 	}
 }
 
+// resetConn1112 breaks the connection under w with a TCP reset.
+func resetConn1112(w http.ResponseWriter) {
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		return
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	_ = conn.Close()
+}
+
+const oaChunk2233 = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"
+const oaEnd2233 = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\ndata: [DONE]\n\n"
+
+// rel-1-0-10:GAP-2233 (RV-1112W2 H1): through the real Bifrost adapter, a
+// provider that answered HTTP 200 and then broke off before its first
+// event (a reset, the agent leaving while a reasoning model thinks, an SSE
+// error event) was billed for the prefill: of unknown cost, and the actor's
+// next call is denied, as on the passthrough path. Bifrost reads that first
+// event before it returns the stream, so these come back as errors, like a
+// 429. A provider that answered with an error status (a 429) is a failed
+// http_429 call and one never reached (a refused connect) a failed call the
+// provider never answered: neither was billed, the next call is allowed.
+func TestTranslatedChatStreamProviderAnsweredBeforeFirstEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name, model string
+		cancel      bool
+		h           func(w http.ResponseWriter, r *http.Request, sent chan<- struct{})
+		outcome     string
+		denied      bool
+		status      int // the provider's status on the record (0: never answered)
+	}{
+		{"oa-200-then-reset", "openai/gpt-5-mini", false, func(w http.ResponseWriter, r *http.Request, _ chan<- struct{}) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(250 * time.Millisecond)
+			resetConn1112(w)
+		}, "failed", true, http.StatusOK},
+		{"oa-200-then-agent-cancel", "openai/gpt-5-mini", true, func(w http.ResponseWriter, r *http.Request, sent chan<- struct{}) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			close(sent)
+			<-r.Context().Done()
+		}, "cancelled", true, http.StatusOK},
+		{"oa-200-then-sse-error", "openai/gpt-5-mini", false, func(w http.ResponseWriter, r *http.Request, _ chan<- struct{}) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"The server had an error while processing your request\",\"type\":\"server_error\"}}\n\n"))
+		}, "failed", true, http.StatusOK},
+		{"anth-200-then-reset", "anthropic/claude-haiku-4-5-20251001", false, func(w http.ResponseWriter, r *http.Request, _ chan<- struct{}) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(250 * time.Millisecond)
+			resetConn1112(w)
+		}, "failed", true, http.StatusOK},
+		{"oa-chunk-then-reset", "openai/gpt-5-mini", false, func(w http.ResponseWriter, r *http.Request, _ chan<- struct{}) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(oaChunk2233))
+			w.(http.Flusher).Flush()
+			time.Sleep(250 * time.Millisecond)
+			resetConn1112(w)
+		}, "failed", true, http.StatusOK},
+		{"oa-429", "openai/gpt-5-mini", false, func(w http.ResponseWriter, r *http.Request, _ chan<- struct{}) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("{\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_error\"}}"))
+		}, "failed", false, http.StatusTooManyRequests},
+		{"oa-refused", "openai/gpt-5-mini", false, nil, "failed", false, 0},
+		{"oa-complete", "openai/gpt-5-mini", false, func(w http.ResponseWriter, r *http.Request, _ chan<- struct{}) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(oaChunk2233 + oaEnd2233))
+		}, "completed", false, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := make(chan struct{})
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { tc.h(w, r, sent) }))
+			defer up.Close()
+			base := up.URL + "/v1"
+			if tc.h == nil {
+				// Nothing listens there: the connect is refused.
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				base = "http://" + ln.Addr().String() + "/v1"
+				_ = ln.Close()
+			}
+			if strings.HasPrefix(tc.model, "anthropic/") {
+				base = up.URL
+			}
+			prov, err := NewProviderWithBase(tc.model, "fixture-key", base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				go func() {
+					select {
+					case <-sent:
+						time.Sleep(300 * time.Millisecond)
+						cancel()
+					case <-time.After(10 * time.Second):
+					}
+				}()
+			}
+			proxy := newTestProxy(t, prov, newMockInspector(), "observe")
+			rec, next := actorUsageCall(t, chatFacts(), ctx, func(w http.ResponseWriter) {
+				chatReq := ChatRequest{Model: "gpt-5-mini", Stream: true, Messages: []ChatMessage{{Role: "user", Content: "hi"}}}
+				httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+				traceResult := proxyV8DefaultResult(true)
+				agentCtx, requestTrace := proxy.startProxyV8RequestTrace(httpReq.Context(), &chatReq, "", "")
+				proxy.handleStreamingRequest(w, httpReq, &chatReq, "openai", "observe", "", prov,
+					agentCtx, "", nil, requestTrace, &traceResult)
+				requestTrace.Finish(traceResult)
+			})
+			if rec.Outcome != tc.outcome {
+				t.Errorf("outcome %q error %q, want %q", rec.Outcome, rec.ErrorType, tc.outcome)
+			}
+			if got := next.Deny != nil && strings.HasPrefix(next.Deny.Code, "budget_cost_unknown:"); got != tc.denied {
+				t.Errorf("next call denied for unknown cost = %v, want %v (%+v)", got, tc.denied, next.Deny)
+			}
+			if rec.Status != tc.status {
+				t.Errorf("record status %d, want the provider's %d", rec.Status, tc.status)
+			}
+			if tc.status >= 400 && rec.ErrorType != "http_429" {
+				t.Errorf("error type %q, want http_429 (rel-1-0-10:GAP-2238)", rec.ErrorType)
+			}
+		})
+	}
+}
+
 // The raw (OpenAI-compatible body kept) chat stream ends its usage record
 // with the upstream read error too.
 func TestRawChatStreamReadErrorIsUnknownCost(t *testing.T) {

@@ -259,29 +259,46 @@ func usageOwnHeader(w http.ResponseWriter) *usageResponseWriter {
 		return nil
 	}
 	uw.mu.Lock()
-	if !uw.header {
-		uw.own = true
-	}
+	uw.own = true
 	uw.mu.Unlock()
 	return uw
 }
 
-// upstreamAnswered tells the usage record that the provider answered: the
-// adapter delivered its first chunk or returned its answer. The first call
-// counts; later ones and a writer whose upstream header the record already
-// has do nothing.
-func (u *usageResponseWriter) upstreamAnswered() {
+// upstreamAnsweredKey keys, on the context of one provider call, the
+// function a provider adapter calls when the provider answered.
+type upstreamAnsweredKey struct{}
+
+// withUpstreamAnswered returns ctx carrying answered for the provider
+// adapter (markUpstreamAnswered).
+func withUpstreamAnswered(ctx context.Context, answered func(status int)) context.Context {
+	return context.WithValue(ctx, upstreamAnsweredKey{}, answered)
+}
+
+// markUpstreamAnswered is called by a provider adapter when the provider
+// answered the call, with the HTTP status it answered with, also when the
+// stream then broke off before its first event. A 2xx stream that breaks off
+// is of unknown cost; an error status is a failed call (http_NNN) the
+// provider billed nothing for; a call the provider never answered (a refused
+// connect) gets no mark (rel-1-0-10:GAP-2233, GAP-2238). Without a hook on
+// ctx it does nothing.
+func markUpstreamAnswered(ctx context.Context, status int) {
+	if answered, ok := ctx.Value(upstreamAnsweredKey{}).(func(int)); ok {
+		answered(status)
+	}
+}
+
+// upstreamAnswered tells the usage record that the provider answered with
+// status: the adapter said so (markUpstreamAnswered), delivered its first
+// chunk or returned its answer (200). The first call counts; later ones and
+// a writer whose upstream header the record already has do nothing.
+func (u *usageResponseWriter) upstreamAnswered(status int) {
 	if u == nil {
 		return
 	}
 	u.mu.Lock()
-	if u.own && !u.header {
+	if !u.header {
 		u.header = true
-		h := u.ownHeader
-		if h == nil {
-			h = u.Header().Clone()
-		}
-		u.call.UpstreamHeader(http.StatusOK, h)
+		u.call.UpstreamHeader(status, u.ownHeader)
 	}
 	u.mu.Unlock()
 }
