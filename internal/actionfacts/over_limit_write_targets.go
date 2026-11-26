@@ -223,7 +223,7 @@ func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]stri
 		return "", false
 	}
 	unread := map[string]struct{}{}
-	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+	for _, write := range nativeFileWrites(input.Tool, input.Args, patchCallCWD(input)) {
 		if write.target != "" && write.combined == combined && write.textOverProofBound() {
 			unread[write.target] = struct{}{}
 		}

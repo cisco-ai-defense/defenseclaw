@@ -1084,7 +1084,7 @@ func dispatchTrustedActionOnce(
 	// prove stays a block (rel-1-0-10:GAP-1055). The same envelope fed to
 	// apply_patch by a shell here-document is judged as the tool's is
 	// (rel-1-0-10:GAP-1077).
-	if actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) ||
+	if actionfacts.PatchNamesUnplacedTarget(request.Input) ||
 		actionfacts.CommandPatchNamesUnplacedTarget(facts) {
 		defer func() {
 			findings = withUnknownFinding(findings, unknownReasonFinding(unplacedPatchTargetTitle,
