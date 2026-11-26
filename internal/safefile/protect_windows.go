@@ -470,21 +470,29 @@ func rejectReparsePath(path string) error {
 	return nil
 }
 
+// rejectReparseChain refuses a path with a reparse point at any component.
+// The components are read from the volume root down: GetFileAttributes of a
+// name does not follow its own last component but follows every link above
+// it, so reading the deepest folder first opened what a link on the way
+// leads to (a share on another machine, rel-1-0-10:GAP-1264) before the link
+// itself was read and refused. Root first, the first link met is refused
+// before anything below it is looked up.
 func rejectReparseChain(path string) error {
 	current, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	for {
-		if err := rejectReparsePath(current); err != nil {
+	chain := []string{current}
+	for parent := filepath.Dir(current); parent != current; parent = filepath.Dir(current) {
+		current = parent
+		chain = append(chain, current)
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		if err := rejectReparsePath(chain[i]); err != nil {
 			return err
 		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return nil
-		}
-		current = parent
 	}
+	return nil
 }
 
 // CreatePrivateDirectory creates path and any missing parents with the private

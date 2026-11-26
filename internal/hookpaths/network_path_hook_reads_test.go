@@ -29,13 +29,16 @@ var hookPathRawReads = map[string][]string{
 	"os":           {"Stat", "Lstat", "Open", "OpenFile", "ReadFile", "ReadDir", "Readlink", "OpenRoot", "OpenInRoot", "DirFS"},
 	"ioutil":       {"ReadFile", "ReadDir"},
 	"filepath":     {"EvalSymlinks", "WalkDir", "Walk", "Glob"},
-	"pathidentity": {"StatPinned"},
+	"pathidentity": {"StatPinned", "LstatPinned", "HoldUnlinked"},
 }
 
 // hookPathRawHandles open a path through the Windows API. A function may
-// call one only after it read the same path through the bounded readers or
-// took it from gatedPath (or asked networkPathUnanswered, for a call that
-// opens no last link).
+// call one only inside a read of readGated or readGatedValue, which hands
+// it the path the share gate read under the hold of its last component and
+// discards the answer when the hold saw it change. Asking
+// networkPathUnanswered or a stat first and then opening the name again is
+// a second lookup of the name after the share decision; it is no gate
+// (rel-1-0-10:GAP-1264).
 var hookPathRawHandles = map[string][]string{
 	"windows": {"CreateFile", "GetLongPathName", "GetNamedSecurityInfo"},
 	"syscall": {"CreateFile"},
@@ -370,7 +373,7 @@ func hookPathUnboundedReads(fset *token.FileSet, decl ast.Decl) []string {
 			}
 		case *ast.Ident:
 			switch node.Name {
-			case "networkPathUnanswered", "gatedPath", "pathStat", "pathLstat":
+			case "readGated", "readGatedValue":
 				gated = true
 			}
 		}

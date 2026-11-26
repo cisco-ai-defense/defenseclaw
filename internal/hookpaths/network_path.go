@@ -693,7 +693,9 @@ func readGated[T any](op, name string, read func(path string) (T, error), discar
 	}
 	still, err := pathidentity.HoldUnlinked(path)
 	switch {
-	case errors.Is(err, pathidentity.ErrLinked):
+	case errors.Is(err, pathidentity.ErrLinked), errors.Is(err, pathidentity.ErrUnpinned):
+		// A link on the way, or a component the hold cannot pin: unknown,
+		// never read unheld (rel-1-0-10:GAP-1263, GAP-1264).
 		return none, shareReadRemote, networkShareError(op, name)
 	case err != nil:
 		return none, shareReadFinal, err
@@ -969,14 +971,36 @@ func ReadFile(name string) ([]byte, error) {
 // ReadRegularFileBounded is safefile.ReadRegularFileBounded for a path a
 // hook call names, read as pathOpen reads it: a share on another machine is
 // never contacted, and the file read is the file the share decision was
-// made for (rel-1-0-10:GAP-1074). safefile refuses a name that passes any
-// link, so it reads the name itself: a name the walk read through a link is
-// refused as before, and one it read without is the path the walk read.
+// made for (rel-1-0-10:GAP-1074). safefile reads the path the gate read,
+// under its hold. It refuses a link on the way, so a name the walk read
+// through a link is refused here before anything opens it (readNameAsGated):
+// opening the name again would follow the link as it is now, which may lead
+// to a share since the walk (rel-1-0-10:GAP-1264).
 func ReadRegularFileBounded(name string, maxBytes int64) ([]byte, error) {
-	body, _, err := readGated("open", name, func(string) ([]byte, error) {
-		return safefile.ReadRegularFileBounded(name, maxBytes)
+	body, _, err := readGated("open", name, func(path string) ([]byte, error) {
+		if err := readNameAsGated("open", name, path); err != nil {
+			return nil, err
+		}
+		return safefile.ReadRegularFileBounded(path, maxBytes)
 	}, nil)
 	return body, err
+}
+
+// errNameReadThroughLink is the refusal of a reader that reads the name it
+// is given as a name (safefile, GetLongPathName) when the share walk read
+// that name through a link: the gate's path is the link's target, and the
+// name would be looked up again through the link as it is now.
+var errNameReadThroughLink = errors.New("hookpaths: the name passes a link the share gate resolved")
+
+// readNameAsGated is the rule of a reader that must read a name as spelled
+// (it refuses links, or it spells the name back): it reads only when the
+// path the gate read (path, mapped) is the name itself, so the read is the
+// gate's read under its hold. Otherwise it refuses (errNameReadThroughLink).
+func readNameAsGated(op, name, path string) error {
+	if path != fixturefs.Map(name) {
+		return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+	}
+	return nil
 }
 
 // LstatPinned is pathidentity.LstatPinned for a path a hook call names,
