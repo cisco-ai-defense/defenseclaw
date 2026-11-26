@@ -147,8 +147,12 @@ type Program struct {
 	// digest of what it reads, never the bytes (wc, sha256sum, cmp);
 	// SummaryFlags are the options that make it so (grep -c, -l, -L, -q;
 	// diff -q). Its reads are not shown to the agent (DET111 GAP-1846).
+	// ShowFlags are the options with which a Summary program prints the
+	// bytes it reads after all (cmp -l, -b, --verbose, --print-bytes; BSD
+	// -x): with one of them its reads are shown (GAP-2213).
 	Summary      bool
 	SummaryFlags []string
+	ShowFlags    []string
 	// Prints: a program outside PosAllRead that prints what it is piped
 	// (tee), so a read upstream of it reaches the call's output.
 	Prints bool
@@ -230,18 +234,17 @@ func init() {
 // result or a digest of what it reads, whatever its options (Program.Summary:
 // wc, md5sum, sha256sum, cksum, b2sum), in the GNU and the BSD tables
 // alike. A reader that prints a summary only with an option (grep -c, diff
-// -q) is not one, nor is cmp: cmp -l, -b, --verbose and --print-bytes print
-// the bytes it compares (GAP-2212).
+// -q) is not one, nor is a summary program with options that print the bytes
+// it reads (ShowFlags: cmp -l, -b, --verbose, --print-bytes, GAP-2212,
+// GAP-2213).
 func SummaryReader(program string) bool {
-	if program == "cmp" {
-		return false
+	for _, bsd := range []bool{false, true} {
+		p, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, bsd)
+		if !ok || !p.Summary || len(p.ShowFlags) > 0 {
+			return false
+		}
 	}
-	gnu, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, false)
-	if !ok || !gnu.Summary {
-		return false
-	}
-	bsd, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, true)
-	return ok && bsd.Summary
+	return true
 }
 
 func lookupProgram(name string, flavor Flavor, dialect Dialect, bsd bool) (Program, bool) {
@@ -897,7 +900,19 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"cut", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "look"}, Pos: PosAllRead, Flags: readerFlags})
 	// Summary readers print a count, a digest or a difference flag, never the
 	// bytes they read (DET111 GAP-1846); diff prints lines unless -q.
-	add(Program{Names: []string{"wc", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "cmp", "shasum"}, Pos: PosAllRead, Summary: true, Flags: readerFlags})
+	add(Program{Names: []string{"wc", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "shasum"}, Pos: PosAllRead, Summary: true, Flags: readerFlags})
+	// cmp names the first differing byte, or with -l / --verbose, -b /
+	// --print-bytes (BSD also -x) the bytes it compares (GAP-2213). Its row
+	// is the GNU diffutils and BSD option grammar, long options and their
+	// value arity included, so a long-option spelling reads as Known as its
+	// short twin does (GAP-2217): -i / --ignore-initial SKIP and -n / --bytes
+	// LIMIT take a value; BSD -h (no link follow), -x (hex bytes) and -z (size
+	// first) are switches.
+	cmpIgnore := Flag{Value: true, Role: RoleIgnore}
+	add(Program{Names: []string{"cmp"}, Pos: PosAllRead, Summary: true,
+		ShowFlags: []string{"-l", "--verbose", "-b", "--print-bytes", "-x"},
+		Flags: fl(map[string]Flag{"-i": cmpIgnore, "--ignore-initial": cmpIgnore, "-n": cmpIgnore, "--bytes": cmpIgnore},
+			"-b", "-l", "-s", "-v", "-h", "-x", "-z", "--print-bytes", "--verbose", "--quiet", "--silent", "--help", "--version")})
 	add(Program{Names: []string{"diff"}, Pos: PosAllRead, SummaryFlags: []string{"-q", "--brief"}, Flags: readerFlags})
 	// Metadata-only programs: they report a file's size, type, inode data or
 	// resolved name, never its bytes, so an operand is accounted but carries no

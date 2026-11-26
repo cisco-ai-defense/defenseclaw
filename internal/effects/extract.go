@@ -657,10 +657,10 @@ func (w *walker) markShown(reads []int) {
 // stagePrints reports a command whose stdout carries the bytes it reads: a
 // reader (cat, head, grep, sed without -i) or a program that prints what it
 // is piped (tee), unless it prints only a summary (wc, a digest, grep -c,
-// diff -q) or edits in place (DET111 GAP-1846). A copy, an upload or an
+// diff -q, cmp without -l or -b) or edits in place (DET111 GAP-1846). A copy, an upload or an
 // archive prints none of its reads: their bytes go to the destination.
 func stagePrints(p Program, words []Word) bool {
-	if p.Summary || hasRowFlag(words, p, p.SummaryFlags) {
+	if p.Summary && !hasRowFlag(words, p, p.ShowFlags) || hasRowFlag(words, p, p.SummaryFlags) {
 		return false
 	}
 	if p.InPlace != "" && hasRowFlag(words, p, append([]string{p.InPlace}, p.InPlaceFlags...)) {

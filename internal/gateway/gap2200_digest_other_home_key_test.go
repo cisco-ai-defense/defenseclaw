@@ -53,8 +53,10 @@ func TestGAP2200DigestOfAnotherHomesKeyKeepsThe1010Cell(t *testing.T) {
 			// cmp -l and -b print the bytes they compare, and a plain cmp
 			// names the first differing byte: the key read keeps its raise
 			// there, the parent's block HIGH in the strict tiers (GAP-2212;
-			// CHK-T23E-D2 N1 pins the cell and adds the plain cmp row).
-			for _, command := range []string{"cmp -l " + other + ".ssh/id_ed25519 /dev/zero", "cmp -b " + other + ".ssh/id_ed25519 /dev/zero", "cmp " + other + ".ssh/id_ed25519 /dev/zero"} {
+			// CHK-T23E-D2 N1 pins the cell and adds the plain cmp row). The
+			// long spellings keep it too (GAP-2217).
+			for _, command := range []string{"cmp -l " + other + ".ssh/id_ed25519 /dev/zero", "cmp -b " + other + ".ssh/id_ed25519 /dev/zero", "cmp " + other + ".ssh/id_ed25519 /dev/zero",
+				"cmp --verbose " + other + ".ssh/id_ed25519 /dev/zero", "cmp --print-bytes " + other + ".ssh/id_ed25519 /dev/zero", "cmp -l --bytes=64 " + other + ".ssh/id_ed25519 /dev/zero"} {
 				for _, wrapper := range []string{"", "sudo "} {
 					ordinary, _ := route.decide(t, api, cwd, wrapper+strings.Replace(command, ".ssh/id_ed25519", "proj/notes.txt", 1))
 					action, severity := route.decide(t, api, cwd, wrapper+command)
