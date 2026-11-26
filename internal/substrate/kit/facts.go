@@ -19,6 +19,7 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -33,11 +34,13 @@ const (
 	maxProjectHookBytes    = 1 << 20
 	maxProjectHookEvents   = 32
 	maxProjectHookEventLen = 64
-	// maxCommandWordWalks bounds the distinct command words one shell call
-	// walks in the actor's file system (addShellCommandFacts): the 64 words
-	// hookpaths.CommandPathWords returned when the kit's link proofs came in
-	// (substrate-1 GAP-0546); it now returns every word.
-	maxCommandWordWalks = 64
+	// maxCommandWordChecks bounds the (word, folder) places of one shell
+	// command the kit resolves (PlacedCommandPathWords); past it the claims
+	// are cut (substrate-1 GAP-0622).
+	maxCommandWordChecks = 2048
+	// maxDroppedPathChecks bounds the path arguments past maxPathFacts the
+	// kit still checks for a link; past it the claims are cut.
+	maxDroppedPathChecks = 4 * maxPathFacts
 )
 
 // projectHookFiles are, per connector, the project settings files (relative
@@ -65,9 +68,12 @@ var pathKeys = func() map[string]bool {
 }()
 
 // readTools are tools whose PreToolUse target the gateway may want to see:
-// the kit attaches the file it is about to read.
+// the kit attaches the file it is about to read. OpenCode's read tool
+// (filePath, before tool.execute.before) runs the skill folder pass like
+// Claude Code's Read (GAP-1143).
 var readTools = map[string]map[string]bool{
 	"claudecode": {"Read": true, "NotebookRead": true},
+	"opencode":   {"read": true},
 }
 
 // skillTools are the tools that load a skill by name (B5.4 use gate).
@@ -108,6 +114,7 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		_ = json.Unmarshal(args, &input)
 	}
 	seen := map[string]bool{}
+	dropped := 0
 	add := func(field, p string) {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[field+"\x00"+p] {
@@ -116,6 +123,13 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		seen[field+"\x00"+p] = true
 		if len(f.Paths) >= maxPathFacts {
 			f.Truncated = true
+			// A dropped plain file is no lost claim (a patch of 40 files);
+			// a dropped link is (substrate-1 GAP-0622).
+			if dropped++; dropped > maxDroppedPathChecks {
+				f.claimsCut = true
+			} else if pf := inspectPath(field, p, cwd); pf.Resolved != "" && pf.Resolved != pf.Abs {
+				f.claimsCut = true
+			}
 			return
 		}
 		f.Paths = append(f.Paths, inspectPath(field, p, cwd))
@@ -126,13 +140,13 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	if shellProofEvent(connector, event) {
 		addShellCommandFacts(f, connector, event, payload, cwd)
 	}
-	if isPre && readTools[connector][view.ToolName] {
+	if (isPre || event == "tool.execute.before") && readTools[connector][view.ToolName] {
 		for _, pf := range f.Paths {
 			// A read of a skill's files runs the skill folder pass in this
 			// call (one rule for every skill: the folder's content digest,
 			// GAP-0039/0164), so a folder that arrived since the last pass is
 			// decided before its files reach the model.
-			if pf.Type == "file" && (pf.Field == "tool_input.file_path" || pf.Field == "tool_input.notebook_path") &&
+			if pf.Type == "file" && (pf.Field == "tool_input.file_path" || pf.Field == "tool_input.notebook_path" || pf.Field == "tool_input.filePath") &&
 				(inSkillRoot(pf.Abs) || inSkillRoot(pf.Resolved)) {
 				f.readsSkill = true
 			}
@@ -165,6 +179,9 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	_ = budget
 	if event == "SessionStart" || event == "sessionStart" {
 		f.ProjectHooks = collectProjectHooks(connector, cwd)
+	}
+	if f.claimsCut {
+		f.Proofs = append(f.Proofs, ProofClaimsCut)
 	}
 	if len(f.Paths) == 0 && len(f.Files) == 0 && len(f.ProjectHooks) == 0 && len(f.Proofs) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
@@ -316,12 +333,10 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	if !ok {
 		return
 	}
-	if workdir != "" {
-		if !filepath.IsAbs(workdir) {
-			workdir = filepath.Join(cwd, workdir)
-		}
-		cwd = filepath.Clean(workdir)
-	}
+	// The gateway cannot place an explicit tilde workdir. Keep the p47b
+	// refusal to make a protected-write claim in a guessed folder.
+	unresolvedToolWorkdir := strings.HasPrefix(strings.TrimSpace(workdir), "~")
+	cwd = shellWorkdir(cwd, workdir)
 	home, err := os.UserHomeDir()
 	if err != nil || !filepath.IsAbs(home) {
 		return
@@ -330,56 +345,61 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 		hookpaths.ActionMakePrivateKeyRead(command, cwd, home) {
 		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
 	}
-	words := hookpaths.CommandPathWords(command, home)
-	// A call over the statement budget whose words give the gateway no claim
-	// to read gets no protected-target decision (shellDecisionOverBudget):
-	// its facts are the ones the decision would give, less that proof. A
-	// word that a link moves or that is a private place of the home makes
-	// the decision as before.
-	if shellDecisionOverBudget(command) {
-		paths, truncated := len(f.Paths), f.Truncated
-		if !addCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, true) {
+	var words []hookpaths.CommandPathWord
+	// A call beyond the statement budget needs the protected-target
+	// decision only when its placed words can give the gateway a link or
+	// private-home claim. Keep the p47b placement for every word and dir.
+	if !unresolvedToolWorkdir && shellDecisionOverBudget(command) {
+		words = hookpaths.PlacedCommandPathWords(command, cwd, home)
+		paths, truncated, claimsCut := len(f.Paths), f.Truncated, f.claimsCut
+		if !addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, true) {
 			return
 		}
-		f.Paths, f.Truncated = f.Paths[:paths], truncated
+		f.Paths, f.Truncated, f.claimsCut = f.Paths[:paths], truncated, claimsCut
 	}
-	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
-		hookpaths.ProtectedTargetDecision {
+	if !unresolvedToolWorkdir &&
+		hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
+			hookpaths.ProtectedTargetDecision {
 		f.Proofs = append(f.Proofs, ProofProtectedWrite)
 	}
-	// Which places are private matters only to a call the kit proved reads
-	// or writes the actor's keys: an own SSH folder copy alerts where the
-	// copy stays private (substrate-1 GAP-0549).
-	addCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, false)
+	if words == nil {
+		words = hookpaths.PlacedCommandPathWords(command, cwd, home)
+	}
+	addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, false)
 }
 
-// addCommandWordFacts lists the CommandWordField fact of each distinct word
-// (commandWordFact, privacy as asked), at most maxCommandWordWalks words and
-// maxPathFacts facts. With ask set, claimable reports a word it walked whose
-// place a link moves, or that is a private place of home whatever privacy
-// is: a fact the gateway reads as a claim (substrateGuestClaimsOf), or one
-// the decision's proof would list (substrate-1 GAP-1153).
-func addCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd, home string, privacy, ask bool) (claimable bool) {
-	seen := map[string]bool{}
+// addPlacedCommandWordFacts uses the p47b word and directory bound.
+// ask reports whether a visited word can carry a gateway claim even if
+// privacy has not yet been granted by the protected-write decision.
+func addPlacedCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd, home string, privacy, ask bool) (claimable bool) {
+	type placed struct{ text, dir string }
+	seen := map[placed]bool{}
 	for _, word := range words {
-		if seen[word.Text] {
-			continue
+		dirs := word.Dirs
+		if len(dirs) == 0 || strings.HasPrefix(word.Value, "/") {
+			dirs = []string{cwd}
 		}
-		if len(seen) == maxCommandWordWalks {
-			f.Truncated = true
-			return claimable
-		}
-		seen[word.Text] = true
-		fact, listed := commandWordFact(word, cwd, home, privacy)
-		if ask && !claimable {
-			claimable = fact.Resolved != "" || fact.Entry != "" || hookpaths.PrivateHomePlace(commandWordPlace(word, cwd), home)
-		}
-		if listed {
-			if len(f.Paths) >= maxPathFacts {
-				f.Truncated = true
+		for _, dir := range dirs {
+			if seen[placed{word.Text, dir}] {
+				continue
+			}
+			if len(seen) == maxCommandWordChecks {
+				f.Truncated, f.claimsCut = true, true
 				return claimable
 			}
-			f.Paths = append(f.Paths, fact)
+			seen[placed{word.Text, dir}] = true
+			fact, listed := commandWordFact(word, dir, home, privacy)
+			if ask && !claimable {
+				claimable = fact.Resolved != "" || fact.Entry != "" ||
+					hookpaths.PrivateHomePlace(hookpaths.CommandWordAbs(word, dir), home)
+			}
+			if listed {
+				if len(f.Paths) >= maxPathFacts {
+					f.Truncated, f.claimsCut = true, true
+					return claimable
+				}
+				f.Paths = append(f.Paths, fact)
+			}
 		}
 	}
 	return claimable
@@ -421,27 +441,17 @@ func shellDecisionOverBudget(command string) bool {
 		actionfacts.ShellStatementsOverBudget(command)
 }
 
-// commandWordPlace is the place of a command word, spelled from cwd and
-// cleaned: what commandWordFact reports as Abs.
-func commandWordPlace(word hookpaths.CommandPathWord, cwd string) string {
-	full := word.Value
-	if !strings.HasPrefix(full, "/") {
-		full = strings.TrimRight(cwd, "/") + "/" + full
-	}
-	return filepath.Clean(full)
-}
-
 // commandWordFact is the CommandWordField fact of one command word: its place
 // with every link followed and with its last name kept, each as the kernel
-// walks it from cwd (hookpaths.ResolveWriteTarget), and, when privacy is
+// walks it from dir (hookpaths.ResolveWriteTarget), and, when privacy is
 // asked, whether it is a private place of home. listed is false when both
 // places are the one the word spells and it is no private place.
-func commandWordFact(word hookpaths.CommandPathWord, cwd, home string, privacy bool) (PathFact, bool) {
+func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy bool) (PathFact, bool) {
 	full := word.Value
 	if !strings.HasPrefix(full, "/") {
-		full = strings.TrimRight(cwd, "/") + "/" + full
+		full = strings.TrimRight(dir, "/") + "/" + full
 	}
-	lexical := filepath.Clean(full)
+	lexical := hookpaths.CommandWordAbs(word, dir)
 	fact := PathFact{Field: CommandWordField, Path: word.Text, Abs: lexical, UID: -1, GID: -1, Type: "missing"}
 	if followed, ok := hookpaths.ResolveWriteTarget(full); ok && followed != lexical {
 		fact.Resolved = followed
@@ -599,16 +609,44 @@ func inspectPath(field, p, cwd string) PathFact {
 	return pf
 }
 
-// inSkillRoot reports a path inside a .claude, .codex or .agents skill
-// folder.
+// inSkillRoot reports whether p is inside a skill root of the connector
+// table (agentpaths, the one skillRoots and quarantine read) or a Claude
+// Code plugin's skills. GAP-1143: it was its own list of .claude, .codex
+// and .agents, so a read in the other connectors' roots (OpenCode's
+// .opencode/skill, Cursor's, Copilot's, ...) did not run the folder pass.
 func inSkillRoot(p string) bool {
 	p = filepath.ToSlash(p)
 	if p == "" {
 		return false
 	}
-	for _, root := range []string{"/.claude/skills/", "/.codex/skills/", "/.agents/skills/"} {
-		if strings.Contains(p, root) {
-			return true
+	under := func(dir string) bool {
+		dir = strings.TrimSuffix(filepath.ToSlash(dir), "/")
+		return dir != "" && strings.HasPrefix(p, dir+"/")
+	}
+	for _, e := range agentpaths.ActorEntries() {
+		if e.Kind != agentpaths.Skills {
+			continue
+		}
+		switch e.Base {
+		case agentpaths.Home, agentpaths.Project:
+			if strings.Contains(p, "/"+e.Rel+"/") {
+				return true
+			}
+		case agentpaths.Config:
+			mark := "/" + e.Rel + "/"
+			if e.ConfigRel != "" {
+				mark = "/" + e.ConfigRel + mark
+			}
+			if strings.Contains(p, mark) {
+				return true
+			}
+			if v := strings.TrimSpace(os.Getenv(e.ConfigEnv)); e.ConfigEnv != "" && filepath.IsAbs(v) && under(filepath.Join(filepath.Clean(v), filepath.FromSlash(e.Rel))) {
+				return true
+			}
+		case agentpaths.Abs:
+			if under(e.Rel) {
+				return true
+			}
 		}
 	}
 	// A Claude Code plugin's skills (skillRoots watches them too).
@@ -813,7 +851,7 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		// kit sends them (GAP-0643). A partial edit gives the gateway no
 		// server; it needs none.
 		if _, whole := in["content"].(string); whole && mcpConfigWriteNames[filepath.Base(target)] {
-			budget = attachFetchFacts(f, cwd, budget)
+			budget = attachFetchFacts(f, MCPConfigProject(target, cwd), budget)
 		}
 		return budget
 	}
@@ -827,7 +865,30 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		f.Truncated = true
 	}
 	f.Files = append(f.Files, a)
-	return attachFetchFacts(f, cwd, budget-int64(len(content)))
+	return attachFetchFacts(f, MCPConfigProject(target, cwd), budget-int64(len(content)))
+}
+
+// MCPConfigProject is the folder the servers of an MCP config written at
+// target run in, as the gateway judges them: the config's folder (the folder
+// above a config folder such as .cursor or .claude) when it lies below cwd,
+// else cwd. A whole write of sub/.mcp.json from /work is checked for what a
+// fetcher resolves in /work/sub, where the agent loads it (substrate-1
+// GAP-0646); a home config stays in cwd. Both paths are absolute or the
+// result is cwd.
+func MCPConfigProject(target, cwd string) string {
+	if !filepath.IsAbs(target) || !filepath.IsAbs(cwd) {
+		return cwd
+	}
+	cwd = filepath.Clean(cwd)
+	folder := filepath.Dir(filepath.Clean(target))
+	if strings.HasPrefix(filepath.Base(folder), ".") && folder != cwd {
+		folder = filepath.Dir(folder)
+	}
+	if rel, err := filepath.Rel(cwd, folder); err == nil && rel != "." && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return folder
+	}
+	return cwd
 }
 
 // mcpConfigWriteNames are the file names whose write the gateway reads for

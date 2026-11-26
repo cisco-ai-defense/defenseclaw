@@ -214,10 +214,11 @@ func callStat(name string) (os.FileInfo, error) {
 }
 
 // stat is callStat for the hook call call (nil: none, pathStat). A loop that
-// stats many paths finds its call once and stats through it: off Windows
-// finding the call is a traceback of the goroutine's stack (goroutineID),
-// and on Windows it was too until hookCallKey, half of a Windows hook
-// decision for the registration names alone (rel-1-0-10:GAP-1293).
+// stats many paths finds its call once and stats through it: finding the call
+// was a traceback of the goroutine's stack (goroutineID), half of a Windows
+// hook decision for the registration names alone (rel-1-0-10:GAP-1293), until
+// hookCallKey read the thread on Windows and goroutineKey the goroutine's g
+// elsewhere (rel-1-0-10:GAP-2215).
 func (call *hookCall) stat(name string) (os.FileInfo, error) {
 	if call == nil {
 		return pathStat(name)
@@ -285,7 +286,6 @@ func HookCall() (end func()) {
 // beginHookCall is HookCall that also returns the call the goroutine runs
 // from then on (nil: none), the one it began or the one already open, so a
 // caller that uses the call does not read the goroutine's key a second time:
-// off Windows each read is a traceback of the stack (goroutineID), and
 // globCutOf runs on every private-key and pattern reading of a decision
 // (rel-1-0-10:GAP-1472).
 func beginHookCall() (*hookCall, func()) {
@@ -319,7 +319,7 @@ func beginHookCall() (*hookCall, func()) {
 // ResolveWriteTarget, newProtectedFiles). It pays where a read is dear: on
 // Windows each stat asks the share check and the file system, 446,000 reads
 // for 100 PowerShell lines, 27 s (rel-1-0-10:GAP-0766). On a POSIX host a
-// stat costs about a microsecond, while finding the call costs a traceback of
+// stat costs about a microsecond, while finding the call cost a traceback of
 // the calling goroutine's stack (goroutineID) on every read: the memory made a
 // decision 1.3 to 4.4 times slower than none (rel-1-0-10:GAP-0844). The
 // answers are the same with it or without it (the file system of one decision
@@ -342,6 +342,11 @@ func memoHookCall() *hookCall {
 // (rel-1-0-10:GAP-1476). The goroutine of a call is already locked to its
 // thread; the lock nests, so its reads are unchanged.
 func currentHookCall() *hookCall {
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system keeps nothing in the call's
+		// memory and reads none of it: its answers are not the host's.
+		return nil
+	}
 	unlock := lockHookCallKey()
 	defer unlock()
 	id := hookCallKey()
@@ -436,6 +441,10 @@ type shareGate struct {
 func networkPathGate(path string, followLast bool) (gate shareGate) {
 	name := path
 	gate.read = name
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system asks no share (Unread).
+		return gate
+	}
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
@@ -673,6 +682,11 @@ func readGated[T any](op, name string, read func(path string) (T, error), discar
 		return none, gate.cut, networkShareError(op, name)
 	}
 	path := fixturefs.Map(gate.read)
+	if path == "" && name != "" {
+		// Inside fixturefs.Unread nothing is read: the name does not exist
+		// (filepath.EvalSymlinks of the empty name would answer itself).
+		return none, shareReadFinal, &fs.PathError{Op: op, Path: name, Err: fs.ErrNotExist}
+	}
 	if !gate.proved {
 		value, err := read(path)
 		return value, shareReadFinal, err

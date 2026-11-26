@@ -17,6 +17,7 @@
 package assetfacts
 
 import (
+	"io/fs"
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
@@ -36,6 +37,11 @@ func fsReadlink(name string) (string, error) {
 }
 
 func fsEvalSymlinks(name string) (string, error) {
-	resolved, err := winpath.EvalLinks(fixturefs.Map(name))
+	mapped := fixturefs.Map(name)
+	if mapped == "" && name != "" {
+		// Inside fixturefs.Unread nothing is read: the name does not exist.
+		return "", &fs.PathError{Op: "evalsymlinks", Path: name, Err: fs.ErrNotExist}
+	}
+	resolved, err := winpath.EvalLinks(mapped)
 	return fixturefs.Unmap(resolved), err
 }

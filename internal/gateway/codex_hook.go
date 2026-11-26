@@ -231,9 +231,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
-	callCWD := req.CWD
+	callCWD, guestCallCWD, guestWorkdirUnresolved := req.CWD, req.guestCWD, false
 	if req.HookEventName == "PreToolUse" || req.HookEventName == "PermissionRequest" {
-		callCWD = codexToolCallCWD(ctx, req)
+		callCWD, guestCallCWD, guestWorkdirUnresolved = codexToolCallCWD(ctx, req)
 	}
 	// The snapshot takes the folder the call runs in, not only the session
 	// folder, before the call is judged (GAP-1388).
@@ -342,7 +342,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			ShellStartup:                  shellStartupFromContext(ctx),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
-			SandboxGuestCWD:               req.guestCWD,
+			SandboxGuestCWD:               guestCallCWD,
+			guestToolCWDUnresolved:        guestWorkdirUnresolved,
 			windowsDialectReadings:        windowsReadings,
 			windowsPowerShellReading:      windowsPowerShellReading,
 			record:                        toolChainRecorderFromContext(ctx),
@@ -912,9 +913,9 @@ func normalizeCodexAction(action string) string {
 // codexToolCallCWD is the folder a Codex tool call runs in: a shell call
 // runs in its workdir, from tool_input or, since the Codex hook leaves it
 // out, from the call in the session rollout (codexTranscriptCallWorkdir).
-func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
+func codexToolCallCWD(ctx context.Context, req codexHookRequest) (host, guest string, unresolved bool) {
 	if !codexShellExecutionTool(codexToolName(req)) {
-		return req.CWD
+		return req.CWD, req.guestCWD, false
 	}
 	workdir, _ := req.ToolInput["workdir"].(string)
 	if workdir == "" {
@@ -926,9 +927,11 @@ func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
 		workdir = resolvedWritesFromContext(ctx)[hookpaths.CallWorkdirKey]
 	}
 	if workdir == "" {
-		return req.CWD
+		return req.CWD, req.guestCWD, false
 	}
-	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir)
+	guest = sandboxHookGuestCWD(ctx, req.guestCWD, workdir)
+	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir),
+		guest, isSandboxHookRequest(ctx) && guest == ""
 }
 
 func codexToolName(req codexHookRequest) string {

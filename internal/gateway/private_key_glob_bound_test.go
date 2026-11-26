@@ -39,8 +39,9 @@ import (
 // spelled from the empty current folder ($PWD/<path>/*/*), which is the
 // reading of the gap's cells on a host whose / holds that many names; the
 // gap's own cells read the host's / and answer either rel's allow or the
-// unknown tier, never 504. Outside a race build each row of the default
-// pack answers three times and the median of the CPU time of those answers
+// unknown tier, never 504. Outside a race build each row of every pack
+// answers three times (GAP-2004: the strict, permissive and managed packs are
+// held to the production bar as well, not only default) and the median of the CPU time of those answers
 // is held to half of the production scan budget; under -race only the
 // answers are checked. The bar counts work (the process's CPU time) and the
 // deadline of the route is raised far above any load, because a wall-clock
@@ -117,7 +118,7 @@ func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.
 		// The answers do not depend on the clock: a scan deadline the box's
 		// load could reach would answer 504 for a bounded expansion too.
 		a.inspectToolScanTimeout = 30 * time.Second
-		if !hookAnswerRaceBuild && p.name == "default" {
+		if !hookAnswerRaceBuild {
 			runs = 3
 		}
 		for _, row := range rows {

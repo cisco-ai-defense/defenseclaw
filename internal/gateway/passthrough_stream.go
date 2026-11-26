@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -155,7 +156,35 @@ type streamRead struct {
 	panic any
 }
 
+// clientWriteErrWriter hands a failed write to the agent to the usage record
+// of the call as modelusage.ErrClientGone: the agent went away, the
+// upstream did not fail (GAP-1112).
+type clientWriteErrWriter struct {
+	http.ResponseWriter
+}
+
+func (c *clientWriteErrWriter) Write(b []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(b)
+	if err != nil {
+		setUsageEndErr(c.ResponseWriter, fmt.Errorf("%w: %v", modelusage.ErrClientGone, err))
+	}
+	return n, err
+}
+
+func (c *clientWriteErrWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (c *clientWriteErrWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
 func (s *passthroughStream) run() {
+	// The stream outcome reaches the usage record (GAP-1112): a write to the
+	// agent that fails, the agent's context ending, and an upstream body that
+	// breaks off (below) end the call with that error, so a stream cut after
+	// the provider began answering is of unknown cost.
+	s.w = &clientWriteErrWriter{ResponseWriter: s.w}
 	p, w, r, resp, mode, label := s.p, s.w, s.r, s.resp, s.mode, s.label
 	ctx := r.Context()
 	blockedReply := func(msg string) {
@@ -844,6 +873,7 @@ read:
 			}
 		case <-ctx.Done():
 			// The agent is gone: nothing more is sent.
+			setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
 			stopped = true
 			break read
 		}
@@ -917,6 +947,15 @@ read:
 			}
 		}
 		if readErr != nil {
+			if readErr != io.EOF {
+				// The upstream body broke off. When the agent's context is
+				// done, that is the cause and the call is cancelled.
+				if ctx.Err() != nil {
+					setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
+				} else {
+					setUsageEndErr(w, readErr)
+				}
+			}
 			if encoded && readErr != io.EOF && ctx.Err() == nil {
 				// A corrupt or oversized encoded stream cannot be read to its end.
 				if p.uninspectableReply(ctx, label, mode, "the encoded stream could not be decoded") {

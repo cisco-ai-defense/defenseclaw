@@ -135,7 +135,7 @@ func TestGAP1153FunctionFirstCallsMatchReference(t *testing.T) {
 	scanned := 0
 	for _, script := range scripts {
 		var scan commandPathScan
-		commandPathWordsIn(script, 0, 0, 0, "/home/u", &scan)
+		commandPathWordsIn(script, 0, 0, 0, -1, "/home/u", &scan)
 		if len(scan.functions) > 0 {
 			scanned++
 		}
@@ -155,7 +155,7 @@ func TestGAP1153FunctionAtMatchesEveryBody(t *testing.T) {
 	for n := 0; n < 3000; n++ {
 		script := gap1153Script(r, 0)
 		var scan commandPathScan
-		commandPathWordsIn(script, 0, 0, 0, "/home/u", &scan)
+		commandPathWordsIn(script, 0, 0, 0, -1, "/home/u", &scan)
 		if len(scan.functions) > 1 {
 			checked++
 		}

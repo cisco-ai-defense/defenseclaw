@@ -627,7 +627,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 					gateway.SubstrateSecretEchoHostCheck(live().Substrate.Secrets, live().Substrate.Egress.NoSwapHosts),
 					gateway.SubstrateSecretBindingStoreCheck(bindingStore),
 					gateway.SubstrateRevocationCheck(revs.snap, time.Now()),
-					gateway.SubstrateRelayCertReissueCheck(c.Substrate.EffectiveRelayCertReissue(), c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode)))}
+					gateway.SubstrateRelayCertReissueCheck(c.Substrate.EffectiveRelayCertReissue(), c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode))),
+					gateway.SubstrateSecretBindingFormCheck(bindingStore, live().Substrate.SecretTemplates)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -1377,6 +1378,15 @@ func substrateChainRegistrations(store registry.Store) chainstate.Options {
 		// caches (GAP-0234).
 		Current: func(ctx context.Context, atespace, name, uid string) (bool, error) {
 			return registry.Current(ctx, store, atespace, name, uid)
+		},
+		// An actor registered in this leader term, not a fork, skips the
+		// chain start grace (GAP-0642).
+		Born: func(ctx context.Context, atespace, uid string) (time.Time, string, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil || !ok {
+				return time.Time{}, "", err
+			}
+			return reg.CreatedAt, reg.ParentUID, nil
 		},
 	}
 }

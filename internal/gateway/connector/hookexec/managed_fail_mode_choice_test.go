@@ -338,10 +338,17 @@ func TestStandaloneManagedOpenCodeAndCopilotFollowTheAdministratorsFailMode(t *t
 
 // No answer cannot prove a stopped gateway, even with a full answer budget.
 // Local work consuming the budget is also recorded separately.
+//
+// The rows that say the gateway had the budget leave it 900 ms more than the
+// floor, and one of them first loses 400 ms to a stalled runner, so a loaded or
+// slow host cannot turn them into the local-spend case (GAP-2054: a macOS
+// runner stalled the test for more than the 100 ms margin the budget of 300 ms
+// left over the floor of 200 ms). The local-spend row spends the budget down to
+// half the floor. Both outcomes stay closed.
 func TestStandaloneManagedNoAnswerAlwaysStaysClosed(t *testing.T) {
-	shortAnswerBudget(t, 300*time.Millisecond)
+	shortAnswerBudget(t, time.Second)
 	previousFloor := hookGatewayAnswerFloor
-	hookGatewayAnswerFloor = 200 * time.Millisecond
+	hookGatewayAnswerFloor = 100 * time.Millisecond
 	t.Cleanup(func() { hookGatewayAnswerFloor = previousFloor })
 	addr := hungGateway(t)
 
@@ -351,7 +358,8 @@ func TestStandaloneManagedNoAnswerAlwaysStaysClosed(t *testing.T) {
 		spentLocally bool
 	}{
 		{name: "the gateway had the budget", spent: 0},
-		{name: "a local step spent the budget", spent: 250 * time.Millisecond, spentLocally: true},
+		{name: "the gateway had the budget after a stall", spent: 400 * time.Millisecond},
+		{name: "a local step spent the budget", spent: 950 * time.Millisecond, spentLocally: true},
 	} {
 		t.Run("session exchange: "+tc.name, func(t *testing.T) {
 			token := "authenticated-generation-token"
