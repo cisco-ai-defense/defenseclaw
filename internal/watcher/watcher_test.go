@@ -1474,7 +1474,7 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 // quarantined: a pending quarantine record stayed and the journal did not
 // say the quarantine failed.
 func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("needs POSIX permissions as a non-root user")
 	}
 	cfg, store, logger, skillDir := setupTestEnv(t)
@@ -1493,10 +1493,9 @@ func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
 	if err := os.MkdirAll(cfg.QuarantineDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(cfg.QuarantineDir, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+	// Windows: an access list that refuses adding files and folders to the
+	// quarantine folder is the twin of mode 0.
+	deniedText := denyWritesToFolder(t, cfg.QuarantineDir)
 
 	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "denied-skill", Path: path, Connector: "claudecode", Timestamp: time.Now()})
 	if res.Verdict != VerdictBlocked {
@@ -1521,7 +1520,7 @@ func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
 				t.Fatal("quarantine alert has no diagnostic")
 			}
 			fields, err := body.Object()
-			if err != nil || !strings.Contains(fmt.Sprint(fields["defenseclaw.health.error_summary"]), "permission denied") ||
+			if err != nil || !strings.Contains(fmt.Sprint(fields["defenseclaw.health.error_summary"]), deniedText) ||
 				record.Correlation().ConnectorID != "claudecode" {
 				t.Fatalf("quarantine alert lost its reason or connector: %v, %v", fields, err)
 			}
@@ -1696,7 +1695,7 @@ func (s *readingScanner) Scan(ctx context.Context, target string) (*scanner.Scan
 // and the CRITICAL skill stayed. The watcher asks for read access (the hook
 // guardian on a managed Windows computer) and scans again.
 func TestUnreadableSkillIsScannedAfterReadGrant(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("needs POSIX permissions that bind the test user")
 	}
 	cfg, store, logger, skillDir := setupTestEnv(t)
@@ -1706,17 +1705,16 @@ func TestUnreadableSkillIsScannedAfterReadGrant(t *testing.T) {
 	if err := os.MkdirAll(moved, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(moved, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(moved, 0o700) })
+	// Windows: an access list that refuses listing the folder is the twin of
+	// mode 0, and the grant removes it.
+	grantRead := denyReadOfFolder(t, moved)
 	grants := 0
 	enforce.SetAssetReadGranter(func(targetType, path string) error {
 		grants++
 		if targetType != "skill" || path != moved {
 			return fmt.Errorf("unexpected grant %s %s", targetType, path)
 		}
-		return os.Chmod(path, 0o700)
+		return grantRead()
 	})
 	t.Cleanup(func() { enforce.SetAssetReadGranter(nil) })
 	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "moved-in", Path: moved, Timestamp: time.Now()})
@@ -1730,7 +1728,7 @@ func TestUnreadableSkillIsScannedAfterReadGrant(t *testing.T) {
 // unfinished admission with its account, admits it again once due, and
 // forgets it when the quarantine completes.
 func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("needs a quarantine folder the test user may not write")
 	}
 	cfg, store, logger, skillDir := setupTestEnv(t)
@@ -1742,10 +1740,10 @@ func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
 			{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
 		}}
 	}
-	if err := os.MkdirAll(cfg.QuarantineDir, 0o500); err != nil {
+	if err := os.MkdirAll(cfg.QuarantineDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+	makeQuarantineWritable := refuseWritesToFolder(t, cfg.QuarantineDir, 0o500)
 	path := filepath.Join(skillDir, "crit-k")
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
@@ -1766,9 +1764,7 @@ func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
 	if len(due) != 1 || due[0].Path != path {
 		t.Fatalf("due after the first delay: %+v", due)
 	}
-	if err := os.Chmod(cfg.QuarantineDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	makeQuarantineWritable()
 	w.runAdmission(context.Background(), evt)
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("the retried quarantine left the skill in place: %v", err)
@@ -2104,7 +2100,7 @@ func TestLinkedSkillIntoAnotherAccountIsRefusedUnread(t *testing.T) {
 // skipped by the rescan as unchanged and stayed active. A quarantined path
 // keeps no baseline, so the copy is admitted again.
 func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("needs a folder the process cannot delete from")
 	}
 	cfg, store, logger, skillDir := setupTestEnv(t)
@@ -2133,10 +2129,9 @@ func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
 	}
 	write()
 	// The gateway cannot delete the original; the guardian removes it later.
-	if err := os.Chmod(skillDir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(skillDir, 0o700) })
+	// Windows: an open handle without delete sharing is the twin of a folder
+	// the process cannot delete from: the move cannot rename or remove it.
+	releaseOriginal := holdOriginalUndeletable(t, skillDir, path)
 	enforce.SetQuarantineSourceRemover(func(enforce.AssetQuarantinePlan, string) error { return nil })
 	t.Cleanup(func() { enforce.SetQuarantineSourceRemover(nil) })
 	evt := InstallEvent{Type: InstallSkill, Name: "rvw-crit1", Path: path, Timestamp: time.Now()}
@@ -2145,9 +2140,7 @@ func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
 	first.recordAdmissionBaseline(evt, snap, res)
 	// A host upgraded from a build that wrote it still has that baseline.
 	first.persistSnapshot(evt, snap, "scan-before-upgrade", first.scannerFingerprint(evt))
-	if err := os.Chmod(skillDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	releaseOriginal()
 	if err := os.RemoveAll(path); err != nil { // the guardian removal
 		t.Fatal(err)
 	}
@@ -2283,5 +2276,71 @@ func TestAllowRuleDoesNotReleaseAnotherPath(t *testing.T) {
 	}
 	if entry == nil || entry.Actions.Runtime != "disable" || entry.Actions.Install != "block" {
 		t.Fatalf("another profile's block was cleared: %+v", entry)
+	}
+}
+
+// refuseWritesToFolder makes dir refuse new files and folders for the test user
+// (the POSIX mode given, an access list entry on Windows) and returns the func
+// that makes it writable again.
+func refuseWritesToFolder(t *testing.T, dir string, mode os.FileMode) func() {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return denyAccessForTest(t, dir, "WD,AD")
+	}
+	if err := os.Chmod(dir, mode); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	return restore
+}
+
+// denyWritesToFolder is refuseWritesToFolder for a folder that stays refused;
+// it returns the text the resulting error carries.
+func denyWritesToFolder(t *testing.T, dir string) string {
+	t.Helper()
+	refuseWritesToFolder(t, dir, 0)
+	if runtime.GOOS == "windows" {
+		return "Access is denied"
+	}
+	return "permission denied"
+}
+
+// denyReadOfFolder makes dir unlistable for the test user and returns the
+// grant that undoes it.
+func denyReadOfFolder(t *testing.T, dir string) func() error {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		restore := denyAccessForTest(t, dir, "RD")
+		return func() error { restore(); return nil }
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	return func() error { return os.Chmod(dir, 0o700) }
+}
+
+// holdOriginalUndeletable makes the skill folder at path impossible to rename
+// or delete for the test user until the returned release runs: mode 0o500 on
+// its parent on POSIX, an open handle without delete sharing on its SKILL.md on
+// Windows.
+func holdOriginalUndeletable(t *testing.T, parent, path string) func() {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return holdOpenForTest(t, filepath.Join(path, "SKILL.md"))
+	}
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	return func() {
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
