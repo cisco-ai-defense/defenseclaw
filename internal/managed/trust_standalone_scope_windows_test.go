@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -593,6 +594,9 @@ func inheritedCreateChildDirForTest(t *testing.T) string {
 // the folder is refused there.
 func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 	t.Run("secure client accepts", func(t *testing.T) {
+		// Secure Client accepts only an administrator-owned folder; a standard
+		// user owns the test folder, which is untrusted by design (GAP-1099).
+		testenv.RequireElevated(t, "the accepted folder must be owned by an administrator, and a standard user owns the temp folder")
 		dir := inheritedCreateChildDirForTest(t)
 		pinTrustProfileForTest(t, false)
 		previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified
