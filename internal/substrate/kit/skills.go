@@ -74,10 +74,15 @@ const (
 // skillScanEvents are the events on which the kit looks at the roots:
 // UserPromptSubmit runs before the model reads the prompt, so a folder
 // copied in between turns (outside any tool call) is scanned before the
-// next turn.
+// next turn. The plugin connectors' own names for the same moments post
+// through hook-post (GAP-1143): OpenCode's tool.execute.after,
+// session.created and session.idle, and Amp's tool.result, session.start,
+// agent.start (before the model reads the prompt) and agent.end.
 var skillScanEvents = map[string]bool{
 	"UserPromptSubmit": true, "userPromptSubmit": true,
 	"PostToolUse": true, "postToolUse": true, "SessionStart": true, "sessionStart": true, "Stop": true, "stop": true,
+	"tool.execute.after": true, "session.created": true, "session.idle": true,
+	"tool.result": true, "session.start": true, "agent.start": true, "agent.end": true,
 }
 
 // skillRoots are the directories whose subfolders an agent loads as skills,
@@ -639,9 +644,12 @@ const skillStuckName = "skill-stuck.json"
 // maxStuckSkills bounds the record.
 const maxStuckSkills = 64
 
-// preToolEvents are the events that can deny a tool call before it runs.
+// preToolEvents are the events that can deny a tool call before it runs,
+// with the plugin connectors' (OpenCode tool.execute.before, Amp tool.call;
+// GAP-1143).
 var preToolEvents = map[string]bool{
 	"PreToolUse": true, "preToolUse": true, "beforeShellExecution": true, "beforeMCPExecution": true,
+	"tool.execute.before": true, "tool.call": true,
 }
 
 func skillStuckPath(home string) string { return filepath.Join(home, ".defenseclaw", skillStuckName) }

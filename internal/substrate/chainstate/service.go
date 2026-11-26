@@ -150,6 +150,11 @@ type Options struct {
 	// cap the first clear check after any restart was refused, however long
 	// after the restart it came (GAP-0601, IB5 TST-2593).
 	StartGrace time.Duration
+	// Born returns when the actor's registration was made and its parent
+	// UID ("" for none). An actor registered in this leader term with no
+	// parent skips the start grace (bornInTerm, GAP-0642). Nil, an error
+	// or no registration keeps the grace.
+	Born func(ctx context.Context, atespace, uid string) (created time.Time, parentUID string, err error)
 }
 
 // Service is the leader's chain and intent state. Every actor has its own
@@ -1647,7 +1652,7 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		return EgressVerdict{}, errWarming
 	case !v.Deny:
 		// A detection under the alert action is answered, as a hit is.
-		if len(v.Detected) == 0 && s.starting() {
+		if len(v.Detected) == 0 && s.starting() && !s.bornInTerm(ctx, in.Actor) {
 			// Not recorded: as during the outage, the callout refuses a
 			// send and the step is not the actor's yet.
 			return EgressVerdict{}, errStarting
@@ -1680,6 +1685,27 @@ func (s *Service) starting() bool {
 		s.servingAt, s.served = now, true
 	}
 	return now.Sub(s.servingAt) < s.opts.StartGrace
+}
+
+// bornInTerm reports whether the actor was registered in this leader term
+// and is not a fork. Then the start grace has nothing to wait for
+// (GAP-0642). The grace waits for a gateway's note of a tool step it could
+// not record while no leader answered. A registration is written through
+// the leader, so an actor registered in this term did not exist during that
+// outage and took no such step. Its first clone right after a restart is
+// answered at once. Before, it was refused for up to the grace, and a run
+// --clone right after a rollout failed with 503. A fork starts from its
+// parent's windows, which may still be waiting for a note, so it waits like
+// any older actor.
+func (s *Service) bornInTerm(ctx context.Context, a Actor) bool {
+	if s.opts.Born == nil || a.UID == "" {
+		return false
+	}
+	s.graceMu.Lock()
+	term := s.termAt
+	s.graceMu.Unlock()
+	created, parent, err := s.opts.Born(ctx, a.Atespace, a.UID)
+	return err == nil && parent == "" && !created.IsZero() && !created.Before(term)
 }
 
 // startGraceCap is how long after the start of a leader term the start
