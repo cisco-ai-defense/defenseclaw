@@ -6,6 +6,7 @@ package effects
 
 import (
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -2210,9 +2211,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// unknown operand path below. This lets cp's table role retain a literal
 	// destination (or -t source) for the protected classifier. A bare xargs
 	// (no option) of a linker, or of a copier fed several words, whose input
-	// is the exact output of the stage before it (exactOutput) gets every
-	// word it splits from it, and its operands are then the call's own, so
-	// echo SRC DST | xargs ln -s reads as ln -s SRC DST (GAP-2214).
+	// the call shows exactly (stdinText: the last stdin redirect, else the
+	// exact output of the stage before it) gets every word it splits from it,
+	// and its operands are then the call's own, so echo SRC DST | xargs ln -s
+	// reads as ln -s SRC DST (GAP-2214). A redirect of xargs's own stdin
+	// replaces the pipe, so the piped words are never its input then.
 	allStatic := true
 	for _, word := range operandWords {
 		if !word.Static {
@@ -2221,14 +2224,22 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 	}
 	if fromInput && allStatic {
+		inText, inCond, inExact := w.stdinText(c)
+		inExact = inExact && !inCond
 		piped := strings.TrimSpace(w.stageIn.literal)
+		if slices.ContainsFunc(c.Redirs, stdinRedirect) {
+			piped = ""
+			if inExact {
+				piped = strings.TrimSpace(inText)
+			}
+		}
 		switch {
 		case entry.Pos == PosSourcesDest && piped != "" && !strings.ContainsAny(piped, " \t\r\n\x00"):
 			// One word to a copier: as before, its write keeps the operands
 			// from input reason (GAP-1317).
 			operandWords = append(append([]Word(nil), operandWords...), Word{Value: piped, Static: true})
-		case bareXargs && w.stageIn.exact && (entry.Pos == PosSourcesDest || entry.Pos == PosLinkTargetLink):
-			if items, ok := xargsInputItems(w.stageIn.text); ok {
+		case bareXargs && inExact && (entry.Pos == PosSourcesDest || entry.Pos == PosLinkTargetLink):
+			if items, ok := xargsInputItems(inText); ok {
 				operandWords = append([]Word(nil), operandWords...)
 				for _, item := range items {
 					operandWords = append(operandWords, Word{Value: item, Static: true})
