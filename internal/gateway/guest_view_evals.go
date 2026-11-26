@@ -33,9 +33,11 @@ import (
 // Keeping must cost next to nothing where a reading is judged once (a
 // here-string fan's one placed list): the first table lives in the
 // reading, eligibility is two bits a rule, the enforcement projection is
-// made only for a matched rule, and the results are a sorted array of
-// small values, so a first judgment adds a few allocations a reading, not
-// one a rule.
+// made only for a matched rule, the results are a sorted array of small
+// values, and the projection, a tree of pointers the collector scans, is
+// kept only from the reading's second judgment on. Kept from the first,
+// the ~1,500 projections of herestr-cd-touch stayed live for the hook and
+// its actor took 140.2 ms against its parent's 134.4 ms (bench6, f4ab1).
 type guestViewEvals struct {
 	mu    sync.Mutex
 	first guestViewEvalTable
@@ -47,6 +49,9 @@ type guestViewEvals struct {
 // is made afresh.
 type guestViewEvalTable struct {
 	generation *compiledRulePackCategories
+	// judgments counts the locks of the table, up to two: a reading's
+	// projection is kept from its second judgment on.
+	judgments uint8
 	// eligible holds two bits a rule: the owner was read, and it is
 	// eligible. Made at the first read.
 	eligible []uint64
@@ -93,6 +98,15 @@ func (evals *guestViewEvals) lock(generation *compiledRulePackCategories) *guest
 		return nil
 	}
 	evals.mu.Lock()
+	table := evals.table(generation)
+	if table.judgments < 2 {
+		table.judgments++
+	}
+	return table
+}
+
+// table is the table of generation, made at its first read.
+func (evals *guestViewEvals) table(generation *compiledRulePackCategories) *guestViewEvalTable {
 	if evals.first.generation == nil {
 		evals.first.generation = generation
 	}
@@ -125,8 +139,11 @@ func (table *guestViewEvalTable) project(view *actionfacts.Facts) (*semanticpb.F
 		return semantic.Project(*view)
 	}
 	if !table.projected {
-		table.projection, table.projectionCode = semantic.Project(*view)
-		table.projected = true
+		projection, code := semantic.Project(*view)
+		if table.judgments < 2 {
+			return projection, code
+		}
+		table.projection, table.projectionCode, table.projected = projection, code, true
 	}
 	return table.projection, table.projectionCode
 }
@@ -158,7 +175,10 @@ func (table *guestViewEvalTable) eligibleFor(rule int, candidate *compiledSemant
 	word, bit := (2*rule)/64, uint((2*rule)%64)
 	if table.eligible[word]&(1<<bit) == 0 {
 		table.eligible[word] |= 1 << bit
-		if candidate.owner.eligible(*view) {
+		// candidate.owner.eligible(*view), with one copy of the reading
+		// for the prerequisite, not a second one for eligible's argument
+		// (TestGAP2226PlacedViewEvalTableIsFresh pins the two together).
+		if prerequisite := candidate.owner.prerequisite; prerequisite == nil || prerequisite(*view) {
 			table.eligible[word] |= 1 << (bit + 1)
 		}
 	}

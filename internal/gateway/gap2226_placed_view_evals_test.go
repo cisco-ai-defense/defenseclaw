@@ -137,10 +137,18 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 	var evals guestViewEvals
 	table := evals.lock(generation)
 	evals.unlock()
+	// A reading judged once keeps no projection: it would stay live for
+	// the hook and never be read again.
+	if _, code := table.project(&facts); table.projected || table.projection != nil {
+		t.Fatalf("a first judgment kept its projection (code %v)", code)
+	}
 	if again := evals.lock(generation); again != table {
 		t.Fatal("a second lock gives another table for the same generation")
 	}
 	evals.unlock()
+	if projection, _ := table.project(&facts); !table.projected || table.projection != projection {
+		t.Fatal("a second judgment did not keep its projection")
+	}
 	var none *guestViewEvalTable
 	for range 2 {
 		for _, view := range []*guestViewEvalTable{table, none} {
