@@ -1416,10 +1416,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					innerInput := input
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
 					innerInput.CWD = state.cwd
-					var wrapperFolderUnknown bool
+					var wrapperFolderUnknown, wrapperFolder bool
 					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd, input.StandInCWD); changed {
 						innerInput.CWD = folder
-						wrapperFolderUnknown = unknown
+						wrapperFolder, wrapperFolderUnknown = true, unknown
 						innerCWDUnknown = innerCWDUnknown || unknown
 					}
 					if innerCWDUnknown {
@@ -1492,7 +1492,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// moved to: `cd X || cd Y && eval "$body"` runs the body
 					// in X or Y, so it is read in each of them as well
 					// (rel-1-0-10:GAP-1144, GAP-0183). A body that starts in
-					// a folder of its own (innerCWDUnknown) has none.
+					// a folder of its own (innerCWDUnknown) has none. A body a
+					// wrapper runs in a folder it names (sudo -D DIR, env -C
+					// DIR, chroot) starts in that folder as placed from each
+					// of the caller's folders, never in the caller's folder
+					// itself (rel-1-0-10:GAP-1274).
 					//
 					// These readings come on top of the statements of the
 					// call: they never make the call over its budget. Past
@@ -1506,6 +1510,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					if !innerCWDUnknown && innerInput.CWD != "" {
 						capped := false
 						for _, dir := range mayRunIn[partIndex] {
+							if wrapperFolder {
+								folder, _, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, dir, input.StandInCWD)
+								if unknown || folder == "" {
+									continue
+								}
+								dir = folder
+							}
 							if dir == innerInput.CWD {
 								continue
 							}
@@ -3545,6 +3556,24 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 				changed = true
 			}
 		default:
+			// A prefix wrapper chain records the folder it runs its child in
+			// (sudo -D/--chdir DIR, env -C DIR) or that the child starts in
+			// a folder the words do not name (sudo -i/--login: the target
+			// user's home). The child's relative paths are read there, not
+			// in the caller's folder (rel-1-0-10:GAP-1274, the class of
+			// GAP-1241 for chroot and nsenter).
+			if run, ok := StaticPrefixWrapperChild(words, static); ok {
+				if run.DirUnknown {
+					return "", true, true
+				}
+				if run.Dir != "" {
+					next, known := simpleWrapperRunFolder(run.Dir, folder, vars, standIn)
+					if !known {
+						return "", true, true
+					}
+					folder, changed = next, true
+				}
+			}
 			child = WrapperChildIndex(words, static)
 		}
 		if child <= 0 || child >= len(words) {
@@ -3553,6 +3582,36 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 		words, static = words[child:], static[child:]
 	}
 	return folder, changed, false
+}
+
+// simpleWrapperRunFolder is the folder a wrapper's child runs in when the
+// wrapper names dir (PrefixWrapperRun.Dir) and the caller runs in cwd: an
+// absolute dir as written, one spelled from the home (~, ~/x, the wrapper
+// reader's home marker) below the HOME the walk knows, a relative one below
+// cwd. known is false when the walk cannot place it: no home or no caller
+// folder, another account's home (~user), or a folder reached from the
+// stand-in folder (rel-1-0-10:GAP-2188).
+func simpleWrapperRunFolder(dir, cwd string, vars map[string]string, standIn string) (string, bool) {
+	if rest, home := strings.CutPrefix(dir, homeDirSentinel); home {
+		dir = "~" + rest
+	}
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		home := vars["HOME"]
+		if !filepath.IsAbs(home) {
+			return "", false
+		}
+		return OperandPath(strings.TrimPrefix(strings.TrimPrefix(dir, "~"), "/"), home), true
+	}
+	if strings.HasPrefix(dir, "~") {
+		return "", false
+	}
+	if filepath.IsAbs(dir) {
+		return OperandPath(dir, ""), true
+	}
+	if cwd == "" || standInReached(cwd, standIn) {
+		return "", false
+	}
+	return OperandPath(dir, cwd), true
 }
 
 // standInReached reports that folder is the stand-in folder (Input.StandInCWD),
