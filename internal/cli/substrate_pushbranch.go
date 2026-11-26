@@ -89,6 +89,9 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 	// The review copied the objects origin lacks into a folder in the
 	// actor, which the push sends from; remove it when this run ends.
 	defer p.Discard(context.WithoutCancel(ctx), rel.Client.BranchExec)
+	if p.Warning != "" {
+		fmt.Fprintln(errw, "warning: "+p.Warning+".")
+	}
 	target := p.PushURL
 	if p.Commits == 0 {
 		fmt.Fprintf(w, "Nothing to push: %s already has all of the agent's work.\n", target)

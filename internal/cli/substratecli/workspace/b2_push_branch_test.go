@@ -59,6 +59,11 @@ func localExec(ctx context.Context, argv []string, dir string, env map[string]st
 	if errors.As(err, &ee) {
 		return out.String(), errb.String(), ee.ExitCode(), nil
 	}
+	if errors.Is(err, exec.ErrNotFound) {
+		// As the relay answers a program it cannot run (an older relay
+		// asked for relay.GitCommand).
+		return "", err.Error(), 127, nil
+	}
 	return out.String(), errb.String(), 0, err
 }
 
@@ -116,6 +121,11 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	if !p.Made || p.Commits != 1 || len(p.Files) != 2 || p.Host != "git.example.test" || p.Repo != "team/app" || p.PushURL != "https://git.example.test/team/app.git" ||
 		len(p.Placeholder) != 1 || p.Placeholder[0] != "npmrc" || len(p.RunsCode) != 1 || !p.Flagged() {
 		t.Fatalf("plan: %+v", p)
+	}
+	// This shell is a relay older than the launcher: the review ran as the
+	// agent, and says so (GAP-0795).
+	if !strings.Contains(p.Warning, "older") || !strings.Contains(p.Warning, "ran as the agent") {
+		t.Fatalf("warning %q", p.Warning)
 	}
 	if gitT(t, repo, "rev-parse", "HEAD") != head || gitT(t, repo, "status", "--porcelain") == "" {
 		t.Fatal("the agent's HEAD or index moved")

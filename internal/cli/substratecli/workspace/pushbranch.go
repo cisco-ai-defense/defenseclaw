@@ -43,6 +43,18 @@ package workspace
 // approved commit. The push copies only that pack into its fresh repository;
 // snapshot HEAD, refs, config and objects/info are not used (GAP-0797/0810). The push moves origin's branch only from the state the
 // review saw, with a lease that git and the server check (GAP-0798).
+//
+// A relay of the agent's user runs those steps as the agent, which could
+// rewrite the review's scratch files, swap a loose object between the pack
+// and the review, or edit the refs it reads, so the review could describe
+// the commit wrongly (GAP-0795), and could rewrite the push repository's
+// config between init and push (GAP-1073). A separated relay (root,
+// relay.agent_user) therefore runs them itself (relay.GitCommand): only
+// the pack of the commit is made as the agent's user, the relay checks
+// every object against its id into a folder only it can write, and reviews
+// and pushes that copy as its own user. A relay that cannot (not
+// separated, or older) makes the launcher run the in-actor steps, with a
+// warning before the review (BranchPush.Warning).
 
 import (
 	"context"
@@ -62,6 +74,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
 // pushReplacedPattern finds the placeholders an upload with replaced
@@ -113,6 +126,14 @@ type BranchPush struct {
 	pack, reviewedCommit string
 	// seen is origin's refs as the review read them (ref -> commit).
 	seen map[string]string
+	// Warning is said before the review when the actor's relay could not
+	// run it as its own user (a relay of the agent's user, or one older
+	// than this launcher): an agent process could then change what the
+	// review reads (GAP-0795). "" when the relay ran it.
+	Warning string
+	// relayOwned: the relay holds the review's copy (snapshot is its
+	// name) and pushes and discards it itself.
+	relayOwned bool
 }
 
 // Flagged reports whether the push needs a careful look.
@@ -123,7 +144,7 @@ func (p *BranchPush) Flagged() bool {
 // BranchPushError is a push refusal in plain words.
 type BranchPushError struct {
 	// Kind is no_checkout, no_origin, no_commit, not_https, alternates,
-	// replaced_copy, exists, moved, refused, mismatch or failed.
+	// objects, replaced_copy, exists, moved, refused, mismatch or failed.
 	Kind string
 	Msg  string
 }
@@ -161,121 +182,15 @@ fi
 printf 'dir\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$commit" "$made" "$objs"
 `
 
-// pushGit is the start of the review and push scripts: no repository or
-// system or user config, no templates, hooks, replace refs, commit-graph,
-// multi-pack index or bitmaps, so nothing in the checkout changes where
-// the push goes, what it carries, or what the review sees. The only
-// credential and TLS settings are image-bound paths from kit; no actor
-// config is parsed for them. Nothing in the environment the relay passes
-// on runs a command or changes the transport either: the ssh, proxy,
-// password-prompt and exec-path variables and every trace (GIT_CURL_VERBOSE
-// and GIT_TRACE_CURL would log the request headers) are unset, and https is
-// the only protocol (RV-T6A); so are every GIT_SSL_* variable (client
-// certificate and key, ciphers, version, CA), the proxy auth method, and
-// GIT_COMMON_DIR and GIT_ATTR_SOURCE, which would move the refs, config and
-// objects or the attributes the review reads (RV-T6B). g runs git.
-const pushGit = `set -u
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE GIT_COMMON_DIR GIT_ATTR_SOURCE
-unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_CURL_VERBOSE GIT_ALLOW_PROTOCOL GIT_PROTOCOL_FROM_USER GIT_HTTP_PROXY_AUTHMETHOD GIT_ASKPASS SSH_ASKPASS
-for v in $(env | sed -n -e 's/^\(GIT_TRACE[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(GIT_SSL_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 GIT_ALLOW_PROTOCOL=https
-g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false -c credential.helper=` + kit.CredHelper + ` -c credential.useHttpPath=false -c http.sslCAInfo=` + kit.TrustBundle + ` "$@"; }
-`
-
-// pushReviewScript lists what origin lacks and makes the review pack
-// ($snap, printed as the "snapshot" frame): a bare git directory g whose
-// pack holds every object reachable from the approved commit. Its one
-// alternate, v, views only the checkout's loose object folders and packs
-// during review; the agent's objects/info files are never read. The later
-// push copies only the named pack into a fresh repository. A checkout that borrows objects is refused
-// (exit 12). ls-remote of the push address gives the commits origin has
-// (the "refs" frame), and the range is the pushed commit ($3) without
-// those the checkout holds. Names come NUL-ended (-z), so git quotes none
-// of them. Each part goes out as a frame "NAME LENGTH\0" and LENGTH
-// bytes, so no file name can end a part early. A merge is diffed against
-// its first parent (--diff-merges=first-parent, git 2.31+), so content
-// that only the merge commit adds is listed, flagged and scanned.
-const pushReviewScript = pushGit + `objs=$1 url=$2 c=$3
-for f in alternates http-alternates; do
-  [ -e "$objs/info/$f" ] && [ -n "$(tr -d ' \t\r\n' < "$objs/info/$f" 2>/dev/null)" ] && { echo "objects/info/$f" >&2; exit 12; }
-done
-s=$(mktemp -d) && snap=$(mktemp -d) || exit 6
-ok=0
-trap 'rm -rf "$s"; [ "$ok" = 1 ] || rm -rf "$snap"' EXIT
-mkdir -p "$snap/v/info" || exit 6
-[ -d "$objs/pack" ] && { ln -s "$objs/pack" "$snap/v/pack" || exit 6; }
-for d in "$objs"/[0-9a-f][0-9a-f]; do [ -d "$d" ] && { ln -s "$d" "$snap/v/" || exit 6; }; done
-git init -q --bare --template= "$snap/g" || exit 6
-printf '%s\n' "$snap/v" > "$snap/g/objects/info/alternates" || exit 6
-export GIT_DIR=$snap/g
-g ls-remote "$url" > "$s/refs" || exit 11
-{ printf '%s\n' "$c"; cut -f1 "$s/refs" | sort -u | g cat-file --batch-check='%(objectname) %(objecttype)' |
-  awk '$2 == "commit" || $2 == "tag" { print "^" $1 }'; } > "$s/range" || exit 6
-g rev-list --count --stdin < "$s/range" > "$s/commits" || exit 6
-# Pack the full closure of the reviewed commit. The later push must not
-# borrow parent objects from the agent's writable checkout or its alternates.
-pack=$(printf '%s\n' "$c" | g pack-objects --revs -q "$snap/g/objects/pack/pack") || exit 13
-printf '%s' "$pack" > "$s/pack"
-names() { g log --diff-merges=first-parent --format= --name-only -z --no-renames "$@" --stdin < "$s/range"; }
-names > "$s/file" || exit 6
-names -G"$4" > "$s/placeholder" || exit 6
-names -G"$5" > "$s/replaced" || exit 6
-: > "$s/patch"
-[ "$(cat "$s/commits")" = 0 ] || g log -p --diff-merges=first-parent --no-color --no-ext-diff --no-textconv --no-renames --format= -U0 --stdin < "$s/range" > "$s/patch" || exit 6
-printf '%s' "$snap" > "$s/snapshot"
-for f in commits file placeholder replaced patch refs snapshot pack; do
-  printf '%s %s\000' "$f" "$(wc -c < "$s/$f" | tr -d ' ')" && cat "$s/$f" || exit 6
-done
-ok=1
-`
-
-// pushScript pushes $3 to refs/heads/$4 from a fresh bare repository
-// containing only the review's named pack ($1, $8); Discard removes the
-// review copy. $6 is the commit this
-// computer pushed to that branch before ("" for none): a branch origin has
-// is refused unless it is at that commit. $7 is the branch as the review
-// saw it ("" for none): the push is refused when origin's branch is not
-// there now (exit 10), and it carries a lease on that state, so a writer
-// that moves the branch during the push makes git or the server refuse it.
-const pushScript = pushGit + `snap=$1 url=$2 c=$3 b=$4 label=$5 prev=$6 seen=$7
-pack=$8
-case "$pack" in ''|*[!0-9a-f]*) echo "bad reviewed pack id" >&2; exit 6;; esac
-umask 077
-s=$(mktemp -d) || exit 6
-trap 'rm -rf "$s"' EXIT
-git init -q --bare --template= "$s/g" || exit 6
-src=$snap/g/objects/pack/pack-$pack
-[ -f "$src.pack" ] && [ -f "$src.idx" ] || { echo "the review's pack is gone" >&2; exit 6; }
-cp -- "$src.pack" "$src.idx" "$s/g/objects/pack/" || exit 6
-export GIT_DIR=$s/g
-# The copied pack is content-addressed. Verify the exact approved commit
-# and every reachable object before any network write.
-g fsck --strict --no-reflogs --no-progress "$c" >/dev/null 2>&1 ||
-  { echo "the review's objects changed or are incomplete" >&2; exit 6; }
-heads() { g ls-remote --heads "$url" > "$s/heads" && awk -v r="refs/heads/$b" '$2 == r { print $1; exit }' "$s/heads"; }
-cur=$(heads) || { echo "ls-remote failed" >&2; exit 6; }
-if [ -n "$cur" ] && [ "$cur" != "$prev" ]; then echo "exists $cur" >&2; exit 7; fi
-[ "$cur" = "$seen" ] || { echo "moved ${cur:-gone}" >&2; exit 10; }
-if [ -n "$cur" ] && ! g merge-base --is-ancestor "$cur" "$c" 2>/dev/null; then
-  # The branch holds this computer's earlier push of the agent's
-  # uncommitted work, which is not in the agent's history: join the two,
-  # so the branch moves forward and nothing on it is lost.
-  # A prior approved push of uncommitted work may not be an ancestor of
-  # this review's commit. Obtain that exact branch tip from origin.
-  g fetch -q --no-tags "$url" "refs/heads/$b" || exit 8
-  g cat-file -e "$cur^{commit}" 2>/dev/null || { echo "moved ${cur:-gone}" >&2; exit 10; }
-  export GIT_AUTHOR_NAME="DefenseClaw agent $label" GIT_AUTHOR_EMAIL=agent@defenseclaw.invalid
-  export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
-  c=$(g commit-tree "$c^{tree}" -p "$cur" -p "$c" -m "defenseclaw: work of agent $label") || exit 8
-fi
-g push --no-verify --no-follow-tags --no-recurse-submodules --force-with-lease="refs/heads/$b:$seen" "$url" "$c:refs/heads/$b" >/dev/null || exit 8
-got=$(heads) || exit 9
-[ "$got" = "$c" ] || { echo "mismatch $got" >&2; exit 9; }
-printf 'pushed\t%s\n' "$c"
-`
-
-// pushDiscardScript removes the review's copy when nothing is pushed.
-const pushDiscardScript = `rm -rf -- "$1"`
+// The review and push scripts are the relay's (relay/gitpush.go): a
+// separated relay runs them itself (relay.GitCommand, GAP-0795), and a
+// relay of the agent's own user through the exec route, as the agent.
+const (
+	pushGit           = relay.GitPrelude
+	pushReviewScript  = relay.GitReviewScript
+	pushScript        = relay.GitPushScript
+	pushDiscardScript = relay.GitDiscardScript
+)
 
 // pushEnv keeps git from prompting in the actor.
 var pushEnv = map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true", "SSH_ASKPASS": "/bin/true"}
@@ -318,10 +233,19 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label, origin 
 		return nil, &BranchPushError{Kind: "not_https", Msg: "the origin " + safeRemote(p.URL) +
 			" is not an https address the cluster can add a credential for; ask your administrator to add it to substrate.git.https_rewrite, or bring the work home with --branch NAME"}
 	}
-	out, stderr, code, err = run(ctx, []string{"sh", "-c", pushReviewScript, "sh", p.objects, p.PushURL, p.Commit, kit.PlaceholderSecret, pushReplacedPattern},
+	out, stderr, code, err = run(ctx, []string{relay.GitCommand, "review", p.objects, p.PushURL, p.Commit, kit.PlaceholderSecret, pushReplacedPattern},
 		p.Dir, pushEnv, 5*time.Minute)
 	if err != nil {
 		return nil, err
+	}
+	p.relayOwned = true
+	if code == relay.ExitGitUnseparated || code == relay.ExitNotRunnable {
+		p.relayOwned, p.Warning = false, unseparatedReview(code)
+		out, stderr, code, err = run(ctx, []string{"sh", "-c", pushReviewScript, "sh", p.objects, p.PushURL, p.Commit, kit.PlaceholderSecret, pushReplacedPattern},
+			p.Dir, pushEnv, 5*time.Minute)
+		if err != nil {
+			return nil, err
+		}
 	}
 	switch code {
 	case 0:
@@ -332,6 +256,9 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label, origin 
 			"), and pull --push-branch pushes only what the checkout holds itself. Bring the work home with --branch NAME and push it from your computer"}
 	case 13:
 		return nil, &BranchPushError{Kind: "failed", Msg: "not pushed: the agent's checkout is missing objects its commits need: " + lastLine(stderr, "")}
+	case relay.ExitGitObjects:
+		return nil, &BranchPushError{Kind: "objects", Msg: "not pushed: the agent's checkout gave objects whose content does not match their ids, " +
+			"or not every object of its commits (" + lastLine(stderr, "") + "). Bring the work home with --branch NAME and look at it on your computer"}
 	default:
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's commits: " + lastLine(stderr, "")}
 	}
@@ -367,6 +294,17 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label, origin 
 	return p, nil
 }
 
+// unseparatedReview is the warning of a review the relay could not run as
+// its own user (code is its answer to relay.GitCommand).
+func unseparatedReview(code int) string {
+	why := "the agent's relay runs as the agent's user (its template was built without relay.agent_user)"
+	if code == relay.ExitNotRunnable {
+		why = "the agent's relay is older than this computer's DefenseClaw"
+	}
+	return why + ", so the review below ran as the agent: an agent process could change what it shows. " +
+		"The push still carries exactly the reviewed commit"
+}
+
 // pushRefs reads ls-remote output (commit\tref lines) into ref -> commit.
 func pushRefs(raw string) map[string]string {
 	m := map[string]string{}
@@ -386,7 +324,11 @@ func (p *BranchPush) Discard(ctx context.Context, run BranchExec) {
 	if p == nil || p.snapshot == "" {
 		return
 	}
-	_, _, _, _ = run(ctx, []string{"sh", "-c", pushDiscardScript, "sh", p.snapshot}, p.Dir, pushEnv, time.Minute)
+	argv := []string{"sh", "-c", pushDiscardScript, "sh", p.snapshot}
+	if p.relayOwned {
+		argv = []string{relay.GitCommand, "discard", p.snapshot}
+	}
+	_, _, _, _ = run(ctx, argv, p.Dir, pushEnv, time.Minute)
 	p.snapshot = ""
 }
 
@@ -512,7 +454,12 @@ func (p *BranchPush) Push(ctx context.Context, run BranchExec, branch, name, pre
 		return &BranchPushError{Kind: "failed", Msg: "not pushed: the review's copy of the agent's commits is gone; run pull --push-branch again"}
 	}
 	seen := p.seen["refs/heads/"+branch]
-	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushScript, "sh", p.snapshot, p.PushURL, p.reviewedCommit, branch, name, prev, seen, p.pack}, p.Dir, pushEnv, 10*time.Minute)
+	argv := []string{"sh", "-c", pushScript, "sh", p.snapshot, p.PushURL, p.reviewedCommit, branch, name, prev, seen, p.pack}
+	if p.relayOwned {
+		// The relay pushes its own copy as its own user (GAP-0795, GAP-1073).
+		argv = []string{relay.GitCommand, "push", p.snapshot, p.PushURL, p.reviewedCommit, branch, name, prev, seen, p.pack}
+	}
+	out, stderr, code, err := run(ctx, argv, p.Dir, pushEnv, 10*time.Minute)
 	if err != nil {
 		return err
 	}
