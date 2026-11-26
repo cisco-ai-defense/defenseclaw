@@ -80,3 +80,29 @@ func TestGAP2226CleanAbsIsPathClean(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP2226CDJoinIsPathJoin pins guestCDJoin's plain-name join to path.Join.
+func TestGAP2226CDJoinIsPathJoin(t *testing.T) {
+	bases := []string{"/", "/a", "/a/", "/a/./b", "/a/../b", "//x", "/home/alice/.cache/s0", "rel", ""}
+	for _, operand := range []string{"d5", ".ssh", "..x", "...", "a b", "x/y", "./x", "../x", ".", "..", "x/", "/abs", "~", "~/d", ""} {
+		got := guestCDJoin(operand, bases, "/home/alice")
+		var want []string
+		switch {
+		case operand == "" || operand == "~":
+			want = []string{"/home/alice"}
+		case strings.HasPrefix(operand, "~/"):
+			want = []string{path.Join("/home/alice", operand[2:])}
+		case path.IsAbs(operand):
+			want = []string{path.Clean(operand)}
+		default:
+			for _, base := range bases {
+				if path.IsAbs(base) {
+					want = append(want, path.Join(base, operand))
+				}
+			}
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("guestCDJoin(%q) = %q, want %q", operand, got, want)
+		}
+	}
+}

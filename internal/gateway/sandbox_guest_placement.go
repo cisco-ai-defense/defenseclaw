@@ -1603,11 +1603,24 @@ func guestCDJoin(operand string, bases []string, home string) []string {
 	case path.IsAbs(operand):
 		return []string{path.Clean(operand)}
 	}
+	// A plain name (cd d5) joined to a clean folder is that folder, a slash
+	// and the name, which is path.Join's answer without its clean: a long
+	// call joins each of its cds to up to 128 folders (rel-1-0-10:GAP-2226).
+	plain := !strings.ContainsRune(operand, '/') && operand != "." && operand != ".."
 	var targets []string
 	for _, base := range bases {
-		if path.IsAbs(base) {
-			targets = append(targets, path.Join(base, operand))
+		if !path.IsAbs(base) {
+			continue
 		}
+		if plain && guestCleanAbs(base) == base {
+			if base == "/" {
+				targets = append(targets, "/"+operand)
+			} else {
+				targets = append(targets, base+"/"+operand)
+			}
+			continue
+		}
+		targets = append(targets, path.Join(base, operand))
 	}
 	return targets
 }
