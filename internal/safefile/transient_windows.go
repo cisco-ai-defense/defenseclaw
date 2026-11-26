@@ -68,4 +68,6 @@ func transientReadError(err error) bool {
 // nameMissing reports a lookup or open that found no file under the name. A
 // rename by a writer that does not use the POSIX-semantics replacement (for
 // example MoveFileEx) can show this to a concurrent opener for a moment.
+// DefenseClaw's own writers (ReplaceFileAtomically, and on NTFS its classic
+// rename-replace fallback) never show a missing name on a first look.
 func nameMissing(err error) bool { return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) }

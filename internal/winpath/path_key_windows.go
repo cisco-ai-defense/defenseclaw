@@ -45,6 +45,12 @@ func ComparisonKey(path string) string {
 // side must match. A command that differs elsewhere, such as a
 // user-written handler, is refused before a long-name lookup of up to
 // longNameLookupBudget per spelling (GAP-2222).
+//
+// Documented limit: a path with a ~ component that also uses, in another
+// component, a short name an administrator set without ~ (SetFileShortName,
+// which needs SeRestorePrivilege) is refused here, where ComparisonKey would
+// have expanded both. It only lowers a claim: the guardian treats that alias
+// as not DefenseClaw's and adds its canonical entry.
 func mayShareComparisonKey(path, want string) bool {
 	a, b := keyComponents(path), keyComponents(want)
 	if len(a) != len(b) {
