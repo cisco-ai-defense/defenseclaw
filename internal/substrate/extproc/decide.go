@@ -20,12 +20,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 )
 
 // Categories the callout adds to the egress Decider's (egress.Category).
@@ -43,6 +45,9 @@ const (
 	CategoryBodyUninspected = "body_uninspectable"
 	CategoryCalloutError    = "callout_error"
 	CategoryInternalHost    = "defenseclaw_internal"
+	// CategoryRateLimited is a request over the actor's rate (GAP-0635):
+	// 429 with Retry-After.
+	CategoryRateLimited = "rate_limited"
 )
 
 // Decision sources the callout adds to egress.Source.
@@ -133,6 +138,8 @@ type Verdict struct {
 	Findings      []string
 	// Retryable refusals (the callout could not decide) answer 503.
 	Retryable bool
+	// TooMany refusals (the actor's rate, GAP-0635) answer 429.
+	TooMany bool
 	// formRules marks a POST whose body may name another method (_method)
 	// where a deny or ask rule covers its host and path (GAP-0046):
 	// DecideBody decides it again on every method the body names.
@@ -181,7 +188,9 @@ type Engine struct {
 	bindings   []binding
 	body       *bodyMode
 	chainLimit chainLimiter
-	now        func() time.Time
+	// rate holds every actor to rate_limits.per_actor_rps (GAP-0635).
+	rate *ratelimit.Limiter
+	now  func() time.Time
 }
 
 // NewEngine builds an Engine and starts its chain worker; Close stops it.
@@ -228,7 +237,54 @@ func NewEngine(o Options) (*Engine, error) {
 	e.bindings = compileBindings(cfg.Secrets, cfg.NoSwapHosts)
 	e.body = newBodyMode(cfg.BodyInspection)
 	e.chain = newChainQueue(o.ChainSink, cfg.Chain.QueueSize)
+	// Only the actor budget limits: the atespace budget and the in-flight
+	// cap are the gateway's (an allowed request's stream has no end the
+	// headers stage sees, so the charge is released at once).
+	e.rate = ratelimit.New(ratelimit.Config{PerActorRPS: cfg.RateLimits.PerActorRPS,
+		PerAtespaceRPS: 1 << 29, PerActorInFlight: math.MaxInt32, Now: e.now})
 	return e, nil
+}
+
+// ShareRates makes the actor budgets the cluster's: the callout replicas
+// count their requests through the leader, as the gateway's do
+// (GAP-0566). A nil send keeps the budget per replica.
+func (e *Engine) ShareRates(send ratelimit.ShareFunc) {
+	if send != nil {
+		e.rate.ShareThrough(send)
+	}
+}
+
+// rateKeyPrefix keeps the callout's keys apart from the gateway's in the
+// leader's one share table.
+const rateKeyPrefix = "egress/"
+
+// overRate charges one request to its actor (GAP-0635) and returns the
+// refusal when the actor is over its rate. Requests the callout refuses
+// before any policy (no identity, no host, a DefenseClaw-internal host) and
+// requests to the actor listener (the gateway limits those itself) are not
+// charged. The actor is its atespace and name: the UID is not known yet,
+// and a flood is refused before it costs a registration lookup.
+func (e *Engine) overRate(req *Request) (Verdict, bool) {
+	if req.IdentityErr != nil || req.Host == "" {
+		return Verdict{}, false
+	}
+	if _, ok := e.internal.match(req.Host); ok {
+		return Verdict{}, false
+	}
+	if _, ok := e.dcHosts.match(req.Host); ok {
+		return Verdict{}, false
+	}
+	space := rateKeyPrefix + req.Actor.Atespace
+	release, err := e.rate.Acquire(space, space+"/"+req.Actor.Name)
+	if err == nil {
+		release()
+		return Verdict{}, false
+	}
+	v := deny(Verdict{}, CategoryRateLimited, string(egress.SourceGuard), "rate_limits.per_actor_rps",
+		fmt.Sprintf("This actor is sending more than %g requests a second through the egress gateway.", e.cfg.RateLimits.PerActorRPS))
+	v.TooMany = true
+	v.Findings = []string{"rate_limited:actor"}
+	return v, true
 }
 
 // Close stops the chain worker after it drains.
@@ -298,6 +354,9 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		}
 	}()
 	begin := e.now()
+	if limited, over := e.overRate(req); over {
+		return limited
+	}
 	var p pass
 	v = e.decideHeaders(ctx, req, &p)
 	switch {

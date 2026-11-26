@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/extproc"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
@@ -182,6 +183,7 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintln(stderr, "substrate-extproc: judge.url is not the gateway callout route: ask-required hosts are refused")
 	}
+	var shareRates ratelimit.ShareFunc
 	switch {
 	case o.leaderAddress != "":
 		lc, err := substrateExtprocLeader(o)
@@ -189,6 +191,9 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 			return err
 		}
 		opts.ChainChecker = substrateChainChecker{client: &chainstate.Client{Leader: lc}}
+		// The per-actor egress rate is the cluster's: the callout
+		// replicas count their requests through the leader (GAP-0635).
+		shareRates = (&chainstate.Client{Leader: lc}).RateShare
 		opts.UIDs = substrateActorDirectory{regs: &registry.Remote{Client: lc}}
 		// Each decision also reaches the OTLP destinations as log.egress.*,
 		// through the leader and a gateway replica (GAP-0453).
@@ -207,6 +212,7 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer eng.Close()
+	eng.ShareRates(shareRates)
 
 	var tlsCfg *tls.Config
 	switch {

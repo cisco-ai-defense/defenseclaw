@@ -72,6 +72,7 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateExtprocAskConfig{}, []string{"substrate", "extproc", "ask"}},
 		{SubstrateExtprocJudgeConfig{}, []string{"substrate", "extproc", "judge"}},
 		{SubstrateExtprocDLPConfig{}, []string{"substrate", "extproc", "dlp"}},
+		{SubstrateExtprocRateLimitsConfig{}, []string{"substrate", "extproc", "rate_limits"}},
 		{SubstrateLLMConfig{}, []string{"substrate", "llm"}},
 		{SubstrateLLMCredentialConfig{}, []string{"substrate", "llm", "credential"}},
 		{SubstrateEgressConfig{}, []string{"substrate", "egress"}},

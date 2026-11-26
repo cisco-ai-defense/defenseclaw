@@ -4815,6 +4815,11 @@ class SubstrateExtprocDLPConfig:
 
 
 @dataclass
+class SubstrateExtprocRateLimitsConfig:
+    per_actor_rps: float | None = None
+
+
+@dataclass
 class SubstrateExtprocConfig:
     """``substrate.extproc``: the egress callout (mirrors Go
     ``SubstrateExtprocConfig``; the callout validates the same bounds)."""
@@ -4838,6 +4843,7 @@ class SubstrateExtprocConfig:
     ask: SubstrateExtprocAskConfig = field(default_factory=SubstrateExtprocAskConfig)
     judge: SubstrateExtprocJudgeConfig = field(default_factory=SubstrateExtprocJudgeConfig)
     dlp: SubstrateExtprocDLPConfig = field(default_factory=SubstrateExtprocDLPConfig)
+    rate_limits: SubstrateExtprocRateLimitsConfig = field(default_factory=SubstrateExtprocRateLimitsConfig)
 
 
 @dataclass
@@ -8646,6 +8652,9 @@ def _merge_substrate_extproc(extproc: dict[str, Any]) -> SubstrateExtprocConfig:
         ),
         dlp=SubstrateExtprocDLPConfig(
             credential_headers=str(_mapping(extproc.get("dlp")).get("credential_headers", "") or "")
+        ),
+        rate_limits=SubstrateExtprocRateLimitsConfig(
+            per_actor_rps=_optional_number(_mapping(extproc.get("rate_limits")).get("per_actor_rps"), float)
         ),
     )
 

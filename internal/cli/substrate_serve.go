@@ -942,8 +942,9 @@ func kubeHTTPClient() (*http.Client, error) {
 // substrateLeaderPermissions is who may call what on the leader
 // (GAP-0094): gateway replicas every method but the controller's own
 // (leader.NamedOnly, GAP-0553); the callout only the egress chain check,
-// the name lookup of a registration (GAP-0090) and its egress decisions for
-// the telemetry relay; the controller the registrations, the chain
+// the name lookup of a registration (GAP-0090), its egress decisions for
+// the telemetry relay and its share of the per-actor egress rate
+// (GAP-0635); the controller the registrations, the chain
 // lifecycle, the activity feed, its counts for the relay (GAP-0450) and
 // publishing its egress callout slot read (GAP-0505). Each relay method
 // accepts only its poster's kinds of record.
@@ -958,7 +959,7 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		}
 	}
 	add(gateways, "*")
-	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress)
+	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress, ratelimit.MethodShare)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
 		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts,
 		leader.MethodCalloutPublish)

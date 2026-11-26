@@ -196,20 +196,26 @@ func setHeader(k, v string) *corev3.HeaderValueOption {
 		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD}
 }
 
-// immediate is the refusal: 403 (503 when the callout could not decide)
+// immediate is the refusal: 403 (503 when the callout could not decide,
+// 429 with Retry-After when the actor is over its rate)
 // with the DefenseClaw JSON body.
 func (e *Engine) immediate(req *Request, v Verdict) *extprocv3.ProcessingResponse {
 	code := typev3.StatusCode_Forbidden
-	if v.Retryable {
+	headers := []*corev3.HeaderValueOption{
+		setHeader("content-type", "application/json"),
+		setHeader(DecisionHeader, "block"),
+	}
+	switch {
+	case v.TooMany:
+		code = typev3.StatusCode_TooManyRequests
+		headers = append(headers, setHeader("retry-after", "1"))
+	case v.Retryable:
 		code = typev3.StatusCode_ServiceUnavailable
 	}
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 		ImmediateResponse: &extprocv3.ImmediateResponse{
-			Status: &typev3.HttpStatus{Code: code},
-			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
-				setHeader("content-type", "application/json"),
-				setHeader(DecisionHeader, "block"),
-			}},
+			Status:  &typev3.HttpStatus{Code: code},
+			Headers: &extprocv3.HeaderMutation{SetHeaders: headers},
 			Body:    e.refusalBody(req, v),
 			Details: "defenseclaw_egress_blocked",
 		}}}
