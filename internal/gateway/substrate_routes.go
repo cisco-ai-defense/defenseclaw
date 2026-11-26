@@ -695,6 +695,14 @@ func (c SubstrateConfig) substrateProfiles() SubstrateProfileResolver {
 	}
 }
 
+// substrateRegistryReadWindow is how long list and status wait for the
+// leader's registry. A leader change takes about 5 s to answer again, so the
+// read retries inside this window; after it the call fails at once with
+// registrations_unavailable and the plain "try again in a minute" message,
+// instead of holding the person for the CLI's whole 30 s timeout
+// (GAP-1089). A var so a test can shorten it.
+var substrateRegistryReadWindow = 8 * time.Second
+
 func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, _ := substrateCallerFrom(r.Context())
@@ -703,7 +711,9 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		if everyone {
 			f.OwnerID = ""
 		}
-		regs, err := st.cfg.Registrations.List(r.Context(), f)
+		readCtx, cancel := context.WithTimeout(r.Context(), substrateRegistryReadWindow)
+		regs, err := st.cfg.Registrations.List(readCtx, f)
+		cancel()
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registrations_unavailable")
 			return
@@ -844,7 +854,9 @@ func (a *APIServer) substrateFind(st *substrateState, r *http.Request, atespace,
 	if err != nil {
 		return registry.Registration{}, http.StatusServiceUnavailable, "control_api_unavailable"
 	}
-	reg, ok, err := st.cfg.Registrations.Get(r.Context(), atespace, live.UID)
+	readCtx, cancel := context.WithTimeout(r.Context(), substrateRegistryReadWindow)
+	reg, ok, err := st.cfg.Registrations.Get(readCtx, atespace, live.UID)
+	cancel()
 	if err != nil {
 		return registry.Registration{}, http.StatusServiceUnavailable, "registrations_unavailable"
 	}
