@@ -2030,6 +2030,9 @@ func agentHookConfigShellWriteOperands(command, dir, home string) []string {
 		return nil
 	}
 	operands := hookpaths.LiteralWriteOperands(command, dir, home)
+	// A move, install or sync into a hook file spelled through x/.. is
+	// judged as its plain spelling (rel-1-0-10:GAP-2288).
+	operands = append(operands, hookpaths.DotDotMoveDestinations(command, dir, home)...)
 	if strings.Contains(command, ">") {
 		redirects, _, _ := hookpaths.ShellWriteOperands(command, dir, home)
 		operands = append(operands, redirects...)

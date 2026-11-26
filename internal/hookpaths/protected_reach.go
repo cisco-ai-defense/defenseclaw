@@ -796,14 +796,17 @@ func processLinkPrefix(path string) string {
 // through a process-dependent link (processLinkHead): the writes that only
 // the process-link proof reads (GAP-2227, GAP-2237, GAP-2275). A call placed
 // in a folder below such a link keeps every operand, as a host that cleans
-// a relative dot-dot it cannot probe may have dropped the link from it.
-func processLinkWrites(names []string, cwd string) []string {
+// a relative dot-dot it cannot probe may have dropped the link from it. An
+// operand that steps out of a link, or passes a link the command makes to a
+// process link (madeLinks.linkBeforeStep), is kept too: its place is known
+// only once those links are resolved (rel-1-0-10:GAP-2287).
+func processLinkWrites(names []string, cwd string, made madeLinks) []string {
 	if throughProcessLink(cwd) {
 		return names
 	}
 	kept := names[:0]
 	for _, name := range names {
-		if throughProcessLink(name) {
+		if throughProcessLink(name) || made.linkBeforeStep(name) {
 			kept = append(kept, name)
 		}
 	}
