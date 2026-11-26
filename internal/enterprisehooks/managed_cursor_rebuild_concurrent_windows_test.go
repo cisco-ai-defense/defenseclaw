@@ -29,6 +29,7 @@ import (
 // it, a changed file DefenseClaw owns is rebuilt, an edit that is not JSON
 // stops the rebuild, and an undo never puts a preimage back over a newer save.
 func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	adminHooks := []byte(`{"version":1,"hooks":{"adminEvent":[{"type":"command","command":"admin-concurrent-hook"}]}}`)
 	type files struct{ hooks, adapter, state, receipt []byte }

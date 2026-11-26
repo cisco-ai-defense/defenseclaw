@@ -113,6 +113,7 @@ func openWindowsManagedRuntimeProfileUnderPrivilege(target windowsManagedRuntime
 // writing made planning fail with ERROR_SHARING_VIOLATION, because planning
 // asked for FILE_APPEND_DATA it never used.
 func TestWindowsManagedRuntimePlanSucceedsWhileHomeIsHeldForReading(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	sid := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
 	calls := shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
@@ -135,6 +136,7 @@ func TestWindowsManagedRuntimePlanSucceedsWhileHomeIsHeldForReading(t *testing.T
 }
 
 func TestWindowsManagedRuntimeMutateOpenRetriesUntilHolderReleases(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := newWindowsManagedRuntimeProfileTarget(t)
 	var release func()
 	calls := shortenWindowsManagedRuntimeProfileRetry(t, 5, func(sleep int) {
@@ -153,6 +155,7 @@ func TestWindowsManagedRuntimeMutateOpenRetriesUntilHolderReleases(t *testing.T)
 }
 
 func TestWindowsManagedRuntimeProfileOpenNamesUserWhenRetriesRunOut(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := newWindowsManagedRuntimeProfileTarget(t)
 	const attempts = 4
 	calls := shortenWindowsManagedRuntimeProfileRetry(t, attempts, nil)
@@ -180,6 +183,7 @@ func TestWindowsManagedRuntimeProfileOpenNamesUserWhenRetriesRunOut(t *testing.T
 }
 
 func TestWindowsManagedRuntimeProfileOpenStopsAtProcessRetryBudget(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := newWindowsManagedRuntimeProfileTarget(t)
 	calls := shortenWindowsManagedRuntimeProfileRetry(t, 10, nil)
 	windowsManagedRuntimeProfileRetryBudget = 3 * time.Millisecond
@@ -203,6 +207,7 @@ func TestWindowsManagedRuntimeProfileOpenStopsAtProcessRetryBudget(t *testing.T)
 }
 
 func TestWindowsManagedRuntimeProfileOpenDoesNotRetryOtherErrors(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := newWindowsManagedRuntimeProfileTarget(t)
 	for _, injected := range []error{windows.ERROR_ACCESS_DENIED, windows.ERROR_FILE_NOT_FOUND} {
 		calls := shortenWindowsManagedRuntimeProfileRetry(t, 5, nil)
@@ -224,6 +229,7 @@ func TestWindowsManagedRuntimeProfileOpenDoesNotRetryOtherErrors(t *testing.T) {
 }
 
 func TestWindowsManagedRuntimeProfileReadModeAsksForNoWriteAccess(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	const writeAccess = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA |
 		windows.FILE_WRITE_ATTRIBUTES | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_WRITE
 	read, readShare, readFlags := windowsManagedRuntimeProfileOpenParameters(windowsManagedRuntimeProfileRead)
@@ -267,6 +273,7 @@ func TestWindowsManagedRuntimeProfileReadModeAsksForNoWriteAccess(t *testing.T) 
 }
 
 func TestWindowsManagedRuntimePlanSkipsProfileStillBusyAfterRetries(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	sid := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
 	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
@@ -320,6 +327,7 @@ func TestWindowsManagedRuntimePlanSkipsProfileStillBusyAfterRetries(t *testing.T
 // One profile the installer cannot open skips that user; it never fails the
 // plan for everyone. A failure that is not about one profile still does.
 func TestWindowsManagedRuntimePlanSkipsInaccessibleProfileButHostErrorsStayFatal(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	sid := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
 	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
@@ -389,6 +397,7 @@ func TestWindowsManagedRuntimeSkippedProfilesValidation(t *testing.T) {
 // after planning, failing the install for everyone. A fresh Install probes
 // that open while planning and skips the user instead.
 func TestWindowsManagedRuntimeFreshInstallPlanSkipsUserBlockedForWriters(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	sid := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
 	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)
@@ -413,6 +422,7 @@ func TestWindowsManagedRuntimeFreshInstallPlanSkipsUserBlockedForWriters(t *test
 // unless it is repaired. Every planning mode re-stamps the canonical
 // descriptor, records the repair, and plans the root as a canonical baseline.
 func TestWindowsManagedRuntimeFreshInstallPlanRepairsDriftedRetainedRoot(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -477,6 +487,7 @@ func TestWindowsManagedRuntimeFreshInstallPlanRepairsDriftedRetainedRoot(t *test
 // enumeration) skips that user. The other user is still planned, and
 // Upgrade/Repair keep the stale rows rather than revoke them.
 func TestWindowsManagedRuntimePlanSkipsRowWhoseProfileIsGone(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	sid := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, sid)
 	shortenWindowsManagedRuntimeProfileRetry(t, 3, nil)

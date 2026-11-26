@@ -44,6 +44,7 @@ func planValidationRootsForTarget(target ManifestTarget) (WindowsManagedRuntimeP
 // pending and the plan leaves that root pending, without following the link;
 // the guardian moves it aside when the account signs in.
 func TestStandaloneSignedOutAccountOwnDataDirLinkStaysPending(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := deferredPendingProofFixture(t, true)
 	sid := currentWindowsTestSID(t)
 	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
@@ -108,6 +109,7 @@ func TestStandaloneRetireFindsNothingBehindAnAccountOwnDataDirLink(t *testing.T)
 // owns, and any link on the Secure Client profile, is still refused for that
 // account.
 func TestStandaloneForeignOwnedDataDirLinkStaysRefused(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := deferredPendingProofFixture(t, true)
 	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
 	outside, canary := outsideDataDirTree(t, target.UserHome)
@@ -137,6 +139,7 @@ func TestStandaloneForeignOwnedDataDirLinkStaysRefused(t *testing.T) {
 }
 
 func TestStandaloneLifecycleValidationSkipsAdministratorOwnedDataDirLink(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := deferredPendingProofFixture(t, true)
 	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
 	outside, canary := outsideDataDirTree(t, target.UserHome)
@@ -166,6 +169,7 @@ func TestStandaloneLifecycleValidationSkipsAdministratorOwnedDataDirLink(t *test
 // SYSTEM) owns as a link the account does not own, apart from the account's
 // own junction, a plain folder and a missing folder. Nothing it names is read.
 func TestWindowsForeignOwnedDataDirLinkIsDistinctFromAccountOwned(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := deferredPendingProofFixture(t, true)
 	sid := currentWindowsTestSID(t)
 	dataDir := filepath.Join(target.UserHome, ".defenseclaw")

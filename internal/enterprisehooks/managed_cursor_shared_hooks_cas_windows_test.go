@@ -135,6 +135,7 @@ const windowsCursorSharedHooksTestHook = `C:\Program Files\Cisco\DefenseClaw\bin
 // compare-and-swap: it must never replace a newer save and then try to put
 // that save back, which loses a save C made between the two swaps.
 func TestWindowsCursorMachineGuardRebuildUndoNeverReplacesANewerSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	hook := windowsCursorSharedHooksTestHook
 	for _, enrolled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "empty", true: "Alice"}[enrolled], func(t *testing.T) {
@@ -200,6 +201,7 @@ func TestWindowsCursorMachineGuardRebuildUndoNeverReplacesANewerSave(t *testing.
 // (Publication with remaining targets runs the same write; its fixture needs
 // real user profiles.)
 func TestWindowsCursorTargetPublicationKeepsAConcurrentHooksSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	hook := windowsCursorSharedHooksTestHook
 	alice := WindowsCursorManagedRuntimeTarget{SID: "S-1-5-21-1000-1000-1000-1001", DataDir: `C:\Users\alice\.defenseclaw`}
 	for _, publish := range []struct {
@@ -273,6 +275,7 @@ func TestWindowsCursorTargetPublicationKeepsAConcurrentHooksSave(t *testing.T) {
 // kept, and the receipt must record the saved file, so that the teardown
 // gives the administrator back exactly that file.
 func TestWindowsCursorEmptyEnrollmentInstallKeepsAConcurrentHooksSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	original := []byte(`{"version":1,"hooks":{"admin-original":[{"type":"command","command":"admin-original"}]}}`)
 	if err := os.WriteFile(paths.Hooks, original, 0o600); err != nil {
@@ -311,6 +314,7 @@ func TestWindowsCursorEmptyEnrollmentInstallKeepsAConcurrentHooksSave(t *testing
 // administrator's save between DefenseClaw's read and its write must be kept,
 // without DefenseClaw's entries.
 func TestWindowsCursorTeardownKeepsAConcurrentHooksSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	original := []byte(`{"version":1,"hooks":{"admin-original":[{"type":"command","command":"admin-original"}]}}`)
 	if err := os.WriteFile(paths.Hooks, original, 0o600); err != nil {

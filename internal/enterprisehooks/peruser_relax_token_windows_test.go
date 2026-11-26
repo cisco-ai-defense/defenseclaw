@@ -83,6 +83,7 @@ func windowsRelaxTestFormat(format string, sid *windows.SID) string {
 // returns that token to the owner-private shape first, and publication over
 // the relaxed token succeeds with nothing but ownership.
 func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	oldToken := strings.Repeat("a", 64)
 	newToken := strings.Repeat("b", 64)
 
@@ -151,6 +152,7 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 // user with Hermes and another agent, and the install never reached coverage.
 // The relax step now includes <data dir> for Hermes only.
 func TestRelaxStandalonePerUserFootprintIncludesHermesDataDir(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	// The elevated test runner is not refused by ProtectDirectory on the
 	// hardened shape, so the standard user's refusal is not reproducible here;
 	// the test pins that the relax step gives the owner WRITE_DAC (OWNER RIGHTS

@@ -93,6 +93,7 @@ func readCreatedFolderRecords(t *testing.T, dir string) map[string]string {
 // letters in lower case (the lifecycle's Get-DefenseClawCreatedFolderRecordName).
 // Nothing outside those roots, and never a root itself.
 func TestStandaloneCreatedFolderRecordNamesEachCreatedVendorFolderOnce(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := useCreatedFolderFixture(t, true, trustAll)
 	cursor := filepath.Join(fixture.programData, "Cursor")
 	codex := filepath.Join(fixture.programData, "OpenAI", "Codex")
@@ -178,6 +179,7 @@ func TestStandaloneCreatedFolderRecordNeedsTheTrustedStandaloneLifecycleFolder(t
 // created: never the existing vendor folder above them, and nothing on a
 // second call that creates nothing.
 func TestEnsureWindowsManagedPolicyDirectoryRecordsOnlyTheFoldersItCreated(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previousDir, previousAncestor, previousRecorder := windowsManagedPolicyDirTrustCheck, windowsManagedPolicyAncestorTrustCheck, windowsCreatedFolderRecorder
 	t.Cleanup(func() {
 		windowsManagedPolicyDirTrustCheck, windowsManagedPolicyAncestorTrustCheck, windowsCreatedFolderRecorder = previousDir, previousAncestor, previousRecorder
@@ -216,6 +218,7 @@ func TestEnsureWindowsManagedPolicyDirectoryRecordsOnlyTheFoldersItCreated(t *te
 // transaction stubbed, as the other install tests do, so the publish's own
 // folder step creates them).
 func TestClaudePublishRollbackKeepsEachCreatedFolderWithItsRecord(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, realLock := range []bool{true, false} {
 		name := "publish alone"
 		if realLock {
@@ -279,6 +282,7 @@ func TestClaudePublishRollbackKeepsEachCreatedFolderWithItsRecord(t *testing.T) 
 // deployment, so a record of one would outlive it. The Cisco folder itself
 // is.
 func TestStandaloneCreatedFolderRecordSkipsDefenseClawsOwnFolders(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := useCreatedFolderFixture(t, true, trustAll)
 	vendor := filepath.Join(fixture.programData, "Cisco")
 	own := []string{
@@ -300,6 +304,7 @@ func TestStandaloneCreatedFolderRecordSkipsDefenseClawsOwnFolders(t *testing.T) 
 // GAP-0091 review 2 S1: the CLI's removal of C:\Program Files\Cisco removes
 // only a recorded, empty, trusted plain folder, and takes its record with it.
 func TestRemoveWindowsCreatedFolderIfEmptyTakesTheRecordWithTheFolder(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	realStandaloneProcess := windowsEnterpriseStandaloneProcess
 	previousFileTrust := windowsManagedPolicyFileTrustCheck
 	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = previousFileTrust })
@@ -421,6 +426,7 @@ func TestRemoveWindowsCreatedFolderIfEmptyTakesTheRecordWithTheFolder(t *testing
 // The CLI used to remove both by name once they were empty; it now relies on
 // this record lookup and its reparse-safe removal alone.
 func TestRemoveWindowsCreatedFolderIfEmptyKeepsAnUnrecordedClaudeCodeFolder(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previousFileTrust := windowsManagedPolicyFileTrustCheck
 	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = previousFileTrust })
 	windowsManagedPolicyFileTrustCheck = trustAll

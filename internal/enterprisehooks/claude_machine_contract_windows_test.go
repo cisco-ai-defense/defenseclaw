@@ -23,6 +23,7 @@ import (
 // can no longer switch the shared policy, and rows on different contracts no
 // longer rewrite it in turn.
 func TestStandaloneClaudeInstallRendersTheDeploymentContract(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	previousStandalone := windowsEnterpriseStandaloneProcess
 	windowsEnterpriseStandaloneProcess = func() bool { return true }
@@ -102,6 +103,7 @@ func TestStandaloneDeferredClaudeStagingRendersTheDeploymentContract(t *testing.
 // deferred row must still recognize that policy as this deployment's; it
 // failed the whole install before.
 func TestSecureClientClaudePolicyIdentityAcceptsTheRowContract(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	useWindowsSecureClientForTest(t)
 	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway")

@@ -26,6 +26,7 @@ import (
 // a guard rebuild byte for byte: the rebuild edits only DefenseClaw's own
 // registration, however the file is formatted.
 func TestWindowsCursorMachineGuardRebuildKeepsForeignHooksBytes(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	foreignA := `{"command": "C:\\Tools\\audit.cmd 2>&1 && echo \u00e9", "timeout": 5.0, "type":"command"}`
 	foreignB := `{ "type" : "command" , "command" : "admin <one> & two" }`
@@ -112,6 +113,7 @@ func TestWindowsCursorMachineGuardRebuildKeepsForeignHooksBytes(t *testing.T) {
 // lost: when the rebuild returns, hooks.json holds the save, with the guard
 // merged in or (when the save came last) as the administrator wrote it.
 func TestWindowsCursorMachineGuardRebuildConcurrentWriterKeepsEverySave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	paths := installWindowsCursorStandaloneGuardForTest(t, hook, true)
 	document := func(name string) []byte {

@@ -353,6 +353,7 @@ func TestWindowsManagedRowCleansRelocatedAgentConfigurations(t *testing.T) {
 // warning names the source and says what to do, the row is not failed for
 // it, and repair revokes the credential.
 func TestWindowsManagedRowResolvesLinkedAgentConfigurations(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, tc := range []struct{ name, dir, file string }{
 		{"codex", ".codex", "config.toml"},
 		{"claudecode", ".claude", "settings.json"},

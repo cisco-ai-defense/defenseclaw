@@ -340,6 +340,7 @@ func requireWindowsCursorSharedWriterOutcomeForTest(t *testing.T, paths windowsC
 }
 
 func TestWindowsCursorSharedWriterKeepsConcurrentAdministratorChanges(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, op := range windowsCursorSharedWriterOps() {
 		for _, change := range sharedfiletest.Changes {
 			for _, before := range []bool{true, false} {

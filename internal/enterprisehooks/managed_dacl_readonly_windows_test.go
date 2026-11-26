@@ -165,6 +165,7 @@ func windowsReadOnlyTestACECount(t *testing.T, path string) uint16 {
 // plan re-stamps like any retained root (26.8.4); strict mode refuses it
 // and a standalone plan skips that user unrepaired (GAP-1733).
 func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
@@ -287,6 +288,7 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 // /repair failed 1603. The plan now recovers that stale shape; a relax a
 // running setup holds and any other DACL stay refused and unchanged.
 func TestWindowsManagedRuntimeRepairPlanRecoversAStaleGuardianSetupRelax(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previousStandalone := windowsEnterpriseStandaloneProcess
 	previousWait, previousStale := windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxIsStale
 	t.Cleanup(func() {

@@ -47,6 +47,7 @@ func captureCodexFolderEvents(t *testing.T) *codexFolderEvents {
 }
 
 func TestEnsureWindowsStandaloneCodexMachineFolderRecreatesAMissingVendorParent(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, name := range []string{"vendor parent and folder missing", "folder missing, vendor parent there"} {
 		t.Run(name, func(t *testing.T) {
 			f := useKeptFixture(t, true, nil)
