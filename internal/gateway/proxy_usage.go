@@ -349,8 +349,8 @@ func isUsageOnlyChunk(payload string) bool {
 // recordChatUsage hands usage the proxy already parsed (Bifrost) to the
 // record of the call answering through w.
 func recordChatUsage(w http.ResponseWriter, u *ChatUsage) {
-	uw := usageWriterOf(w)
-	if uw == nil || u == nil {
+	uw, ok := w.(*usageResponseWriter)
+	if !ok || u == nil {
 		return
 	}
 	uw.call.Usage(modelusage.ParsedUsage{Input: u.PromptTokens, Output: u.CompletionTokens, Source: "provider"})

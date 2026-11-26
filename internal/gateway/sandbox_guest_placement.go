@@ -678,8 +678,11 @@ func (memo *guestReadingMemo) analyze(input actionfacts.Input) actionfacts.Facts
 }
 
 // guestReadingMemoReadings bounds the guest readings a guestReadingMemo
-// keeps: the call, its twins and the statements the dispatch reads alone.
-const guestReadingMemoReadings = 8
+// keeps: the call, its twins, the statements the dispatch reads alone and
+// the placed children of their walks (sandboxGuestPlacedChildrenWalk, which
+// places the same command in the same folder for the call and its twins,
+// GAP-2215).
+const guestReadingMemoReadings = 16
 
 // clippedFacts is facts with each of its lists at its length.
 func clippedFacts(facts actionfacts.Facts) actionfacts.Facts {
