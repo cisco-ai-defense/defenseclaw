@@ -1753,6 +1753,15 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 	grown := targets
 	var bases []string
 	reached := map[string]int{}
+	// joins holds, per move, the bases it was joined to in the last round
+	// that changed them, and the targets of that join. A move whose bases
+	// are the same in a later round reaches the same targets, and each of
+	// them is already known from call.first or earlier (a folder's place
+	// only moves earlier), so it is not joined or looked up again: the
+	// round that only confirms the walk redid every join of an 8 KB cd
+	// chain (rel-1-0-10:GAP-2249).
+	type moveJoin struct{ bases, targets []string }
+	joins := make([]moveJoin, len(moves))
 	for round := 0; ; round++ {
 		if round == 4 {
 			for _, dir := range slices.Concat(listed, grown) {
@@ -1763,7 +1772,8 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 		changed := false
 		grown = slices.Clone(targets)
 		clear(reached)
-		for _, move := range moves {
+		var pool []string
+		for at, move := range moves {
 			call := calls[move.at]
 			bases = bases[:0]
 			for _, list := range [2][]string{dirs, grown} {
@@ -1773,13 +1783,23 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 					}
 				}
 			}
-			for _, target := range guestCDJoinClean(move.operand, bases, home) {
+			join := &joins[at]
+			same := round > 0 && slices.Equal(join.bases, bases)
+			if !same {
+				start := len(pool)
+				pool = append(pool, bases...)
+				join.bases, join.targets = pool[start:len(pool):len(pool)], guestCDJoinClean(move.operand, bases, home)
+			}
+			for _, target := range join.targets {
 				// reached is read only against followed, which counts no
 				// folder when the split followed no value.
 				if len(followed) != 0 {
 					reached[target]++
 				}
 				grown = keep(grown, target)
+				if same {
+					continue
+				}
 				if since, ok := known[target]; !ok || call.first < since {
 					known[target] = call.first
 					changed = true
