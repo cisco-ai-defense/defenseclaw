@@ -2627,6 +2627,19 @@ def _windows_path_parts(name: str) -> tuple[str, str, bool] | None:
     return volume.lower(), name.lower(), verbatim
 
 
+def _posix_path_in_dir(word: str, directory: str) -> bool:
+    """Whether *word*, a POSIX path, names a file inside *directory* once ``.`` and ``..`` are resolved.
+
+    Mirrors ``posixHookPathInDir`` (GAP-2148): ``<hooks>/../../bin/x`` is the user's.
+    """
+
+    prefix = directory.rstrip("/") + "/"
+    if not word.startswith(prefix):
+        return False
+    clean = posixpath.normpath(word[len(prefix) :])
+    return clean not in (".", "..") and not clean.startswith("../")
+
+
 def _windows_resolved_path(name: str) -> tuple[str, str] | None:
     """A Windows absolute path as Windows resolves it: its volume and cleaned POSIX form, or None.
 
@@ -2960,7 +2973,7 @@ def _setup_claims_edited_entry(
     """
 
     if connector == "claudecode":
-        return guarded or first_rest == "" or (bool(word) and word.startswith(os.path.dirname(current) + "/"))
+        return guarded or first_rest == "" or (bool(word) and _posix_path_in_dir(word, os.path.dirname(current)))
     if connector == "copilot":
         if _copilot_live_lookalike(command, current):
             return False

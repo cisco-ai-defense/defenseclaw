@@ -218,6 +218,36 @@ func windowsHookCommandInDir(command, volume, dir string) (string, bool) {
 	return name, found && name != ""
 }
 
+// posixHookPathInDir reports whether word, a POSIX path, names a file inside
+// dir once . and .. are resolved: /home/u/.defenseclaw/hooks/../../bin/x is
+// the user's, as the Windows claim reads it (hookCommandInWindowsDir,
+// GAP-2116) and as 1.0.10 did not (GAP-2148). The doctor legs use it with
+// the command's first word (editedHookEntryClaimed, and _posix_path_in_dir
+// in cli/defenseclaw/hook_integrity.py).
+func posixHookPathInDir(word, dir string) bool {
+	rel, ok := strings.CutPrefix(word, strings.TrimSuffix(dir, "/")+"/")
+	if !ok {
+		return false
+	}
+	clean := path.Clean(rel)
+	return clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
+}
+
+// posixHookCommandInDir is Setup's hooks-dir claim of an unquoted command:
+// it starts in dir (which may hold a blank) and its script word, the text
+// after dir up to the next blank, stays inside dir (posixHookPathInDir).
+func posixHookCommandInDir(command, dir string) bool {
+	prefix := strings.TrimSuffix(dir, "/") + "/"
+	rel, ok := strings.CutPrefix(command, prefix)
+	if !ok {
+		return false
+	}
+	if i := strings.IndexAny(rel, " \t"); i >= 0 {
+		rel = rel[:i]
+	}
+	return posixHookPathInDir(prefix+rel, dir)
+}
+
 // hookCommandInWindowsDir reports whether command's first word is a Windows
 // path inside dir, a Windows path too (windowsHookCommandInDir): on dir's
 // volume, after . and .. are resolved, in any case and with either
