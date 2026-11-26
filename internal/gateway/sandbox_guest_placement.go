@@ -587,8 +587,9 @@ func guestCollect(list []guestPending, listed map[guestKey]int, plain *[]int, dr
 // placed-children reading, the split-gap reading and the sandbox hook-config
 // guard each made them from the start for the same input, up to four
 // SimpleCommands passes a hook (substrate-1 GAP-0923, GAP-1028). An entry
-// serves only an input and facts equal to the ones it was made for; any
-// other is read afresh. A copy of the request shares it; a nil memo keeps
+// serves only an input and facts equal to the ones it was made for (a split
+// or a plan whatever the input's walk wait, guestLexicalKey); any other is
+// read afresh. A copy of the request shares it; a nil memo keeps
 // nothing.
 type guestReadingMemo struct {
 	mu     sync.Mutex
@@ -650,9 +651,10 @@ func (memo *guestReadingMemo) simpleCommands(input actionfacts.Input, facts acti
 	if memo == nil {
 		return actionfacts.SimpleCommands(input, facts)
 	}
+	key := guestLexicalKey(input)
 	memo.mu.Lock()
 	for _, entry := range memo.splits {
-		if reflect.DeepEqual(entry.input, input) && reflect.DeepEqual(entry.facts, facts) {
+		if reflect.DeepEqual(entry.input, key) && reflect.DeepEqual(entry.facts, facts) {
 			memo.mu.Unlock()
 			return slices.Clone(entry.simples)
 		}
@@ -663,7 +665,7 @@ func (memo *guestReadingMemo) simpleCommands(input actionfacts.Input, facts acti
 	if len(memo.splits) == guestReadingMemoEntries {
 		memo.splits = slices.Delete(memo.splits, 0, 1)
 	}
-	memo.splits = append(memo.splits, guestSplitEntry{input: input, facts: facts, simples: slices.Clone(simples)})
+	memo.splits = append(memo.splits, guestSplitEntry{input: key, facts: facts, simples: slices.Clone(simples)})
 	memo.mu.Unlock()
 	return simples
 }
@@ -859,14 +861,32 @@ func guestCandidateMayReadKey(text string) bool {
 	return slices.ContainsFunc(sshPrivateKeyContentReaders, func(program string) bool { return strings.Contains(lower, program) })
 }
 
+// guestLexicalKey is input as the memo's splits and plans compare it: without
+// the hook call's wait for walk slots (Input.CredentialWalkBudget). A split
+// and a plan are lexical readings of the call (command texts, folders and
+// flags) and neither reads the wait, which only the facts' credential walk
+// draws on. The rule dispatch carries the hook's wait on its input
+// (dispatchTrustedActionOnce) and the lanes judge the call as the hook sent
+// it, with none, so since the wait was put on the input (substrate-1
+// GAP-1083) the sandbox hook-config guard made again the plan the placed
+// children had just made for the same call, its SimpleCommands and Analyze
+// passes included: a long copy-mode call took about 10% longer
+// (rel-1-0-10:GAP-2239). Every other field still has to match, and the
+// analysis cache (analyze) keeps the wait in its key: its facts carry it.
+func guestLexicalKey(input actionfacts.Input) actionfacts.Input {
+	input.CredentialWalkBudget = nil
+	return input
+}
+
 // plan is newGuestPlacementPlan(input, facts) over the memo's splits.
 func (memo *guestReadingMemo) plan(input actionfacts.Input, facts actionfacts.Facts) *guestPlacementPlan {
 	if memo == nil {
 		return newGuestPlacementPlan(input, facts, nil, nil)
 	}
+	key := guestLexicalKey(input)
 	memo.mu.Lock()
 	for _, entry := range memo.plans {
-		if reflect.DeepEqual(entry.input, input) && reflect.DeepEqual(entry.facts, facts) {
+		if reflect.DeepEqual(entry.input, key) && reflect.DeepEqual(entry.facts, facts) {
 			memo.mu.Unlock()
 			return entry.plan
 		}
@@ -877,7 +897,7 @@ func (memo *guestReadingMemo) plan(input actionfacts.Input, facts actionfacts.Fa
 	if len(memo.plans) == guestReadingMemoEntries {
 		memo.plans = slices.Delete(memo.plans, 0, 1)
 	}
-	memo.plans = append(memo.plans, guestPlanEntry{input: input, facts: facts, plan: plan})
+	memo.plans = append(memo.plans, guestPlanEntry{input: key, facts: facts, plan: plan})
 	memo.mu.Unlock()
 	return plan
 }
