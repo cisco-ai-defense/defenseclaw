@@ -15,12 +15,27 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+// repoOutsideTheHome returns a working directory that is not under the fake
+// home but is the root of its own repository (a .git directory), so the
+// project walk stops there. A bare t.TempDir() is not hermetic on a native
+// Windows run: the temporary directory sits under the real user profile
+// (C:\Users\<user>\...), and with no .git on the way the walk climbs into the
+// real profile and reads whatever Claude Code settings it holds.
+func repoOutsideTheHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestCopilotIgnoresClaudeUserHooksOutsideTheHome(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
 			req := guardRequest(t, ConnectorCopilot, config.ForeignHooksRemove)
 			req.GOOS = goos
-			req.WorkingDir = t.TempDir()
+			req.WorkingDir = repoOutsideTheHome(t)
 			settings := filepath.Join(req.Home, ".claude", "settings.json")
 			original := `{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"prettier --write"}]}]}}`
 			writeFile(t, settings, original)
@@ -40,7 +55,7 @@ func TestCopilotIgnoresClaudeUserHooksOutsideTheHome(t *testing.T) {
 
 func TestCopilotVSCodeClaudeUserSourceStaysReportOnly(t *testing.T) {
 	req := guardRequest(t, ConnectorCopilot, config.ForeignHooksRemove)
-	req.WorkingDir = t.TempDir()
+	req.WorkingDir = repoOutsideTheHome(t)
 	req.HookSurface = connector.CopilotHookSurfaceVSCodeLocal
 	settings := filepath.Join(req.Home, ".claude", "settings.json")
 	for _, source := range guardSources(req) {
@@ -55,8 +70,9 @@ func TestCopilotVSCodeClaudeUserSourceStaysReportOnly(t *testing.T) {
 }
 
 func TestCopilotIgnoresDefenseClawClaudeUserRegistration(t *testing.T) {
+	// WorkingDir stays at the default, <home>/work/repo/src: under the fake
+	// home and bounded by the repository's .git, so no walk can leave it.
 	req := guardRequest(t, ConnectorCopilot, config.ForeignHooksRemove)
-	req.WorkingDir = t.TempDir()
 	command := connector.PerUserOwnedHookCommands("claudecode", filepath.Join(req.Home, ".defenseclaw"))[0]
 	req.OwnedCommands = connector.PerUserOwnedHookCommands("copilot", filepath.Join(req.Home, ".defenseclaw"))
 	writeFile(t, filepath.Join(req.Home, ".claude", "settings.json"),
