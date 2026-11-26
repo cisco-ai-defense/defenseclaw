@@ -51,14 +51,19 @@ func TestUnquotedGlobAtHomeMatchesAcrossOS(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, header := range []bool{true, false} {
 			for _, row := range rows {
+				// Codex runs PowerShell on Windows, whose wildcards match a
+				// leading dot: a row that expects a POSIX glob to skip a dot
+				// name does not apply there, so it is not generated. A skipped
+				// row kept the whole name from ever being a pass on Windows
+				// (GAP-2168).
+				if connector == "codex" && codexShellRunsPowerShell && !row.block {
+					continue
+				}
 				name := connector + "/" + row.name
 				if !header {
 					name += "/no-header"
 				}
 				t.Run(name, func(t *testing.T) {
-					if connector == "codex" && codexShellRunsPowerShell && !row.block {
-						t.Skip("PowerShell wildcards match a leading dot")
-					}
 					home := t.TempDir()
 					keys := filepath.Join(home, ".ssh", "authorized_keys")
 					for _, dir := range []string{filepath.Dir(keys), filepath.Join(home, "project"), filepath.Join(home, "Documents")} {
