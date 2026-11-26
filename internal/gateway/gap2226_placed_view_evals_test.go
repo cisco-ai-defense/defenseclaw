@@ -189,6 +189,16 @@ func TestGAP2226PlacedViewEvalTableIsFresh(t *testing.T) {
 	}
 	// One slot per rule and projection, whatever order the results come
 	// in; a table per generation.
+	slots := map[int]bool{}
+	for rule := range generation.semanticRules {
+		for _, enforcement := range []bool{false, true} {
+			slot := guestKeptSlot(rule, enforcement)
+			if slots[slot] {
+				t.Fatalf("rule %d enforcement %v: slot %d is another rule's or projection's", rule, enforcement, slot)
+			}
+			slots[slot] = true
+		}
+	}
 	probe := &guestViewEvalTable{generation: generation}
 	want := map[int]uint64{}
 	for _, put := range []struct {
