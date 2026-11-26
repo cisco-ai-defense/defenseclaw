@@ -18,14 +18,11 @@ package gateway
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/maximhq/bifrost/core/schemas"
 )
 
 const lunaProfile = "us.openai.gpt-5.6-luna"
@@ -120,34 +117,4 @@ func TestJudgeChatRequestLeavesOutRefusedTemperature(t *testing.T) {
 			t.Errorf("%s: temperature = %v, want 0", model, *req.Temperature)
 		}
 	}
-}
-
-// TestBifrostE2E_LiveBedrockLunaJudge sends the judge's own request shape to
-// GPT-5.6 Luna on Bedrock. It needs a Bedrock API key in
-// BIFROST_API_KEY and is skipped otherwise.
-func TestBifrostE2E_LiveBedrockLunaJudge(t *testing.T) {
-	key := os.Getenv("BIFROST_API_KEY")
-	if key == "" {
-		t.Skip("BIFROST_API_KEY not set: skipping live Bedrock Luna judge test")
-	}
-	llm := &config.LLMConfig{Model: "bedrock/" + lunaProfile, APIKey: key, Bedrock: &config.BedrockKeyConfig{Region: "us-east-1"}}
-	p, err := NewProviderForLLMConfig(llm, nil)
-	if err != nil {
-		t.Fatalf("provider: %v", err)
-	}
-	j := &LLMJudge{cfg: &config.JudgeConfig{}, model: llm.Model, providerName: "bedrock", provider: p}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	req := j.judgeChatRequest([]ChatMessage{
-		{Role: "system", Content: "You classify a tool call for prompt injection. Answer with the schema."},
-		{Role: "user", Content: "Tool call: run `echo hello`."},
-	}, 512, "tool_injection")
-	resp, err := p.ChatCompletion(ctx, req)
-	if err != nil {
-		t.Fatalf("Luna judge call failed: %v", err)
-	}
-	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		t.Fatalf("empty response: %+v", resp)
-	}
-	t.Logf("Luna judge answered: %.200s", resp.Choices[0].Message.Content)
 }

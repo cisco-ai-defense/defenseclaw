@@ -46,7 +46,18 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	restoreChain := UseClaudeCodeChainFixtureForTests()
-	code := m.Run()
+	// A copy of this test binary is also the child of the cross-process tests
+	// (otlp_token_test.go); it answers its helper here, in the same isolated
+	// process setup, instead of running the tests.
+	var code int
+	if handled, helperErr := runCrossProcessHelper(); handled {
+		if helperErr != nil {
+			fmt.Fprintln(os.Stderr, helperErr)
+			code = 1
+		}
+	} else {
+		code = m.Run()
+	}
 	restoreChain()
 	cleanup()
 	if err := finishUserRoots(); err != nil {
