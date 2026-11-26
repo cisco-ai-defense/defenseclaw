@@ -728,6 +728,125 @@ func (g *procLinkGuard) unproved(path string, below bool) bool {
 	return !fixedPIDLeafProved(link)
 }
 
+// processLinkHead recognizes a process-dependent link at the end of a
+// lexically placed prefix. No suffix after that link may be cleaned: dot-dot
+// is interpreted from the link target by the kernel, not from its text.
+func processLinkHead(parts []string) bool {
+	if len(parts) == 2 && parts[0] == "dev" {
+		return parts[1] == "stdin" || parts[1] == "stdout" || parts[1] == "stderr"
+	}
+	if len(parts) == 3 && parts[0] == "dev" && parts[1] == "fd" {
+		return allDigits(parts[2])
+	}
+	if len(parts) < 3 || parts[0] != "proc" {
+		return false
+	}
+	process := allDigits(parts[1]) || parts[1] == "self" || parts[1] == "thread-self"
+	if !process {
+		return false
+	}
+	if len(parts) == 3 {
+		return parts[2] == "root" || parts[2] == "cwd" || parts[2] == "exe"
+	}
+	if len(parts) == 4 {
+		return (parts[2] == "fd" || parts[2] == "map_files") && allDigits(parts[3])
+	}
+	if len(parts) >= 5 && parts[2] == "task" && allDigits(parts[3]) {
+		if len(parts) == 5 {
+			return parts[4] == "root" || parts[4] == "cwd" || parts[4] == "exe"
+		}
+		return len(parts) == 6 && (parts[4] == "fd" || parts[4] == "map_files") && allDigits(parts[5])
+	}
+	return false
+}
+
+// processLinkPrefix cleans only components before the first process link.
+// Empty and dot components before /proc/<pid>/root must not hide the link,
+// while root/.. must remain raw because it stays at the linked root.
+func processLinkPrefix(path string) string {
+	path = filepath.ToSlash(path)
+	if !strings.HasPrefix(path, "/") {
+		return path
+	}
+	input := strings.Split(path, "/")
+	parts := make([]string, 0, len(input))
+	for i := 1; i < len(input); i++ {
+		switch input[i] {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, input[i])
+		}
+		if processLinkHead(parts) {
+			prefix := "/" + strings.Join(parts, "/")
+			if i+1 < len(input) {
+				return prefix + "/" + strings.Join(input[i+1:], "/")
+			}
+			return prefix
+		}
+	}
+	return path
+}
+
+// ProcessLinkWriteUnproved reports a write below a process link whose target
+// the hook cannot prove. Opener-relative descriptors and task links are
+// always unproved. A numbered PID link keeps its existing fixedPIDLink proof.
+// A write to the descriptor itself is ordinary: only a path continuing below
+// it could name a key file in an unknown directory (GAP-2227, GAP-2237).
+func ProcessLinkWriteUnproved(path string, guest bool) bool {
+	path = processLinkPrefix(path)
+	if openerRelativeLinkBelow(path) {
+		return true
+	}
+	link, ok := fixedPIDLink(path)
+	if !ok || filepath.ToSlash(path) == link {
+		return false
+	}
+	return guest || !fixedPIDLinkProved(link)
+}
+
+func openerRelativeLinkBelow(path string) bool {
+	path = filepath.ToSlash(path)
+	for _, alias := range []string{"/dev/stdin", "/dev/stdout", "/dev/stderr"} {
+		if rest, ok := strings.CutPrefix(path, alias+"/"); ok && rest != "" {
+			return true
+		}
+	}
+	if strings.HasPrefix(path, "/dev/fd/") {
+		rest := strings.TrimPrefix(path, "/dev/fd/")
+		n, below, ok := strings.Cut(rest, "/")
+		return ok && below != "" && allDigits(n)
+	}
+	rest, found := strings.CutPrefix(path, "/proc/")
+	if !found {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) < 3 || parts[0] != "self" && parts[0] != "thread-self" {
+		return false
+	}
+	entry := 1
+	if parts[1] == "task" {
+		if len(parts) < 5 || !allDigits(parts[2]) {
+			return false
+		}
+		entry = 3
+	}
+	switch parts[entry] {
+	case "root":
+		return entry > 1 && len(parts) > entry+1 && parts[entry+1] != ""
+	case "cwd", "exe":
+		return len(parts) > entry+1 && parts[entry+1] != ""
+	case "fd", "map_files":
+		return len(parts) > entry+2 && allDigits(parts[entry+1]) && parts[entry+2] != ""
+	}
+	return false
+}
+
 func unprovedProcessLink(path string, below bool) bool {
 	var g procLinkGuard
 	return g.unproved(path, below)
