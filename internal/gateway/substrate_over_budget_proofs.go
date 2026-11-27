@@ -104,7 +104,7 @@ func withOverBudgetOwnSSHFolderCopyAlert(request trustedActionRequest, findings 
 	}
 	for index := range findings {
 		if overBudgetKitKeyFinding(findings[index]) {
-			findings[index].enforcement = findingEnforcementAlertOnly
+			findings[index].Proof = findings[index].Proof.Advise()
 			if findings[index].RuleID == "persistence.ssh_authorized_keys_command" {
 				findings[index].Title = ownSSHFolderCopyTitle
 			}
