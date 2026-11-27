@@ -283,6 +283,9 @@ func (s *passthroughStream) run() {
 		flusher.Flush()
 	}
 	var accumulated responseText
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(ctx, newMidStreamScanState())
 	streamResponseModel := ""
 	lastScanLen := 0
 	// lastFullScanLen is the text the last full mid-stream check read: the
@@ -467,7 +470,7 @@ func (s *passthroughStream) run() {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.CheckText(), label, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(midCtx, accumulated.CheckText(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -731,7 +734,7 @@ func (s *passthroughStream) run() {
 		}
 		if accumulated.Len() > lastScanLen {
 			checkContent := accumulated.CheckText()
-			initVerdict := p.inspector.InspectMidStream(ctx, "completion", checkContent,
+			initVerdict := p.inspector.InspectMidStream(midCtx, "completion", checkContent,
 				[]ChatMessage{{Role: "assistant", Content: checkContent}}, label, mode)
 			p.resolveConfirm(ctx, r, initVerdict, "completion", label, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
