@@ -625,6 +625,10 @@ Hook handlers then treat a sandbox request differently from a host request
   mount mode `/work/<repo>` becomes the real host project path, and a path
   resolves only if it stays inside the project and is not a masked secret. In
   copy mode no path reaches the host filesystem.
+- In copy mode, a call that may name the SSH folder is decided by its words
+  alone, because the sandbox's files are not on the host. On a Mac gateway
+  these decisions, and other hooks running at the same time, take longer than
+  on Linux or Windows. The verdicts are the same.
 - `~` means the sandbox HOME, `/sandbox`, never the host user's home.
 - Tool results never earn the source-scope proofs that read the host tree.
 - Session state is kept per binding, because session IDs are chosen by the

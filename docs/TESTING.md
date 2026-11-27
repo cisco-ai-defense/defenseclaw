@@ -41,26 +41,28 @@ opa test policies/rego/ -v
 
 ## Tests That Run a Decision Without a File System
 
-Some tests decide a call by its words alone, with no file system behind it, for
-example a Substrate actor's command in copy mode, whose files live on the actor
-and not on the host. `internal/fixturefs` provides `Unread` for this: while a
-decision runs inside `Unread`, reads on that goroutine see no files, and other
-goroutines are not affected.
+Some decisions judge a call by its words alone, with no file system behind
+it: a sandbox copy-mode call that may name the SSH folder names files of the
+sandbox, which the host does not have. `internal/fixturefs` provides `Unread`
+for this. While a decision runs inside `Unread`, reads on that goroutine see no
+files, and other goroutines are not affected. The shipped gateway uses it too,
+so tests of these decisions run the same code as the gateway.
 
-To tell which goroutine is inside `Unread`, `fixturefs` uses a key per
-goroutine, and the cost of that key depends on the platform:
+To tell which goroutine is inside `Unread`, `fixturefs` keys each check by
+goroutine, and the cost of the key depends on the platform:
 
-| Platform | Key | Cost of a check while a decision runs |
+| Platform | Key | Cost of each check while a decision runs |
 |---|---|---|
-| Linux and Windows | The id of the operating system thread, which `Unread` holds its goroutine on | One system call |
-| macOS | The goroutine number, read from a stack capture | One stack capture per `fixturefs.Map` call |
+| Linux and Windows | The id of the operating system thread, which `Unread` holds its goroutine on | One thread-id call |
+| macOS | The goroutine number, read from a stack capture | One stack capture |
 
-On macOS a test run therefore spends more time on each by-name decision, and on
-every other test that reads files while one runs. This only costs time; the
-verdicts are the same. The thread-id key is not used on macOS because it has
-not been checked there, and a wrong key could make other goroutines read as
+A check is made by every `fixturefs.Map` call, by the direct `Unreadable` checks
+in `internal/hookpaths` and by `fixturefs.Go`. On macOS these decisions, and
+other hooks running at the same time, therefore take longer; the verdicts are
+the same. macOS keeps the stack capture because a thread-id key is not yet
+proven correct there, and a wrong key could make other goroutines read as
 inside `Unread`, which would weaken verdicts. Do not change the macOS key
-without a macOS test run. `TestUnreadKeyStrategyPerPlatform` in
+without running these tests on a Mac. `TestUnreadKeyStrategyPerPlatform` in
 `internal/fixturefs` fails if macOS stops using the stack capture or if Linux
 or Windows go back to it.
 
