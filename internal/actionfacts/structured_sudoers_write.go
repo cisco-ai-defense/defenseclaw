@@ -269,6 +269,13 @@ func applyDotDotSteps(base, name string) (string, bool) {
 		prefix, named = volume+string(filepath.Separator), true
 		slashed = filepath.ToSlash(name[len(volume):])
 	}
+	// The walk appends each name to one buffer: prefix is clean and a part
+	// holds no separator, so the join is the prefix, a separator and the
+	// part. filepath.Join cleaned the whole prefix again at every name, a
+	// cost quadratic in the operand: a 58000-byte mv operand ending in ../f
+	// took 1.96 s (TestGAP2287LinkBeforeStepScale). A dot-dot step, at most
+	// maxOperandDotDotSteps of them, reads the prefix as a string.
+	walked := []byte(prefix)
 	steps, plain := 0, ""
 	for _, part := range strings.Split(slashed, "/") {
 		switch part {
@@ -277,6 +284,7 @@ func applyDotDotSteps(base, name string) (string, bool) {
 			if steps++; steps > maxOperandDotDotSteps {
 				return "", false
 			}
+			prefix = string(walked)
 			if named {
 				if !folderAtOrAbove(prefix, plain) {
 					if !operandPlainDirProbe(prefix) {
@@ -287,12 +295,15 @@ func applyDotDotSteps(base, name string) (string, bool) {
 			} else if operandLinkProbe(prefix) {
 				return "", false
 			}
-			prefix = filepath.Dir(prefix)
+			walked = append(walked[:0], filepath.Dir(prefix)...)
 		default:
-			prefix, named = filepath.Join(prefix, part), true
+			if len(walked) == 0 || !os.IsPathSeparator(walked[len(walked)-1]) {
+				walked = append(walked, filepath.Separator)
+			}
+			walked, named = append(walked, part...), true
 		}
 	}
-	return prefix, true
+	return string(walked), true
 }
 
 // folderAtOrAbove reports whether the clean folder is the clean folder below
