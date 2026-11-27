@@ -42,8 +42,11 @@ func powerShellQuotedPathOperands(command, cwd, home string) (operands []stateOp
 			single := psQuoteOfKind(runes[i], true)
 			if !single && !psQuoteOfKind(runes[i], false) {
 				// A bare argument that starts with the home is the same path
-				// to PowerShell: Add-Content -Path $HOME\.codex\config.toml.
-				if runes[i] != '$' || i > 0 && !strings.ContainsRune(" \t\r\n(,=:;|{", runes[i-1]) {
+				// to PowerShell: Add-Content -Path $HOME\.codex\config.toml,
+				// Get-Item ~\.defenseclaw\config.yaml (its FileSystem provider
+				// reads a leading ~ as the home, rel-1-0-10:GAP-1191).
+				tilde := runes[i] == '~' && i+1 < len(runes) && (runes[i+1] == '\\' || runes[i+1] == '/')
+				if runes[i] != '$' && !tilde || i > 0 && !strings.ContainsRune(" \t\r\n(,=:;|{", runes[i-1]) {
 					continue
 				}
 				j := i + 1
@@ -61,7 +64,11 @@ func powerShellQuotedPathOperands(command, cwd, home string) (operands []stateOp
 					j++
 				}
 				word := string(runes[i:j])
-				if path, ok := psHomeQuotedPath(word, home); ok && !seen[word] {
+				path, ok := psHomeQuotedPath(word, home)
+				if tilde {
+					path, ok = psTildeHomePath(word, home)
+				}
+				if ok && !seen[word] {
 					if len(seen) >= powerShellQuotedPathMax {
 						return false
 					}
@@ -150,6 +157,26 @@ func psHomeQuotedPath(text, home string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// psTildeHomePath returns the path a bare PowerShell word ~\rest or ~/rest
+// names: rest in the home, for a Windows home and for pwsh on Linux and
+// macOS. A word that expands anything else is no static path.
+func psTildeHomePath(word, home string) (string, bool) {
+	if !actionWindowsHome(home) && !strings.HasPrefix(home, "/") ||
+		len(word) < 3 || word[0] != '~' || word[1] != '\\' && word[1] != '/' {
+		return "", false
+	}
+	rest := word[1:]
+	if strings.HasPrefix(home, "/") {
+		// pwsh takes \ as a separator on Linux and macOS too.
+		rest = strings.ReplaceAll(rest, `\`, "/")
+	}
+	path := strings.TrimRight(home, `\/`) + rest
+	if !psQuotedPath(path, false) {
+		return "", false
+	}
+	return path, true
 }
 
 // psQuoteOfKind reports a single quote (single) or a double quote of

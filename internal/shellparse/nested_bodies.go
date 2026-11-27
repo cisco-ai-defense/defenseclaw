@@ -89,8 +89,8 @@ func nestedBodyWeight(command string, mayDescend func(body string) bool) int {
 		if depth >= nestedBodyMaxDepth || depth > 0 && !mayDescend(text) || nestingBound(text) != "" {
 			return false
 		}
-		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-		if err != nil || file == nil {
+		file, parsed := ParseBash(text)
+		if !parsed {
 			return false
 		}
 		over := false

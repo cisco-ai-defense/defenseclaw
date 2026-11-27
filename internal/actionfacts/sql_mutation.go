@@ -25,6 +25,10 @@ type exactSQLMutationInput struct {
 	source             SQLMutationQuerySource
 	connectionIdentity string
 	databaseIdentity   string
+	// rolledBack marks a statement of a multi-statement query inside a
+	// transaction the query undoes (sqlSessionStatementCandidates): it changes no
+	// data, and the mutation reader leaves it out.
+	rolledBack bool
 }
 
 // ExactSQLMutations returns validated value-free copies of all exact mutation
@@ -66,7 +70,7 @@ func validSQLMutationFact(fact SQLMutationFact) bool {
 		return false
 	}
 	switch fact.Operation {
-	case SQLMutationDeleteUnbounded, SQLMutationTruncate, SQLMutationDropTable:
+	case SQLMutationDeleteUnbounded, SQLMutationUpdateUnbounded, SQLMutationTruncate, SQLMutationDropTable:
 		return fact.Scope == SQLMutationScopeTable
 	case SQLMutationDropSchema:
 		return fact.Scope == SQLMutationScopeSchema
@@ -85,71 +89,54 @@ func validSQLMutationDigest(value string) bool {
 	return err == nil
 }
 
-func projectSQLMutations(input Input, facts Facts) []SQLMutationFact {
-	inputs := exactSQLMutationInputs(input, facts)
-	mutations := make([]SQLMutationFact, 0, len(inputs))
-	for _, candidate := range inputs {
-		operation, scope, object, ok := exactSQLMutation(candidate.engine, candidate.query)
-		if candidate.engine == "sqlite" {
-			object, ok = exactSQLiteUnboundedDelete(candidate.query)
-			operation = SQLMutationDeleteUnbounded
-			scope = SQLMutationScopeTable
-		}
-		if !ok {
-			continue
-		}
-		connectionDigest := sqlMutationDigest(
-			sqlMutationConnectionDigestDomain,
-			candidate.engine,
-			candidate.connectionIdentity,
-		)
-		databaseIdentity := candidate.databaseIdentity
-		if operation == SQLMutationDropDatabase {
-			if candidate.engine == "generic" {
-				// A db.execute argument cannot authenticate the dropped database
-				// by itself. Keep the connector identity in the digest boundary.
-				databaseIdentity = candidate.connectionIdentity + "\x00" + object
-			} else {
-				databaseIdentity = object
-			}
-		}
-		if databaseIdentity == "" {
-			databaseIdentity = "implicit"
-		}
-		databaseDigest := sqlMutationDigest(
-			sqlMutationDatabaseDigestDomain,
-			candidate.engine,
-			databaseIdentity,
-		)
-		if candidate.engine == "sqlite" {
-			// MCP SQLite read_query and write_query calls name their database only
-			// through authenticated connector context. Reuse the rowset resource
-			// digest so a later bounded chain can prove the same database without
-			// retaining or trusting an argument-supplied identity.
-			databaseDigest = framedPrivateDigest(
-				sensitiveSQLRowsetIdentityDomain,
-				candidate.databaseIdentity,
-			)
-		}
-		fact := SQLMutationFact{
-			Engine:                   candidate.engine,
-			Operation:                operation,
-			Scope:                    scope,
-			QuerySource:              candidate.source,
-			ConnectionIdentityDigest: connectionDigest,
-			DatabaseIdentityDigest:   databaseDigest,
-			ObjectIdentityDigest: sqlMutationDigest(
-				sqlMutationObjectDigestDomain,
-				candidate.engine,
-				object,
-			),
-			Exact: true,
-		}
-		if validSQLMutationFact(fact) {
-			mutations = append(mutations, fact)
+func projectSQLMutationFact(
+	candidate exactSQLMutationInput,
+	operation SQLMutationOperation,
+	scope SQLMutationScope,
+	object string,
+) (SQLMutationFact, bool) {
+	connectionDigest := sqlMutationDigest(
+		sqlMutationConnectionDigestDomain,
+		candidate.engine,
+		candidate.connectionIdentity,
+	)
+	databaseIdentity := candidate.databaseIdentity
+	if operation == SQLMutationDropDatabase {
+		if candidate.engine == "generic" {
+			databaseIdentity = candidate.connectionIdentity + "\x00" + object
+		} else {
+			databaseIdentity = object
 		}
 	}
-	return mutations
+	if databaseIdentity == "" {
+		databaseIdentity = "implicit"
+	}
+	databaseDigest := sqlMutationDigest(
+		sqlMutationDatabaseDigestDomain,
+		candidate.engine,
+		databaseIdentity,
+	)
+	if candidate.engine == "sqlite" {
+		databaseDigest = framedPrivateDigest(
+			sensitiveSQLRowsetIdentityDomain,
+			candidate.databaseIdentity,
+		)
+	}
+	fact := SQLMutationFact{
+		Engine:                   candidate.engine,
+		Operation:                operation,
+		Scope:                    scope,
+		QuerySource:              candidate.source,
+		ConnectionIdentityDigest: connectionDigest,
+		DatabaseIdentityDigest:   databaseDigest,
+		ObjectIdentityDigest: sqlMutationDigest(
+			sqlMutationObjectDigestDomain,
+			candidate.engine,
+			object,
+		),
+		Exact: true,
+	}
+	return fact, validSQLMutationFact(fact)
 }
 
 func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
@@ -187,11 +174,7 @@ func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
 	if input.Tool == "sql_query" || !facts.Authoritative() || len(facts.Commands) != 1 {
 		return nil
 	}
-	candidate, ok := exactSQLMutationCommand(facts.Commands[0])
-	if !ok {
-		return nil
-	}
-	return []exactSQLMutationInput{candidate}
+	return exactSQLCLICommandInputs(facts.Commands[0], true)
 }
 
 // exactDBExecuteInput recognizes the closed two-key schema observed in public
@@ -296,37 +279,45 @@ func exactStructuredSQLMutationTarget(connection, database string) (string, stri
 	return engine, strings.ToLower(database), true
 }
 
-func exactSQLMutationCommand(command CommandFact) (exactSQLMutationInput, bool) {
+// exactSQLCLICommandInputs is the inline SQL of one SQL client command line:
+// its query option or its literal stdin, and with multi each -c of a psql
+// call (psql runs them in order). nil when command is no exact SQL client
+// call or names no query.
+func exactSQLCLICommandInputs(command CommandFact, multi bool) []exactSQLMutationInput {
 	if command.Kind != CommandKindProcess || command.Effect != EffectExecute ||
 		command.ControlFlowUncertain || !command.ArgvComplete || len(command.Wrappers) != 0 ||
 		len(command.Argv) < 1 {
-		return exactSQLMutationInput{}, false
+		return nil
 	}
 	engine, ok := sqlMutationEngine(command.Program)
 	if !ok {
-		return exactSQLMutationInput{}, false
+		return nil
 	}
-	parsed, ok := parseExactSQLCLI(command.Argv, engine)
+	parsed, ok := parseSQLCLI(command.Argv, engine, multi)
 	if !ok {
-		return exactSQLMutationInput{}, false
+		return nil
 	}
-	query, source := parsed.query, SQLMutationQueryArgv
+	queries, source := parsed.queries, SQLMutationQueryArgv
 	if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
-		if query != "" {
-			return exactSQLMutationInput{}, false
+		if len(queries) != 0 {
+			return nil
 		}
-		query, source = command.LiteralStdin, SQLMutationQueryLiteralStdin
+		queries, source = []string{command.LiteralStdin}, SQLMutationQueryLiteralStdin
 	}
-	if query == "" {
-		return exactSQLMutationInput{}, false
+	inputs := make([]exactSQLMutationInput, 0, len(queries))
+	for _, query := range queries {
+		if query == "" {
+			return nil
+		}
+		inputs = append(inputs, exactSQLMutationInput{
+			engine:             engine,
+			query:              query,
+			source:             source,
+			connectionIdentity: parsed.connectionIdentity(engine),
+			databaseIdentity:   strings.ToLower(parsed.database),
+		})
 	}
-	return exactSQLMutationInput{
-		engine:             engine,
-		query:              query,
-		source:             source,
-		connectionIdentity: parsed.connectionIdentity(engine),
-		databaseIdentity:   strings.ToLower(parsed.database),
-	}, true
+	return inputs
 }
 
 func sqlMutationEngine(program string) (string, bool) {
@@ -347,7 +338,7 @@ func sqlMutationEngine(program string) (string, bool) {
 }
 
 type exactSQLCLI struct {
-	query    string
+	queries  []string
 	database string
 	options  map[string]string
 }
@@ -372,14 +363,16 @@ func (parsed exactSQLCLI) connectionIdentity(engine string) string {
 	return strings.Join(parts, "\x00")
 }
 
-func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
+// parseSQLCLI reads a SQL client argv. With multi a psql call may repeat -c
+// (each query is kept, in order); every other repeated option is refused.
+func parseSQLCLI(argv []string, engine string, multi bool) (exactSQLCLI, bool) {
 	parsed := exactSQLCLI{options: make(map[string]string)}
 	for index := 1; index < len(argv); index++ {
 		argument := argv[index]
 		key, value, consumesNext, flag, ok := exactSQLCLIOption(engine, argument)
 		if ok {
 			previous, duplicate := parsed.options[key]
-			if duplicate && key != "option" {
+			if duplicate && key != "option" && (!multi || key != "query" || engine != "postgresql") {
 				return exactSQLCLI{}, false
 			}
 			if consumesNext {
@@ -389,7 +382,7 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 				index++
 				value = argv[index]
 			}
-			if !flag && (!exactSQLScalar(value, maxCommandBytes) || unresolvedSQLMutationValue(value)) {
+			if !flag && (!exactSQLScalar(value, maxCommandBytes) || unresolvedSQLCLIValue(engine, key, value)) {
 				return exactSQLCLI{}, false
 			}
 			if key == "option" {
@@ -402,7 +395,7 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 			}
 			parsed.options[key] = value
 			if key == "query" {
-				parsed.query = value
+				parsed.queries = append(parsed.queries, value)
 			}
 			if key == "database" {
 				parsed.database = value
@@ -770,6 +763,45 @@ func exactSQLIdentity(value string) bool {
 		}
 	}
 	return true
+}
+
+// unresolvedSQLCLIValue is unresolvedSQLMutationValue of an option value of
+// a SQL client, except that the tags of each complete PostgreSQL dollar quote
+// ($$...$$, $tag$...$tag$) in a psql query are SQL quoting, not a template
+// placeholder: the text is checked without them, so the server-side readers
+// see a COPY ... TO PROGRAM $$id$$ as the quoted form (GAP-1950). Each reader
+// still parses the query exactly; a lone $, a parameter ($1) or an
+// unterminated tag stays unresolved.
+func unresolvedSQLCLIValue(engine, key, value string) bool {
+	if engine == "postgresql" && key == "query" && strings.Contains(value, "$") {
+		value = withoutPostgreSQLDollarTags(value)
+	}
+	return unresolvedSQLMutationValue(value)
+}
+
+// withoutPostgreSQLDollarTags is text with the opening and closing tag of
+// each complete dollar quote removed and its body kept; a $ that opens no
+// complete dollar quote is kept.
+func withoutPostgreSQLDollarTags(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		tag, ok := "", false
+		if text[i] == '$' {
+			tag, ok = sqlDollarTag(text[i:])
+		}
+		end := -1
+		if ok {
+			end = strings.Index(text[i+len(tag):], tag)
+		}
+		if end < 0 {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		out.WriteString(text[i+len(tag) : i+len(tag)+end])
+		i += len(tag) + end + len(tag)
+	}
+	return out.String()
 }
 
 func unresolvedSQLMutationValue(value string) bool {

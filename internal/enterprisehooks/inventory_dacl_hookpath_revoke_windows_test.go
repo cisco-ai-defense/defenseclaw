@@ -21,6 +21,7 @@ import (
 // connector's hook path first; a connector whose hook path does not run
 // through ~\.config leaves it alone.
 func TestRevokeGatewayInventoryReadOnHookPathDotdirsUnblocksTheRemovalWalk(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := t.TempDir()
 	config := filepath.Join(home, ".config")

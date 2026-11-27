@@ -2541,7 +2541,12 @@ func readStableManagedRuntimeFileForOwner(
 ) ([]byte, bool, error) {
 	var data []byte
 	var exists bool
-	err := safefile.RetryTransientRead(func() error {
+	retry := safefile.RetryTransientRead
+	if allowMissing {
+		// A missing optional runtime file is an answer: one confirming look.
+		retry = safefile.RetryOptionalRead
+	}
+	err := retry(func() error {
 		var readErr error
 		data, exists, readErr = readStableManagedRuntimeFileForOwnerOnce(
 			path, label, maxBytes, expectedOwnerSID,
@@ -2580,7 +2585,7 @@ func readStableManagedRuntimeFileForOwnerOnce(
 	}
 	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, safefile.NameVanished(err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
@@ -2633,7 +2638,7 @@ func readStableManagedRuntimeFileForOwnerOnce(
 	}
 	current, err := os.Lstat(path)
 	if err != nil {
-		return nil, false, fmt.Errorf("%s changed after open: %w", label, err)
+		return nil, false, fmt.Errorf("%s changed after open: %w", label, safefile.NameVanished(err))
 	}
 	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
 		!os.SameFile(opened, current) ||

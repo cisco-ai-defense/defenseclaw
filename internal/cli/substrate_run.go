@@ -198,6 +198,7 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	}
 	ctx, stop := substrateContext(cmd)
 	defer stop()
+	egress := substrateEgressAhead(ctx, s)
 	a, err := resolveSubstrateActor(ctx, s.Client, ref)
 	if err != nil {
 		return substrateFail(err)
@@ -216,6 +217,9 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	}
 	defer mcp.Close()
 	o.Notices = mcp.Notices()
+	// GAP-0505: the person learns here, not from a DNS error in the agent,
+	// that another callout holds Substrate's egress slot.
+	egress(cmd.ErrOrStderr())
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
@@ -501,6 +505,12 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 		}
 		defer prepared.Close()
 	}
+	// GAP-0505: read during the create, printed after "Started". A batch
+	// prints it once for all of its tasks (runSubstrateBatch).
+	egress := func(io.Writer) {}
+	if req.BatchID == "" {
+		egress = substrateEgressAhead(ctx, s)
+	}
 	a, err = s.Client.Create(ctx, req)
 	// GAP-0527: the profile login saved (--default-profile) is a preference,
 	// not the person's assignment. Refused (a contractor whose login saved
@@ -560,6 +570,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	if t.note != "" {
 		fmt.Fprintf(w, "Note: %s\n", t.note)
 	}
+	egress(w)
 	defer func() {
 		if err != nil {
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -800,9 +811,17 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if err != nil {
 		return -1, substrateFail(err)
 	}
+	info := substrateTaskEndInfo(ctx, s)
+	// GAP-0505: a task whose other hosts were refused because another
+	// callout holds Substrate's egress slot says so where it ends.
+	if info != nil {
+		if line := substrateEgressLine(info.EgressCallout); line != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), line)
+		}
+	}
 	// A task whose hook and model calls the gateway refused may still end
 	// with exit 0; it did not finish (GAP-0194).
-	if msg, refused := substrateTokenRefusal(ctx, s, started); refused {
+	if msg, refused := substrateTokenRefusal(info, started); refused {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s\nReview it with: defenseclaw substrate logs %s\n", msg, a.Name)
 		return 1, cliusage.WithExitCode(errors.New("the task did not run: the cluster refused its calls"), 1)
 	}
@@ -814,13 +833,23 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	return code, substrateMCPNone(mcp, f.mcpSpecs)
 }
 
-// substrateTokenRefusal asks the cluster whether it refused every agent's
-// token since start, and says so in words a person can act on.
-func substrateTokenRefusal(ctx context.Context, s *substrateSession, start time.Time) (string, bool) {
+// substrateTaskEndInfo is the one /info read made when a task ends (the
+// token refusal and the egress callout), nil when it failed.
+func substrateTaskEndInfo(ctx context.Context, s *substrateSession) *api.Info {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	info, err := s.Client.Info(cctx)
-	if err != nil || !info.ActorTokens.Refusing(start) {
+	if err != nil {
+		return nil
+	}
+	return &info
+}
+
+// substrateTokenRefusal says whether the cluster (its /info, nil when the
+// read failed) refused every agent's token since start, in words a person
+// can act on.
+func substrateTokenRefusal(info *api.Info, start time.Time) (string, bool) {
+	if info == nil || !info.ActorTokens.Refusing(start) {
 		return "", false
 	}
 	why := "the agent's identity could not be checked"
@@ -870,6 +899,10 @@ func runSubstrateBatch(ctx context.Context, cmd *cobra.Command, s *substrateSess
 	batchID := "b-" + newSubstrateID(4)
 	w := cmd.ErrOrStderr()
 	fmt.Fprintf(w, "Batch %s: %d task(s), %d at a time.\n", batchID, len(tasks), par)
+	// GAP-0505: the tasks' own output is not shown, so the batch says once
+	// at its start and once at its end that another callout holds
+	// Substrate's egress slot.
+	substrateEgressAhead(ctx, s)(w)
 	type result struct {
 		Task   string `json:"task"`
 		Name   string `json:"name,omitempty"`
@@ -925,6 +958,7 @@ func runSubstrateBatch(ctx context.Context, cmd *cobra.Command, s *substrateSess
 		}()
 	}
 	wg.Wait()
+	substrateEgressAhead(ctx, s)(w)
 	out := cmd.OutOrStdout()
 	failed := 0
 	for _, r := range results {

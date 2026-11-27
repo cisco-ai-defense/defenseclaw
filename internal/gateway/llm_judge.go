@@ -298,6 +298,11 @@ func localJudgeEndpoint(endpoint string) bool {
 // An alignment call (judgeCallAlignment) never waits for a slot: with none
 // free it fails with errJudgeSlotBusy, and it gives its slot up (failing
 // with errJudgeSlotPreempted) as soon as another judge call has to wait.
+//
+// A blank answer (no choice, or only white space) is asked once more on the
+// same slot while ctx allows: a model occasionally ends a turn with no text
+// (GAP-0610). A second blank answer goes to the caller, whose empty or
+// unparsed path treats it as a failed judge call.
 func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (resp *ChatResponse, err error) {
 	var release func()
 	yielding := judgeCallClassOf(kind) == judgeCallAlignment
@@ -329,13 +334,28 @@ func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (res
 	if end, bounded := hookJudgeAnswerEnd(ctx); bounded && !time.Now().Before(end) {
 		return nil, context.Canceled
 	}
-	call := j.beginJudgeUsage(ctx, kind)
-	if yielding {
-		return j.chatAbandonable(ctx, call, req)
+	for attempt := 0; ; attempt++ {
+		call := j.beginJudgeUsage(ctx, kind)
+		if yielding {
+			resp, err = j.chatAbandonable(ctx, call, req)
+		} else {
+			resp, err = j.provider.ChatCompletion(ctx, req)
+			finishJudgeUsage(call, resp, err)
+		}
+		if attempt > 0 || err != nil || !judgeAnswerBlank(resp) || ctx.Err() != nil {
+			return resp, err
+		}
+		if end, bounded := hookJudgeAnswerEnd(ctx); bounded && !time.Now().Before(end) {
+			return resp, err
+		}
 	}
-	resp, err = j.provider.ChatCompletion(ctx, req)
-	finishJudgeUsage(call, resp, err)
-	return resp, err
+}
+
+// judgeAnswerBlank reports a model response with no answer text: no choice,
+// no message, or a message of white space only.
+func judgeAnswerBlank(resp *ChatResponse) bool {
+	return resp == nil || len(resp.Choices) == 0 || resp.Choices[0].Message == nil ||
+		strings.TrimSpace(resp.Choices[0].Message.Content) == ""
 }
 
 // maxAbandonedAlignmentCalls bounds the alignment provider calls still
@@ -2404,6 +2424,10 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	// TARGET_HISTORY: what this session did earlier to the call's targets.
 	// The intent store has no place for it (judge_packet.go).
 	targetHistory := j.judgeTargets().record(sessionID, effects, time.Now())
+	// A remote chat party may have written the task: unless the connector
+	// said the owner typed it (GAP-1637), it scopes nothing for the judge
+	// (toolJudgeUnverifiedIntentNote) and the decision model does not get it.
+	intentUnverified := judgeTaskOwnerUnknown(ctx) && !j.sessionTaskFromOwner(sessionID)
 
 	var sample strings.Builder
 	if entry.UserIntent != "" {
@@ -2415,9 +2439,7 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 			targets = strings.Join(named, ", ")
 		}
 		attrs := fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets)
-		if judgeTaskOwnerUnknown(ctx) {
-			// A remote chat party may have written the task: it scopes
-			// nothing for the judge (toolJudgeUnverifiedIntentNote).
+		if intentUnverified {
 			attrs = toolJudgeIntentUnverifiedAttr + " " + attrs
 		}
 		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", attrs, entry.UserIntent)
@@ -2440,6 +2462,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 			SessionUserIntent: entry.UserIntent,
 			CurrentToolCall:   decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: current},
 			SessionHistory:    j.renderDecisionHistory(ctx),
+		}
+		if intentUnverified {
+			state.SessionUserIntent = ""
 		}
 		j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'c', tool: sanitizeToolName(toolName), text: args})
 		for _, event := range prior {
@@ -2568,7 +2593,11 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 // kernel-verified hook peer, or the account a per-user credential is bound
 // to) plus the session's state key, so another account that sends the same
 // session id can neither read, write nor reset it (GAP-0460). On a per-user
-// gateway, which has no verified caller, it is the state key as before.
+// gateway, which runs as its one user and has no verified caller, the
+// state key is the user's. The canonical connector the request came through
+// (judgeSessionConnector) is part of the key too, so two connectors, or a
+// connector and an unscoped caller, that send the same session id never
+// share a task, calls or decision history (GAP-0152).
 func judgeSessionKey(ctx context.Context) string {
 	return judgeSessionKeyFor(ctx, SessionIDFromContext(ctx))
 }
@@ -2577,6 +2606,9 @@ func judgeSessionKeyFor(ctx context.Context, sessionID string) string {
 	key := sandboxSessionStateKey(ctx, sessionID)
 	if key == "" {
 		return ""
+	}
+	if connectorName := judgeSessionConnector(ctx); connectorName != "" {
+		key = "connector\x00" + connectorName + "\x00" + key
 	}
 	if caller, ok := verifiedAuditCaller(ctx); ok && caller.ID != "" {
 		return "caller\x00" + caller.ID + "\x00" + key

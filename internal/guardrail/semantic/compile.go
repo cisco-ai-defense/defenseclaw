@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/cel-go/cel"
 	celast "github.com/google/cel-go/common/ast"
+	"github.com/google/cel-go/common/types"
 )
 
 type cachedCompile struct {
@@ -46,6 +47,9 @@ type Program struct {
 	listReductionSafe       bool
 	subsetReductionSafe     bool
 	argvSubsetReductionSafe bool
+	// neverTrue: constant folding leaves the literal false (false, false &&
+	// x, 1 == 2): the program admits no call whatever the facts.
+	neverTrue bool
 }
 
 // NewCompiler constructs an isolated compiler for one rulepack candidate.
@@ -151,7 +155,40 @@ func (c *Compiler) compile(expression string) (*Program, CompileCode) {
 		listReductionSafe:       listReductionSafe(checked),
 		subsetReductionSafe:     subsetReductionSafe(checked),
 		argvSubsetReductionSafe: argvSubsetReductionSafe(checked),
+		neverTrue:               foldsToFalse(c.env, checked),
 	}, CompileOK
+}
+
+// foldsToFalse reports a checked expression whose constant folding leaves the
+// literal false, so it is false for every input (a pack tombstone written
+// false, false && ..., ... && false or 1 == 2). Any folding error reads as
+// may-be-true: the answer is only ever used to withhold authority from a
+// rule that cannot fire (GAP-2207).
+func foldsToFalse(env *cel.Env, checked *cel.Ast) bool {
+	folder, err := cel.NewConstantFoldingOptimizer()
+	if err != nil {
+		return false
+	}
+	optimizer, err := cel.NewStaticOptimizer(folder)
+	if err != nil {
+		return false
+	}
+	folded, issues := optimizer.Optimize(env, checked)
+	if folded == nil || issues != nil && issues.Err() != nil {
+		return false
+	}
+	expr := folded.NativeRep().Expr()
+	if expr.Kind() != celast.LiteralKind {
+		return false
+	}
+	value, ok := expr.AsLiteral().(types.Bool)
+	return ok && !bool(value)
+}
+
+// NeverTrue reports a program that is false for every input: its expression
+// folds to the constant false (GAP-2207).
+func (p *Program) NeverTrue() bool {
+	return p != nil && p.neverTrue
 }
 
 // StaticCost returns the admitted checked-expression maximum.

@@ -286,6 +286,7 @@ func prepareWindowsTargetsManifestTestDirectory(t *testing.T) string {
 // folder must already be re-stamped when it runs; otherwise drift the repair
 // exists to fix would refuse the write.
 func TestWriteTargetsManifestAtomicRepairsParentBeforeTrustWalk(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := t.TempDir() // inherits the profile's descriptor: drifted
 	if validateWindowsTargetsManifestObject(dir, true) == nil {
 		t.Skip("temp folder already carries the AdminDirectory contract")
@@ -331,6 +332,7 @@ func windowsTargetsManifestDescriptor(t *testing.T, path string) string {
 }
 
 func TestProtectWindowsTargetsManifestObjectAppliesExactInstallerContract(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := t.TempDir()
 	file := filepath.Join(dir, "targets.yaml")
 	if err := os.WriteFile(file, []byte("version: 1\n"), 0o600); err != nil {
@@ -356,6 +358,7 @@ func TestProtectWindowsTargetsManifestObjectAppliesExactInstallerContract(t *tes
 }
 
 func TestValidateWindowsTargetsManifestObjectRejectsGenericSplitDirectoryDACL(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := t.TempDir()
 	// This is the four-ACE representation produced when inheritable
 	// GENERIC_ALL entries are materialized by NTFS: concrete effective access
@@ -411,6 +414,7 @@ func TestValidateWindowsTargetsManifestObjectRejectsGenericSplitDirectoryDACL(t 
 // tick on a stable box. If regressions land here, the test-fixture's
 // mtime check catches it.
 func TestWriteTargetsManifestAtomicNoOpNoWrite(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := filepath.Join(dir, "targets.yaml")
 
@@ -477,6 +481,7 @@ func TestWriteTargetsManifestAtomicNoOpNoWrite(t *testing.T) {
 // atomic-replace half: a non-identical serialisation lands via the
 // ACL-preserving Windows replacement path and the new bytes are on disk.
 func TestWriteTargetsManifestAtomicReplacesOnDifference(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := filepath.Join(dir, "targets.yaml")
 
@@ -524,6 +529,7 @@ func TestWriteTargetsManifestAtomicReplacesOnDifference(t *testing.T) {
 }
 
 func TestWriteTargetsManifestAtomicProtectionFailureLeavesKnownGoodDestination(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := filepath.Join(dir, "targets.yaml")
 	first := Manifest{
@@ -573,6 +579,7 @@ func TestWriteTargetsManifestAtomicProtectionFailureLeavesKnownGoodDestination(t
 }
 
 func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := filepath.Join(dir, "targets.yaml")
 	manifest := Manifest{
@@ -1193,6 +1200,7 @@ func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *t
 // parent is restored to the AdminDirectory contract, and the caller only
 // proceeds once the repaired object actually validates.
 func TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	t.Run("healthy parent is not rewritten", func(t *testing.T) {
 		dir := prepareWindowsTargetsManifestTestDirectory(t)
 		originalProtect := windowsTargetsManifestProtect

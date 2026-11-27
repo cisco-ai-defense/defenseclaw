@@ -12,6 +12,8 @@ import (
 	"sync"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 )
 
 // Reader is the reader to hand a recursive shell parser
@@ -53,25 +55,58 @@ func parse(command string, comments bool) (*syntax.File, bool) {
 		return parseCommand(command, comments)
 	}
 	key := parseCacheKey{command, comments}
-	if file, ok, hit := cachedParse(key); hit {
+	if file, ok, _, hit := cachedParse(key); hit {
 		return file, ok
 	}
-	file, ok := parseCommand(command, comments)
-	storeParse(key, file, ok)
+	file, ok, bash := parseCommandVariant(command, comments)
+	storeParse(key, file, ok, bash)
 	return file, ok
 }
 
 func parseCommand(command string, comments bool) (*syntax.File, bool) {
+	file, ok, _ := parseCommandVariant(command, comments)
+	return file, ok
+}
+
+// parseCommandVariant is parseCommand that also tells whether the Bash
+// grammar read the tree (bash false: the POSIX one did, or neither).
+func parseCommandVariant(command string, comments bool) (file *syntax.File, ok, bash bool) {
 	if TooDeep(command) {
-		return nil, false
+		return nil, false, false
 	}
-	for at := range parseVariants {
+	for at, variant := range parseVariants {
+		workcount.AddLarge(workcount.LargeParse, len(command))
 		file, err := parseWith(at, comments, command)
 		if err == nil {
+			return file, true, variant == syntax.LangBash
+		}
+	}
+	return nil, false, false
+}
+
+// ParseBash reads command in the Bash grammar alone, without comments: the
+// tree syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse gives, and
+// false where that parse fails. A large command is answered from the tree
+// Parse keeps (parse cache): that parse tries Bash first, so a tree Bash
+// read is this tree. Readers that each parsed a large command again on their
+// own cost the 1 MiB here-document a full parse apiece, three of them per
+// call (rel-1-0-10:GAP-0299). Where Bash did not read the kept tree, the
+// command is parsed here as before.
+func ParseBash(command string) (*syntax.File, bool) {
+	if len(command) >= largeCommandMin && len(command) <= MaxCommandBytes {
+		key := parseCacheKey{command, false}
+		file, ok, bash, hit := cachedParse(key)
+		if !hit {
+			file, ok, bash = parseCommandVariant(command, false)
+			storeParse(key, file, ok, bash)
+		}
+		if ok && bash {
 			return file, true
 		}
 	}
-	return nil, false
+	workcount.AddLarge(workcount.LargeParse, len(command))
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	return file, err == nil
 }
 
 // parseVariants are the grammars Parse tries, in order.

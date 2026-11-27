@@ -151,6 +151,12 @@ func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookR
 	policyHash := sha256.Sum256([]byte(policy))
 	call := connectorName + "\x00" + scope + "\x00" + session + "\x00" + phase + "\x00" + tool + "\x00" + digest + "\x00" + cwd + "\x00" + hex.EncodeToString(evidenceHash[:]) +
 		"\x00" + hex.EncodeToString(policyHash[:])
+	if phase == "posttooluse" {
+		// A post verdict is a verdict on the output too: a later call with the
+		// same arguments but another output, whose first surface delivery
+		// went missing, must not take the earlier output's verdict (GAP-1654).
+		call += "\x00" + copilotToolResultDigest(req.Payload)
+	}
 	if id := firstString(req.Payload, "tool_use_id", "toolUseId"); id != "" {
 		request = scope + "\x00" + session + "\x00" + id
 		exact = "id\x00" + request + "\x00" + call
@@ -198,6 +204,34 @@ func copilotToolArgsDigest(raw json.RawMessage) (string, bool) {
 	}
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), true
+}
+
+// copilotToolResultDigest hashes the tool's output in one form for both
+// deliveries of a call: Copilot's camelCase toolResult object is reduced to
+// its textResultForLlm, a string is taken as is, any other value is
+// re-marshalled (sorted keys). No output hashes the empty string, so two
+// deliveries that both lack it still pair.
+func copilotToolResultDigest(payload map[string]interface{}) string {
+	value := firstValue(payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error")
+	if object, ok := value.(map[string]interface{}); ok {
+		if text, ok := object["textResultForLlm"].(string); ok {
+			value = text
+		}
+	}
+	var canonical []byte
+	switch v := value.(type) {
+	case nil:
+	case string:
+		canonical = []byte(v)
+	default:
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			encoded = []byte(stringifyHookValue(v))
+		}
+		canonical = append([]byte("json\x00"), encoded...)
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:])
 }
 
 // begin looks up this delivery's keys. On a hit it returns the earlier

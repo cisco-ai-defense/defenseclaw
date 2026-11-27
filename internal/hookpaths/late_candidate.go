@@ -65,6 +65,12 @@ func lateCallGradeReadingIn(command, cwd, home string, spelled, chained bool) Gr
 			if drive := lateWindowsDrivePath(word); drive != word {
 				grade = grade.Max(ProtectedReach(OperandPath(drive, cwd), home, memo))
 			}
+			// The path Windows opens: an 8.3 short component (SSH~1,
+			// AUTHOR~1) expanded and the trailing dots and spaces Win32
+			// strips removed (rel-1-0-10:GAP-1553).
+			if long, ok := lateWindowsLongSpelling(OperandPath(word, cwd)); ok {
+				grade = grade.Max(ProtectedReach(long, home, memo))
+			}
 		}
 		return grade
 	}

@@ -36,8 +36,8 @@ func TestCommandMayDotglobReadsSettingsAndQualifiers(t *testing.T) {
 		{"large body then qualifier", "cat <<EOF\n" + filler + "EOF\nls *(D)\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := actionCommandMayDotglob(tc.command); got != tc.want {
-				t.Fatalf("actionCommandMayDotglob = %t, want %t", got, tc.want)
+			if got := CommandMayDotglob(tc.command); got != tc.want {
+				t.Fatalf("CommandMayDotglob = %t, want %t", got, tc.want)
 			}
 		})
 	}

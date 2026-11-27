@@ -11,7 +11,42 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+// gap1731OwnFixturesAsTokenUser makes the test account the default owner of
+// what this test creates, and puts the token's previous default owner back
+// when the test ends. An elevated administrator's token names
+// BUILTIN\Administrators as that default owner, so the fixture folders
+// (t.TempDir under the managed root and CLAUDE_CONFIG_DIR) would be owned by
+// Administrators while the connector's safefile checks require the token
+// user: "refusing foreign-owned directory" (GAP-1872). Only these tests need
+// it. Other tests in the package rely on elevated Administrators-owned
+// fixtures (GAP-1910, GAP-1911, GAP-1916, GAP-1917), so it is not set in
+// TestMain. A standard user's token already names itself and nothing changes.
+func gap1731OwnFixturesAsTokenUser(t *testing.T) {
+	t.Helper()
+	previous, err := testenv.OwnNewObjectsAsTokenUser()
+	if err != nil {
+		t.Fatalf("own new objects as the token user: %v", err)
+	}
+	t.Cleanup(func() {
+		var token windows.Token
+		if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
+			t.Errorf("open the process token to restore the default owner: %v", err)
+			return
+		}
+		defer token.Close()
+		owner := struct{ Owner *windows.SID }{previous}
+		if err := windows.SetTokenInformation(token, windows.TokenOwner, (*byte)(unsafe.Pointer(&owner)), uint32(unsafe.Sizeof(owner))); err != nil {
+			t.Errorf("restore the token default owner: %v", err)
+		}
+	})
+}
 
 // gap1731Fixture renders and installs DefenseClaw's drop-in in an isolated
 // file tier, then serves hklm as the HKLM Settings policy. It returns the
@@ -19,6 +54,7 @@ import (
 // case that sets AgentVersion installs the render for that version.
 func gap1731Fixture(t *testing.T) (SetupOpts, []byte, func(map[string]interface{}), string) {
 	t.Helper()
+	gap1731OwnFixturesAsTokenUser(t)
 	_, opts, _, managedRoot := isolatedClaudePolicyFixture(t)
 	opts.ManagedEnterprise = true
 	opts.HookExecutable = filepath.Join(t.TempDir(), "defenseclaw-hook.exe")

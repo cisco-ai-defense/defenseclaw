@@ -119,6 +119,7 @@ VENDORED_LOCAL_FILES: dict[str, frozenset[str]] = {
     "bifrost-core": frozenset(
         {
             VENDORED_README,
+            "bifrost.go",
             "providers/utils/proxy_conn.go",
             "providers/utils/roundtripper.go",
             "providers/utils/utils.go",

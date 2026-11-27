@@ -105,7 +105,7 @@ func actionClientResolvedProtectedWrite(file *syntax.File, command, cwd, home st
 	currentCWD := cwd
 	var directoryStack []string
 	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
+	actionWalkDirectoryScoped(file, &currentCWD, &directoryStack, func(node syntax.Node) bool {
 		if found {
 			return false
 		}

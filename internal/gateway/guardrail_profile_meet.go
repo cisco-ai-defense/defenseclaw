@@ -456,6 +456,7 @@ func meetRuleGenerationWithNames(sources []*compiledRulePackCategories, names []
 		members:            sources,
 		memberNames:        slices.Clone(names),
 		budgetNote:         new(sync.Once),
+		effectSeverity:     map[string]string{},
 	}
 	for _, source := range sources {
 		merged.overridden, merged.added = max(merged.overridden, source.overridden), max(merged.added, source.added)

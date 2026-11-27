@@ -139,5 +139,9 @@ func doctorRegistryFiles(ctx context.Context, s *substrateSession, mine []api.Ac
 		return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": its template names " + baked + " in its npm configuration from its build; none was written at start (mode template)",
 			Fix: "a registry bound since its start reaches the next agent you run"}
 	}
-	return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": no registry secret is bound for it (mode none)"}
+	// The doctor reads only the agent's files, not its bindings: none says
+	// what it saw (GAP-0975). A kept image file or a refused link shows up
+	// here too; run prints a Note for each at start.
+	return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": no registry placeholders were found in its home or its template (mode none)",
+		Fix: "if a registry is bound for this agent, the Notes defenseclaw substrate run printed at its start say which file was kept and why"}
 }

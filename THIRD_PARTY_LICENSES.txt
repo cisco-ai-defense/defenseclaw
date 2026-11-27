@@ -14,6 +14,13 @@ API definitions vendored for the Linux sensor helper:
   - github.com/cilium/tetragon/api v1.7.1 (the .proto files under
     third_party/tetragon, vendored unmodified, and the Go stubs generated
     from them; not a go.mod dependency)
+  - github.com/denoland/clawpatrol at commit 0e6674c (MIT): the Kubernetes
+    API path and HTTP verb decomposition adapted in
+    internal/actionfacts/kube_request.go, and the design reference (read
+    only) for the bounded SQL scanner in internal/actionfacts/sql_ast.go; no
+    code is imported or vendored
+  - github.com/PowerShell/PowerShell (the PowerShell parser, ported to Go in
+    internal/pwshparse; not a go.mod dependency)
 
 It is a scoped attribution artifact for those dependency additions, not an
 exhaustive inventory of every dependency in every DefenseClaw artifact.
@@ -65,6 +72,13 @@ License-text provenance:
   Upstream file: https://github.com/ai-openshell/sdk-go/blob/v0.1.9/LICENSE
   Upstream LICENSE SHA-256:
     d07c0367e2861e7fe70fa1b679f879f4fa2f9138ade4457d44ecf8b2e135bb45
+
+  Module: github.com/PowerShell/PowerShell
+  Version: v7.6.6 (tag v7.6.6, commit f260eb9c31ec72c5282f98e5ea24d9be4f8d7536), the parser
+    sources (src/System.Management.Automation/engine/parser)
+  Upstream file: https://github.com/PowerShell/PowerShell/blob/v7.6.6/LICENSE.txt
+  Upstream LICENSE SHA-256:
+    7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744
 
   Module: github.com/cilium/tetragon/api
   Version: v1.7.1 (tag api/v1.7.1, commit 99ca93d98710b98a42551bf3c12613e32888885d)
@@ -856,3 +870,63 @@ github.com/cilium/tetragon/api v1.7.1 (LICENSE)
    See the License for the specific language governing permissions and
    limitations under the License.
 
+
+==============================================================================
+github.com/denoland/clawpatrol 0e6674c (MIT)
+==============================================================================
+
+Adapted (not imported) in internal/actionfacts/kube_request.go from
+internal/config/plugins/facets/k8s/k8s.go (parsePath, verbFromMethod).
+Reviewed only, as the SQL parser design reference for
+internal/actionfacts/sql_ast.go (no source code copied or imported).
+Upstream file: https://github.com/denoland/clawpatrol/blob/0e6674c/LICENSE.md
+Upstream LICENSE.md SHA-256:
+  3dd2616f96c71e3b5aafecbce0b3210e37327079a32a3a62f63f7b4a36433d8d
+
+MIT License
+
+Copyright 2026 Deno Land Inc
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+==============================================================================
+github.com/PowerShell/PowerShell (MIT, parser port in internal/pwshparse)
+==============================================================================
+
+Copyright (c) Microsoft Corporation.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

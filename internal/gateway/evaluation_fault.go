@@ -53,7 +53,7 @@ const evaluatorFaultTitle = "The command could not be checked safely (internal e
 func evaluationFaultFindings(title string, enforcementCapable bool) []RuleFinding {
 	finding := RuleFinding{
 		RuleID: parseFailureRuleID, Title: title, Severity: "CRITICAL", Confidence: 1,
-		enforcement: findingEnforcementAllowed, evaluationFault: true,
+		evaluationFault: true,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(parseFailureRuleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{finding}, enforcementCapable)
 }

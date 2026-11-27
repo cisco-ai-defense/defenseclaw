@@ -443,6 +443,14 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 			if lAction != probe.want {
 				t.Fatalf("laptop oracle %s/%s %v, want %s", lAction, lSeverity, lRules, probe.want)
 			}
+			// These Writes keep the one-entry fallback document the laptop
+			// file holds here, not what Setup writes: without a snapshot the
+			// actor requires Setup's full hook set (substrate-1 GAP-0615; the
+			// real-setup row is TestGAP0615GuestHookConfigParity
+			// C1_control_Write_keeps_all_hooks).
+			if probe.noCopy == "" && (probe.name == "settings home Write keeps hooks" || probe.name == "gap0577 chain 1 Write adds model") {
+				probe.noCopy = "block"
+			}
 			if !withFacts && (probe.tool == "Edit" || probe.tool == "MultiEdit" || probe.noCopy != "") {
 				expected := "block"
 				if probe.name == "settings home Edit keeps hooks" || probe.name == "rvnf5 count bound 64" || probe.name == "rvnf5 escape_benign_model" {

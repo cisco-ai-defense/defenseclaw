@@ -20,6 +20,7 @@ import (
 // content write the gateway already enforces) is recorded as the next config
 // generation, once; a recorded config is left alone.
 func TestRecordUnrecordedManagedConfigAdvancesTheGeneration(t *testing.T) {
+	keepTestOffTheRealDataHome(t)
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	write := func(body string) {
 		t.Helper()

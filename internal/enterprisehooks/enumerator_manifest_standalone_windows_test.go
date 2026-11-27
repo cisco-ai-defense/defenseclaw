@@ -82,6 +82,7 @@ func pinWindowsTargetsManifestContentRule(t *testing.T, standalone bool, strict 
 // a targets.yaml that an untrusted principal can write. The write is refused
 // with the Setup step, and the file keeps the descriptor every reader refuses.
 func TestWriteTargetsManifestAtomicStandaloneRefusesDriftedManifest(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	path, before := driftedWindowsTargetsManifestForTest(t, "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FW;;;BU)")
 	pinWindowsTargetsManifestContentRule(t, true, nil)
 	originalProtect := windowsTargetsManifestProtect
@@ -110,6 +111,7 @@ func TestWriteTargetsManifestAtomicStandaloneRefusesDriftedManifest(t *testing.T
 // ACL-only drift (a reader, no untrusted writer) is still re-stamped on
 // standalone, and Secure Client keeps re-stamping a writer grant.
 func TestWriteTargetsManifestAtomicKeepsRestampWhenNotRefused(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, tc := range []struct {
 		name       string
 		sddl       string

@@ -58,6 +58,7 @@ func gap1495Args(t *testing.T, text string) []byte {
 // guardian published no state. The 1.0.9 drop-in is this deployment's: ensure
 // replaces it with the current form, and again is a no-op.
 func TestGAP1495StandaloneClaudeEnsureUpgrades109GuardPolicy(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	setStandaloneProfileForTest(t, true)
 	opts := windowsManagedInstallOptions(fixture)

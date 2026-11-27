@@ -17,7 +17,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -311,11 +310,7 @@ func TestResolveActiveConnector_SurfaceTagInError(t *testing.T) {
 func TestSidecarWorkerCountCoversEverySenderIntoErrCh(t *testing.T) {
 	t.Parallel()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate the test file")
-	}
-	source, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "sidecar.go"))
+	source, err := os.ReadFile(filepath.Join(repoRootFromTestFile(t), "internal", "gateway", "sidecar.go"))
 	if err != nil {
 		t.Fatalf("read sidecar.go: %v", err)
 	}

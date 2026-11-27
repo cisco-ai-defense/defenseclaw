@@ -83,7 +83,7 @@ func PowerShellFetchedContentExecuted(source string, dialect Dialect) (found boo
 		return false
 	}
 	if dialect == DialectPOSIX || dialect == DialectNone || dialect == DialectMixed {
-		body, bodyDialect, ok := posixSoleHostCallSource(source)
+		body, bodyDialect, ok, _ := posixSoleHostCallSource(source)
 		if !ok {
 			return false
 		}

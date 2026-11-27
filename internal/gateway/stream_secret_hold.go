@@ -4,8 +4,11 @@
 package gateway
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // The open-secret hold of a streamed reply (rel-1-0-10:GAP-0429).
@@ -54,8 +57,17 @@ import (
 // quiet it stays held, and the next text or the end decides it, so a card
 // number or a token the upstream pauses inside never goes out in part. Past
 // streamSecretMaxHeld bytes held behind open runs (a long numeric table keeps
-// one open at almost every piece end) the held bytes go out once the check
-// has read them, with no verdict, and what follows is held again. While
+// one open at almost every piece end) the held pieces before the one that
+// holds the first byte of the oldest open run go out once the check has read
+// them, with no verdict, and the rest stays held (rel-1-0-10:GAP-1306: the
+// whole queue went out, and with it the first bytes of a card number or a
+// token cut at that moment). The run is at most streamSecretMaxToken bytes,
+// so what stays is the pieces from its start. When those are over the bound
+// themselves (the run's lane gets no text while other lanes stream, or one
+// piece is that large), the bound decides the run as it does an open
+// private-key block: the text is checked, then the unknown tier of the pack
+// decides (TRUNCATED; rel-1-0-10:GAP-1767: they all went out with the run's
+// first bytes and no verdict). While
 // the upstream is quiet behind an open run the client gets a keep-alive, or
 // the held bytes with the run masked, every streamKeepAliveAfter
 // (rel-1-0-10:GAP-1307, stream_keepalive.go).
@@ -75,7 +87,15 @@ const (
 	streamPEMLineMax = 290
 )
 
+// The held bound is in the cap registry (DET111 step 2, one bound model).
+var _ = bounded.Register("gateway.streamSecretMaxHeld", bounded.Bytes, streamSecretMaxHeld)
+
 const pemBeginMark = "-----BEGIN "
+
+// streamRunHeldWhy is the bound reason of an open token or digit run whose
+// own held pieces, from the one with its first byte, are over
+// streamSecretMaxHeld (rel-1-0-10:GAP-1767). The same on every stream path.
+var streamRunHeldWhy = fmt.Sprintf("over %d reply stream bytes held from the first byte of an open token or digit run", streamSecretMaxHeld)
 
 // streamTokenRules are the token shapes of the secret rules (the
 // secrets.yaml of every shipped pack), each with the prefix that starts it
@@ -163,6 +183,39 @@ type secretLane struct {
 	parked    bool
 	parkedAt  int
 	parkLimit int
+	// segs places the end of the lane in the reply text (GAP-1306): from
+	// lane byte at, the bytes were added when the reply had n bytes of text.
+	// Only the segments that reach the last streamSecretTail bytes are kept,
+	// where an open run starts (tokenStart).
+	segs []laneSeg
+}
+
+// laneSeg is one piece of a lane: it starts at lane byte at and reply text
+// byte n.
+type laneSeg struct{ at, n int }
+
+// mark records a piece of the lane that starts at lane byte at and reply
+// text byte n, and drops the segments that end before the tail a run can
+// start in.
+func (s *secretLane) mark(at, n int) {
+	drop := 0
+	for drop+1 < len(s.segs) && s.segs[drop+1].at <= at-streamSecretTail {
+		drop++
+	}
+	s.segs = append(s.segs[drop:], laneSeg{at: at, n: n})
+}
+
+// textAt is the reply text offset of lane byte off, which is in the kept
+// tail (mark keeps every segment from len-streamSecretTail on).
+func (s *secretLane) textAt(off int) int {
+	if len(s.segs) == 0 {
+		return off
+	}
+	i := len(s.segs) - 1
+	for i > 0 && s.segs[i].at > off {
+		i--
+	}
+	return max(s.segs[i].n+off-s.segs[i].at, 0)
 }
 
 // pem advances the private-key state over t and reports an open BEGIN line
@@ -373,6 +426,18 @@ type openSecret struct {
 	// reasoningOnly: all open runs are parked reasoning tokens, which can
 	// be masked in their own wire events while answer events stream.
 	reasoningOnly bool
+	// answerParkedOnly: reasoningOnly, and every one of those runs is parked
+	// by the switch from the reasoning to the answer until the message ends
+	// (streamReasoningAnswerParkMax, GAP-2170), not at a block end or a tool
+	// switch (streamRunParkMax). Only then does the held bound let all go
+	// with no verdict, as rel does; a run parked at a block end or a tool
+	// switch keeps the GAP-1767 TRUNCATED verdict (rel-1-0-10:GAP-2218).
+	answerParkedOnly bool
+	// parkedOnly: every open run is a parked token or digit run (any park,
+	// any lane), no private-key block and no boundary run: at the held bound
+	// the run is decided by its own bytes, not the non-text events read
+	// while it was parked (rel-1-0-10:GAP-2224).
+	parkedOnly bool
 }
 
 // OpenSecret advances every lane and same-choice check boundary over text
@@ -380,7 +445,7 @@ type openSecret struct {
 // behind a split secret until the existing matcher reads them whole.
 func (r *responseText) OpenSecret() openSecret {
 	var o openSecret
-	var reasoningOpen, otherOpen bool
+	var reasoningOpen, otherOpen, blockParked, unparked bool
 	for i, l := range r.lanes {
 		t := l.String()
 		pemOpen, over := r.secret[i].pem(t)
@@ -390,11 +455,12 @@ func (r *responseText) OpenSecret() openSecret {
 		if tokenOpen && r.secret[i].parked {
 			if lane, ok := r.laneForIndex(i); ok && lane.field == responseFieldReasoning {
 				reasoningOpen = true
+				blockParked = blockParked || r.secret[i].parkLimit != streamReasoningAnswerParkMax
 			} else {
 				otherOpen = true
 			}
 		} else if tokenOpen || pemOpen {
-			otherOpen = true
+			otherOpen, unparked = true, true
 		}
 	}
 	for i := range r.boundaries {
@@ -405,12 +471,39 @@ func (r *responseText) OpenSecret() openSecret {
 			continue
 		}
 		if b.secret.token(line) {
-			otherOpen = true
+			otherOpen, unparked = true, true
 		}
 	}
 	o.open = reasoningOpen || otherOpen
 	o.reasoningOnly = reasoningOpen && !otherOpen && !o.pem
+	o.answerParkedOnly = o.reasoningOnly && !blockParked
+	o.parkedOnly = o.open && !unparked && !o.pem
 	return o
+}
+
+// OpenRunFrom is the reply text offset (Len) of the first byte of the oldest
+// open token or digit run, -1 for none (GAP-1306).
+func (r *responseText) OpenRunFrom() int {
+	from := -1
+	for i, l := range r.lanes {
+		if st := r.secret[i].tokenStart(l.String()); st >= 0 {
+			if at := r.secret[i].textAt(st); from < 0 || at < from {
+				from = at
+			}
+		}
+	}
+	return from
+}
+
+// heldBeforeRun is how many of the held pieces end before the reply text
+// offset from: marks[i] is the text length once piece i was read, in stream
+// order (GAP-1306). Those pieces hold no byte of the open run.
+func heldBeforeRun(marks []int, from int) int {
+	k := 0
+	for k < len(marks) && marks[k] <= from {
+		k++
+	}
+	return k
 }
 
 // ReleaseOpenSecret stops holding what is open now, after a bound decided it.
@@ -422,6 +515,15 @@ func (r *responseText) ReleaseOpenSecret() {
 		b := &r.boundaries[i]
 		b.secret.giveUp(r.boundaryLine(b))
 	}
+}
+
+// sumInts is the sum of ns.
+func sumInts(ns []int) int {
+	n := 0
+	for _, v := range ns {
+		n += v
+	}
+	return n
 }
 
 // bufferedBytes is the size of the held chunks.

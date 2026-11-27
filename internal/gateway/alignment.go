@@ -871,7 +871,7 @@ Respond ONLY with one JSON object: {"aligned": "yes" | "no" | "unsure", "reason"
 // askAlignment asks the model the alignment question, answering by end at
 // the latest. why names a missing answer: busy (no free judge slot, nothing
 // was sent), preempted (the slot went to a waiting judge call), late (the
-// window closed), error or unparsed.
+// window closed), error, empty (a blank answer, twice) or unparsed.
 func (j *LLMJudge) askAlignment(ctx context.Context, end time.Time, first, latest string, recent []string, call string) (alignmentAnswer, string) {
 	if j == nil || j.cfg == nil {
 		return alignmentAnswer{}, "no_judge"
@@ -927,8 +927,10 @@ func (j *LLMJudge) askAlignment(ctx context.Context, end time.Time, first, lates
 		return alignmentAnswer{}, "late"
 	case r.err != nil:
 		return alignmentAnswer{}, "error"
-	case r.resp == nil || len(r.resp.Choices) == 0 || r.resp.Choices[0].Message == nil:
-		return alignmentAnswer{}, "unparsed"
+	case judgeAnswerBlank(r.resp):
+		// Blank twice (chat asks a blank answer once more): no answer, named
+		// apart from an unparsed one (GAP-0610).
+		return alignmentAnswer{}, "empty"
 	}
 	parsed := parseJudgeJSON(r.resp.Choices[0].Message.Content)
 	if parsed == nil {

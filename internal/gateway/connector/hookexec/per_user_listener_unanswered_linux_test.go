@@ -349,6 +349,22 @@ func assertListenerOutageModeCells(t *testing.T, addr, dataDir string, newClient
 // in every fail mode at the production wait: nothing proves it is the gateway,
 // whoever the account is.
 func TestUnrecordedListenerOfThisAccountStaysBlockedInEveryMode(t *testing.T) {
+	// The subject is the verdict on a listener the call reached. A call cut
+	// by its restart budget (3 s, the first try at least 1 s) before the
+	// dial returns, or by its answer budget (3.5 s) before the owner of the
+	// listener is read, is the outage of a gateway that never answered:
+	// outage mode decides, and open allows with the warning, by design and
+	// as at rel since 1.0.8; the outage tests cover it. On a loaded box (go
+	// test -race -p 8 beside other packages, or one CPU shared with
+	// burners) the work before the try spent those budgets, the call took
+	// the outage answer, and this test failed although no listener was
+	// judged (rel-1-0-10:GAP-1511). Both budgets here outlast any dial and
+	// owner read, so the verdict tested is always the listener's; the
+	// accept wait (perUserConnectedWait) and the owner-scan grace stay the
+	// production ones.
+	restartBudget, answerBudget := gatewayRestartBudget, hookAnswerBudget
+	gatewayRestartBudget, hookAnswerBudget = time.Minute, time.Minute
+	t.Cleanup(func() { gatewayRestartBudget, hookAnswerBudget = restartBudget, answerBudget })
 	project := lateOrdinaryProject(t)
 	decoy := otherProcess(t)
 	addr := frozenListener(t)

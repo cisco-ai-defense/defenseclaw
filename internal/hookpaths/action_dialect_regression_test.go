@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -20,7 +21,10 @@ func TestR104WindowsActionExplicitDialect(t *testing.T) {
 		{"POSIX escaped dollar", `echo \$HOME/.ssh/authorized_keys`, actionfacts.DialectPOSIX, ""},
 		{"POSIX single quoted dollar", `echo '$HOME/.ssh/authorized_keys'`, actionfacts.DialectPOSIX, ""},
 		{"POSIX lowercase literal dollar", `echo '$home/.ssh/authorized_keys'`, actionfacts.DialectPOSIX, ""},
-		{"POSIX percent literal", `echo '%USERPROFILE%/.ssh/authorized_keys'`, actionfacts.DialectPOSIX, ""},
+		// On a Windows host %USERPROFILE% is the home to every Windows tool
+		// that expands it, so the quoted text names the key as the plain
+		// path does (actionCmdHomeVariablePath, rel-1-0-10:GAP-1628).
+		{"POSIX percent literal", `echo '%USERPROFILE%/.ssh/authorized_keys'`, actionfacts.DialectPOSIX, windowsHostDecision("protected-target")},
 		{"POSIX quoted tilde", `echo '~/.ssh/authorized_keys'`, actionfacts.DialectPOSIX, ""},
 		{"POSIX expanded dollar", `echo $HOME/.ssh/authorized_keys`, actionfacts.DialectPOSIX, "protected-target"},
 		{"POSIX Windows path in literal here document", "cat > review.patch <<'EOF'\n*** Update File: C:\\Users\\alice\\.ssh\\authorized_keys\nEOF", actionfacts.DialectPOSIX, "protected-target"},
@@ -59,4 +63,12 @@ func TestR104WindowsActionExplicitDialect(t *testing.T) {
 			}
 		})
 	}
+}
+
+// windowsHostDecision is decision on a Windows host and none elsewhere.
+func windowsHostDecision(decision string) string {
+	if runtime.GOOS == "windows" {
+		return decision
+	}
+	return ""
 }

@@ -11,26 +11,27 @@ import (
 	"testing"
 )
 
-// TestCascadeLanesDefaultIsShadow proves a config that never names
-// guardrail.cascade.lanes loads with both lanes shipped as "shadow": the
-// effect-model and secret-flow lanes compute and record beside today's rules
-// without changing the answer.
-func TestCascadeLanesDefaultIsShadow(t *testing.T) {
+// TestCascadeLanesDefaults proves a config that never names
+// guardrail.cascade.lanes loads with the effect-model lane on (raise-only,
+// DET111) and the secret-flow lane shadow (it computes and records beside
+// today's rules without changing the answer).
+func TestCascadeLanesDefaults(t *testing.T) {
 	cfg := DefaultConfig()
-	if got := cfg.Guardrail.Cascade.Lanes.EffectsMode(); got != "shadow" {
-		t.Fatalf("default effects lane = %q, want shadow", got)
+	if got := cfg.Guardrail.Cascade.Lanes.EffectsMode(); got != "on" {
+		t.Fatalf("default effects lane = %q, want on", got)
 	}
 	if got := cfg.Guardrail.Cascade.Lanes.SecretFlowMode(); got != "shadow" {
 		t.Fatalf("default secret_flow lane = %q, want shadow", got)
 	}
 	var empty CascadeLaneValues
-	if empty.EffectsMode() != "shadow" || empty.SecretFlowMode() != "shadow" {
+	if empty.EffectsMode() != "on" || empty.SecretFlowMode() != "shadow" {
 		t.Fatalf("an unset lane must read as its shipped default, got %q / %q", empty.EffectsMode(), empty.SecretFlowMode())
 	}
 }
 
-// TestCascadeLanesSchemaEnum accepts the exact values each lane takes in 1.0.10
-// (a shadow-only lane: off, shadow; nonshell: off, shadow, on), refuses another
+// TestCascadeLanesSchemaEnum accepts the exact values each lane takes
+// (the shadow-only secret_flow: off, shadow; effects and nonshell: off,
+// shadow, on), refuses another
 // case or a padded value, refuses "on" for a shadow-only lane, and refuses any
 // other value, so a typo cannot silently disable or enable a lane.
 func TestCascadeLanesSchemaEnum(t *testing.T) {
@@ -65,19 +66,20 @@ func TestCascadeLanesSchemaEnum(t *testing.T) {
 	}
 }
 
-// TestCascadeLaneOnIsNotAvailable: a shadow-only lane refuses "on" with the
-// message that names the release and the open gaps (decision D4).
+// TestCascadeLaneOnIsNotAvailable: the shadow-only secret_flow lane refuses
+// "on" with the message that names the release and the open gaps (decision
+// D4); the effects lane takes on (raise-only since DET111).
 func TestCascadeLaneOnIsNotAvailable(t *testing.T) {
 	validate := func(lanes CascadeLaneValues) error {
 		cfg := &Config{}
 		cfg.Guardrail.Cascade.Lanes = lanes
 		return cfg.ValidateCascade(false)
 	}
-	for _, lanes := range []CascadeLaneValues{{"effects": "on"}, {"secret_flow": "on"}} {
-		err := validate(lanes)
-		if err == nil || !strings.Contains(err.Error(), "not available in 1.0.10") || !strings.Contains(err.Error(), "GAP-0191") {
-			t.Fatalf("ValidateCascade(%v) = %v, want a not-available-in-1.0.10 refusal naming the gaps", lanes, err)
-		}
+	if err := validate(CascadeLaneValues{"effects": "on"}); err != nil {
+		t.Fatalf("ValidateCascade refused effects=on (live raise-only since DET111): %v", err)
+	}
+	if err := validate(CascadeLaneValues{"secret_flow": "on"}); err == nil || !strings.Contains(err.Error(), "not available in 1.0.10") || !strings.Contains(err.Error(), "GAP-0191") {
+		t.Fatalf("ValidateCascade(secret_flow on) = %v, want a not-available-in-1.0.10 refusal naming the gaps", err)
 	}
 	if err := validate(CascadeLaneValues{"effects": "maybe"}); err == nil {
 		t.Fatalf("ValidateCascade accepted an unknown lane value")

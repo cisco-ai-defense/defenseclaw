@@ -15,10 +15,17 @@ export async function contract(plugin, fixture) {
   let sessionLocation = location;
   let servers = [];
   let disposed = 0;
+  const sessionHooks = new Map();
   let streamStopped = false;
   const ctx = {
     location,
-    session: { get: async ({ sessionID }) => ({ id: sessionID, location: sessionLocation }) },
+    session: {
+      get: async ({ sessionID }) => ({ id: sessionID, location: sessionLocation }),
+      hook: async (name, callback) => {
+        sessionHooks.set(name, callback);
+        return { dispose: async () => { sessionHooks.delete(name); } };
+      },
+    },
     mcp: { list: async () => ({ location, data: servers }) },
     tool: { hook: async (name, callback) => {
       await Promise.resolve();
@@ -110,9 +117,30 @@ export async function contract(plugin, fixture) {
   const idle = payloads.find((p) => p.hook_event_name === "session.idle" && p.session_id === "ses_child");
   assert.equal(failed.source_event_id, "evt_failed");
   assert.equal(idle.source_event_id, "evt_failed:idle");
+  // The user's turn reaches the gateway as a session.prompt post whose prompt
+  // field is the text; the host's prompt is neither awaited nor changed.
+  assert.deepEqual([...sessionHooks.keys()], ["prompt"]);
+  ctx.session.get = async ({ sessionID }) => ({ id: sessionID, location });
+  const turn = { sessionID: "ses_test", messageID: "msg_prompt", prompt: { text: "ship the fix" }, delivery: "immediate" };
+  assert.equal(sessionHooks.get("prompt")(turn), undefined);
+  assert.equal(turn.prompt.text, "ship the fix");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const turns = (await fixture.payloads()).filter((p) => p.hook_event_name === "session.prompt");
+  if (fixture.sessionPrompt === false) {
+    // The managed plugin carries the shared adapter but drops the turn at its
+    // event allowlist (GAP-0032): nothing reaches the gateway.
+    assert.equal(turns.length, 0);
+  } else {
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].prompt, "ship the fix");
+    assert.equal(turns[0].session_id, "ses_test");
+    assert.equal(turns[0].source_event_id, "msg_prompt");
+  }
+  assert(!(await fixture.payloads()).some((p) => p.hook_event_name !== "session.prompt" && "prompt" in p), "only a user turn carries a prompt field");
   await cleanup();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(disposed, 2);
+  assert.equal(sessionHooks.size, 0);
   assert.equal(hooks.size, 0);
   assert(streamStopped);
   console.log("OpenCode v2 contract: ok");

@@ -186,7 +186,7 @@ func TestCascadeReviewerCandidatesRefused(t *testing.T) {
 		"lock violation (profile block_at)":  "guardrail:\n  cascade:\n    admin:\n      locked: [block_at]\n  profiles:\n    p:\n      block_at: CRITICAL\n",
 		"lock violation (connector unknown)": "guardrail:\n  cascade:\n    admin:\n      locked: [unknown]\n  connectors:\n    codex:\n      cascade:\n        unknown: block\n",
 		"unknown allow":                      "guardrail:\n  cascade:\n    unknown: allow\n",
-		"no such lane":                       "guardrail:\n  cascade:\n    lanes:\n      effects: on\n",
+		"shadow-only lane on":                "guardrail:\n  cascade:\n    lanes:\n      secret_flow: on\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
@@ -280,7 +280,8 @@ func TestCascadeLockedModeUnderApplicationProtection(t *testing.T) {
 }
 
 // GAP-0686: the v8 schema refuses on for a lane that ships shadow-only, as
-// rel's lane enum did, and every shipped shadow-only lane has that enum.
+// rel's lane enum did, and every shipped shadow-only lane has that enum; the
+// effects lane takes on since DET111.
 func TestCascadeSchemaRefusesOnForShadowOnlyLanes(t *testing.T) {
 	raw, err := os.ReadFile("../../schemas/config/v8/defenseclaw-config.schema.json")
 	if err != nil {
@@ -314,7 +315,7 @@ func TestCascadeSchemaRefusesOnForShadowOnlyLanes(t *testing.T) {
 		lanes string
 		ok    bool
 	}{
-		{"effects: \"on\"", false}, {"secret_flow: \"on\"", false}, {"effects: live", false},
+		{"effects: \"on\"", true}, {"secret_flow: \"on\"", false}, {"effects: live", false},
 		{"effects: \"off\"", true}, {"secret_flow: shadow", true},
 	} {
 		body := []byte("config_version: 9\ndata_dir: " + dataDir + "\nguardrail:\n  cascade:\n    lanes:\n      " + tc.lanes + "\n")

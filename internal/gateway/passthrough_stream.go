@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,6 +63,9 @@ type passthroughStream struct {
 	bedrock        *bedrockEventStreamText
 	// ndjson: a native Ollama stream, one JSON event per line (GAP-0370).
 	ndjson bool
+	// eventTyped: the last event eventContent read added typed model text
+	// (rel-1-0-10:GAP-2224).
+	eventTyped bool
 }
 
 // snapshotEvent reports an event whose content repeats what earlier events
@@ -81,6 +86,7 @@ func snapshotEvent(typ string) bool {
 // It returns why the event can be read two ways (a repeated or differently
 // spelled key), "" when it cannot.
 func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *responseText, model *string) string {
+	s.eventTyped = false
 	if !ev.HasData {
 		return ""
 	}
@@ -112,7 +118,18 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 		segs = kept
 	}
 	acc.AddAll(withWalkerPieces(typed, segs))
+	s.eventTyped = piecesHaveText(typed)
 	return sc.Ambiguous
+}
+
+// piecesHaveText reports a piece with model text.
+func piecesHaveText(ps []responsePiece) bool {
+	for _, p := range ps {
+		if p.text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *passthroughStream) copyHeaders() {
@@ -131,7 +148,7 @@ func (s *passthroughStream) copyHeaders() {
 
 // copyRest forwards what is left of src without inspection (the fail mode
 // of an OSS install, after the alert).
-func (s *passthroughStream) copyRest(src io.Reader) {
+func (s *passthroughStream) copyRest(src io.Reader, tw *clientWriteErrWriter) {
 	flusher, _ := s.w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {
@@ -143,6 +160,10 @@ func (s *passthroughStream) copyRest(src io.Reader) {
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				// A cut here is of unknown cost like any other (GAP-1112).
+				tw.endUsage(s.r.Context(), err)
+			}
 			return
 		}
 	}
@@ -161,14 +182,46 @@ type streamRead struct {
 // upstream did not fail (GAP-1112).
 type clientWriteErrWriter struct {
 	http.ResponseWriter
+	// final: the stream's final event reached the agent (GAP-1121).
+	final bool
 }
 
 func (c *clientWriteErrWriter) Write(b []byte) (int, error) {
 	n, err := c.ResponseWriter.Write(b)
 	if err != nil {
 		setUsageEndErr(c.ResponseWriter, fmt.Errorf("%w: %v", modelusage.ErrClientGone, err))
+	} else if !c.final && finalStreamEvent(b) {
+		c.final = true
 	}
 	return n, err
+}
+
+// finalStreamEvent reports bytes written to the agent that carry the final
+// event of a stream: the OpenAI [DONE] line, an Anthropic message_stop, an
+// OpenAI Responses response.completed, an Ollama done object. Text inside a
+// JSON string cannot match: its quotes are escaped and its line ends are
+// \n, never a real line end.
+func finalStreamEvent(b []byte) bool {
+	return bytes.HasPrefix(b, []byte("data: [DONE]")) || bytes.Contains(b, []byte("\ndata: [DONE]")) ||
+		bytes.HasPrefix(b, []byte("event: message_stop")) || bytes.Contains(b, []byte("\nevent: message_stop")) ||
+		bytes.Contains(b, []byte(`"type":"message_stop"`)) || bytes.Contains(b, []byte(`"type": "message_stop"`)) ||
+		bytes.Contains(b, []byte(`"type":"response.completed"`)) || bytes.Contains(b, []byte(`"type": "response.completed"`)) ||
+		bytes.Contains(b, []byte(`"done":true`)) || bytes.Contains(b, []byte(`"done": true`))
+}
+
+// endUsage ends the call's usage record with why the stream stopped: the
+// agent's context done is a client gone, anything else the upstream's read
+// error. Once the final event reached the agent the call is whole, and
+// neither marks it cut.
+func (c *clientWriteErrWriter) endUsage(ctx context.Context, readErr error) {
+	if c.final {
+		return
+	}
+	if ctx.Err() != nil {
+		setUsageEndErr(c.ResponseWriter, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
+		return
+	}
+	setUsageEndErr(c.ResponseWriter, readErr)
 }
 
 func (c *clientWriteErrWriter) Flush() {
@@ -184,7 +237,8 @@ func (s *passthroughStream) run() {
 	// agent that fails, the agent's context ending, and an upstream body that
 	// breaks off (below) end the call with that error, so a stream cut after
 	// the provider began answering is of unknown cost.
-	s.w = &clientWriteErrWriter{ResponseWriter: s.w}
+	tw := &clientWriteErrWriter{ResponseWriter: s.w}
+	s.w = tw
 	p, w, r, resp, mode, label := s.p, s.w, s.r, s.resp, s.mode, s.label
 	ctx := r.Context()
 	blockedReply := func(msg string) {
@@ -208,7 +262,7 @@ func (s *passthroughStream) run() {
 				return
 			}
 			s.copyHeaders()
-			s.copyRest(resp.Body)
+			s.copyRest(resp.Body, tw)
 			return
 		}
 		// Deferred first, so it runs after the reader goroutine has ended.
@@ -252,6 +306,12 @@ func (s *passthroughStream) run() {
 	var queue [][]byte         // events read and not yet sent
 	var queueAt []time.Time    // when each event of the queue was read
 	var queueMark []streamMark // the content blocks each event of the queue opens or closes
+	var queueText []int        // the text length once each event of the queue was read (GAP-1306)
+	var queueUntexted []int    // the size of each event of the queue that added no typed model text (GAP-2224)
+	// heldCut: the held bound behind an open token or digit run was passed;
+	// only the first heldCut events may go out, the rest holds the run
+	// (GAP-1306). -1: no cut.
+	heldCut := -1
 	queueBytes := 0
 	relN := 0      // the first relN events of the queue are not held behind an open tool call
 	heldBytes := 0 // bytes of the events held behind an open tool call
@@ -295,20 +355,24 @@ func (s *passthroughStream) run() {
 	maskedRuns := map[int][2]int{}
 
 	writeQueue := func() {
-		if relN == 0 {
+		n := relN
+		if heldCut >= 0 {
+			n, heldCut = min(n, heldCut), -1
+		}
+		if n == 0 {
 			return
 		}
-		for i, ev := range queue[:relN] {
+		for i, ev := range queue[:n] {
 			_, _ = w.Write(ev)
 			queueBytes -= len(ev)
 			released += len(ev)
 			sent.add(queueMark[i])
 		}
-		queue, queueAt, queueMark = queue[relN:], queueAt[relN:], queueMark[relN:]
+		queue, queueAt, queueMark, queueText, queueUntexted = queue[n:], queueAt[n:], queueMark[n:], queueText[n:], queueUntexted[n:]
 		if len(queue) == 0 {
-			queue, queueAt, queueMark = nil, nil, nil
+			queue, queueAt, queueMark, queueText, queueUntexted = nil, nil, nil, nil, nil
 		}
-		relN = 0
+		relN -= n
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -457,6 +521,7 @@ func (s *passthroughStream) run() {
 	// an open secret (rel-1-0-10:GAP-0429, stream_secret_hold.go). ok is
 	// false when a bound on it blocked.
 	secretWait := func() (wait, ok bool) {
+		heldCut = -1
 		if !tailHold {
 			return false, true
 		}
@@ -474,10 +539,36 @@ func (s *passthroughStream) run() {
 		case queueBytes > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case queueBytes > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): what is held
-			// goes out once the check has read it, with no verdict, and
-			// what comes next is held behind it again.
-			return false, true
+			// Only a token or a digit run is open (GAP-1265): the events
+			// before the one with the run's first byte go out once the
+			// check has read them, with no verdict, and the run stays held
+			// (GAP-1306). When the events from the run's first byte are
+			// over the bound themselves, the bound decides the run
+			// (TRUNCATED, GAP-1767), then all go. When only reasoning runs parked
+			// by the switch to the answer are open (o.answerParkedOnly,
+			// GAP-2170: parked until the message ends while the answer
+			// streams behind it), all go out as rel does, with no verdict: a
+			// benign answer over the bound after thinking that ends in a
+			// number is not cut. A run parked at a block end or a tool switch
+			// keeps the verdict (GAP-2218), unless it is over the bound only
+			// by the events read while it was parked that carry no model text
+			// (server tool results, an image, encrypted reasoning): those go
+			// out as rel sends them, with no verdict (rel-1-0-10:GAP-2224).
+			// Below the bound the park holds the run as before; non-text
+			// bytes never end it.
+			k := heldBeforeRun(queueText, accumulated.OpenRunFrom())
+			runBytes := queueBytes - bufferedBytes(queue[:k])
+			if k > 0 && runBytes <= streamSecretMaxHeld {
+				heldCut = k
+				return false, true
+			}
+			if o.answerParkedOnly {
+				return false, true
+			}
+			if o.parkedOnly && runBytes-sumInts(queueUntexted[k:]) <= streamSecretMaxHeld {
+				return false, true
+			}
+			return false, secretBound(bounded.Bytes, streamRunHeldWhy)
 		}
 		return true, true
 	}
@@ -671,6 +762,12 @@ func (s *passthroughStream) run() {
 		}
 		queue = append(queue, ev.Raw)
 		queueAt = append(queueAt, lastRead)
+		queueText = append(queueText, accumulated.Len())
+		untexted := 0
+		if sseCalls != nil && !s.eventTyped {
+			untexted = len(ev.Raw)
+		}
+		queueUntexted = append(queueUntexted, untexted)
 		mark := noStreamMark
 		switch {
 		case s.bedrock != nil:
@@ -873,7 +970,7 @@ read:
 			}
 		case <-ctx.Done():
 			// The agent is gone: nothing more is sent.
-			setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
+			tw.endUsage(ctx, nil)
 			stopped = true
 			break read
 		}
@@ -950,11 +1047,7 @@ read:
 			if readErr != io.EOF {
 				// The upstream body broke off. When the agent's context is
 				// done, that is the cause and the call is cancelled.
-				if ctx.Err() != nil {
-					setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
-				} else {
-					setUsageEndErr(w, readErr)
-				}
+				tw.endUsage(ctx, readErr)
 			}
 			if encoded && readErr != io.EOF && ctx.Err() == nil {
 				// A corrupt or oversized encoded stream cannot be read to its end.

@@ -208,6 +208,8 @@ async def test_delete_asks_once_then_runs_with_yes(panel, monkeypatch) -> None:
         assert await app._substrate_delete("docs-b21c") is True  # noqa: SLF001
     assert commands == [("defenseclaw", ("substrate", "delete", "docs-b21c", "--yes"))]
     assert "defenseclaw substrate delete docs-b21c --yes" in shown[0].model.details[0]
+    # The dialog names what the CLI prompt names: snapshots and the checkpoints inside it (GAP-0667).
+    assert "checkpoints saved inside it" in shown[0].model.consequence
     assert [row.ref for row in app.sandbox_model.substrate_rows] == ["fix-tests-7f3a"]
 
 

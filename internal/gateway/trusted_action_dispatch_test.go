@@ -58,7 +58,7 @@ func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
 		t.Fatalf("trusted action did not match PATH-AWS-CREDS: %v", FindingStrings(findings))
 	}
 	if credential.Evidence != "" || credential.contributesToEnforcement() {
-		t.Fatalf("semantic finding evidence/enforcement = %q/%v", credential.Evidence, credential.enforcement)
+		t.Fatalf("semantic finding evidence/enforcement = %q/%v", credential.Evidence, credential.Proof)
 	}
 
 	for _, test := range []struct {
@@ -555,9 +555,8 @@ func TestRemotePayloadBoundedSubgraphControlsEnforcement(t *testing.T) {
 			facts := actionfacts.Analyze(input)
 			findings := filterExactFallbackFindings(
 				[]RuleFinding{{
-					RuleID:      "CMD-REMOTE-PAYLOAD-EXEC-CLEANUP",
-					Severity:    "CRITICAL",
-					enforcement: findingEnforcementAllowed,
+					RuleID:   "CMD-REMOTE-PAYLOAD-EXEC-CLEANUP",
+					Severity: "CRITICAL",
 				}},
 				input,
 				facts,
@@ -1792,6 +1791,9 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			legacyText: `{"command":"` + oversizedAttack + `"}`,
 		},
 		{
+			// The call is also judged as bash runs it, rm -rf / > f 2> f
+			// (bashAggregateRedirectTwinRequest, GAP-2151): the delete
+			// enforces as that one-step form's does.
 			name: "bash combined output redirect",
 			input: actionfacts.Input{
 				Tool:    "bash",
@@ -1800,6 +1802,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  dangerous + " &>/tmp/dc.log",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			// The here-string call is judged as its POSIX twin
@@ -2944,11 +2947,11 @@ func installDefaultProfileConnector(t *testing.T, connector string) {
 
 func TestDetectionOnlyFindingCannotDriveBlock(t *testing.T) {
 	finding := RuleFinding{
-		RuleID:      "test.detection",
-		Title:       "detection only",
-		Severity:    "CRITICAL",
-		Confidence:  1,
-		enforcement: findingEnforcementDetectionOnly,
+		RuleID:     "test.detection",
+		Title:      "detection only",
+		Severity:   "CRITICAL",
+		Confidence: 1,
+		Proof:      recordProof,
 	}
 	verdict := buildVerdict([]RuleFinding{finding}, "tool_call")
 	if verdict.Action != guardrailActionAllow || verdict.Severity != "CRITICAL" ||

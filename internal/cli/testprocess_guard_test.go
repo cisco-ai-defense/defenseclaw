@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // testProcessState is the process-wide state a test can change for every
@@ -100,4 +102,17 @@ func TestTestProcessStateGuardNamesEveryChange(t *testing.T) {
 	if changes := diffTestProcessState(before, before); len(changes) != 0 {
 		t.Fatalf("an unchanged state reported %v", changes)
 	}
+}
+
+// keepTestOffTheRealDataHome moves the home of one test to a folder of its
+// own. A config write validates the candidate and loads the .env of the data
+// folder into the process environment (config.ValidateCandidate), so a test
+// that writes config.yaml without its own home read the .env of the account
+// that runs the tests and left its keys set for every test after it. On a
+// host whose account has a .env that failed the run guard above; only a
+// native Windows standard-user run had one (GAP-2174).
+func keepTestOffTheRealDataHome(t *testing.T) {
+	t.Helper()
+	testenv.SetHome(t, t.TempDir())
+	t.Setenv("DEFENSECLAW_HOME", "")
 }

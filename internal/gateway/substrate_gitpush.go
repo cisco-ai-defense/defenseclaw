@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -29,14 +30,25 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/pushgrant"
 )
 
 // B2 2.4: `substrate pull NAME --push-branch BR` asks this route before the
 // launcher pushes an actor's work to its origin with the bound token. The
 // answer is allow, ask or deny from the profile floor's git_push and
-// substrate.git.push_branch. It is a policy for the launcher's path, not a
-// boundary: the agent's own git push stays governed by hooks and egress
-// url_rules, as before.
+// substrate.git.push_branch. The agent's own git push stays governed by
+// hooks and egress url_rules, as before, except while a launcher push holds
+// a grant (GAP-1073): an allow to a launcher that asks for one (?grant=1)
+// opens a push grant on the leader, and until the launcher closes it
+// (DELETE .../push/{grant}) or it expires the egress callout refuses every
+// git push of the actor to another repository. So a push the agent
+// redirects inside the actor fails outside it.
+
+// SubstratePushGrants is the leader's push grants (pushgrant.Client).
+type SubstratePushGrants interface {
+	OpenPushGrant(ctx context.Context, in pushgrant.OpenRequest) (pushgrant.Opened, error)
+	ClosePushGrant(ctx context.Context, in pushgrant.CloseRequest) (pushgrant.Closed, error)
+}
 
 // SubstrateGitPushFor is git_push for an actor of profile: the floor's
 // git_push (deny wins between substrate.admin and the profile), else
@@ -121,6 +133,17 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 			for k, v := range extra {
 				out[k] = v
 			}
+			if decision == config.SubstrateGitPushAllow && r.URL.Query().Get("grant") == "1" {
+				// GAP-1073: the grant the callout enforces while the
+				// launcher pushes. One that cannot be opened is said, and
+				// the launcher warns (an older leader, a full store).
+				g, err := a.substrateOpenPushGrant(r.Context(), st, reg.Atespace, reg.Name, reg.UID, in.Host, in.Repo, in.Branch)
+				if err != nil {
+					out["grant_error"] = err.Error()
+				} else {
+					out["grant"], out["grant_expires"] = g.ID, g.Expires
+				}
+			}
 			writeSubstrateJSON(w, http.StatusOK, out)
 		}
 		switch st.cfg.GitPush(reg.Profile) {
@@ -178,6 +201,50 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 		}
 		a.substrateAuditGitPush(r, reg.Atespace+"/"+reg.Name, ask.OwnerID, target, in.Branch, in.Commits, in.Files, config.SubstrateGitPushAsk, opened.ID)
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"decision": config.SubstrateGitPushAsk, "ask_id": opened.ID, "summary": opened.Summary})
+	}
+}
+
+var errSubstrateNoPushGrants = errors.New("push_grants_unavailable")
+
+// substrateOpenPushGrant opens the leader's grant for a push of
+// atespace/name to host/repo, refs/heads/branch.
+func (a *APIServer) substrateOpenPushGrant(ctx context.Context, st *substrateState, atespace, name, uid, host, repo, branch string) (pushgrant.Opened, error) {
+	if st.cfg.PushGrants == nil {
+		return pushgrant.Opened{}, errSubstrateNoPushGrants
+	}
+	g, err := st.cfg.PushGrants.OpenPushGrant(ctx, pushgrant.OpenRequest{Atespace: atespace, Actor: name, UID: uid,
+		Host: host, Repo: repo, Ref: "refs/heads/" + branch})
+	if err != nil || !pushgrant.ValidID(g.ID) {
+		return pushgrant.Opened{}, errSubstrateNoPushGrants
+	}
+	return g, nil
+}
+
+// substrateGitPushClose is DELETE .../push/{grant}: the launcher closes its
+// grant after the push. The answer says whether the grant was still open
+// and how many pushes to the approved repository egress checked under it.
+func (a *APIServer) substrateGitPushClose(st *substrateState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("grant")
+		if !pushgrant.ValidID(id) {
+			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		if st.cfg.PushGrants == nil {
+			writeSubstrateJSONError(w, http.StatusNotImplemented, "push_grants_unavailable")
+			return
+		}
+		reg, status, reason := a.substrateFindSession(st, r, r.PathValue("atespace"), r.PathValue("name"))
+		if status != http.StatusOK {
+			writeSubstrateJSONError(w, status, reason)
+			return
+		}
+		c, err := st.cfg.PushGrants.ClosePushGrant(r.Context(), pushgrant.CloseRequest{Atespace: reg.Atespace, Actor: reg.Name, ID: id})
+		if err != nil {
+			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "push_grants_unavailable")
+			return
+		}
+		writeSubstrateJSON(w, http.StatusOK, map[string]any{"closed": c.Found, "pushes": c.Pushes})
 	}
 }
 

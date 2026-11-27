@@ -59,7 +59,7 @@ func TestGAP0674ThinReadsCensus(t *testing.T) {
 		"internal/gateway credentialFileContentRead CredentialPathReads":         true,
 		"internal/gateway exactSecretReadChainDigest CredentialPathReads":        true,
 		"internal/gateway credentialFileReadProofDigest CredentialPathReads":     true,
-		"internal/gateway dispatchTrustedActionOnce CredentialPathReadCaps":      true,
+		"internal/gateway dispatchTrustedActionOnceIn CredentialPathReadCaps":    true,
 		"internal/gateway thinCredentialPathReads ThinCredentialPathReads":       true,
 		"internal/actionfacts Facts.CredentialPathReads credentialPaths":         true,
 		"internal/actionfacts Facts.HasCredentialPathReads credentialPaths":      true,

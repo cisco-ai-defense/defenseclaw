@@ -88,6 +88,7 @@ func fillJunctionTarget(t *testing.T, target string) {
 // permissions, whether displacePlanted is called on its own or reached from
 // the connector reconcile.
 func TestWindowsDisplacePlantedLeavesTheJunctionTargetUntouched(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, part := range []string{`GitHub\Copilot`, "opencode"} {
 		for _, via := range []string{"displacePlanted", "reconcile"} {
 			t.Run(strings.ReplaceAll(part, `\`, "-")+"/"+via, func(t *testing.T) {
@@ -136,6 +137,7 @@ func TestWindowsDisplacePlantedLeavesTheJunctionTargetUntouched(t *testing.T) {
 // An administrator-made junction is not a standard user plant: displacePlanted
 // refuses it by design, and the refusal leaves the link and its target alone.
 func TestWindowsDisplacePlantedRefusalLeavesAnAdministratorJunctionTargetUntouched(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	target := filepath.Join(filepath.Dir(opts.WindowsProgramData), "admin-target")
 	userCreatedDir(t, target)
@@ -164,6 +166,7 @@ func TestWindowsDisplacePlantedRefusalLeavesAnAdministratorJunctionTargetUntouch
 // neither fails on it nor reads through it. Either way the target keeps its
 // files and bytes.
 func TestWindowsGoOwnedRemovalKeepsOrClearsALinkAndCreatesNothing(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, part := range []string{`GitHub\Copilot`, "opencode"} {
 		for _, owner := range []string{"standard user", "administrator"} {
 			t.Run(strings.ReplaceAll(part, `\`, "-")+"/"+owner, func(t *testing.T) {
@@ -226,6 +229,7 @@ func TestWindowsGoOwnedRemovalKeepsOrClearsALinkAndCreatesNothing(t *testing.T) 
 // is still removed, so a Cascade registration does not keep refusing after the
 // uninstall.
 func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, linked := range []string{"Devin", legacyconnector.CascadeMachineFolder} {
 		t.Run(linked+" linked", func(t *testing.T) {
 			opts := windowsOpenCodeTestOptions(t)

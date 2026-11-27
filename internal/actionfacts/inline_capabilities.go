@@ -46,22 +46,30 @@ type inlineCapabilityRow struct {
 	// (environment, arguments, stdin): a destination read from them is not
 	// the literal next to it.
 	dynamicInput []string
+	// clusterPrefixes are single-letter, no-operand flags that may precede
+	// a code option in the same short-option word.
+	clusterPrefixes string
+	// moduleOptions load a named module before the inline body. A module
+	// name is read as capability evidence only when an inline body exists.
+	moduleOptions []string
 	// backtickExec: a backtick runs a command (perl, ruby, php).
 	backtickExec bool
 }
 
 var inlineCapabilityTable = map[string]inlineCapabilityRow{
 	"python": {
-		options:      []string{"-c"},
-		network:      []string{"socket", "urllib", "http.client", "requests", "asyncio.open_connection", "ftplib", "telnetlib", "smtplib"},
-		exec:         []string{"os.system", "os.popen", "subprocess", "pty", "os.execv", "os.execve", "os.execvp", "os.execl", "os.spawnl", "commands.getoutput"},
-		dynamicInput: []string{"os.environ", "os.getenv", "sys.argv", "sys.stdin", "input", "getpass"},
+		options:         []string{"-c"},
+		clusterPrefixes: "I",
+		network:         []string{"socket", "urllib", "http.client", "requests", "asyncio.open_connection", "ftplib", "telnetlib", "smtplib"},
+		exec:            []string{"os.system", "os.popen", "subprocess", "pty", "os.execv", "os.execve", "os.execvp", "os.execl", "os.spawnl", "commands.getoutput"},
+		dynamicInput:    []string{"os.environ", "os.getenv", "sys.argv", "sys.stdin", "input", "getpass"},
 	},
 	"node": {
-		options:      []string{"-e", "--eval", "-p", "--print"},
-		network:      []string{"net", "http", "https", "dgram", "tls", "fetch", "WebSocket"},
-		exec:         []string{"child_process", "execSync", "spawnSync", "execFile", "spawn", "eval", "Function"},
-		dynamicInput: []string{"process.env", "process.argv", "process.stdin", "readline"},
+		options:         []string{"-e", "--eval", "-p", "--print"},
+		clusterPrefixes: "p",
+		network:         []string{"net", "http", "https", "dgram", "tls", "fetch", "WebSocket"},
+		exec:            []string{"child_process", "execSync", "spawnSync", "execFile", "spawn", "eval", "Function"},
+		dynamicInput:    []string{"process.env", "process.argv", "process.stdin", "readline"},
 	},
 	"bun": {
 		options:      []string{"-e", "--eval", "-p", "--print"},
@@ -76,18 +84,22 @@ var inlineCapabilityTable = map[string]inlineCapabilityRow{
 		dynamicInput: []string{"Deno.env", "Deno.args", "Deno.stdin"},
 	},
 	"perl": {
-		options:      []string{"-e", "-E"},
-		network:      []string{"IO::Socket", "IO::Socket::INET", "Socket", "LWP::Simple", "HTTP::Tiny"},
-		exec:         []string{"system", "exec", "qx"},
-		dynamicInput: []string{"ENV", "ARGV", "STDIN"},
-		backtickExec: true,
+		options:         []string{"-e", "-E"},
+		clusterPrefixes: "lwW",
+		moduleOptions:   []string{"-M"},
+		network:         []string{"IO::Socket", "IO::Socket::INET", "Socket", "LWP::Simple", "HTTP::Tiny"},
+		exec:            []string{"system", "exec", "qx"},
+		dynamicInput:    []string{"ENV", "ARGV", "STDIN"},
+		backtickExec:    true,
 	},
 	"ruby": {
-		options:      []string{"-e"},
-		network:      []string{"socket", "TCPSocket", "UDPSocket", "Net::HTTP", "open-uri"},
-		exec:         []string{"system", "exec", "spawn", "IO.popen", "Open3", "pty"},
-		dynamicInput: []string{"ENV", "ARGV", "STDIN", "gets"},
-		backtickExec: true,
+		options:         []string{"-e"},
+		clusterPrefixes: "w",
+		moduleOptions:   []string{"-r"},
+		network:         []string{"socket", "TCPSocket", "UDPSocket", "Net::HTTP", "open-uri"},
+		exec:            []string{"system", "exec", "spawn", "IO.popen", "Open3", "pty"},
+		dynamicInput:    []string{"ENV", "ARGV", "STDIN", "gets"},
+		backtickExec:    true,
 	},
 	"php": {
 		options: []string{"-r"},
@@ -162,13 +174,82 @@ func inlineInterpreterRow(program string) (string, inlineCapabilityRow, bool) {
 }
 
 func inlineCodeOperands(row inlineCapabilityRow, args []string) string {
+	source, _ := inlineCodeOperandsWithFirst(row, args)
+	return source
+}
+
+func inlineCodeOperandsWithFirst(row inlineCapabilityRow, args []string) (string, int) {
 	var code []string
-	for index, argument := range args {
-		if slices.Contains(row.options, argument) && index+1 < len(args) {
-			code = append(code, args[index+1])
+	firstCode := len(args)
+	appendCode := func(index int, source string) {
+		if source == "" {
+			return
+		}
+		code = append(code, source)
+		if index < firstCode {
+			firstCode = index
 		}
 	}
-	return strings.Join(code, "\n")
+	for index, argument := range args {
+		for _, option := range row.options {
+			if argument == option {
+				if index+1 < len(args) {
+					appendCode(index, args[index+1])
+				}
+				continue
+			}
+			// Code options that accept an attached value are a different
+			// operand spelling, not a different capability.
+			if len(option) == 2 && option[0] == '-' && option[1] != '-' &&
+				strings.HasPrefix(argument, option) && len(argument) > len(option) {
+				appendCode(index, argument[len(option):])
+			}
+			if strings.HasPrefix(option, "--") &&
+				strings.HasPrefix(argument, option+"=") && len(argument) > len(option)+1 {
+				appendCode(index, argument[len(option)+1:])
+			}
+		}
+		if len(argument) < 3 || argument[0] != '-' || argument[1] == '-' ||
+			row.clusterPrefixes == "" {
+			continue
+		}
+		for _, option := range row.options {
+			if len(option) != 2 || option[0] != '-' || option[1] == '-' {
+				continue
+			}
+			position := strings.IndexByte(argument[1:], option[1])
+			if position <= 0 {
+				continue
+			}
+			prefix := argument[1 : 1+position]
+			if strings.Trim(prefix, row.clusterPrefixes) != "" {
+				continue
+			}
+			tail := argument[2+position:]
+			if tail != "" {
+				appendCode(index, tail)
+			} else if index+1 < len(args) {
+				appendCode(index, args[index+1])
+			}
+		}
+	}
+	return strings.Join(code, "\n"), firstCode
+}
+
+func inlineModuleOperands(row inlineCapabilityRow, args []string) string {
+	var modules []string
+	for index, argument := range args {
+		for _, option := range row.moduleOptions {
+			if argument == option {
+				if index+1 < len(args) {
+					modules = append(modules, args[index+1])
+				}
+			} else if strings.HasPrefix(argument, option) && len(argument) > len(option) {
+				modules = append(modules, argument[len(option):])
+			}
+		}
+	}
+	return strings.Join(modules, "\n")
 }
 
 // InlineCodeNetworkAndExec reports an interpreter one-liner that asks for a
@@ -182,8 +263,14 @@ func InlineCodeNetworkAndExec(facts Facts) bool {
 		if !ok {
 			continue
 		}
-		if source := inlineCodeOperands(row, argv[1:]); source != "" && inlineSourceNetworkAndExec(row, source) {
-			return true
+		args := argv[1:]
+		if source, firstCode := inlineCodeOperandsWithFirst(row, args); source != "" {
+			if modules := inlineModuleOperands(row, args[:firstCode]); modules != "" {
+				source += "\n" + modules
+			}
+			if inlineSourceNetworkAndExec(row, source) {
+				return true
+			}
 		}
 	}
 	return false

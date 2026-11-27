@@ -29,6 +29,7 @@ func (c windowsKeptConfigConnector) Teardown(context.Context, connector.SetupOpt
 }
 
 func TestWindowsTeardownReturnsKeptPatchedFilesToTheirOwner(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, fail := range []bool{false, true} {
 		t.Run(map[bool]string{false: "clean", true: "failed"}[fail], func(t *testing.T) {
 			home := t.TempDir()

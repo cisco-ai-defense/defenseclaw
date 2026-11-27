@@ -2627,6 +2627,22 @@ def _windows_path_parts(name: str) -> tuple[str, str, bool] | None:
     return volume.lower(), name.lower(), verbatim
 
 
+def _posix_path_in_dir(word: str, directory: str) -> bool:
+    """Whether *word*, a POSIX path spelled from *directory*, names a file inside it once the whole path is resolved.
+
+    Mirrors ``posixHookPathInDir`` (GAP-2148): ``<hooks>/../../bin/x`` and
+    ``<hooks>//../../bin/x`` are the user's, ``<hooks>/../hooks/<script>`` is
+    DefenseClaw's. The textual prefix is still required.
+    """
+
+    if not word.startswith(directory.rstrip("/") + "/"):
+        return False
+    # normpath keeps a leading "//"; anchor both at one "/".
+    clean = posixpath.normpath("/" + word.lstrip("/"))
+    root = posixpath.normpath("/" + directory.lstrip("/")).rstrip("/") + "/"
+    return clean.startswith(root)
+
+
 def _windows_resolved_path(name: str) -> tuple[str, str] | None:
     """A Windows absolute path as Windows resolves it: its volume and cleaned POSIX form, or None.
 
@@ -2960,7 +2976,7 @@ def _setup_claims_edited_entry(
     """
 
     if connector == "claudecode":
-        return guarded or first_rest == "" or (bool(word) and word.startswith(os.path.dirname(current) + "/"))
+        return guarded or first_rest == "" or (bool(word) and _posix_path_in_dir(word, os.path.dirname(current)))
     if connector == "copilot":
         if _copilot_live_lookalike(command, current):
             return False

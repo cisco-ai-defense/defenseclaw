@@ -15,6 +15,20 @@ import (
 
 const postgreSQLCopyProgramRuleID = "exec.postgresql_copy_program"
 
+func TestPostgreSQLCopyProgramPSQLCLIAlerts(t *testing.T) {
+	input := actionfacts.Input{
+		Tool:    "shell",
+		Command: `psql -d production -c "COPY audit.events FROM PROGRAM 'printf data';"`,
+		CWD:     "/repo",
+	}
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: input, LegacyText: input.Command, EnforcementCapable: true,
+	})
+	if findingWithID(findings, postgreSQLCopyProgramRuleID) == nil {
+		t.Fatalf("psql COPY PROGRAM did not alert: %v", FindingStrings(findings))
+	}
+}
+
 func TestPostgreSQLCopyProgramSemanticOwnerAndCEL(t *testing.T) {
 	compiler, err := semantic.NewCompiler()
 	if err != nil {

@@ -665,7 +665,7 @@ rules:
     tags: [defense-evasion, tampering, cloud, audit-logging, bounded-lineage]
   - id: exec.postgresql_copy_program
     tool_call_only: true
-    expression: "f.tool == 'sql_query'"
+    expression: "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program == 'psql')"
     # Exact structured SQL detection only; no universal block.
     pattern: 'a^'
     title: "PostgreSQL COPY PROGRAM server-side command execution"
@@ -674,7 +674,7 @@ rules:
     tags: [execution, database, postgresql, server-side, bounded-lineage]
   - id: secrets.sql_sensitive_server_file_read
     tool_call_only: true
-    expression: "f.tool == 'sql_query'"
+    expression: "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb'])"
     # Exact structured SQL detection only; no source-text fallback or
     # universal block.
     pattern: 'a^'
@@ -904,7 +904,7 @@ rules:
   - id: credential.kubernetes_named_secret_content_read
     tool_call_only: true
     pattern: 'a^'
-    title: "Read the content of one named Kubernetes Secret"
+    title: "Read the content of Kubernetes Secrets"
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]

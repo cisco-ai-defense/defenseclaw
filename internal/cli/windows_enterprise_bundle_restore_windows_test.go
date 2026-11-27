@@ -64,6 +64,9 @@ func newWindowsBundleRestoreHost(t *testing.T) *windowsBundleRestoreHost {
 
 func newWindowsBundleRestoreHostForVersion(t *testing.T, sourceVersion string) *windowsBundleRestoreHost {
 	t.Helper()
+	// The restore writes config.yaml, which loads the account's own .env into
+	// the process; a home of the test keeps its keys out (GAP-2174).
+	keepTestOffTheRealDataHome(t)
 	e := newBundleCLIEnv(t)
 	appVersion = sourceVersion
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})

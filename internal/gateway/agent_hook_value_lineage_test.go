@@ -21,7 +21,7 @@ func TestToolValueLineageRuntimeProjectionMatchesSuccessfulSensitiveRead(t *test
 	})
 	read := guardrail.ToolChainProjection{ParseStatus: readFacts.Parse.Status}
 	projectTrustedActionChainSteps(&read, readFacts, []RuleFinding{{
-		RuleID: "PATH-ENV-FILE", enforcement: findingEnforcementAllowed,
+		RuleID: "PATH-ENV-FILE",
 	}})
 	assertToolChainStep(
 		t, read, guardrail.ToolChainSensitiveReadValueExternalTransmit, 1, true,

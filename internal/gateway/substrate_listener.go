@@ -265,6 +265,10 @@ type SubstrateConfig struct {
 	// of profile (SubstrateGitPushFor, read live; B2 2.4). nil: the push
 	// route answers push_unavailable.
 	GitPush func(profile string) string
+	// PushGrants opens and closes the leader's push grants (GAP-1073): an
+	// allowed pull --push-branch that asks for one (?grant=1) gets a grant
+	// the egress callout enforces. nil: no grant, and the launcher warns.
+	PushGrants SubstratePushGrants
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
@@ -403,6 +407,9 @@ type substrateState struct {
 	tokens actorTokenHealth
 	// signIn is the last check of the OIDC sign-in server (GAP-0262).
 	signIn signInHealth
+	// calloutView is the hook path's last read of the egress callout slot
+	// (GAP-0505, substrate_callout_note.go).
+	calloutView substrateCalloutView
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler

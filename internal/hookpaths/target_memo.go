@@ -4,9 +4,12 @@
 package hookpaths
 
 import (
+	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -38,6 +41,9 @@ type TargetMemo struct {
 	// startup is the agent's shell startup for this evaluation, from the
 	// hook client's header (nil: the process's own).
 	startup *ShellStartup
+	// callDots is set when the words of the whole call this evaluation
+	// judges may turn dotglob on (WithCallWords).
+	callDots atomic.Bool
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -56,6 +62,11 @@ type TargetMemo struct {
 	resolved map[string]resolvedTarget
 	// entries are the answers of stateEntryMayDiffer by the exact path.
 	entries map[string]stateEntry
+	// lstats are the Lstat answers of the paths the memo's walks and state
+	// entries read: the state scan reads the entry of each word the walk
+	// just read (rel-1-0-10:GAP-0299, two Lstat calls per word of a 1 MiB
+	// here-document).
+	lstats map[string]statAnswer
 	// The shared reach reader keeps complete names and per-parent answers.
 	reachNames   map[string]reachNames
 	reachParents map[reachParentKey]reachParentAnswer
@@ -147,6 +158,28 @@ func NewTargetMemo() *TargetMemo {
 	return memo
 }
 
+// NewCallTargetMemo is an empty file system memory for one hook call on a
+// host where the call keeps none of its own (memoReads off: POSIX). The
+// memos of the call's evaluations (NewTargetMemoIn) resolve their write
+// targets and read their state entries in it.
+func NewCallTargetMemo() *TargetMemo { return newTargetMemo() }
+
+// NewTargetMemoIn is NewTargetMemo whose write targets and state entries
+// are kept in call, the memory of the hook call it judges (nil: none): the
+// gateway judges one call in several evaluations (the sandbox shell reading,
+// the trusted tool reading, their twins), and each walked every distinct word
+// of the command again; the 1 MiB here-document of GAP-0299 was 24,000 walks
+// per evaluation. The answers depend only on the path and the file system,
+// the same for the whole call; the flags of each evaluation stay its own.
+// Where the hook call keeps its own memory (Windows) that memory serves.
+func NewTargetMemoIn(call *TargetMemo) *TargetMemo {
+	memo := NewTargetMemo()
+	if memo.call == nil && call != nil {
+		memo.call = call
+	}
+	return memo
+}
+
 // newTargetMemo is an empty memo that keeps its own answers.
 func newTargetMemo() *TargetMemo {
 	return &TargetMemo{
@@ -157,6 +190,7 @@ func newTargetMemo() *TargetMemo {
 		files:    make(map[string]protectedFiles),
 		resolved: make(map[string]resolvedTarget),
 		entries:  make(map[string]stateEntry),
+		lstats:   make(map[string]statAnswer),
 	}
 }
 
@@ -424,7 +458,7 @@ func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
 		return known.differ, known.missing
 	}
 	mark := m.cutMark()
-	differ, missing = actionStateEntryMayDiffer(value)
+	differ, missing = actionStateEntryMayDifferWith(value, m)
 	if !m.keepsSince(mark) {
 		return differ, missing
 	}
@@ -434,6 +468,33 @@ func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
 	}
 	m.mu.Unlock()
 	return differ, missing
+}
+
+// lstat is pathLstat through the memo (nil: the file system): each path is
+// read once for the memo's walks and state entries. An answer read while the
+// budget cut a share wait short is not kept (rel-1-0-10:GAP-1606).
+func (m *TargetMemo) lstat(name string) (os.FileInfo, error) {
+	if m == nil {
+		workcount.Add(workcount.WordLookup)
+		return pathLstat(name)
+	}
+	m.mu.Lock()
+	answer, found := m.lstats[name]
+	m.mu.Unlock()
+	if found {
+		return answer.info, answer.err
+	}
+	mark := m.cutMark()
+	workcount.Add(workcount.WordLookup)
+	info, err := pathLstat(name)
+	if m.keepsSince(mark) {
+		m.mu.Lock()
+		if len(m.lstats) < maxTargetMemoEntries {
+			m.lstats[name] = statAnswer{info, err}
+		}
+		m.mu.Unlock()
+	}
+	return info, err
 }
 
 // nonWritesExcused is set for the scan ActionMentionsNoWriteRole runs; a nil memo
@@ -470,4 +531,31 @@ func (m *TargetMemo) shellStartup() ShellStartup {
 		return *m.startup
 	}
 	return CurrentShellStartup()
+}
+
+// WithCallWords records the whole call the evaluation judges and returns
+// the memo. When its words may turn dotglob or globdots on
+// (CommandMayDotglob), every statement read in this evaluation is read with
+// * and ? matching a leading dot, as the call's own reading is: the gateway
+// judges each statement of an eval body on its own, and the statement
+// rm -rf * of eval 'cd ~; shopt -s dotglob; rm -rf *' does not spell the
+// option its body turned on (rel-1-0-10:GAP-2267). It only turns the
+// reading on.
+func (m *TargetMemo) WithCallWords(command string) *TargetMemo {
+	if m != nil && !m.callDots.Load() && CommandMayDotglob(command) {
+		m.callDots.Store(true)
+	}
+	return m
+}
+
+// callMayDotglob reports a call whose words may turn dotglob on
+// (WithCallWords).
+func (m *TargetMemo) callMayDotglob() bool { return m != nil && m.callDots.Load() }
+
+// withCallDotglobOf gives m the call reading of from and returns m.
+func (m *TargetMemo) withCallDotglobOf(from *TargetMemo) *TargetMemo {
+	if m != nil && from.callMayDotglob() {
+		m.callDots.Store(true)
+	}
+	return m
 }

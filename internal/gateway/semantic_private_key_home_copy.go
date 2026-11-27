@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // A user who copies their own SSH key to another place in their own home (a
@@ -442,7 +443,7 @@ func appendTrustedPrivateKeyHomeCopyAlert(
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 	}))
-	finding.enforcement = findingEnforcementAlertOnly
+	finding.Proof = finding.Proof.Advise()
 	return append(findings, finding)
 }
 
@@ -476,8 +477,8 @@ func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfac
 	if command == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
-	if err != nil || len(file.Stmts) == 0 {
+	file, parsed := shellparse.ParseBash(command)
+	if !parsed || len(file.Stmts) == 0 {
 		return false
 	}
 	copied := false

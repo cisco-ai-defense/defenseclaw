@@ -1849,6 +1849,18 @@ func HarnessArg(spec *harness.Spec) string {
 	return spec.Command
 }
 
+// HarnessArgs are the names HarnessArg gives every supported harness, for a
+// message that names them all (substrate run with no agent, GAP-0722).
+func HarnessArgs() []string {
+	var out []string
+	for _, n := range harness.Names() {
+		if spec, ok := harness.Get(n); ok {
+			out = append(out, HarnessArg(spec))
+		}
+	}
+	return out
+}
+
 // mergeHarnesses is openshell.harnesses with specs added: setting up one
 // more harness keeps those set up before. Entries that name a known
 // harness are recorded by its connector name.

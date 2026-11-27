@@ -56,11 +56,13 @@ func alignmentPathCases(t *testing.T) (cwd string, cases []alignmentCase) {
 			// Claude Code's Bash is Git Bash on Windows and is read as POSIX
 			// (GAP-0940): quoted or forward-slash drive paths keep their
 			// folder, while an unquoted backslash path loses its backslashes
-			// (C:Usersbench...), a drive-relative target that cannot be placed.
+			// (C:Usersbench...): a drive-relative name, which Windows places
+			// in the current folder of drive C, the working folder (DET111
+			// T23E6, effects placement of C:foo).
 			call("Bash", map[string]string{"command": `echo hi > 'C:\Users\bench\work\notes.txt'`}, false),
 			call("Bash", map[string]string{"command": `echo hi > C:/Users/bench/work/notes.txt`}, false),
-			call("Bash", map[string]string{"command": `echo hi > C:\Users\bench\work\notes.txt`}, true),
-			call("Bash", map[string]string{"command": `echo hi > C:\ProgramData\other\motd`}, true),
+			call("Bash", map[string]string{"command": `echo hi > C:\Users\bench\work\notes.txt`}, false),
+			call("Bash", map[string]string{"command": `echo hi > C:\ProgramData\other\motd`}, false),
 			// A leading-slash path is drive-relative on Windows: it cannot be
 			// placed under the working folder, so a write to it counts.
 			call("Bash", map[string]string{"command": "echo hi > /etc/motd"}, true),

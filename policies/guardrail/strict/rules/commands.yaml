@@ -733,7 +733,7 @@ rules:
     tags: [defense-evasion, tampering, cloud, audit-logging, bounded-lineage]
   - id: exec.postgresql_copy_program
     tool_call_only: true
-    expression: "f.tool == 'sql_query'"
+    expression: "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program == 'psql')"
     # Deliberately remains HIGH detection-only under strict posture. A block
     # requires trusted protected-database policy context that is not present.
     pattern: 'a^'
@@ -743,7 +743,7 @@ rules:
     tags: [execution, database, postgresql, server-side, bounded-lineage]
   - id: secrets.sql_sensitive_server_file_read
     tool_call_only: true
-    expression: "f.tool == 'sql_query'"
+    expression: "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb'])"
     # Strict also remains alert-only: the exact read is high signal, but
     # profile posture alone does not prove the database operation unauthorized.
     pattern: 'a^'
@@ -1018,7 +1018,7 @@ rules:
     # Exact named Secret reads stay alert-only without protected-cluster
     # authorization; the Kubernetes use-case pack supplies the blocking rule.
     pattern: 'a^'
-    title: "Read the content of one named Kubernetes Secret"
+    title: "Read the content of Kubernetes Secrets"
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]
@@ -1462,7 +1462,7 @@ rules:
     tags: [privilege, container, host-escape]
   - id: lateral.workload_exec
     tool_call_only: true
-    pattern: '(?i)\b(?:(?:kubectl|oc)\b[^;\n]*\b(?:exec|debug|rsh)\b|crictl\b[^;\n]*\bexec\b|ctr\b[^;\n]*\btasks?\s+exec\b|(?:docker|podman)\b[^;\n]*(?:--host|-H)(?:=|\s+)(?:tcp|ssh)://[^;\s]+\s+exec\b)'
+    pattern: '(?i)\b(?:(?:kubectl|oc)\b[^;\n]*\b(?:exec|attach|debug|rsh)\b|crictl\b[^;\n]*\bexec\b|ctr\b[^;\n]*\btasks?\s+exec\b|(?:docker|podman)\b[^;\n]*(?:--host|-H)(?:=|\s+)(?:tcp|ssh)://[^;\s]+\s+exec\b)'
     title: "Remote workload command execution"
     severity: HIGH
     confidence: 0.92

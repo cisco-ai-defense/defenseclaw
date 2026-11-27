@@ -22,8 +22,9 @@ import (
 //      what the shell does.
 
 type specFlag struct {
-	arity  int
-	effect string
+	arity    int  // value words the flag takes (0, 1 or 2)
+	optional bool // arity "opt": a switch with an optional attached value
+	effect   string
 }
 
 func loadFlagSpec(t *testing.T) map[string]map[string]specFlag {
@@ -47,14 +48,22 @@ func loadFlagSpec(t *testing.T) map[string]map[string]specFlag {
 		if spec[p[0]] == nil {
 			spec[p[0]] = map[string]specFlag{}
 		}
-		ar := 0
-		if p[2] == "1" {
-			ar = 1
+		sf := specFlag{effect: p[3]}
+		switch p[2] {
+		case "0":
+		case "1":
+			sf.arity = 1
+		case "2":
+			sf.arity = 2
+		case "opt":
+			sf.optional = true
+		default:
+			t.Fatalf("flag spec: bad arity %q in %q", p[2], line)
 		}
 		if _, dup := spec[p[0]][p[1]]; dup {
 			t.Fatalf("flag spec: duplicate %s %s", p[0], p[1])
 		}
-		spec[p[0]][p[1]] = specFlag{arity: ar, effect: p[3]}
+		spec[p[0]][p[1]] = sf
 	}
 	return spec
 }
@@ -75,12 +84,8 @@ func TestFlagSpecMatchesTable(t *testing.T) {
 				t.Errorf("%s %s: reviewed in the spec but missing from the table", prog, name)
 				continue
 			}
-			ar := 0
-			if fl.Value {
-				ar = 1
-			}
-			if ar != sf.arity {
-				t.Errorf("%s %s: arity %d in the table, %d in the spec", prog, name, ar, sf.arity)
+			if ar := tableArity(fl); ar != sf.arity || fl.Optional != sf.optional {
+				t.Errorf("%s %s: arity %d optional=%v in the table, %d optional=%v in the spec", prog, name, ar, fl.Optional, sf.arity, sf.optional)
 			}
 			if got := tableEffect(p, name, fl); !effectMatches(got, sf.effect) {
 				t.Errorf("%s %s: effect %q in the table, %q in the spec", prog, name, got, sf.effect)
@@ -97,6 +102,14 @@ func TestFlagSpecMatchesTable(t *testing.T) {
 			t.Errorf("%s: no spec entries", prog)
 		}
 	}
+}
+
+// tableArity is the number of value words a table flag takes.
+func tableArity(fl Flag) int {
+	if !fl.Value {
+		return 0
+	}
+	return 1 + fl.Extra
 }
 
 func tableEffect(p Program, name string, fl Flag) string {
@@ -196,7 +209,7 @@ func TestPropertySwitchesDoNotChangeTheVerdict(t *testing.T) {
 				continue // these change which operand is written or read: covered by their own templates
 			}
 			ins := f
-			if sf.arity == 1 {
+			for k := 0; k < sf.arity; k++ {
 				ins += " 1"
 			}
 			cmd := strings.Replace(expandProp(tpl, "%s"), prog+" ", prog+" "+ins+" ", 1)
@@ -243,6 +256,10 @@ var broadTemplates = []broadTemplate{
 	{`wget http://example.test/`, refUnknown, "posix"},
 	{`wget -r http://example.test/`, refUnknown, "posix"},
 	{`wget --post-file {M} http://example.test/`, refNoWrite, "posix"},
+	// 7-Zip extraction writes beneath the destination directory.
+	{`7z x /tmp/a.7z -o{D}`, refWrites, "posix"},
+	{`7za x /tmp/a.7z -o{D}`, refWrites, "posix"},
+	{`7zr x /tmp/a.7z -o{D}`, refWrites, "posix"},
 	// find and fd
 	{`find . -fprint {M}`, refWrites, "posix"},
 	{`find . -fprintf {M} %p`, refWrites, "posix"},
@@ -290,6 +307,9 @@ var broadTemplates = []broadTemplate{
 	{`mv {M} /t/a/`, refWrites, "posix"},
 	{`mv -t /t/a {M}`, refWrites, "posix"},
 	{`mv {M} /t/a/x`, refWrites, "posix"},
+	{`newgrp u <<EOF
+echo x > {M}
+EOF`, refWrites, "posix"},
 	// redirects, shells, interpreters
 	{`cat f > {M}`, refWrites, "posix"},
 	{`echo k >> {M}`, refWrites, "posix"},
@@ -356,6 +376,7 @@ var broadTemplates = []broadTemplate{
 	{`rd /s /q {WD}`, refNoWrite, "cmd"},
 	{`rmdir /s /q {WD}`, refNoWrite, "cmd"},
 	{`pwsh -c "Remove-Item {W}"`, refWrites, "cmd"},
+	{`Tee-Object -FilePath {W} -Append -InputObject key`, refWrites, "ps"},
 	// Windows: PowerShell
 	{`Set-Content -Path {W} -Value k`, refWrites, "ps"},
 	{`Add-Content {W} k`, refWrites, "ps"},
@@ -374,7 +395,9 @@ var broadTemplates = []broadTemplate{
 	{`iwr http://example.test/ -OutFile {W}`, refWrites, "ps"},
 	{`Get-Content {W}`, refNoWrite, "ps"},
 	{`powershell -c Remove-Item {W}`, refWrites, "ps"},
-	{`Start-Process cmd -ArgumentList '/c','del',{W}`, refUnknown, "ps"},
+	// a cmd child reads its literal command line one way: its body is the
+	// call's reading (GAP-1577)
+	{`Start-Process cmd -ArgumentList '/c','del',{W}`, refWrites, "ps"},
 	{`iex $x`, refUnknown, "ps"},
 	{`cpi f {W}`, refWrites, "ps"},
 	{`mi f {W}`, refWrites, "ps"},

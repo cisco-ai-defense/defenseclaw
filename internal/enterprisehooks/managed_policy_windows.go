@@ -2466,7 +2466,8 @@ func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
 		data, readErr = readTrustedWindowsManagedPolicyFileOnce(path, &seen)
 		return readErr
 	}
-	err := safefile.RetryTransientRead(read)
+	// An absent managed policy file is an answer: one confirming look.
+	err := safefile.RetryOptionalRead(read)
 	if seen && safefile.IsTransientReadError(err) {
 		err = safefile.RetryPublishedRead(read)
 	}
@@ -2483,6 +2484,9 @@ func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
 func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, error) {
 	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
+		if *seen {
+			err = safefile.NameVanished(err)
+		}
 		return nil, fmt.Errorf("enterprise hooks: inspect Claude Code managed policy %s: %w", path, err)
 	}
 	*seen = true
@@ -2500,7 +2504,7 @@ func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, e
 	}
 	file, err := winpath.OpenReadShared(path)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, safefile.NameVanished(err))
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
@@ -2522,7 +2526,7 @@ func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, e
 	}
 	current, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: re-inspect Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: re-inspect Claude Code managed policy %s: %w", path, safefile.NameVanished(err))
 	}
 	if !current.Mode().IsRegular() {
 		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type during read: %s", path)
@@ -2964,9 +2968,12 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 
 func windowsManagedFileMatchesExisting(path string, data []byte) (bool, error) {
 	var seen, matched bool
-	err := safefile.RetryTransientRead(func() error {
+	err := safefile.RetryOptionalRead(func() error {
 		info, err := os.Lstat(path)
 		if err != nil {
+			if seen {
+				return safefile.NameVanished(err)
+			}
 			return err
 		}
 		seen = true
@@ -2978,7 +2985,7 @@ func windowsManagedFileMatchesExisting(path string, data []byte) (bool, error) {
 		}
 		current, err := winpath.ReadFileShared(path)
 		if err != nil {
-			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, err)
+			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, safefile.NameVanished(err))
 		}
 		if !bytes.Equal(current, data) {
 			return nil

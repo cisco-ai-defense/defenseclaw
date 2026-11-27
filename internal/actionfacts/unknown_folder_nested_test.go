@@ -83,6 +83,8 @@ func TestFindHandedReadings(t *testing.T) {
 		`find ~/notes.txt -exec cat {} +`:           "cat /home/alice/notes.txt",
 		`find /srv/a.log -execdir head -n1 {} \;`:   "head -n1 /srv/a.log",
 		`find "my notes.txt" -exec cp {} /tmp/n \;`: "cp '/home/alice/proj/my notes.txt' /tmp/n",
+		// a shell child whose body only reads is a reader (rel-1-0-10:GAP-1327)
+		`find notes.txt -exec sh -c 'cat "$1"' _ {} \;`: `sh -c 'cat "$1"' _ /home/alice/proj/notes.txt`,
 	} {
 		got, truncated := read(command)
 		if truncated || len(got) != 1 || got[0] != want {
@@ -90,7 +92,7 @@ func TestFindHandedReadings(t *testing.T) {
 		}
 	}
 	for _, command := range []string{
-		`find notes.txt -exec rm {} \;`, `find notes.txt -exec sh -c 'cat "$1"' _ {} \;`,
+		`find notes.txt -exec rm {} \;`, `find notes.txt -exec sh -c ': > "$1"' _ {} \;`,
 		`find notes.txt -name x`, `find "$DIR" -exec cat {} \;`, `find notes.txt -exec echo done \;`,
 	} {
 		if got, _ := read(command); len(got) != 0 {

@@ -27,7 +27,7 @@ func TestRunTimeShellTwinReadsShellTextAsTheShellDoes(t *testing.T) {
 		{"cat <<EOF | (sh)\nmake clean\nEOF", "cat <<EOF | (bash -c " + q("make clean\n") + ")\nmake clean\nEOF"},
 		{"cat <<EOF | { bash; }\nmake clean\nEOF", "cat <<EOF | { bash -c " + q("make clean\n") + "; }\nmake clean\nEOF"},
 		{"bash <<< \"$(cat <<EOF\nmake clean\nEOF\n)\"", "bash -c " + q("make clean")}, // the here-string is the -c STRING, not stdin (GAP-1088),
-		{"sh < <(cat <<'EOF'\nmake clean\nEOF\n)", "bash -c " + q("make clean\n") + " < <(cat <<'EOF'\nmake clean\nEOF\n)"},
+		{"sh < <(cat <<'EOF'\nmake clean\nEOF\n)", "bash -c " + q("make clean\n")},     // the process substitution is the -c STRING, not stdin (GAP-1593)
 		// GAP-1148: \$, \` and \\ lose the backslash and a backslash line end
 		// joins the lines in an unquoted body; any other backslash stays, and a
 		// quoted body is literal.

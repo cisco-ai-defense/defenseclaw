@@ -21,6 +21,7 @@ import (
 // restores the exact protected DACL. GAP-1257: the revoke also takes the
 // file-only grant on the profile-root .claude.json.
 func TestRevokeGatewayInventoryReadRestoresTheProtectedDACL(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := t.TempDir()
 	config := filepath.Join(home, ".config")

@@ -9,7 +9,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -85,11 +84,7 @@ func TestBundledCodeGuardPackagedCopyScansCleanThroughWindowsConnectors(t *testi
 
 func bundledCodeGuardGatewayRepositoryRoot(t *testing.T) string {
 	t.Helper()
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller could not locate the connector asset test")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
+	return filepath.Clean(repoRootFromTestFile(t))
 }
 
 func bundledCodeGuardGatewayCopyExact(t *testing.T, sourceDir, destinationDir string) {

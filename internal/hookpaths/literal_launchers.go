@@ -371,6 +371,16 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 				names = append(names, name)
 			}
 		}
+		// The file of a w or W command, or of the w flag of s, is opened for
+		// writing by name, so a hard link there writes its file, with or
+		// without -i (rel-1-0-10:GAP-1288, GAP-1318).
+		if scripts, ok := sedScriptTexts(words[1:]); ok {
+			for _, script := range scripts {
+				if files, ok := sedScriptWriteFiles(script); ok {
+					names = append(names, files...)
+				}
+			}
+		}
 		return add(names)
 	case program == "cp" || program == "gcp":
 		if len(words) < 3 {
@@ -395,6 +405,78 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); dest != "" {
 			return []string{dest}
+		}
+	case program == "mv" || program == "gmv":
+		// mv, install and rsync have their own readers (the rename, the
+		// move onto a link, the recursive copy scope). Only a destination
+		// below a process link, which those readers cannot place, is listed
+		// here (rel-1-0-10:GAP-2227, GAP-2237); listing every destination
+		// judged a plain rename onto a link and a recursive folder sync as
+		// writes through links (rel-1-0-10:GAP-2275).
+		op, ok := parseRename(words[1:], cwd)
+		if !ok || len(op.sources) == 0 {
+			return nil
+		}
+		if op.targetDir != "" {
+			var names []string
+			for _, source := range op.sources {
+				names = append(names, OperandPath(op.targetDir, cwd)+"/"+filepath.Base(source))
+			}
+			return processLinkWrites(names, cwd)
+		}
+		if op.dest != "" {
+			return processLinkWrites([]string{OperandPath(op.dest, cwd)}, cwd)
+		}
+	case program == "install" || program == "ginstall":
+		if len(words) < 3 {
+			return nil
+		}
+		var destination string
+		var sources []string
+		for i := 1; i < len(words); i++ {
+			word := words[i]
+			switch {
+			case word == "--":
+				sources = append(sources, words[i+1:]...)
+				i = len(words)
+			case word == "-d" || word == "--directory":
+				return nil
+			case word == "-t" || word == "--target-directory":
+				i++
+				if i >= len(words) {
+					return nil
+				}
+				destination = words[i]
+			case strings.HasPrefix(word, "--target-directory="):
+				destination = strings.TrimPrefix(word, "--target-directory=")
+			case strings.HasPrefix(word, "-t") && len(word) > 2:
+				destination = word[2:]
+			case strings.HasPrefix(word, "-"):
+				continue
+			default:
+				sources = append(sources, word)
+			}
+		}
+		if destination != "" {
+			if len(sources) == 0 {
+				return nil
+			}
+			var names []string
+			for _, source := range sources {
+				names = append(names, OperandPath(destination, cwd)+"/"+filepath.Base(source))
+			}
+			return processLinkWrites(names, cwd)
+		}
+		if len(sources) >= 2 {
+			return processLinkWrites([]string{OperandPath(sources[len(sources)-1], cwd)}, cwd)
+		}
+	case program == "rsync":
+		if len(words) < 3 {
+			return nil
+		}
+		dest := archiveCopyDestination(words[1:], makeStatic(len(words)-1), cwd)
+		if dest != "" {
+			return processLinkWrites([]string{dest}, cwd)
 		}
 	case program == "tee" || program == "gtee":
 		var names []string

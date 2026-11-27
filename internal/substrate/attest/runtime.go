@@ -806,9 +806,19 @@ func runsNothingOfFolder(s MCPServer, project string, files []AttachedFile) bool
 		// Where the kit found a bare command on the actor's PATH: a
 		// program of the folder (./node_modules/.bin, a venv) is the
 		// folder's, whatever its name (GAP-0575).
-		resolved = commandPath(s.Command, files)
+		resolved = commandPath(RoleCommandPath, s.Command, files)
 		if resolved != "" && inFolder(resolved) {
 			return false
+		}
+		// A link of the folder (a folder PATH entry) is the folder's,
+		// whatever installed program it points at (GAP-0632).
+		if hit := commandPath(RoleCommandPathHit, s.Command, files); hit != "" && inFolder(hit) {
+			return false
+		}
+		// What runs is the link's target: a runner reached under another
+		// name is read as that runner (GAP-0632).
+		if rb := strings.TrimSuffix(path.Base(resolved), ".exe"); resolved != "" && !runtimeFetchers[base] && !runnerName(base) && runnerName(rb) {
+			base = rb
 		}
 	}
 	switch {
@@ -881,7 +891,7 @@ func serverFiles(all []AttachedFile) []AttachedFile {
 	var out []AttachedFile
 	for _, f := range all {
 		switch f.Role {
-		case RoleMCPServer, RoleMCPConfig, RoleMCPModuleAbsent, RoleFetchChecked, RoleFetchLocal, RoleFetchConfig, RoleFetchNames, RoleCommandPath:
+		case RoleMCPServer, RoleMCPConfig, RoleMCPModuleAbsent, RoleFetchChecked, RoleFetchLocal, RoleFetchConfig, RoleFetchNames, RoleFetchBins, RoleCommandPath, RoleCommandPathHit:
 			out = append(out, f)
 		}
 	}

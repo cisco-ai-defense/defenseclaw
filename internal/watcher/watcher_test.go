@@ -1335,9 +1335,6 @@ func TestAdmissionFailsClosedWhenTheJudgeDidNotRun(t *testing.T) {
 // admitted the plugin. With a judge configured it now fails closed; with none
 // the same finding still only warns.
 func TestPluginAdmissionFailsClosedWhenTheConfiguredJudgeFailed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the fake plugin scanner is a shell script")
-	}
 	for _, tc := range []struct {
 		judge string
 		want  Verdict
@@ -1347,9 +1344,17 @@ func TestPluginAdmissionFailsClosedWhenTheConfiguredJudgeFailed(t *testing.T) {
 	} {
 		cfg, store, logger, skillDir := setupTestEnv(t)
 		pluginDir := t.TempDir()
+		report := `{"scanner":"plugin-scanner","findings":[{"id":"l1","rule_id":"` +
+			scanner.RulePluginLLMScanError + `","severity":"MEDIUM","title":"LLM analysis failed to run"}]}`
+		// The fake plugin scanner prints one report: a shell script, and on
+		// Windows a batch file, which Go starts through cmd.exe, so the
+		// admission path also runs natively there (rel-1-0-10:GAP-1690).
 		bin := filepath.Join(t.TempDir(), "defenseclaw")
-		script := "#!/bin/sh\necho '{\"scanner\":\"plugin-scanner\",\"findings\":[{\"id\":\"l1\",\"rule_id\":\"" +
-			scanner.RulePluginLLMScanError + "\",\"severity\":\"MEDIUM\",\"title\":\"LLM analysis failed to run\"}]}'\n"
+		script := "#!/bin/sh\necho '" + report + "'\n"
+		if runtime.GOOS == "windows" {
+			bin += ".cmd"
+			script = "@echo off\r\necho " + report + "\r\n"
+		}
 		if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}

@@ -41,7 +41,8 @@ const WindowsManagedRuntimeDriftReason = "enterprise_managed_runtime_drift"
 
 // Resolver failure classes. A drift failure (permission or owner drift on the
 // user's runtime files, an oversized file, a stale selector or generation, a
-// short-path invocation of the policy executable, a Cursor adapter mode that
+// short-path invocation of the policy executable whose long name could not be
+// confirmed, a Cursor adapter mode that
 // differs from the generation, a busy lock) follows the hook's configured
 // fail mode. A boundary failure (a reparse point, a hard link, a wrong object
 // type, a hook executable or machine file an untrusted principal can write,
@@ -189,6 +190,13 @@ func ResolveWindowsManagedHookRuntime(
 		err     error
 	)
 	name := strings.ToLower(strings.TrimSpace(connectorName))
+	// An administrator policy (the HKLM Claude matrix) can name the installed
+	// hook by its 8.3 alias, and the process then reports that alias as its
+	// image. Every check below compares the long name the installed hook is
+	// recorded under, so the alias of that same file is spelled by it first;
+	// a different file, a copy or a link keeps its own spelling and still
+	// fails them (GAP-2243).
+	hookExecutable = winpath.LongName(hookExecutable)
 	switch name {
 	case "claudecode":
 		runtime, err = resolveWindowsClaudeManagedHookRuntime(hookExecutable)
@@ -240,10 +248,13 @@ func windowsLongPathName(path string) (string, bool) {
 }
 
 // windowsManagedHookExecutableMismatch classifies an invoking executable that
-// differs from the policy executable. When both name the same file, or two
-// images of the same managed hook (GAP-0751), once short (8.3) components are
-// expanded, only the invocation path drifted; any other executable is a
-// boundary.
+// differs from the policy executable. ResolveWindowsManagedHookRuntime has
+// already spelled an 8.3 alias of an existing file by its long name
+// (winpath.LongName), so a short spelling reaches here only when that could
+// not be confirmed (a lookup past its budget, a file replaced in between).
+// When both still name the same file, or two images of the same managed hook
+// (GAP-0751), once short (8.3) components are expanded, only the invocation
+// path drifted; any other executable is a boundary.
 func windowsManagedHookExecutableMismatch(
 	result *WindowsManagedHookRuntime,
 	connectorName string,

@@ -4,10 +4,6 @@
 package gateway
 
 import (
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,40 +39,18 @@ func TestGAP0944SSHFolderGlobCopyKeepsTheRelBlockOnWindows(t *testing.T) {
 	} {
 		for _, p := range gap0437Packs {
 			a := gap0437Server(t, p, "openclaw", "action")
-			out := gap0944Inspect(t, a, cwd, replacer.Replace(command))
+			// The first call of a fresh server builds the rule generation,
+			// which on a slow Windows box can take longer than the scan
+			// deadline (rel-1-0-10:GAP-0958). A harmless call takes that
+			// cost before the inspect these rows pin, which keeps the
+			// production deadline (rel-1-0-10:GAP-1012).
+			warmDefenseClawControl(t, a.handleInspectTool, "/api/v1/inspect/tool", map[string]any{
+				"tool": "exec", "connector": "openclaw", "args": map[string]any{"command": "ls", "workdir": cwd},
+			})
+			out := gap0437Inspect(t, a, cwd, replacer.Replace(command))
 			if out["action"] != "block" {
 				t.Errorf("%s %s: action %v findings %v, want block (rel)", p.name, command, out["action"], out["findings"])
 			}
 		}
 	}
-}
-
-// gap0944Inspect is gap0437Inspect that asks again after a scan timeout: the
-// first call of a fresh server on a cold Windows runner can spend the inspect
-// budget compiling the rule set (rel-1-0-10:GAP-0958), which says nothing
-// about the verdict these rows pin.
-func gap0944Inspect(t *testing.T, a *APIServer, cwd, command string) map[string]any {
-	t.Helper()
-	raw, _ := json.Marshal(map[string]any{
-		"tool": "exec", "connector": "openclaw", "args": map[string]any{"command": command, "workdir": cwd},
-	})
-	for try := 0; try < 3; try++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", bytes.NewReader(raw))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-		a.handleInspectTool(w, req)
-		if w.Code == http.StatusGatewayTimeout {
-			continue
-		}
-		if w.Code != http.StatusOK {
-			t.Fatalf("status %d body %s", w.Code, w.Body.String())
-		}
-		var out map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
-			t.Fatal(err)
-		}
-		return out
-	}
-	t.Fatalf("%s: three scan timeouts", command)
-	return nil
 }

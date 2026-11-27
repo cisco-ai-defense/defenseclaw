@@ -803,6 +803,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, Vau
         margin-bottom: 0;
     }
 
+    /* The Inventory bars give rows to the table at 80x24 (GAP-2051): no
+       scrollbar row under the tabs (the "more" mark on the border says the
+       bar scrolls) and no box around the filter chips. */
+    Screen.-short #inventory-controls {
+        scrollbar-size-horizontal: 0;
+    }
+
+    Screen.-short #inventory-filter-controls {
+        border: none;
+    }
+
     #body {
         height: auto;
         margin-bottom: 1;
@@ -5332,8 +5343,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, Vau
             self.inventory_model.set_size(
                 int(getattr(self.size, "width", 0) or 0), int(getattr(self.size, "height", 0) or 0)
             )
-            self._table_columns = self.inventory_model.data_table_columns()
-            self._table_rows = self.inventory_model.data_table_rows()
+            # Every sub-tab fits the terminal width with an ellipsis, so a long
+            # Source value never makes the table scroll sideways and draw a
+            # scrollbar of block glyphs (GAP-2051). The detail card has the value.
+            self._table_columns, self._table_rows = self._fit_to_screen(
+                self.inventory_model.data_table_columns(), self.inventory_model.data_table_rows()
+            )
             empty = self.inventory_model.empty_state()
             suffix = f"\n\n{empty}" if empty else ""
             self.body_text = self._inventory_body_text() + suffix

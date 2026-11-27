@@ -21,6 +21,47 @@ func sedScriptReplaceOnly(script string) bool {
 type sedScan struct {
 	s string
 	i int
+	// collect: read the commands that name a file too (w, W, r, R, the w
+	// flag of s, labels), listing each file the script writes in files.
+	collect bool
+	files   []string
+}
+
+// sedScriptWriteFiles lists the files a sed script opens for writing by
+// name: the file of each w and W command and of the w flag of s. GNU sed
+// takes the name to the end of the line, does not expand it and opens it
+// with truncation, so a write through a name that is a hard link of a
+// protected file changes that file (rel-1-0-10:GAP-1288, GAP-1318).
+// /dev/stdout and /dev/stderr are the output streams, not files. ok is false
+// for a script the reader cannot settle (an unknown command, the e command
+// or flag, an unterminated part): the caller keeps its other readings.
+func sedScriptWriteFiles(script string) (files []string, ok bool) {
+	p := sedScan{s: script, collect: true}
+	if !p.script() {
+		return nil, false
+	}
+	return p.files, true
+}
+
+// fileName reads the file name of w, W, r, R and the w flag of s: after
+// blanks, to the end of the line. An empty name is malformed.
+func (p *sedScan) fileName(write bool) bool {
+	p.skipBlank()
+	start := p.i
+	for p.more() && p.peek() != '\n' {
+		p.i++
+	}
+	name := p.s[start:p.i]
+	if p.more() {
+		p.i++
+	}
+	if name == "" {
+		return false
+	}
+	if write && name != "/dev/stdout" && name != "/dev/stderr" {
+		p.files = append(p.files, name)
+	}
+	return true
 }
 
 func (p *sedScan) more() bool { return p.i < len(p.s) }
@@ -108,6 +149,15 @@ func (p *sedScan) script() bool {
 		case 'a', 'i', 'c':
 			p.text()
 		case 'b', 't', 'T':
+			p.label()
+		case 'w', 'W', 'r', 'R':
+			if !p.collect || !p.fileName(command == 'w' || command == 'W') {
+				return false
+			}
+		case ':', 'v':
+			if !p.collect {
+				return false
+			}
 			p.label()
 		default:
 			return false
@@ -227,6 +277,9 @@ func (p *sedScan) substitute() bool {
 	for p.more() {
 		c := p.peek()
 		switch {
+		case c == 'w' && p.collect:
+			p.i++
+			return p.fileName(true)
 		case c == 'e' || c == 'w':
 			return false
 		case c == 'g' || c == 'p' || c == 'i' || c == 'I' || c == 'm' || c == 'M' || c >= '0' && c <= '9':

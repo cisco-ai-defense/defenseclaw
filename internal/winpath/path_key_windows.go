@@ -38,6 +38,48 @@ func ComparisonKey(path string) string {
 	return strings.ToLower(filepath.Clean(path))
 }
 
+// mayShareComparisonKey reports, without asking the file system, whether
+// path and want can have one ComparisonKey. The 8.3 expansion keeps the
+// number of components and only changes a component spelled with ~, so the
+// two must have as many components and every component without ~ on either
+// side must match. A command that differs elsewhere, such as a
+// user-written handler, is refused before a long-name lookup of up to
+// longNameLookupBudget per spelling (GAP-2222).
+//
+// Documented limit: a path with a ~ component that also uses, in another
+// component, a short name an administrator set without ~ (SetFileShortName,
+// which needs SeRestorePrivilege) is refused here, where ComparisonKey would
+// have expanded both. It only lowers a claim: the guardian treats that alias
+// as not DefenseClaw's and adds its canonical entry.
+func mayShareComparisonKey(path, want string) bool {
+	a, b := keyComponents(path), keyComponents(want)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.Contains(a[i], "~") || strings.Contains(b[i], "~") {
+			continue
+		}
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// keyComponents splits path as ComparisonKey spells it, without the 8.3
+// expansion.
+func keyComponents(path string) []string {
+	path = filepath.FromSlash(strings.TrimSpace(path))
+	switch {
+	case strings.HasPrefix(path, `\\?\UNC\`):
+		path = `\\` + strings.TrimPrefix(path, `\\?\UNC\`)
+	case strings.HasPrefix(path, `\\?\`):
+		path = strings.TrimPrefix(path, `\\?\`)
+	}
+	return strings.Split(filepath.Clean(path), `\`)
+}
+
 // longNameLookupBudget bounds how long ComparisonKey waits for the 8.3 long
 // name of one spelling. The lookup touches the file system, and a stalled
 // redirected or network profile can hold it for good; ComparisonKey runs

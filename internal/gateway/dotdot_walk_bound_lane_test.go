@@ -34,7 +34,13 @@ func init() {
 			return boundedShellLane(walk, walk)(size, shape)
 		},
 		seen: boundedShellSeenCall,
-		// In the managed tier the write past the bound blocks decisively
-		// (persistence.ssh_authorized_keys_command) and skips the judge.
-		open: map[string]string{"managed/" + boundedJudgeOpenShape: "rel-1-0-10:GAP-1203"}})
+		// In a managed install the protected-home hook reports the write
+		// past the bound as an operand it could not place, and the keys
+		// proof blocks it decisively (persistence.ssh_authorized_keys_command)
+		// without the judge: the 1.0.10 managed fail-closed verdict for a
+		// truncated write that may reach the keys file. A bound is a MAYBE,
+		// and a MAYBE keeps its 1.0.10 verdict (DET111 ruling 2026-11-22),
+		// so the block stands (rel-1-0-10:GAP-1203). Managed strict blocks
+		// at the floor too.
+		decisive: map[string]string{"managed/" + boundedJudgeOpenShape: "rel-1-0-10:GAP-1203 managed keys fail-closed"}})
 }

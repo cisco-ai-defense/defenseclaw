@@ -40,6 +40,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -56,7 +57,11 @@ var defaultsFS embed.FS
 
 // RulePack is the top-level container loaded from a rule-pack directory.
 type RulePack struct {
-	Suppressions   *SuppressionsConfig
+	Suppressions *SuppressionsConfig
+	// Tiers is the pack's tier table column (tiers.yaml, DET111 D4): the
+	// pack's own tier and what each proof class is worth in it. Nil keeps
+	// the built-in column of decide.Builtin().
+	Tiers          *decide.Column
 	JudgeConfigs   map[string]*JudgeYAML
 	SensitiveTools *SensitiveToolsConfig
 	RuleFiles      []*RulesFileYAML
@@ -277,10 +282,68 @@ type RuleDefYAML struct {
 	Severity        string   `yaml:"severity"`
 	Confidence      float64  `yaml:"confidence"`
 	Tags            []string `yaml:"tags"`
+	// Keys is the key vocabulary of SEC-SECRET-ASSIGN, the only rule that
+	// reads one (GAP-0433): the words that name a credential and the words
+	// around one that make the key a setting or a name. A list left out
+	// keeps the built-in one (the default pack's).
+	Keys *RuleKeysYAML `yaml:"keys,omitempty"`
 
 	decoded       bool `yaml:"-"`
 	confidenceSet bool `yaml:"-"`
 	expressionSet bool `yaml:"-"`
+}
+
+// SecretAssignmentRuleID is the rule that reads a key vocabulary
+// (RuleDefYAML.Keys).
+const SecretAssignmentRuleID = "SEC-SECRET-ASSIGN"
+
+// RuleKeysYAML is the key vocabulary of an assignment rule. Words are lower
+// case letters and digits; a key is cut into words at _ and -, case changes
+// and acronyms, and one word, or two or three joined (api + key), must be in
+// Words, with no word before it in Prefixes (max_tokens) and none after it
+// in Suffixes (token_count).
+type RuleKeysYAML struct {
+	Words    []string `yaml:"words,omitempty"`
+	Prefixes []string `yaml:"prefixes,omitempty"`
+	Suffixes []string `yaml:"suffixes,omitempty"`
+}
+
+// maxRuleKeyWords bounds each list of a key vocabulary.
+const maxRuleKeyWords = 512
+
+var ruleKeyWord = regexp.MustCompile(`^[a-z0-9]{1,48}$`)
+
+// validateRuleKeys checks a rule's key vocabulary: only the assignment rule
+// reads one, every list is bounded, and every word is a lower case word.
+func validateRuleKeys(rel string, ruleIndex int, ruleID string, keys *RuleKeysYAML) error {
+	if keys == nil {
+		return nil
+	}
+	if ruleID != SecretAssignmentRuleID {
+		return rulePackErr(rel, "validation", fmt.Sprintf("rule %d keys is read only by rule %s", ruleIndex, SecretAssignmentRuleID))
+	}
+	if len(keys.Words) == 0 && len(keys.Prefixes) == 0 && len(keys.Suffixes) == 0 {
+		return rulePackErr(rel, "validation", fmt.Sprintf("rule %d keys names no words, prefixes or suffixes", ruleIndex))
+	}
+	for _, list := range []struct {
+		name  string
+		words []string
+	}{{"words", keys.Words}, {"prefixes", keys.Prefixes}, {"suffixes", keys.Suffixes}} {
+		if len(list.words) > maxRuleKeyWords {
+			return rulePackErr(rel, "validation", fmt.Sprintf("rule %d keys %s has more than %d entries", ruleIndex, list.name, maxRuleKeyWords))
+		}
+		seen := make(map[string]struct{}, len(list.words))
+		for wordIndex, word := range list.words {
+			if !ruleKeyWord.MatchString(word) {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d keys %s entry %d must be 1 to 48 lower case letters or digits", ruleIndex, list.name, wordIndex))
+			}
+			if _, exists := seen[word]; exists {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d keys %s entries must be unique", ruleIndex, list.name))
+			}
+			seen[word] = struct{}{}
+		}
+	}
+	return nil
 }
 
 // SensitiveToolsConfig maps to sensitive-tools.yaml.
@@ -399,6 +462,17 @@ func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 			return nil, err
 		}
 		rp.Suppressions = &cfg
+	}
+	if _, ok := inventory.files[decide.TiersFile]; ok {
+		var raw decide.ColumnYAML
+		if err := decode(decide.TiersFile, &raw); err != nil {
+			return nil, err
+		}
+		col, err := raw.Column()
+		if err != nil {
+			return nil, rulePackErr(decide.TiersFile, "invalid_tiers", err.Error())
+		}
+		rp.Tiers = col
 	}
 	if _, ok := inventory.files["sensitive-tools.yaml"]; ok {
 		var cfg SensitiveToolsConfig
@@ -529,11 +603,18 @@ func (rp *RulePack) FilesDigest() string {
 	return rp.filesDigest
 }
 
-// Posture is the level named by the manifest bytes loaded and covered by
-// FilesDigest. An absent or unrecognized optional manifest has no posture.
+// Posture is the pack's own tier: the level named by the manifest bytes
+// loaded and covered by FilesDigest, else the tier field of its tiers.yaml.
+// A copy that lost its manifest keeps the tier its content names, whatever
+// its folder is called (rel-1-0-10:GAP-1562, owner 2026-11-21: a pack's tier
+// comes from the pack's own tier field, never from its folder name). A pack
+// naming neither has no posture.
 func (rp *RulePack) Posture() string {
 	if rp == nil {
 		return ""
+	}
+	if rp.manifestPosture == "" && rp.Tiers != nil {
+		return rp.Tiers.Tier.String()
 	}
 	return rp.manifestPosture
 }
@@ -741,7 +822,7 @@ func isRecognizedRulePackYAML(rel string) bool {
 		return false
 	}
 	switch rel {
-	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml":
+	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml", decide.TiersFile:
 		return true
 	}
 	for _, name := range knownJudgeNames {
@@ -1228,6 +1309,9 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 			}
 			if len(rule.Tags) == 0 {
 				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d tags must not be empty", ruleIndex))
+			}
+			if err := validateRuleKeys(rel, ruleIndex, ruleID, rule.Keys); err != nil {
+				return err
 			}
 			seenTags := make(map[string]struct{}, len(rule.Tags))
 			for tagIndex, tag := range rule.Tags {

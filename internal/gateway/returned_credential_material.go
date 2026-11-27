@@ -97,7 +97,7 @@ func returnedCredentialMaterialFindings(
 		findings = append(findings, RuleFinding{
 			RuleID: ruleID, Title: title, Severity: severity, Confidence: confidence,
 			Tags:        append(tags, "result-backed", "detection-only"),
-			enforcement: findingEnforcementDetectionOnly,
+			Proof:       recordProof,
 			disposition: findingDispositionAdvisory,
 		})
 	}
