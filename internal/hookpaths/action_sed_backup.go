@@ -320,8 +320,8 @@ func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit boo
 
 // sedProgram is the program a command word names, as the readers of this
 // file know it: the last element of its path in lower case, with the GNU
-// prefix of the macOS ports (gsed, gxargs, gfind) and the version of perl
-// (perl5.38.2) dropped.
+// prefix of the macOS ports (gsed, gxargs, gfind) dropped; programBase
+// already drops the version of perl (perl5.38.2).
 func sedProgram(word string) string {
 	name := programBase(word)
 	switch {
@@ -331,8 +331,6 @@ func sedProgram(word string) string {
 		return "xargs"
 	case name == "gfind":
 		return "find"
-	case strings.HasPrefix(name, "perl") && strings.Trim(name[len("perl"):], "0123456789.") == "":
-		return "perl"
 	}
 	return name
 }

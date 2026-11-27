@@ -10,8 +10,9 @@ import (
 
 // GAP-1097: inline Perl writes to a hook file through forms beyond a literal
 // builtin operand. Each form must surface the hook file as a write operand or
-// keep the conservative unproven-write audit (UnprovenProtectedWrite), so it alerts in default and
-// blocks in strict. perl5.36 is the same program as perl (versioned binary). The hook-file name is built from parts.
+// keep the conservative unproven-write audit (UnprovenProtectedWrite), so it
+// alerts in default and blocks in strict. perl5.36 is the same program as
+// perl (a versioned binary). The hook-file name is built from parts.
 func TestGAP1097PerlHookFileWriteForms(t *testing.T) {
 	dir := t.TempDir()
 	folder := "." + "claude"
