@@ -6,6 +6,7 @@ package connector
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -214,7 +215,15 @@ func editCodexRequirementsInPlace(raw []byte, cfg map[string]interface{}) ([]byt
 	// written as [[top.sub]] blocks, cannot be narrowed.
 	arrayForm := map[string]bool{}
 	plainHeader := map[string]bool{}
+	// A table the administrator wrote as dotted keys at the root
+	// (hooks.windows_managed_dir = ..., features.web_search = ...) cannot
+	// take a [top] header later; its new keys are dotted root keys too
+	// (GAP-2119).
+	dottedRoot := map[string]bool{}
 	for _, line := range lines {
+		if line.key && line.rootKey && len(line.path) == 2 {
+			dottedRoot[line.path[0]] = true
+		}
 		if line.header && line.array && len(line.path) == 2 {
 			arrayForm[codexReqPathKey(line.path)] = true
 		}
@@ -375,6 +384,12 @@ func editCodexRequirementsInPlace(raw []byte, cfg map[string]interface{}) ([]byt
 				return nil, false
 			}
 			rootNew.WriteString(text)
+		case !codexReqTableLike(value) && len(path) == 2 && dottedRoot[path[0]] && !plainHeader[path[0]]:
+			text, err := codexReqValueLine(path, value)
+			if err != nil {
+				return nil, false
+			}
+			rootNew.WriteString(text)
 		case !codexReqTableLike(value) && len(path) == 2 && plainHeader[path[0]]:
 			text, err := codexReqValueLine(path[1:], value)
 			if err != nil {
@@ -462,6 +477,24 @@ func editCodexRequirementsInPlace(raw []byte, cfg map[string]interface{}) ([]byt
 	}
 	result := []byte(out.String())
 	check := map[string]interface{}{}
+	if parseCodexTOML(result, &check) != nil {
+		return nil, false
+	}
+	// A table whose last dotted root key went away is still in cfg, empty;
+	// spell it as an empty [top] table, as the whole render does (GAP-2119).
+	tops := codexReqUnion(want, nil)
+	slices.Sort(tops)
+	for _, top := range tops {
+		table, isTable := want[top].(map[string]interface{})
+		if _, present := check[top]; !isTable || len(table) != 0 || present {
+			continue
+		}
+		if len(result) != 0 && !bytes.HasSuffix(result, []byte("\n")) {
+			result = append(result, newline...)
+		}
+		result = append(result, newline+"["+codexReqKeyText([]string{top})+"]"+newline...)
+	}
+	check = map[string]interface{}{}
 	if parseCodexTOML(result, &check) != nil || !codexValueMatches(check, want) {
 		return nil, false
 	}

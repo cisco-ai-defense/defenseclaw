@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -26,9 +27,31 @@ type resolver func(*windows.KNOWNFOLDERID, uint32) (string, error)
 // Folder registration. Its documented default is <LocalAppData>\Programs, so
 // fall back to the independently resolved LocalAppData Known Folder while
 // preserving the same non-environment trust boundary.
+//
+// The answer belongs to the process token's user and does not change while
+// the process runs (a folder redirection applies at the next sign-in), so the
+// first successful one is kept: hook ownership checks ask once per hook word
+// (GAP-2149). A failure is not kept.
 func UserProgramFiles() (string, error) {
-	return userProgramFiles(winpath.CurrentUserKnownFolderPathWithFlags)
+	userProgramFilesMu.Lock()
+	defer userProgramFilesMu.Unlock()
+	if userProgramFilesPath != "" {
+		return userProgramFilesPath, nil
+	}
+	path, err := resolveUserProgramFiles()
+	if err == nil {
+		userProgramFilesPath = path
+	}
+	return path, err
 }
+
+var (
+	resolveUserProgramFiles = func() (string, error) {
+		return userProgramFiles(winpath.CurrentUserKnownFolderPathWithFlags)
+	}
+	userProgramFilesMu   sync.Mutex
+	userProgramFilesPath string
+)
 
 func userProgramFiles(resolve resolver) (string, error) {
 	programs, programsErr := resolve(windows.FOLDERID_UserProgramFiles, windows.KF_FLAG_DONT_VERIFY)

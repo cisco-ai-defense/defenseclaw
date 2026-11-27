@@ -2149,7 +2149,7 @@ func TestVerifyWindowsClaudeRepairsNoncanonicalSharedHookProtection(t *testing.T
 	setWindowsTestUntrustedWriteDACL(t, path, fixture.targetSID)
 
 	if _, err := Verify(context.Background(), opts); err != nil {
-		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want repair or accepted drift", err)
+		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want the repair", err)
 	}
 }
 
@@ -2194,7 +2194,7 @@ func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *t
 		dataDir,
 		fixture.targetSID.String(),
 	); err != nil {
-		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want repair or accepted drift", err)
+		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want the repair", err)
 	}
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {

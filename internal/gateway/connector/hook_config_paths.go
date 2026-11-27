@@ -1024,7 +1024,7 @@ func editedHookEntryClaimed(connector, command, current, word, first, rest strin
 		// scriptHasMarker). Claude Code never registered an argument: a copy
 		// elsewhere followed by --event, or run through a wrapper, is the
 		// user's.
-		return guarded || first == "" || (word != "" && strings.HasPrefix(word, path.Dir(current)+"/"))
+		return guarded || first == "" || (word != "" && posixHookPathInDir(word, path.Dir(current)))
 	case "copilot":
 		// A live script of that name without DefenseClaw's marker is the
 		// operator's on any event (copilotLiveOperatorLookalike). On another

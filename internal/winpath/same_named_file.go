@@ -25,7 +25,7 @@ import (
 // too.
 func SameNamedFile(path, want string) bool {
 	path, want = strings.TrimSpace(path), strings.TrimSpace(want)
-	if path == "" || want == "" {
+	if path == "" || want == "" || !mayShareComparisonKey(path, want) {
 		return false
 	}
 	return ComparisonKey(path) == ComparisonKey(want) && pathidentity.Same(path, want)

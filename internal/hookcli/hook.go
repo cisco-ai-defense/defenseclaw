@@ -743,7 +743,8 @@ func buildHookOptionsForCall(connector, event, apiAddr, _ string, enterpriseMana
 func ReadHookSidecar(path string) map[string]string {
 	out := map[string]string{}
 	var data []byte
-	err := safefile.RetryTransientRead(func() error {
+	// A missing sidecar supplies no address: one confirming look.
+	err := safefile.RetryOptionalRead(func() error {
 		data = nil
 		// A link, another file type or a file past the writers' bound
 		// (gwconnector.HookSidecarMaxBytes) supplies no address.
@@ -757,7 +758,7 @@ func ReadHookSidecar(path string) map[string]string {
 		}
 		file, err := winpath.OpenReadShared(path)
 		if err != nil {
-			return err
+			return safefile.NameVanished(err)
 		}
 		defer file.Close()
 		opened, err := file.Stat()
@@ -773,7 +774,7 @@ func ReadHookSidecar(path string) map[string]string {
 		}
 		current, err := os.Lstat(path)
 		if err != nil {
-			return err
+			return safefile.NameVanished(err)
 		}
 		if !current.Mode().IsRegular() {
 			data = nil

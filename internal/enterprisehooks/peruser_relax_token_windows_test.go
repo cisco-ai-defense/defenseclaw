@@ -112,8 +112,7 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 	// standard user too.
 	requireElevatedManagedWindows(t)
 
-	// With the relax step (run by the guardian as LocalSystem, which the
-	// hardened DACL grants full control; the elevated runner stands in).
+	// With the relax step.
 	dataDir := testenv.PrivateTempDir(t)
 	if err := connector.PublishHookAPIToken(dataDir, "amp", oldToken); err != nil {
 		t.Fatalf("seed hook token: %v", err)
