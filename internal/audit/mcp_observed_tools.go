@@ -20,6 +20,7 @@ const (
 	maxMCPObservedUserIDKind    = 64
 	maxMCPObservedUserName      = 256
 	maxMCPToolsPerGroup         = 256
+	maxMCPObservedGroups        = 256
 )
 
 // MCPObservedTool is the content-free durable projection of an authenticated
@@ -157,7 +158,12 @@ func validMCPObservedText(value string, maxBytes int, rejectSlash bool) bool {
 func upsertMCPObservedToolTx(ctx context.Context, tx *sql.Tx, tool MCPObservedTool) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO mcp_observed_tool_parents (parent_component_id, overflowed)
-		VALUES (?, 0) ON CONFLICT(parent_component_id) DO NOTHING`, tool.ObservationGroupID); err != nil {
+		SELECT ?, 0
+		WHERE EXISTS (
+			SELECT 1 FROM mcp_observed_tool_parents WHERE parent_component_id = ?
+		) OR (SELECT COUNT(*) FROM mcp_observed_tool_parents) < ?
+		ON CONFLICT(parent_component_id) DO NOTHING`,
+		tool.ObservationGroupID, tool.ObservationGroupID, maxMCPObservedGroups); err != nil {
 		return fmt.Errorf("audit: prepare observed MCP tool parent: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -167,11 +173,13 @@ func upsertMCPObservedToolTx(ctx context.Context, tx *sql.Tx, tool MCPObservedTo
 		)
 		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE EXISTS (
+			SELECT 1 FROM mcp_observed_tool_parents WHERE parent_component_id = ?
+		) AND (EXISTS (
 			SELECT 1 FROM mcp_observed_tools
 			WHERE parent_component_id = ? AND tool_name = ?
 		) OR (
 			SELECT COUNT(*) FROM mcp_observed_tools WHERE parent_component_id = ?
-		) < ?
+		) < ?)
 		ON CONFLICT(parent_component_id, tool_name) DO UPDATE SET
 			connector = excluded.connector,
 			server_name = excluded.server_name,
@@ -191,7 +199,8 @@ func upsertMCPObservedToolTx(ctx context.Context, tx *sql.Tx, tool MCPObservedTo
 		tool.ObservationGroupID, tool.Connector, tool.ServerName, tool.ToolName,
 		tool.UserID, tool.UserIDKind, tool.UserName,
 		tool.FirstObservedAt, tool.LastObservedAt,
-		tool.ObservationGroupID, tool.ToolName, tool.ObservationGroupID, maxMCPToolsPerGroup,
+		tool.ObservationGroupID, tool.ObservationGroupID, tool.ToolName,
+		tool.ObservationGroupID, maxMCPToolsPerGroup,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: upsert observed MCP tool: %w", err)

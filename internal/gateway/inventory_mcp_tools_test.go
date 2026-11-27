@@ -150,6 +150,26 @@ func TestMCPToolListingFailureRetriesVersionedPartialState(t *testing.T) {
 	}
 }
 
+func TestObservedMCPToolGroupLimitMarksCollectionPartial(t *testing.T) {
+	var tools mcpToolInventory
+	for index := range maxMCPObservedGroups {
+		server := fmt.Sprintf("server-%03d", index)
+		if _, recorded := tools.recordObserved("codex", server, "search", time.Now()); !recorded {
+			t.Fatalf("group %d was rejected before the limit", index)
+		}
+	}
+	if _, recorded := tools.recordObserved("codex", "server-overflow", "search", time.Now()); recorded {
+		t.Fatal("new group was accepted beyond the global limit")
+	}
+	if _, recorded := tools.recordObserved("codex", "server-000", "read", time.Now()); !recorded {
+		t.Fatal("existing group update was rejected at the global limit")
+	}
+	rows, partial := tools.observedComponents()
+	if !partial || len(rows) != maxMCPObservedGroups+1 || len(tools.observedOwners) != maxMCPObservedGroups {
+		t.Fatalf("rows=%d owners=%d partial=%v", len(rows), len(tools.observedOwners), partial)
+	}
+}
+
 func TestMCPToolFirstListingFailureRetriesWithNonzeroTimestamp(t *testing.T) {
 	store := &testMCPObservedToolStore{advertisedErr: fmt.Errorf("database busy")}
 	tools := &mcpToolInventory{store: store}
@@ -245,7 +265,7 @@ func TestMCPToolFullPersistenceQueueDoesNotExposeObservation(t *testing.T) {
 	if _, recorded, queued := tools.recordObservedAndBeginWrite("codex", "notes", "not-durable", time.Now()); !recorded || queued {
 		t.Fatalf("full queue recorded=%v queued=%v", recorded, queued)
 	}
-	key := mcpToolServerKey("codex", "notes")
+	key := mcpObservedToolKey("codex", "", "notes")
 	if _, visible := tools.observed[key]["not-durable"]; visible {
 		t.Fatal("observation became visible without a pending durable write")
 	}

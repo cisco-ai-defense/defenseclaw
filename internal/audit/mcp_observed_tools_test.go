@@ -202,6 +202,40 @@ func TestMCPObservedToolOverflowIsDurableAndDoesNotReplaceSiblings(t *testing.T)
 	}
 }
 
+func TestMCPObservedToolGroupLimitKeepsExistingGroupsWritable(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	at := time.Date(2026, 11, 17, 1, 2, 3, 0, time.UTC)
+	for index := range maxMCPObservedGroups {
+		if err := store.UpsertMCPObservedTool(t.Context(), MCPObservedTool{
+			ObservationGroupID: fmt.Sprintf("group-%03d", index), Connector: "codex",
+			ServerName: fmt.Sprintf("server-%03d", index), ToolName: "search", LastObservedAt: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.UpsertMCPObservedTool(t.Context(), MCPObservedTool{
+		ObservationGroupID: "group-overflow", Connector: "codex",
+		ServerName: "server-overflow", ToolName: "search", LastObservedAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMCPObservedTool(t.Context(), MCPObservedTool{
+		ObservationGroupID: "group-000", Connector: "codex",
+		ServerName: "server-000", ToolName: "read", LastObservedAt: at.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ListMCPObservedTools(t.Context())
+	if err != nil || len(rows) != maxMCPObservedGroups+1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	for _, row := range rows {
+		if row.ObservationGroupID == "group-overflow" {
+			t.Fatal("durable store accepted a group beyond the global limit")
+		}
+	}
+}
+
 func TestMCPObservedToolRejectsContentLikeOversizedNames(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	err := store.UpsertMCPObservedTool(context.Background(), MCPObservedTool{

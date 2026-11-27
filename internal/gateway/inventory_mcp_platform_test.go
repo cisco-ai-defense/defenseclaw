@@ -18,6 +18,7 @@ import (
 
 func TestMCPServerInventoryAdaptersProjectTheSameContract(t *testing.T) {
 	home := t.TempDir()
+	t.Setenv("CODEX_HOME", t.TempDir())
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}

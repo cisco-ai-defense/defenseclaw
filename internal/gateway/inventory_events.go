@@ -1252,6 +1252,7 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 			product:                 product,
 			active:                  !disabled,
 			itemName:                name,
+			mcpRuntimeServerName:    name,
 			mcpTransport:            inventoryStableToken(server.Transport, 64),
 			mcpCommandBasename:      command,
 			mcpCommandFingerprint:   commandFingerprint,
@@ -2170,18 +2171,19 @@ func discoveredMCPEntriesFromReport(
 			// distinct component ids.
 			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
 			components = append(components, endpointInventoryComponent{
-				id:             endpointInventoryComponentID("mcp-entry", signal.SignatureID+"/"+scope+"/"+name),
-				componentType:  inventory.SignalMCPServer,
-				signal:         inventoryStableToken(signal.SignatureID, 128),
-				product:        inventoryStableToken(signal.Product, 128),
-				active:         active,
-				itemName:       name,
-				mcpDisabled:    &disabled,
-				agentConnector: connectorSlug,
-				userID:         signal.UserID,
-				userIDKind:     discoveryUserIDKind(signal.UserID),
-				userName:       signal.UserName,
-				userEmail:      discoveryUserEmail(signal),
+				id:                   endpointInventoryComponentID("mcp-entry", signal.SignatureID+"/"+scope+"/"+name),
+				componentType:        inventory.SignalMCPServer,
+				signal:               inventoryStableToken(signal.SignatureID, 128),
+				product:              inventoryStableToken(signal.Product, 128),
+				active:               active,
+				itemName:             name,
+				mcpRuntimeServerName: name,
+				mcpDisabled:          &disabled,
+				agentConnector:       connectorSlug,
+				userID:               signal.UserID,
+				userIDKind:           discoveryUserIDKind(signal.UserID),
+				userName:             signal.UserName,
+				userEmail:            discoveryUserEmail(signal),
 			})
 		}
 	}

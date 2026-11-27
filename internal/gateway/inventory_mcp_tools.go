@@ -16,6 +16,7 @@ import (
 
 const (
 	maxMCPToolObservations = maxManagedMCPInventory
+	maxMCPObservedGroups   = maxManagedMCPInventory
 	// The 256-name bound is per configured server. A collection can contain
 	// one bounded set for each of the 256 managed MCP parents.
 	maxMCPToolCollection = maxManagedMCPInventory * maxMCPToolObservations
@@ -71,6 +72,7 @@ type mcpToolInventory struct {
 	restoredAdvertised          map[string]map[string]audit.MCPAdvertisedToolSnapshot
 	pendingRemoval              map[string]struct{}
 	observedRestoreIncomplete   bool
+	observedCollectionPartial   bool
 	advertisedRestoreIncomplete bool
 }
 
@@ -321,6 +323,9 @@ func (m *mcpToolInventory) beginObservedWrite(connector, server, tool string, at
 }
 
 func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool string, user llmEventUser, at time.Time) (pendingMCPObservedTool, bool) {
+	if !m.admitObservedGroupLocked(key) {
+		return pendingMCPObservedTool{}, false
+	}
 	if m.pendingObserved == nil {
 		m.pendingObserved = make(map[string]map[string]pendingMCPObservedTool)
 	}
@@ -328,6 +333,10 @@ func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool
 		m.pendingObserved[key] = make(map[string]pendingMCPObservedTool)
 	}
 	if _, exists := m.pendingObserved[key][tool]; !exists && len(m.pendingObserved[key]) >= maxMCPToolObservations {
+		if m.observedPartial == nil {
+			m.observedPartial = make(map[string]bool)
+		}
+		m.observedPartial[key] = true
 		return pendingMCPObservedTool{}, false
 	}
 	firstAt, lastAt := at.UTC(), at.UTC()
@@ -348,6 +357,26 @@ func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool
 	}
 	m.pendingObserved[key][tool] = pending
 	return pending, true
+}
+
+func (m *mcpToolInventory) admitObservedGroupLocked(key string) bool {
+	if _, exists := m.observed[key]; exists {
+		return true
+	}
+	if _, exists := m.pendingObserved[key]; exists {
+		return true
+	}
+	groups := len(m.observed)
+	for pendingKey := range m.pendingObserved {
+		if _, exists := m.observed[pendingKey]; !exists {
+			groups++
+		}
+	}
+	if groups >= maxMCPObservedGroups {
+		m.observedCollectionPartial = true
+		return false
+	}
+	return true
 }
 
 func (m *mcpToolInventory) observedWriteIsCurrent(pending pendingMCPObservedTool) bool {
@@ -638,6 +667,9 @@ func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at 
 	key := mcpObservedToolKey(connector, user.ID, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.admitObservedGroupLocked(key) {
+		return key, false
+	}
 	m.rememberObservedOwnerLocked(key, user)
 	return m.recordObservedLocked(key, name, at)
 }
@@ -654,15 +686,11 @@ func (m *mcpToolInventory) recordObservedAndBeginWrite(connector, server, rawNam
 	key := mcpObservedToolKey(connector, user.ID, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.rememberObservedOwnerLocked(key, user)
 	pending, queued := m.beginObservedWriteLocked(key, connector, server, name, user, at)
 	if !queued {
-		if m.observedPartial == nil {
-			m.observedPartial = make(map[string]bool)
-		}
-		m.observedPartial[key] = true
 		return pendingMCPObservedTool{}, true, false
 	}
+	m.rememberObservedOwnerLocked(key, user)
 	_, recorded := m.recordObservedLocked(key, name, at)
 	return pending, recorded, true
 }
@@ -709,12 +737,16 @@ func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.observedRestoreIncomplete = false
+	m.observedCollectionPartial = false
 	for _, tool := range tools {
 		name := inventorySafeItemName(tool.ToolName, 256)
 		if name == "" || name != tool.ToolName || tool.ObservationGroupID == "" {
 			continue
 		}
 		key := mcpObservedToolKey(tool.Connector, tool.UserID, tool.ServerName)
+		if !m.admitObservedGroupLocked(key) {
+			continue
+		}
 		m.rememberObservedOwnerLocked(key, llmEventUser{ID: tool.UserID, IDKind: tool.UserIDKind, Name: tool.UserName})
 		m.restoreToolLocked(key, tool)
 	}
@@ -900,7 +932,7 @@ func (m *mcpToolInventory) observedComponents() ([]endpointInventoryComponent, b
 	}
 	sort.Strings(keys)
 	rows := make([]endpointInventoryComponent, 0)
-	partial := m.observedRestoreIncomplete
+	partial := m.observedRestoreIncomplete || m.observedCollectionPartial
 	for _, key := range keys {
 		parts := strings.SplitN(key, "\x00", 3)
 		if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
