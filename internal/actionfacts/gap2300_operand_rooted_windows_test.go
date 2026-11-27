@@ -31,7 +31,8 @@ func TestGAP2300OperandPathRootedWindowsNameUsesTheVolume(t *testing.T) {
 	if got := OperandPath("/tmp/list.txt", `\\server\share\repo`); got != `\\server\share\tmp\list.txt` {
 		t.Errorf("share cwd: got %q", got)
 	}
-	if got := OperandPath("/tmp/list.txt", "repo"); got != "/tmp/list.txt" {
+	// With no absolute directory the name keeps its (cleaned) spelling.
+	if got := OperandPath("/tmp/list.txt", "repo"); got != filepath.Clean("/tmp/list.txt") {
 		t.Errorf("relative cwd: got %q", got)
 	}
 }
