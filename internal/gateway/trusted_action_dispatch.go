@@ -728,8 +728,11 @@ func dispatchTrustedActionOnce(
 		// is a possible write to it, which blocks in every mode and
 		// profile, as the readers' proof of a state write did before the
 		// budget refused to read the call (GAP-0254, GAP-0255, GAP-0281).
+		// The kit whole-command proofs of a Substrate actor still decide
+		// (substrate-1 GAP-1156).
 		return withPowerShellCapPieces(parent, request,
-			withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable)))
+			withOverBudgetKitProofs(parent, request, nil,
+				withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable))))
 	}
 	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
 		// Past the reading bounds: no reader below parses it, and the call
@@ -827,11 +830,14 @@ func dispatchTrustedActionOnce(
 			// (GAP-0382); the finding is the same one. The statements at the start
 			// and the end of a PowerShell call are also judged alone: a protected
 			// write beside the padding that put the call past the budget keeps its
-			// block (GAP-0693).
+			// block (GAP-0693). The kit whole-command proofs of a Substrate
+			// actor still decide: its links are not this gateway to follow
+			// (substrate-1 GAP-1156).
 			return withPowerShellCapPieces(parent, request,
-				withOverBudgetStateMutation(parent, request, facts,
-					withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
-						posixParseTruncation(request, facts), request)))
+				withOverBudgetKitProofs(parent, request, &facts,
+					withOverBudgetStateMutation(parent, request, facts,
+						withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
+							posixParseTruncation(request, facts), request))))
 		}
 		if awkCommandDynamic(facts) && !awkDynamicBoundBySimpleCommands(request, facts) {
 			// An awk command built at run time has no text to judge

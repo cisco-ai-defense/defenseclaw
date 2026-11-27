@@ -19,7 +19,8 @@ import (
 )
 
 // gap1156Pad is the padding that puts a statement past the statement
-// budget: 88 statements of one pad kind, the statement in the middle.
+// budget: 88 statements of one pad kind, the statement in the middle. The
+// colon pad is the one an own SSH folder copy allows beside it.
 func gap1156Pad(kind, statement string) string {
 	var out strings.Builder
 	for i := range 88 {
@@ -30,6 +31,8 @@ func gap1156Pad(kind, statement string) string {
 		switch kind {
 		case "eval":
 			out.WriteString("eval :; ")
+		case "colon":
+			out.WriteString(": && :; ")
 		default:
 			fmt.Fprintf(&out, "test -e f%d && :; ", i)
 		}
@@ -43,8 +46,10 @@ func gap1156Pad(kind, statement string) string {
 // write or a private-key read of (in the actor file system) is answered at
 // least as the same statement alone is, naming its rules: the budget refusal
 // reads the kit whole-command proofs (substrate-1 GAP-1156). The forms are a
-// write through a hard link, a write in the SSH folder after a cd, and a
-// link write or read beside eval padding.
+// write through a hard link, a write in the SSH folder after a cd, a link
+// write or read beside eval padding, and a copy of the own SSH folder inside
+// the home, which keeps its alert: the answer is never above the stronger of
+// the statement alone and the budget answer without the kit facts.
 func TestGAP1156OverBudgetKitProofKeepsUnderBudgetAnswer(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
@@ -56,6 +61,7 @@ func TestGAP1156OverBudgetKitProofKeepsUnderBudgetAnswer(t *testing.T) {
 		{"cd ssh folder write", strings.Join([]string{"cd", "~/" + ".ssh", "&&", "echo", "k", ">>", keys}, " "), "test"},
 		{"link write eval pad", strings.Join([]string{"echo", "k", ">>", "ak" + "-link"}, " "), "eval"},
 		{"link read eval pad", strings.Join([]string{"cat", "key" + "-link"}, " "), "eval"},
+		{"own ssh folder copy", strings.Join([]string{"cp", "-r", "~/" + ".ssh", "~/bak"}, " "), "colon"},
 	}
 	for _, row := range rows {
 		for _, c := range []struct{ pack, mode string }{
@@ -67,10 +73,13 @@ func TestGAP1156OverBudgetKitProofKeepsUnderBudgetAnswer(t *testing.T) {
 				if err := os.Link(filepath.Join(home, ".ssh", keys), filepath.Join(app, "hl")); err != nil {
 					t.Fatal(err)
 				}
-				verdict := func(command string) (string, []string, []string) {
+				verdict := func(command string, withFacts bool) (string, []string, []string) {
 					host, _ := json.Marshal(claude.body(command, app))
 					guest, _ := json.Marshal(claude.body(command, sandboxauth.SandboxHome+"/app"))
-					facts := gap0545KitFacts(t, "claudecode", "PreToolUse", host, home)
+					var facts *SubstrateFacts
+					if withFacts {
+						facts = gap0545KitFacts(t, "claudecode", "PreToolUse", host, home)
+					}
 					var proofs []string
 					if facts != nil {
 						proofs = facts.Proofs
@@ -78,9 +87,14 @@ func TestGAP1156OverBudgetKitProofKeepsUnderBudgetAnswer(t *testing.T) {
 					a, r := gap0545Verdict(t, api, gap0545Actor(actor, "claudecode", "PreToolUse", guest, facts), claude, guest)
 					return a, r, proofs
 				}
-				ua, ur, _ := verdict(row.statement)
-				oa, or, proofs := verdict(gap1156Pad(row.pad, row.statement))
-				t.Logf("alone %s %v, over budget %s %v, kit proofs %v", ua, ur, oa, or, proofs)
+				padded := gap1156Pad(row.pad, row.statement)
+				ua, ur, _ := verdict(row.statement, true)
+				oa, or, proofs := verdict(padded, true)
+				ba, br, _ := verdict(padded, false)
+				t.Logf("alone %s %v, over budget %s %v, without kit facts %s %v, kit proofs %v", ua, ur, oa, or, ba, br, proofs)
+				if gap0545Rank(oa, or) > max(gap0545Rank(ua, ur), gap0545Rank(ba, br)) {
+					t.Errorf("over budget %s %v is stronger than alone %s %v and the budget answer %s %v", oa, or, ua, ur, ba, br)
+				}
 				if !slices.Contains(proofs, kit.ProofProtectedWrite) && !slices.Contains(proofs, kit.ProofPrivateKeyRead) {
 					t.Fatalf("kit sent no whole-command proof over the budget: %v", proofs)
 				}
@@ -90,8 +104,13 @@ func TestGAP1156OverBudgetKitProofKeepsUnderBudgetAnswer(t *testing.T) {
 				if gap0545Rank(oa, or) < gap0545Rank(ua, ur) {
 					t.Errorf("over budget %s %v is weaker than alone %s %v", oa, or, ua, ur)
 				}
+				// Each rule of a kit proof the call carries is named.
+				proved := map[string]bool{
+					"persistence.ssh_authorized_keys_command": slices.Contains(proofs, kit.ProofProtectedWrite),
+					"PATH-SSH-KEY": slices.Contains(proofs, kit.ProofPrivateKeyRead),
+				}
 				for _, rule := range ur {
-					if rule != evaluationLimitRuleID && !slices.Contains(or, rule) {
+					if proved[rule] && !slices.Contains(or, rule) {
 						t.Errorf("over budget %s %v does not name %s (alone %s %v)", oa, or, rule, ua, ur)
 					}
 				}
