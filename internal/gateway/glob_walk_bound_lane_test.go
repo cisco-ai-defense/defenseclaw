@@ -52,12 +52,14 @@ func globWalkTree(size int) string {
 
 // The property test of the bound rule (TestBoundRuleEveryLaneCap) covers the
 // read bound of the target scan's pattern walk in the five tiers
-// (rel-1-0-10:GAP-1324): a cp into <tree>/b*/c* at the bound is read whole
-// and allowed; past it the walk stops with no protected match read, which was
-// the CRITICAL authorized-keys block in every tier and is now TRUNCATED, cap
-// paths (the unknown tier, the judge still asked).
+// (rel-1-0-10:GAP-1324): an ls of <tree>/b*/c* beside a cp is read whole and
+// allowed at the bound; past it the walk stops with no protected match read,
+// which was the CRITICAL authorized-keys block in every tier and is now
+// TRUNCATED, cap paths (the unknown tier, the judge still asked). A write
+// into the capped pattern keeps the rel/1.0.10 protected target
+// (rel-1-0-10:GAP-2300, TestGAP1324GlobWalkCapIsTruncated).
 func init() {
-	walk := func(size int) string { return "cp a.txt " + globWalkTree(size) + "/b*/c*" }
+	walk := func(size int) string { return "ls " + globWalkTree(size) + "/b*/c*; cp a.txt b.txt" }
 	registerBoundedLane(boundedLaneCap{lane: "target scan glob walk", cap: bounded.Paths, limit: globWalkBoundReads,
 		gen: func(size int, shape boundedShape) (boundedLaneCall, bool) {
 			if shape.multi {
