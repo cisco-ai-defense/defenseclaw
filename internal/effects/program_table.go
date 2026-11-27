@@ -116,6 +116,7 @@ type Program struct {
 	PermissionFlags []string // options that make PosConditionalPerm positionals permission changes
 
 	ShellCode      bool     // the code operand is shell text we can unwrap
+	ShOptions      bool     // sh-style invocation options: -s makes the operands positional and stdin the code, -o/-O take a value (hasCodeOperand, GAP-2290)
 	StdinCode      bool     // stdin is code even when other args name an account
 	FirstPosIgnore bool     // first positional is a script/pattern, not a path (sed/grep)
 	FirstPosText   TextKind // the grammar that must accept that first positional (sed script, awk program, grep pattern)
@@ -871,7 +872,7 @@ func buildPOSIXTable() {
 			"--ignore-case", "--invert-match", "--line-number", "--files-with-matches", "--count", "--word-regexp", "--fixed-strings", "--only-matching", "--quiet", "--no-messages", "--with-filename", "--no-filename", "--null")})
 	add(Program{Names: []string{"fd"}, Pos: PosAllRead, Pattern: true,
 		Flags: map[string]Flag{"-x": {Role: RoleExecProgram}, "-X": {Role: RoleExecProgram}, "--exec": {Role: RoleExecProgram}}})
-	add(Program{Names: []string{"bash", "sh", "zsh", "dash", "ksh"}, Pos: PosFirstCode, ShellCode: true,
+	add(Program{Names: []string{"bash", "sh", "zsh", "dash", "ksh"}, Pos: PosFirstCode, ShellCode: true, ShOptions: true,
 		Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "-s": {Role: RoleNone}, "-l": {Role: RoleNone}, "-i": {Role: RoleNone}}})
 	add(Program{Names: []string{"eval", "source", "."}, Pos: PosFirstCode, ShellCode: true})
 	add(Program{Names: []string{"su", "runuser"}, Pos: PosNone, ShellCode: true, Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "--command": {Value: true, Role: RoleExecCode}, "-s": {Value: true, Role: RoleIgnore}, "-l": {}, "-": {}}})
