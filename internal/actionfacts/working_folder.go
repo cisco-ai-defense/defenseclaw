@@ -1020,10 +1020,20 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 				return leftOK, leftOK
 			}
 			return unionWorkFolders(leftOK, rightOK), unionWorkFolders(leftAfter, rightAfter)
-		default: // a pipe: each member runs in a copy of the shell
+		default:
+			// A pipe: each member runs in a copy of the shell, but zsh, and
+			// Bash with lastpipe (shopt -s lastpipe, bash -O lastpipe -c),
+			// run the last stage in the shell itself, so the shell may go on
+			// in a folder that stage moves to: true | { cd D && ls; }; X
+			// runs X in D there, a state write in D included (substrate-1
+			// GAP-0668). The stages of an inner pipeline (cmd.X) are never
+			// the last stage.
 			t.stmt(cmd.X, in)
-			t.stmt(cmd.Y, in)
-			return in, in
+			lastOK, lastAfter := t.stmt(cmd.Y, in)
+			if sameWorkFolders(lastOK, in) && sameWorkFolders(lastAfter, in) {
+				return in, in
+			}
+			return unionWorkFolders(in, lastOK), unionWorkFolders(in, lastAfter)
 		}
 	case *syntax.Subshell:
 		t.list(cmd.Stmts, in)

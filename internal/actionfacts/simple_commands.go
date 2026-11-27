@@ -613,11 +613,17 @@ func SimpleCommandsWith(input Input, facts Facts, operands *RelativeOperandMemo)
 		}
 		// A command that is a piece of the call as written adds nothing: the
 		// call is judged as written, with the rules and the enforcement it had
-		// before this reading. Only a reading with a variable resolved is new.
+		// before this reading. Only a reading with a variable resolved is new,
+		// and so is a piece the walk read in a folder a cd moved the shell
+		// to: the call as written is judged in its own folder only, so time {
+		// cd D && ls; }; X, or cd D; cat <(...); X, judged X in the hook
+		// folder alone, a state write in D included (substrate-1 GAP-0668).
 		// The walk records the pieces as it reads them, so a text that merely
 		// occurs elsewhere in the call (a comment, a quoted word) is no piece.
 		if pieces != nil {
-			result = slices.DeleteFunc(result, pieces.has)
+			result = slices.DeleteFunc(result, func(simple SimpleCommand) bool {
+				return simple.CWD == input.CWD && pieces.has(simple)
+			})
 		}
 	}
 	return result
