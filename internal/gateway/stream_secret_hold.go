@@ -206,7 +206,9 @@ func (s *secretLane) mark(at, n int) {
 }
 
 // textAt is the reply text offset of lane byte off, which is in the kept
-// tail (mark keeps every segment from len-streamSecretTail on).
+// tail (mark keeps every segment from len-streamSecretTail on). A byte
+// before the kept tail (a boundary line run in reasoning that has resumed
+// since, GAP-2219) is placed at 0: no held piece goes out before it.
 func (s *secretLane) textAt(off int) int {
 	if len(s.segs) == 0 {
 		return off
@@ -214,6 +216,9 @@ func (s *secretLane) textAt(off int) int {
 	i := len(s.segs) - 1
 	for i > 0 && s.segs[i].at > off {
 		i--
+	}
+	if s.segs[i].at > off {
+		return 0
 	}
 	return max(s.segs[i].n+off-s.segs[i].at, 0)
 }
@@ -482,7 +487,9 @@ func (r *responseText) OpenSecret() openSecret {
 }
 
 // OpenRunFrom is the reply text offset (Len) of the first byte of the oldest
-// open token or digit run, -1 for none (GAP-1306).
+// open token or digit run, -1 for none (GAP-1306): of a lane, or of a
+// reasoning-to-answer boundary line OpenSecret holds for (GAP-2166), which
+// can start before every lane run (rel-1-0-10:GAP-2219).
 func (r *responseText) OpenRunFrom() int {
 	from := -1
 	for i, l := range r.lanes {
@@ -490,6 +497,11 @@ func (r *responseText) OpenRunFrom() int {
 			if at := r.secret[i].textAt(st); from < 0 || at < from {
 				from = at
 			}
+		}
+	}
+	for i := range r.boundaries {
+		if at := r.boundaryRunFrom(&r.boundaries[i]); at >= 0 && (from < 0 || at < from) {
+			from = at
 		}
 	}
 	return from
