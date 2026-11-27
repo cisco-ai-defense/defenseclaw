@@ -11,6 +11,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -51,6 +52,7 @@ func TestManagedAuditExportUsesCanonicalDACLForAnAdministrator(t *testing.T) {
 // canonical check refuses, so every SYSTEM export of a managed store failed
 // and its file was removed. The export is owned by Administrators instead.
 func TestManagedAuditExportAsLocalSystemIsCanonical(t *testing.T) {
+	testenv.RequireElevated(t, "the export is owned by Administrators, an owner only an administrator token can assign")
 	current, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || current == nil || current.User.Sid == nil {
 		t.Fatalf("resolve current user SID: %v", err)

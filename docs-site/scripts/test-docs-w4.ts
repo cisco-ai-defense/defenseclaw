@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { test } from 'node:test';
+import { existsSync, readFileSync } from 'node:fs';
+import { test, type TestContext } from 'node:test';
 import { loadPolicy } from '@open-policy-agent/opa-wasm';
 import { buildCommand, DEFAULT_STATE } from '../components/command-generator';
 import { projectPolicyToData, withPolicyInput } from '../components/policy-creator/lib/data-projection';
@@ -16,6 +16,21 @@ import { defaultAnswers } from '../components/policy-creator/quick-start/questio
 import recipes from '../data/policy-recipes.json';
 import scenarios from '../data/policy-scenarios.json';
 
+// The admission and guardrail replays run the compiled policy modules in
+// public/opa/<domain>.wasm, which `npm run build:policy-assets` (the
+// postinstall step) builds only when `opa` is on PATH. A machine without opa
+// (a gate box, a contributor laptop) would otherwise report six failures that
+// say nothing about the policy. There the replay is skipped with the reason;
+// CI_REQUIRE_OPA=1 (set by the docs-site workflow, which installs opa) turns a
+// missing module into a failure, so the replay can never be skipped in CI.
+function opaModuleReady(t: TestContext, domain: 'admission' | 'guardrail'): boolean {
+  if (existsSync(new URL(`../public/opa/${domain}.wasm`, import.meta.url))) return true;
+  const why = `public/opa/${domain}.wasm is not built: opa was not on PATH when build:policy-assets ran`;
+  if (process.env.CI_REQUIRE_OPA === '1') assert.fail(why);
+  t.skip(why);
+  return false;
+}
+
 for (const shell of ['bash', 'powershell'] as const) {
   test(`Hermes generator explains the closed hook and upstream timeout (${shell})`, () => {
     const built = buildCommand({ ...DEFAULT_STATE, connector: 'hermes', mode: 'action' }, shell);
@@ -26,7 +41,8 @@ for (const shell of ['bash', 'powershell'] as const) {
   });
 }
 
-test('Balanced Quick Start admission replay agrees with its default expectations', async () => {
+test('Balanced Quick Start admission replay agrees with its default expectations', async (t) => {
+  if (!opaModuleReady(t, 'admission')) return;
   const policy = applyAnswers(defaultAnswers());
   const data = projectPolicyToData(policy);
   for (const scenario of scenarios.scenarios.filter((s) => s.domain === 'admission')) {
@@ -37,7 +53,8 @@ test('Balanced Quick Start admission replay agrees with its default expectations
   }
 });
 
-test('every admission scenario matches its expectation under each preset (GAP-0209)', async () => {
+test('every admission scenario matches its expectation under each preset (GAP-0209)', async (t) => {
+  if (!opaModuleReady(t, 'admission')) return;
   const engine = await loadPolicy(readFileSync(new URL('../public/opa/admission.wasm', import.meta.url)));
   for (const preset of ['default', 'strict', 'permissive'] as const) {
     const data = projectPolicyToData(policyFromPreset(preset));
@@ -54,7 +71,8 @@ test('every admission scenario matches its expectation under each preset (GAP-02
   assert.ok(!pane.includes('res.verdict === s.expectedVerdict') && !pane.includes('expected: s.expectedVerdict,'), 'Live Test scores against one preset only');
 });
 
-test('guardrail scenarios keep their authored action-mode expectations', async () => {
+test('guardrail scenarios keep their authored action-mode expectations', async (t) => {
+  if (!opaModuleReady(t, 'guardrail')) return;
   const policy = policyFromPreset('default');
   policy.guardrail.mode = 'action';
   const data = projectPolicyToData(policy);
@@ -66,7 +84,8 @@ test('guardrail scenarios keep their authored action-mode expectations', async (
   }
 });
 
-test('every guardrail scenario matches its expectation under each preset in action mode (GAP-1920)', async () => {
+test('every guardrail scenario matches its expectation under each preset in action mode (GAP-1920)', async (t) => {
+  if (!opaModuleReady(t, 'guardrail')) return;
   const engine = await loadPolicy(readFileSync(new URL('../public/opa/guardrail.wasm', import.meta.url)));
   for (const preset of ['default', 'strict', 'permissive'] as const) {
     const policy = policyFromPreset(preset);
@@ -84,7 +103,8 @@ test('every guardrail scenario matches its expectation under each preset in acti
   assert.equal(medium && expectedVerdictFor(medium, 'permissive'), 'allow');
 });
 
-test('Quick Start observe mode alerts at HIGH+ and allows MEDIUM', async () => {
+test('Quick Start observe mode alerts at HIGH+ and allows MEDIUM', async (t) => {
+  if (!opaModuleReady(t, 'guardrail')) return;
   const data = projectPolicyToData(applyAnswers(defaultAnswers()));
   assert.equal(data.guardrail.mode, 'observe');
   assert.equal(data.guardrail.alert_threshold, 3);
@@ -102,7 +122,8 @@ test('Quick Start observe mode alerts at HIGH+ and allows MEDIUM', async () => {
   }
 });
 
-test('MEDIUM MCP scan warns under Balanced and is rejected under Strict', async () => {
+test('MEDIUM MCP scan warns under Balanced and is rejected under Strict', async (t) => {
+  if (!opaModuleReady(t, 'admission')) return;
   const scenario = scenarios.scenarios.find((s) => s.id === 'admission-medium-mcp')!;
   for (const [preset, verdict] of [['default', 'warning'], ['strict', 'rejected']] as const) {
     const data = projectPolicyToData(policyFromPreset(preset));

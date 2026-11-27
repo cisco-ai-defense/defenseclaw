@@ -37,6 +37,21 @@ func stubRootRuntimeLeftovers(t *testing.T, names ...string) *rootStartBlockersS
 	return seen
 }
 
+// stubGatewayPortFree reports the configured gateway port as free, so a test
+// of the start path does not depend on what the machine running it has
+// listening on the default port (a developer machine often runs its own
+// gateway there, and the real lookup then refuses the start with a
+// foreign-listener message before the check under test is reached).
+func stubGatewayPortFree(t *testing.T) {
+	t.Helper()
+	oldHolder, oldAnswers := gatewayPortHolder, gatewayPortAnswers
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers = oldHolder, oldAnswers })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{}, errors.New("no listener on the port")
+	}
+	gatewayPortAnswers = func(string) bool { return false }
+}
+
 // GAP-0788: a start or restart over root-owned runtime files from a stopped
 // sudo-run gateway names the files and the repair chain, not the daemon's raw
 // protected-state error, and does so before anything is launched or stopped.
@@ -102,6 +117,7 @@ func TestRunStartRefusesRootOwnedLeftoversBeforeLaunching(t *testing.T) {
 		t.Fatal(err)
 	}
 	stubRootRuntimeLeftovers(t, "application_protection_state.json")
+	stubGatewayPortFree(t)
 	err := runStartLocked(startCmd, nil, false)
 	if err == nil || !strings.Contains(err.Error(), "application_protection_state.json") ||
 		!strings.Contains(err.Error(), `sudo chown -R "$(id -un)" `) {
