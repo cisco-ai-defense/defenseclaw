@@ -258,9 +258,10 @@ func literalCodePositionOracle(code string, position int, language string) bool 
 			continue
 		}
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 		} else if c == '\'' || c == '"' {

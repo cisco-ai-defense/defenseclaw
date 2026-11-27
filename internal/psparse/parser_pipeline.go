@@ -491,7 +491,7 @@ func (p *parser) gluedParameterName(name string, end int) (string, int, bool) {
 func parameterNameText(text string) bool {
 	for i := 0; i < len(text); i++ {
 		c := text[i]
-		if c != '-' && c != '/' && c != '_' && !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') {
+		if c != '-' && c != '/' && c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
