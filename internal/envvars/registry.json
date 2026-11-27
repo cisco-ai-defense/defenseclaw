@@ -9330,6 +9330,66 @@
         }
       ],
       "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SLIM_HOOK_EXE",
+      "category": "test_fixture",
+      "purpose": "Names the prebuilt Windows defenseclaw-hook.exe the native slim-hook size test measures; unset, the test looks in the folders above its own (the native build zip root).",
+      "default": "unset",
+      "accepted_values": [
+        "<path to defenseclaw-hook.exe>",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook/slim_test.go",
+          "description": "slimHookPrebuiltWindowsBudget measures this executable against the size budget"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_EXIT",
+      "category": "test_fixture",
+      "purpose": "Exit code of the default mode of the Windows launcher test copy (default 7).",
+      "default": "unset",
+      "accepted_values": [
+        "<exit code>",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/claudecode_launcher_guard_helper_test.go",
+          "description": "answerAsGuardPassthroughLauncher exits with this code"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_MODE",
+      "category": "test_fixture",
+      "purpose": "Selects the answer of the Windows launcher test copy: unset prints its arguments and copies stdin, review answers like the GAP-0322 review fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "review",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/claudecode_launcher_guard_helper_test.go",
+          "description": "answerAsGuardPassthroughLauncher picks its answer by this mode"
+        }
+      ],
+      "since": "1.0.11"
     }
   ]
 }
