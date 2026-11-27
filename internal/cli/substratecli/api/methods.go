@@ -320,6 +320,34 @@ func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, err
 	return a.shown(), err
 }
 
+// WorkspaceEvent is a checkpoint the launcher took or an undo it ran with
+// git inside the agent, reported so the cluster's chain state follows it
+// (substrate-1:GAP-0476). Removed and Restored are path digests
+// (guardrail.ToolChainPOSIXPathDigest) of the files an undo removed and put
+// back.
+type WorkspaceEvent struct {
+	Event      string   `json:"event"`
+	Checkpoint string   `json:"checkpoint"`
+	Removed    []string `json:"removed,omitempty"`
+	Restored   []string `json:"restored,omitempty"`
+}
+
+// WorkspaceEventResult is the gateway's answer: how many chain events an
+// undo changed, and whether the leader knew its checkpoint.
+type WorkspaceEventResult struct {
+	Forgotten       int  `json:"forgotten"`
+	CheckpointKnown bool `json:"checkpoint_known"`
+}
+
+// ReportWorkspace reports a checkpoint or an undo. An older gateway
+// answers 404 or 405, one without the leader's chain state 501, and one
+// whose leader refused it 502.
+func (c *Client) ReportWorkspace(ctx context.Context, atespace, name string, ev WorkspaceEvent) (WorkspaceEventResult, error) {
+	var out WorkspaceEventResult
+	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/workspace-event", nil, ev, &out)
+	return out, err
+}
+
 // SnapshotTimeout bounds a Snapshot call: the upload of a large agent's
 // memory takes longer than an ordinary request. The gateway finishes the
 // snapshot and starts the agent again even when the launcher stops waiting.
