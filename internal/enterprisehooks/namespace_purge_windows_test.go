@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -541,9 +542,7 @@ func TestPurgeWindowsNamespaceRootRejectsSymbolicLinkChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "redirect")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("Windows symbolic-link fixtures are unavailable: %v", err)
-	}
+	testenv.Symlink(t, outside, link)
 
 	request.ValidateOnly = false
 	report, err := PurgeWindowsNamespaceRoot(request)
@@ -762,9 +761,7 @@ func TestPurgeWindowsNamespaceInstallRootRejectsSocketPathSymlink(t *testing.T) 
 	if err := os.WriteFile(outside, []byte("preserve"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(ipc, "defenseclaw_ipc.sock")); err != nil {
-		t.Skipf("symlink fixture unavailable: %v", err)
-	}
+	testenv.Symlink(t, outside, filepath.Join(ipc, "defenseclaw_ipc.sock"))
 	report, err := PurgeWindowsNamespaceRoot(request)
 	if err == nil || report.OK || report.Removed || report.EntriesRemoved != 0 ||
 		!strings.Contains(strings.ToLower(err.Error()), "reparse") {
@@ -858,9 +855,7 @@ func TestPurgeWindowsNamespaceStateRootRejectsReparseChild(t *testing.T) {
 	if err := os.WriteFile(sentinel, []byte("preserve"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {
-		t.Skipf("Windows symbolic-link fixtures are unavailable: %v", err)
-	}
+	testenv.Symlink(t, outside, filepath.Join(root, "redirect"))
 	report, err := PurgeWindowsNamespaceRoot(request)
 	if err == nil || report.OK || report.Removed || report.EntriesRemoved != 0 {
 		t.Fatalf("reparse StateRoot purge report=%#v error=%v", report, err)

@@ -3323,19 +3323,26 @@ func verifyClaudeCodeHookGroups(
 			}
 			return fmt.Errorf("%s observational handler must be asynchronous", expected.eventType)
 		}
-		if fallback {
-			second := locations[1]
-			for _, owned := range []claudeCodeOwnedHookLocation{location, second} {
+		// A synchronous handler enforces policy: a shell setting changes how
+		// Claude Code starts it and a condition skips it. Refuse both on every
+		// owned handler of the event, the Windows launcher handler as well as
+		// the Unix direct and fallback pair (GAP-0322, GAP-2278). Setup writes
+		// neither key. An asynchronous observational handler is not checked.
+		if !expected.async {
+			for _, owned := range locations {
 				if _, exists := owned.handler["shell"]; exists {
-					return fmt.Errorf("%s direct handler has a shell setting", expected.eventType)
+					return fmt.Errorf("%s DefenseClaw handler has a shell setting", expected.eventType)
 				}
 				if condition, exists := owned.handler["if"]; exists {
 					value, ok := condition.(string)
 					if !ok || value != "" {
-						return fmt.Errorf("%s direct handler has a condition", expected.eventType)
+						return fmt.Errorf("%s DefenseClaw handler has a condition", expected.eventType)
 					}
 				}
 			}
+		}
+		if fallback {
+			second := locations[1]
 			fallbackArgs := append([]string{"fallback-guard-user-hook", expectedCommand}, expectedArgs[2:]...)
 			fallbackTimeout, timeoutOK := claudeCodeHookInteger(second.handler["timeout"])
 			fallbackType, _ := second.handler["type"].(string)

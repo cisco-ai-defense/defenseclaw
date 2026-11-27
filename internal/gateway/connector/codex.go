@@ -685,7 +685,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 				for eventType, val := range hooks {
 					list, _ := val.([]interface{})
 					for _, entry := range list {
-						if isOwnedHook(entry, hooksDir) {
+						if isOwnedCodexHookGroup(entry, hooksDir) {
 							residual = append(residual, fmt.Sprintf("config.toml hooks[%s] still contains defenseclaw hook", eventType))
 							break
 						}
@@ -4394,6 +4394,66 @@ func isOwnedCodexHookHandler(rawHook interface{}, hooksDir string) bool {
 			continue
 		}
 		if isOwnedHookHandler(map[string]interface{}{"command": candidate}, hooksDir) {
+			return true
+		}
+	}
+	// A launcher or guard name edited in place inside the Windows direct
+	// cmd.exe start is still DefenseClaw's registration (GAP-2281), as it is
+	// in the Claude Code exec form (GAP-1364).
+	for _, key := range []string{"command", "commandWindows", "command_windows"} {
+		if candidate, _ := handler[key].(string); isRenamedCodexCmdDirectHookCommand(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRenamedCodexCmdDirectHookCommand reports a Windows Codex direct cmd.exe
+// start (windowsCmdDirectHookCommand, or the guarded start of
+// windowsCodexGuardedHookCommand) whose quoted program is a DefenseClaw
+// executable renamed in place next to ours (isRenamedDefenseClawHookExecutable)
+// and whose whole command is, byte for byte, the one Setup renders for that
+// program with one of DefenseClaw's Codex event and contract bindings. A
+// foreign cmd.exe hook, another program, another folder, or any argv that is
+// not exactly ours stays the operator's. Windows only: no other OS writes
+// this form.
+func isRenamedCodexCmdDirectHookCommand(command string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	prefix := windowsSystemCmdExe() + ` /d /v:off /c "`
+	if !strings.HasPrefix(command, prefix) {
+		return false
+	}
+	program, _, ok := strings.Cut(command[len(prefix):], `"`)
+	if !ok || !isRenamedDefenseClawHookExecutable(program) {
+		return false
+	}
+	for _, contract := range builtinHookContracts["codex"] {
+		for _, event := range contract.Events {
+			arguments := nativeHookBridgeArguments("codex", event, contract.ContractID, nil)
+			if direct, ok := windowsCmdDirectHookCommand(program, arguments); ok && command == direct {
+				return true
+			}
+			if guarded, ok := windowsCodexGuardedHookCommand(program, event, contract.ContractID); ok && command == guarded {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isOwnedCodexHookGroup reports a Codex hook group that holds a handler
+// isOwnedCodexHookHandler claims, so VerifyClean reports every registration
+// Teardown removes (GAP-2281).
+func isOwnedCodexHookGroup(rawGroup interface{}, hooksDir string) bool {
+	group, ok := rawGroup.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	handlers, _ := group["hooks"].([]interface{})
+	for _, handler := range handlers {
+		if isOwnedCodexHookHandler(handler, hooksDir) {
 			return true
 		}
 	}
