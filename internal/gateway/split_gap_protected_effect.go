@@ -152,13 +152,7 @@ type splitGapTwinSet struct {
 // broader reading of its text.
 func (set *splitGapTwinSet) add(facts actionfacts.Facts) {
 	prefixes := map[int64]string{}
-	candidates := facts.Paths
-	if links := facts.LinkTargetReads(); len(links) != 0 {
-		// A link to a file is judged as its plain read (substrate-1:GAP-0706
-		// part 3): its target is a read effect of the call here too.
-		candidates = append(slices.Clone(facts.Paths), links...)
-	}
-	for _, candidate := range candidates {
+	for _, candidate := range facts.Paths {
 		effect, ok := pathEffectTwin(candidate.Access)
 		spelled := filepath.ToSlash(candidate.Resolved)
 		if !ok || !splitGapPlainPath(spelled) {

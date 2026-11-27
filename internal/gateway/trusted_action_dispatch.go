@@ -1829,15 +1829,6 @@ func dispatchTrustedActionWith(
 				// credential file handed to a copy through xargs gets the
 				// finding of the copy (rel-1-0-10:GAP-0997).
 				readings := xargsStaticInputReadings(text, request.Input.ActiveHome)
-				if strings.Contains(text, "ln") {
-					// A link to a protected file is judged as the plain read
-					// of the file it points at (substrate-1:GAP-0706).
-					linkFacts := facts
-					if index != 0 {
-						linkFacts = actionfacts.Analyze(input)
-					}
-					readings = append(readings, linkTargetReadings(linkFacts)...)
-				}
 				if strings.Contains(text, "-exec") || strings.Contains(text, "-ok") {
 					inputFacts := facts
 					if index != 0 {
@@ -13763,32 +13754,4 @@ func posixReadingTwinRequest(request trustedActionRequest) (trustedActionRequest
 	twin.Input.DialectHint = ""
 	twin.windowsShellDialect, twin.windowsPowerShellReading, twin.posixReadingTwin = false, nil, false
 	return twin, true
-}
-
-// linkTargetReadingCap bounds the link targets of one call judged as reads.
-const linkTargetReadingCap = 16
-
-// linkTargetReadings are the plain reads (cat -- FILE) of the files the
-// executing ln calls of facts point their links at, each in its resolved
-// absolute spelling (actionfacts Facts.LinkTargetReads): the ruling of
-// substrate-1:GAP-0706 part 3 judges ln of a protected file, symbolic or
-// hard, as the plain read of its target in each pack.
-func linkTargetReadings(facts actionfacts.Facts) []string {
-	var readings []string
-	for _, candidate := range facts.LinkTargetReads() {
-		if len(readings) == linkTargetReadingCap {
-			break
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if !ok || command.Effect != actionfacts.EffectExecute ||
-			candidate.Flavor != actionfacts.PathFlavorPOSIX || !strings.HasPrefix(candidate.Resolved, "/") ||
-			strings.Contains(candidate.Resolved, "'") {
-			continue
-		}
-		reading := "cat -- '" + candidate.Resolved + "'"
-		if !slices.Contains(readings, reading) {
-			readings = append(readings, reading)
-		}
-	}
-	return readings
 }
