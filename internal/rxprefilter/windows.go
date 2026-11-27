@@ -223,6 +223,15 @@ func (t *Text) FindStringIndex(re *regexp.Regexp) []int {
 		return nil
 	}
 	if t.memo != nil {
+		// The search around a rule's literals (literal_ranges.go, GAP-1697)
+		// reads only the ranges of its hits, where the search in runs reads
+		// the whole open run again at each check: a keyword early in a long
+		// reply would make every mid-stream check read the reply again.
+		if len(t.text) >= MinText {
+			if loc, ok := t.literalFind(re); ok {
+				return loc
+			}
+		}
 		if first, ok := t.memoMatches(re, true); ok {
 			if len(first) == 0 {
 				return nil
@@ -255,6 +264,11 @@ func (t *Text) FindAllStringIndex(re *regexp.Regexp) [][]int {
 		return nil
 	}
 	if t.memo != nil {
+		if len(t.text) >= MinText {
+			if out, ok := t.literalFindAll(re); ok {
+				return out
+			}
+		}
 		if all, ok := t.memoMatches(re, false); ok {
 			return all
 		}
