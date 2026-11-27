@@ -2829,6 +2829,14 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		// ordinary/../link or ../project/link and allowed what the
 		// per-user gateway blocks (rel-1-0-10:GAP-2294).
 		if raw := operandRawSpelling(written, cwd); raw != path && hasDotDotStep(filepath.ToSlash(raw)) && len(raw) <= MaxWriteTargetPathBytes {
+			// The raw spelling follows the clean key's rule: a later writer
+			// of the same spelling replaces the answer of an earlier one
+			// (safeRedirect keeps it), or a gateway that keeps the step raw
+			// read the earlier, weaker answer (CHK-RF-VB7D N1).
+			if old, present := targets[raw]; present && !safeRedirect {
+				size -= len(jsonString(raw)) + 1 + len(jsonString(old)) + 1
+				delete(targets, raw)
+			}
 			if _, present := targets[raw]; !present {
 				cost := len(jsonString(raw)) + 1 + len(jsonString(resolved)) + 1
 				if linkText != "" {
