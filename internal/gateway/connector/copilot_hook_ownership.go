@@ -29,6 +29,14 @@ func copilotCleanAbsoluteScriptWord(word string) bool {
 	return strings.HasPrefix(word, "/") && path.Clean(word) == word
 }
 
+// copilotPOSIXOnlyScriptWord reports a script word that is a POSIX absolute
+// path but not a native one: /dir/copilot-hook.sh on Windows, where Copilot's
+// bash resolves / under its own root and a native read of the word reaches a
+// different file (GAP-2284). Never true on Linux or macOS.
+func copilotPOSIXOnlyScriptWord(word string) bool {
+	return !filepath.IsAbs(word) && strings.HasPrefix(word, "/")
+}
+
 // copilotManagedShellCommand recognizes a plain script invocation, optionally
 // through a shell interpreter. It never evaluates wrapper text or reads a
 // relative executable chosen by the project. Unproven wrappers stay in place

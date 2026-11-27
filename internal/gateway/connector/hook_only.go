@@ -6060,7 +6060,15 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 	}
 	// A deleted copy has no marker to read. The exact DefenseClaw script
 	// name with Copilot's event binding remains a repairable registration.
+	// On Windows a POSIX word (/dir/copilot-hook.sh) names the file Copilot's
+	// bash resolves under its own root (Git for Windows maps / to its install
+	// folder), not the drive-root file a native Lstat reaches, so whether it
+	// is deleted is unknown here and the text decides, as the doctor reads it
+	// on every OS (GAP-2284). Either way the result is the canonical hook.
 	if isCopilotShellHookScript(word) && copilotBoundEventArgument(rest) {
+		if copilotPOSIXOnlyScriptWord(word) {
+			return true
+		}
 		if _, err := os.Lstat(word); errors.Is(err, os.ErrNotExist) {
 			return true
 		}
