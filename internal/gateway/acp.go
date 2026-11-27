@@ -272,7 +272,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		direction = "prompt"
 	}
 	inspectContent := func(content string) *ToolInspectVerdict {
-		scanCtx, cancel := context.WithTimeout(ctx, inspectScanTimeout)
+		scanCtx, cancel := context.WithTimeout(ctx, a.inspectScanBudget())
 		defer cancel()
 		return a.inspectMessageContent(scanCtx, &ToolInspectRequest{
 			Tool: "message", Content: content, Direction: direction,

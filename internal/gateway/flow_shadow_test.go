@@ -53,12 +53,12 @@ func TestFlowShadowFindings(t *testing.T) {
 	if len(fs) != 1 || fs[0].RuleID != flow.RuleIDEgress || fs[0].disposition != findingDispositionFlowSecretEgress {
 		t.Fatalf("alert finding wrong: %+v", fs)
 	}
-	if fs[0].enforcement != findingEnforcementAlertOnly || !fs[0].proof.authoritative {
+	if !fs[0].Proof.Advisory() || !fs[0].proof.authoritative {
 		t.Fatalf("alert finding enforcement/proof wrong: %+v", fs[0])
 	}
 	block := flow.Result{Action: flow.ActionBlock, Hits: []flow.Hit{{Kind: flow.HitValueMatch, Sets: []string{"value"}}}}
 	fb := flowShadowFindings(block, flowLaneOn)
-	if len(fb) != 1 || fb[0].enforcement != findingEnforcementInherit || !fb[0].proof.authoritative {
+	if len(fb) != 1 || !fb[0].contributesToEnforcement() || !fb[0].proof.authoritative {
 		t.Fatalf("block finding wrong: %+v", fb)
 	}
 }

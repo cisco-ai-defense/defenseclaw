@@ -50,9 +50,9 @@ var stdinNameCopiers = []string{"cpio", "bsdcpio"}
 // block (actionCallKeepsMentions). A POSIX call only: any fixed word of it,
 // other than a protected key file it reads, in the home's .ssh or state
 // folder (cat KEYS > ~/.ssh/k.new, cd ~/.ssh, $TOOL > ~/.ssh/rc.d/x) keeps
-// the verdict rel gives it. So does a call with cpio in it: cpio copies the
-// files its input names (ls KEYS | cpio -pdl d is a copy of the keys file,
-// S7 lead ruling 2026-11-19), so the listing that feeds it is no mention.
+// the verdict rel gives it. A pipeline that hands the protected name to
+// cpio, pax pass-through or xargs cp also keeps the block: those programs
+// copy the files their input names (S7 lead ruling 2026-11-19).
 func ActionMentionsNoKnownWrite(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) bool {
 	if dialect != "" && dialect != actionfacts.DialectPOSIX ||
 		ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) != "protected-target" {
@@ -63,6 +63,9 @@ func ActionMentionsNoKnownWrite(command, cwd, home string, dialect actionfacts.D
 		return false
 	}
 	keys := ProtectedAuthorizedKeysPaths(home)
+	if pipelineCopiesStdinNames(file, cwd, home, keys) {
+		return false
+	}
 	near := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		word, isWord := node.(*syntax.Word)
@@ -91,4 +94,74 @@ func ActionMentionsNoKnownWrite(command, cwd, home string, dialect actionfacts.D
 	memo := NewTargetMemo()
 	memo.excuseNonWrites, memo.excuseUnknownRoles = true, true
 	return memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) == ""
+}
+
+// pipelineCopiesStdinNames identifies a protected name handed through a
+// pipeline to a copier that reads file names from stdin. A plain ls stage
+// must print that file name; unrelated or transformed text is no proof.
+func pipelineCopiesStdinNames(file *syntax.File, cwd, home string, keys []string) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		pipe, ok := node.(*syntax.BinaryCmd)
+		if !ok || pipe.Op != syntax.Pipe && pipe.Op != syntax.PipeAll {
+			return true
+		}
+		consumer, ok := pipe.Y.Cmd.(*syntax.CallExpr)
+		if !ok || !stdinNameCopier(consumer, home) {
+			return true
+		}
+		producer, ok := pipe.X.Cmd.(*syntax.CallExpr)
+		if !ok || len(producer.Args) != 2 {
+			return true
+		}
+		program, programKnown := StaticWord(producer.Args[0], home)
+		value, valueKnown := StaticWord(producer.Args[1], home)
+		if !programKnown || !valueKnown || program != "ls" {
+			return true
+		}
+		if !filepath.IsAbs(value) {
+			value = filepath.Join(cwd, value)
+		}
+		found = slices.Contains(keys, filepath.Clean(value))
+		return !found
+	})
+	return found
+}
+
+// stdinNameCopier is the one role property the mention reader needs. An
+// xargs child is a copier only when the handed names are sources and its
+// destination is separate; pax pass-through needs its destination alone.
+func stdinNameCopier(call *syntax.CallExpr, home string) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	words := make([]string, len(call.Args))
+	for i, arg := range call.Args {
+		var static bool
+		words[i], static = StaticWord(arg, home)
+		if !static {
+			return false
+		}
+	}
+	switch strings.ToLower(filepath.Base(words[0])) {
+	case "pax":
+		if len(words) == 2 && words[1] == "-w" {
+			return true
+		}
+		return len(words) == 3 && (words[1] == "-rw" || words[1] == "-wr") && !strings.HasPrefix(words[2], "-")
+	case "xargs":
+		start, replace, known := actionfacts.XargsProgram(words)
+		if !known || start >= len(words) || strings.ToLower(filepath.Base(words[start])) != "cp" {
+			return false
+		}
+		for _, option := range words[1:start] {
+			if strings.HasPrefix(option, "--arg-file") ||
+				strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") && strings.Contains(option[1:], "a") {
+				return false // names may come from an argument file, not the pipe
+			}
+		}
+		handed := actionfacts.XargsHandedEntries(words[start:], replace)
+		return !handed.MayChange && len(handed.Outputs) > 0
+	}
+	return false
 }

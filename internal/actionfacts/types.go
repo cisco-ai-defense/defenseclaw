@@ -19,7 +19,11 @@
 // not an event schema and must not be serialized into audit or telemetry data.
 package actionfacts
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+)
 
 // Input is the normalized action material available at a tool-call or
 // execution-approval boundary. Callers should preserve structured argv instead
@@ -41,6 +45,9 @@ type Input struct {
 	// action. It must be an absolute POSIX or Windows filesystem path.
 	// ActionFacts never discovers it from process state.
 	ActiveHome string
+	// ActiveShell is trusted hook-account context from the same counted identity
+	// lookup as ActiveHome. Empty when that account's login shell is unknown.
+	ActiveShell string `json:"-"`
 	// ActiveAgentFiles is trusted connector context containing the exact files
 	// whose instructions are active for this action. Entries must be absolute
 	// filesystem paths. ActionFacts validates, canonicalizes, bounds, and copies
@@ -77,6 +84,14 @@ type Input struct {
 	// tool is read the same way without it (posixPowerShellScript,
 	// rel-1-0-10:GAP-1214).
 	PowerShellLauncherBody bool `json:"-"`
+	// FloorRaiseOnly is trusted caller provenance set on a reading made
+	// through a reading DefenseClaw 1.0.10 did not have (the -EncodedCommand
+	// body read past its blanks, psparse.NestedScript.BlankDecoded; the
+	// evaluated loop-header group of the gateway's argument reading). Every
+	// reading made of such a reading carries it. It changes no fact: the
+	// gateway lets the findings of such a reading raise the call but never
+	// folds an effect finding into them (DET111 ruling 2 on GAP-1984).
+	FloorRaiseOnly bool `json:"-"`
 	// WindowsHookHost is trusted hook-host context. A test can force Windows
 	// routing on a POSIX runner, whose process home does not describe the
 	// Windows shell's home. Such a call must not take the POSIX PowerShell
@@ -106,6 +121,18 @@ type Input struct {
 	// folder, so its current-folder heads and relative operands are read as
 	// the top level reads them (rel-1-0-10:GAP-1042).
 	folderUnknown bool
+	// StandInCWD is trusted caller context set by a gateway that does not
+	// know the caller's folder and judges the call in a private empty
+	// stand-in folder instead (the LLM proxy, which a model reply gives no
+	// session directory). It names that folder; CWD starts there. Operands
+	// relative to it resolve in it as in a fresh project. A folder the walk
+	// reaches from it by relative moves (it, a folder in it, one of its
+	// parents) has no known place on the caller's file system, so a wrapper
+	// that places its child relative to the caller's folder (nsenter
+	// --wd=REL) leaves the child in an unknown folder there, as it did before
+	// relative nsenter folders were resolved (rel-1-0-10:GAP-2188).
+	// ActionFacts never derives it from action input.
+	StandInCWD string `json:"-"`
 	// CurrentWindowsDrive is trusted caller context: the drive letter of the
 	// directory the hook payload reported, for a gateway that could not place
 	// that directory itself (CWD is empty). A Windows path with no drive of
@@ -196,6 +223,14 @@ type Facts struct {
 	// unexported, never serialized and printed as a pointer. Read it with
 	// CredentialPathReads.
 	credentialPaths *credentialPathResult
+	// kubeCut is the private record of a Kubernetes request cut
+	// (KubeRequestCaps).
+	kubeCut kubeCutRecord
+	// sqlASTCaps are the bounds the SQL facts reader hit (SQLASTCaps).
+	sqlASTCaps bounded.CapSet
+	// sqlUnreadDanger: a statement past the statement cap holds a modeled
+	// danger keyword and was not read alone (SQLUnreadDanger).
+	sqlUnreadDanger bool
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
 	// containing both a protected credential/secret path and a non-local literal
@@ -248,6 +283,9 @@ type Facts struct {
 	// boundary. The projection exists only to support a bounded same-function,
 	// same-connection chain after a successful create result.
 	SQLCommandUDFOperations []SQLCommandUDFOperationFact `json:"-"`
+	// SQLFacts contains bounded syntactic facts from one authenticated SQL source.
+	// It never stores SQL literals or connection credentials.
+	SQLFacts []SQLFact `json:"-"`
 	// SQLMutations contains only exact destructive mutation classes and
 	// domain-separated SHA-256 identity digests. SQL text, connection strings,
 	// usernames, passwords, and raw database/object names are discarded before
@@ -294,6 +332,10 @@ type Facts struct {
 	// class for exact kubectl requests. Tokens, selectors, contexts,
 	// namespaces, output formats, and other argument values are discarded.
 	KubernetesSensitiveAccesses []KubernetesSensitiveAccessFact `json:"-"`
+	// KubeRequests is every Kubernetes API request the action issues, from
+	// kubectl argv and from curl or wget URLs addressed to an apiserver
+	// (kube_request.go, GAP-1824).
+	KubeRequests []KubeRequestFact `json:"-"`
 	// StructuredPortForwards contains a closed forward class, bounded ports,
 	// and an opaque destination identity. Raw target hosts are discarded.
 	StructuredPortForwards []StructuredPortForwardFact `json:"-"`
@@ -883,11 +925,21 @@ type DirectoryCredentialAcquisitionFact struct {
 	Operation DirectoryCredentialAcquisition
 }
 
+// SQLFact contains the bounded, value-free syntactic facts of one SQL input.
+type SQLFact struct {
+	Verbs          []string
+	Tables         []string
+	Functions      []string
+	Database       string
+	StatementCount int
+}
+
 // SQLMutationOperation is the closed destructive SQL operation vocabulary.
 type SQLMutationOperation string
 
 const (
 	SQLMutationDeleteUnbounded SQLMutationOperation = "delete_unbounded"
+	SQLMutationUpdateUnbounded SQLMutationOperation = "update_unbounded"
 	SQLMutationTruncate        SQLMutationOperation = "truncate"
 	SQLMutationDropTable       SQLMutationOperation = "drop_table"
 	SQLMutationDropSchema      SQLMutationOperation = "drop_schema"

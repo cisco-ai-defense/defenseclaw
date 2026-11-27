@@ -37,7 +37,8 @@ const (
 	maxStateGlobDirEntries = 4096
 	// maxStateGlobWork bounds the work of the directory reads of one
 	// command (RV-pod2-1): one unit for each directory listed and each name
-	// examined. It counts work, never time, so the answer does not depend on
+	// examined. A directory is listed and charged once per command, however
+	// many patterns read it (rel-1-0-10:GAP-1726). It counts work, never time, so the answer does not depend on
 	// the load of the box (rel-1-0-10:GAP-0339). It is what the 250 ms time
 	// bound it replaces read on an idle box: the widest component (64 folders
 	// of 4,000 names, 256,128 units) took 120 ms on the gate box, so about two
@@ -57,7 +58,16 @@ const (
 // within maxStateGlobWork: a pattern with wildcards above the home
 // (ls /*/*/*/*/*/.defenseclaw/x) walked the whole filesystem past the hook
 // answer budget (RV-pod2-1). ok is false when no pattern matched.
-func StateGlobTwin(command, activeHome string) (twin string, ok bool) {
+//
+// cut holds the caps the reading hit (the one bound rule, DET111 step 2): a
+// pattern that matches more than maxStateGlobMatches names is spelled as its
+// first maxStateGlobMatches matches and cut has bounded.Items
+// (rel-1-0-10:GAP-1017); a folder with more than maxStateGlobDirEntries names
+// (bounded.Items) or a command past maxStateGlobWork (bounded.Time, counted
+// work) leaves the pattern as written and is in cut too, so a later state
+// pattern behind decoys that used up the work is the unknown tier, never a
+// silent literal (rel-1-0-10:GAP-1726).
+func StateGlobTwin(command, activeHome string) (twin string, ok bool, cut bounded.CapSet) {
 	return stateGlobTwin(command, activeHome, nil)
 }
 
@@ -69,18 +79,18 @@ func StateGlobTwin(command, activeHome string) (twin string, ok bool) {
 // writes there (a match or the pattern itself) lies in that tree. Nothing
 // is read from the filesystem. A pattern that names no state name adds
 // nothing, so cp a.txt ~/.defenseclaw/*.bak keeps its plain reading.
-func StateGlobTwinNamed(command, activeHome string, stateNames []string) (twin string, ok bool) {
+func StateGlobTwinNamed(command, activeHome string, stateNames []string) (twin string, ok bool, cut bounded.CapSet) {
 	if len(stateNames) == 0 {
-		return "", false
+		return "", false, cut
 	}
 	return stateGlobTwin(command, activeHome, stateNames)
 }
 
-func stateGlobTwin(command, activeHome string, stateNames []string) (twin string, ok bool) {
+func stateGlobTwin(command, activeHome string, stateNames []string) (twin string, ok bool, cut bounded.CapSet) {
 	home, _ := normalizeActiveHome(activeHome)
 	home = strings.TrimRight(home, "/")
 	if home == "" || !posixShellHome(home) || strings.ContainsAny(home, "\x00\r\n") {
-		return "", false
+		return "", false, cut
 	}
 	// A Git Bash call on Windows has a drive home, C:/Users/x: its patterns
 	// are placed and read there too (GAP-2573: cp a.txt
@@ -89,22 +99,39 @@ func stateGlobTwin(command, activeHome string, stateNames []string) (twin string
 	drive := DriveSlashPath(home + "/")
 	source := command
 	if !strings.ContainsAny(source, "*?[") || !strings.Contains(source, "/") {
-		return "", false
+		return "", false, cut
 	}
-	work := 0
-	return globWordTwin(source, home, func(pattern string) []string {
+	var trunc bounded.Truncated
+	reading := stateGlobReading{
+		home: home, stateNames: stateNames, trunc: &trunc,
+		work: bounded.NewCounter(&trunc, bounded.Time, maxStateGlobWork),
+	}
+	twin, ok = globWordTwin(source, home, func(pattern string) []string {
 		if drive {
 			pattern = stateDrivePattern(pattern)
 		}
 		if !strings.HasPrefix(pattern, "/") && (!drive || !DriveSlashPath(pattern)) {
 			return nil
 		}
-		matches, complete := stateGlobMatches(pattern, home, &work, stateNames)
-		if !complete {
-			return nil
-		}
+		matches, _ := reading.matches(pattern)
 		return matches
 	})
+	return twin, ok, trunc.Set(&reading.work)
+}
+
+// stateGlobReading is the expansion of the state patterns of one command:
+// one work counter and one listing per directory, shared by every pattern.
+type stateGlobReading struct {
+	home       string
+	stateNames []string
+	trunc      *bounded.Truncated
+	work       bounded.Counter
+	listings   map[string]stateGlobListing
+}
+
+type stateGlobListing struct {
+	names  []string
+	listed bool
 }
 
 // RelativeGlobTwinsNamed returns the POSIX readings of command in which
@@ -393,15 +420,18 @@ func statePatternWord(word *syntax.Word, home string) (string, bool) {
 	return text.String(), true
 }
 
-// stateGlobMatches expands pattern as the shell does where it can name
-// the active home .defenseclaw tree: each component up to the home must
-// match the home itself (no directory above it is read), the next one must
-// match .defenseclaw, and only directories of that tree are listed. A
-// longer listing, more matches or more work than maxStateGlobWork end the expansion
-// (complete is false); the reading then adds nothing. With stateNames
-// (StateGlobTwinNamed) nothing is read: the .defenseclaw directory holds
-// exactly those names and a deeper pattern component is kept as written.
-func stateGlobMatches(pattern, home string, work *int, stateNames []string) (matches []string, complete bool) {
+// matches expands pattern as the shell does where it can name the active
+// home .defenseclaw tree: each component up to the home must match the home
+// itself (no directory above it is read), the next one must match
+// .defenseclaw, and only directories of that tree are listed. More than
+// maxStateGlobMatches matches keep the first ones (sorted names) and record
+// bounded.Items; a longer listing or more work than maxStateGlobWork end the
+// expansion (complete is false, the pattern stays as written) and record
+// their cap. With stateNames (StateGlobTwinNamed) nothing is read: the
+// .defenseclaw directory holds exactly those names and a deeper pattern
+// component is kept as written.
+func (r *stateGlobReading) matches(pattern string) (matches []string, complete bool) {
+	home, stateNames := r.home, r.stateNames
 	// A drive home is on a Windows file system, which opens a name spelled
 	// in any case (~/.DefenseClaw/conf*.yaml lists the state); a wildcard
 	// component is still matched by the shell as written.
@@ -436,33 +466,42 @@ func stateGlobMatches(pattern, home string, work *int, stateNames []string) (mat
 			continue
 		}
 		var next []string
+	dirs:
 		for _, dir := range current {
-			if *work++; *work > maxStateGlobWork {
-				return nil, false
-			}
 			var names []string
-			listed := true
 			switch {
 			case stateNames == nil:
-				names, listed = stateGlobDirNames(dir)
+				listing, seen := r.listings[dir]
+				if !seen {
+					if !r.work.Take() {
+						return nil, false
+					}
+					listing.names, listing.listed = stateGlobDirNames(dir)
+					if !r.work.TakeN(len(listing.names)) {
+						return nil, false
+					}
+					if r.listings == nil {
+						r.listings = make(map[string]stateGlobListing)
+					}
+					r.listings[dir] = listing
+				}
+				if !listing.listed {
+					r.trunc.Hit(bounded.Items)
+					return nil, false
+				}
+				names = listing.names
 			case dir == stateRoot:
 				names = stateNames
 			default:
 				next = append(next, dir+"/"+component)
 				continue
 			}
-			if !listed {
-				return nil, false
-			}
-			if *work += len(names); *work > maxStateGlobWork {
-				return nil, false
-			}
 			for _, name := range names {
 				if match(component, name) {
-					next = append(next, dir+"/"+name)
-					if len(next) > maxStateGlobMatches {
-						return nil, false
+					if !r.trunc.Within(bounded.Items, len(next)+1, maxStateGlobMatches) {
+						break dirs
 					}
+					next = append(next, dir+"/"+name)
 				}
 			}
 		}

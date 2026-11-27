@@ -1,0 +1,75 @@
+---
+title: "Tier table: tiers.yaml"
+description: The tier table of a DefenseClaw rule pack. What each row and cell means, what a custom pack may change, and the errors the loader gives for a column it refuses.
+keywords:
+  - tiers.yaml
+  - DefenseClaw tier table
+  - rule pack tier
+  - custom guardrail pack
+  - strict permissive default
+---
+
+<Callout type="info" title="Preview">
+Editing `tiers.yaml` in a custom pack is a preview feature. The bundled packs ship the built-in table unchanged.
+</Callout>
+
+Every rule pack has a `tiers.yaml` next to `defenseclaw-pack.json`. It names the pack's tier (`default`, `permissive` or `strict`) and holds the pack's column of the tier table: for each kind of finding (a row), the least action it gets and how its severity counts, for a per-user install and for a managed computer. The bundled `default`, `permissive` and `strict` packs each carry their column of the built-in table.
+
+A pack without `tiers.yaml` uses the built-in column of its tier. The gateway reads the file with the rest of the pack, under the same digest pin, so a change reaches enforcement only through a new pin. See [rules and custom packs](/docs/policies/rules).
+
+## File format
+
+```yaml
+version: 1
+tier: strict
+rows:
+  - id: tiered-strict
+    per_user:
+      floor: block
+    managed:
+      floor: block
+```
+
+| Key | Meaning |
+|---|---|
+| `version` | Always `1`. |
+| `tier` | The pack's tier: `default`, `permissive` or `strict`. |
+| `rows` | The rows this pack sets. A row you leave out keeps its built-in cells. Each row is listed once. |
+| `rows[].id` | The row: one of the row names below. |
+| `rows[].per_user`, `rows[].managed` | The cell for a per-user install and for a managed computer. |
+
+A cell has these keys:
+
+| Key | Values | Meaning |
+|---|---|---|
+| `floor` | `allow`, `alert`, `confirm`, `block` | The least action the finding gets. |
+| `ceiling` | `alert`, `record` (optional) | The most it can raise. `record` keeps the finding in the decision record and raises nothing; it needs floor `allow`. |
+| `levels` | `true` (default), `false` | `false` keeps the finding out of the severity mapping (`block_at`, `alert_at`), so only the floor acts. Floor `allow` with `levels: false` is refused: the finding would be allowed silently. |
+| `severity` | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` (optional) | Must equal the built-in row's severity. |
+
+Rows: `effect-unknown`, `effect-content-decided`, `effect-own-key-write`, `effect-link`, `effect-read`, `record`, `advisory`, `ask-ticket-request`, `evaluation-fault`, `unverified-path`, `truncated`, `state-write`, `shell-protected-file`, `read-ssh-private-key`, `read-credential`, `read-other-home-ssh-private-key`, `read-other-home-git-credential`, `read-other-home-credential`, `tiered-strict`, `tiered-managed`.
+
+## What a pack may change
+
+A pack column changes how strongly its tier acts on a row. It cannot change what the rest of the gateway reads from the built-in table, so the loader refuses a column that:
+
+- **Changes a row's severity.** The severity of a verdict always comes from the built-in row.
+- **Lowers a protected row.** `evaluation-fault`, `state-write`, `truncated`, `unverified-path` and `shell-protected-file` may be raised (a higher floor, levels on, a ceiling removed) but never lowered: the floor cannot go down, the ceiling cannot tighten, and `levels: false` is refused where the built-in cell has levels.
+- **Turns record-only on or off for a row.** A row whose built-in cells are `record` in every tier and deployment stays so, and no other row becomes record-only in every cell.
+
+## Errors
+
+The loader refuses the whole pack and names the row. `defenseclaw guardrail validate-pack PACK` prints the same message without a running gateway ([validate rule packs](/docs/policies/rulepack-validation)).
+
+| Message | Fix |
+|---|---|
+| `tiers.yaml: version N, want 1` | Set `version: 1`. |
+| `tiers.yaml: tier "x" is not default, permissive or strict` | Name one of the three tiers. |
+| `tiers.yaml: unknown row "x"` | Use a row name from the list above. |
+| `tiers.yaml: row "x" listed twice` | Keep one entry per row. |
+| `row "x" per_user: severity S, the built-in row has B: a pack does not change a row's severity` | Remove `severity`, or set the built-in value. |
+| `row "x" managed: lowers the built-in cell (floor F): a pack may raise this row, never lower it` | Keep at least the built-in floor, levels and ceiling for that row. |
+| `row "x": the built-in row is recorded in every cell=..., the pack's=...` | Keep the row's `ceiling: record` cells as they are built in. |
+| `floor "x" is not allow, alert, confirm or block`, `ceiling "x" is not alert or record`, `a record ceiling with floor "x"`, `floor allow with levels false allows the finding silently` | Fix the cell value. |
+
+A pack the loader refuses never names a tier either: the standalone hook and the hook outage fail mode fall back to the tier the configuration or the pack's folder names.

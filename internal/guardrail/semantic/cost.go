@@ -22,6 +22,14 @@ import (
 	"github.com/google/cel-go/checker"
 )
 
+const (
+	maxSQLFacts      = 16
+	maxSQLFactValues = 4096
+	// maxSQLFactStatements is the statement count an SQL fact can hold: the
+	// SQL reader's own statement bound (actionfacts.maxSQLASTStatements).
+	maxSQLFactStatements = 256
+)
+
 type sizeBound struct {
 	path string
 	max  uint64
@@ -33,6 +41,14 @@ var semanticSizeBounds = [...]sizeBound{
 	{"f.active_home", maxScalarBytes},
 	{"f.parse.issues", maxIssues},
 	{"f.commands", maxCommands},
+	{"f.sql_facts", maxSQLFacts},
+	{"f.sql_facts.@items.verbs", maxSQLFactValues},
+	{"f.sql_facts.@items.verbs.@items", maxScalarBytes},
+	{"f.sql_facts.@items.tables", maxSQLFactValues},
+	{"f.sql_facts.@items.tables.@items", maxScalarBytes},
+	{"f.sql_facts.@items.functions", maxSQLFactValues},
+	{"f.sql_facts.@items.functions.@items", maxScalarBytes},
+	{"f.sql_facts.@items.database", maxScalarBytes},
 	{"f.commands.@items.executable", maxScalarBytes},
 	{"f.commands.@items.program", maxScalarBytes},
 	{"f.commands.@items.argv", maxArgvItems},
@@ -54,6 +70,15 @@ var semanticSizeBounds = [...]sizeBound{
 	{"f.network.@items.scheme", maxScalarBytes},
 	{"f.network.@items.host", maxScalarBytes},
 	{"f.network.@items.normalized_host", maxScalarBytes},
+	{"f.kube", maxKube},
+	{"f.kube.@items.source", maxScalarBytes},
+	{"f.kube.@items.verb", maxScalarBytes},
+	{"f.kube.@items.group", maxScalarBytes},
+	{"f.kube.@items.version", maxScalarBytes},
+	{"f.kube.@items.resource", maxScalarBytes},
+	{"f.kube.@items.subresource", maxScalarBytes},
+	{"f.kube.@items.namespace", maxScalarBytes},
+	{"f.kube.@items.name", maxScalarBytes},
 	{"f.data_flows", maxDataFlows},
 	{"f.artifacts", maxArtifacts},
 	{"f.artifacts.@items.value", maxScalarBytes},

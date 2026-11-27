@@ -708,8 +708,8 @@ rules:
     tags: [defense-evasion, tampering, cloud, audit-logging, bounded-lineage]
   - id: exec.postgresql_copy_program
     tool_call_only: true
-    expression: "f.tool == 'sql_query'"
-    # The CEL expression admits only the closed sql_query surface. The exact
+    expression: "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program == 'psql')"
+    # The CEL expression admits sql_query and the closed psql CLI surface. The exact
     # semantic owner additionally requires an explicit PostgreSQL URI/database
     # identity and one bounded literal COPY ... PROGRAM statement.
     pattern: 'a^'
@@ -719,7 +719,7 @@ rules:
     tags: [execution, database, postgresql, server-side, bounded-lineage]
   - id: secrets.sql_sensitive_server_file_read
     tool_call_only: true
-    expression: "f.tool == 'sql_query'"
+    expression: "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb'])"
     # Exact ActionFacts owner only. It requires a recognized MySQL or
     # PostgreSQL connection, one literal SELECT statement, an engine-matched
     # server-side file-read function, and a closed sensitive-path class.
@@ -980,7 +980,7 @@ rules:
     # literal Secret plus json/yaml or a closed data selector. Universal policy
     # alerts only; protected-cluster policy owns blocking authorization.
     pattern: 'a^'
-    title: "Read the content of one named Kubernetes Secret"
+    title: "Read the content of Kubernetes Secrets"
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]

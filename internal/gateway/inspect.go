@@ -99,6 +99,9 @@ type ToolInspectRequest struct {
 	// unknown tier of the policy, any other tool is blocked as an oversize call
 	// is (rel-1-0-10:GAP-0356). It can only make a verdict stricter.
 	ArgsPartial bool `json:"args_partial,omitempty"`
+	// aliasPending is held by the HTTP route until all final policy steps
+	// have decided whether the tool will run. Never from the wire.
+	aliasPending *effectAliasPending
 	// toolUseID is set by a connector adapter, never from the wire (see
 	// contentScope below).
 	toolUseID string
@@ -226,10 +229,18 @@ type ToolInspectVerdict struct {
 	// verdict. Never serialized.
 	laneVerdict bool
 	// decisionConfirm reports that the confirm action came from the
-	// decision model answering without the LLM judge (cascade 2). Where the
-	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
-	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
+	// decision model answering without the LLM judge (cascade 2), or only
+	// from a tier-table confirm floor (decide.Output.FloorConfirm: the
+	// default tier's ask on a ticket request, GAP-0067). Where the agent
+	// cannot ask, such a confirm is an alert, not a block
+	// (decisionConfirmWithoutAsk). Never serialized.
 	decisionConfirm bool
+	// floorConfirm marks a tool-route verdict whose confirm came from a
+	// tier-table confirm floor; with decisionConfirm still set (no other
+	// lane confirmed or changed the action) the /inspect/tool route answers
+	// it with an alert where the caller cannot ask
+	// (resolveOpenClawInspectConfirm). Never serialized.
+	floorConfirm bool
 	// uninspectedRaised marks an action the uninspected marker raised
 	// (markOversizeUninspected, markContentCut), not one the content that was
 	// read proved: the cascade policy may lower it, but never below the
@@ -986,6 +997,7 @@ func inspectToolTrustedShellCWD(dir string) string {
 // short-circuits there exactly as the message lane does; native hook
 // callers reach this through inspectToolPolicy with context.Background().
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
+	ctx = withCallTargetMemo(ctx)
 	actionTool := req.Tool
 	if strings.EqualFold(strings.TrimSpace(req.Connector), "opencode") {
 		actionTool = agentHookTrustedActionTool(req.Connector, req.Tool, "")
@@ -1002,6 +1014,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		EnforcementCapable: true,
 		sessionID:          req.SessionID,
 		sendDestination:    req.sendDestination,
+		aliasPending:       req.aliasPending,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
 	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
@@ -1209,7 +1222,8 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 			findings = withHostTwinFindings(findings, trustedToolCallFindingsOf(ctx, nested.request, mcpServer, secureClient))
 			continue
 		}
-		findings = trustedToolCallLaneFindings(ctx, nested.request, findings, mcpServer, secureClient)
+		from := len(findings)
+		findings = withFloorRaiseOnlyMark(nested.request, trustedToolCallLaneFindings(ctx, nested.request, findings, mcpServer, secureClient), from)
 	}
 	if twin, ok := localCommandLinkTwinRequest(action); ok {
 		// The shell call as it runs once its links are followed (command
@@ -1236,6 +1250,21 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// GAP-0623).
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
+	if twin, ok := wrapperExactTwinRequest(action); ok {
+		// A program run through a chain of static prefix wrappers that hands
+		// it its argv unchanged (taskset 1 sudo env LD_PRELOAD=x curl URL,
+		// chrt -i 0 pkill -f defenseclaw) keeps the cell its plain call gets
+		// for the rules that judge the program by its own words
+		// (wrappedProgramRules; GAP-1461, GAP-1494; DET111 ruling
+		// 2026-11-24T21:35Z). The plain call is judged by every reading,
+		// after every reading of the wrapped call, and it only raises the
+		// call (withRaiseOnlyTwinFindings; DET111 ruling 2026-11-25T01:30Z).
+		// A wrapper read only with words that may expand, a shell STRING, a
+		// moved folder and the writer sink grammar keep the call readings.
+		findings = withRaiseOnlyTwinFindings(findings, slices.DeleteFunc(trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient), func(f RuleFinding) bool {
+			return !wrappedProgramRule(f.RuleID)
+		}))
+	}
 	if claims != nil && (claims.cut || twinsCut) {
 		// Its kit claims were cut: a word or argument past the cut may
 		// write through a link the laptop follows and blocks, so the call
@@ -1243,7 +1272,7 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// (substrate-1 GAP-0622).
 		findings = withUnknownFinding(findings, boundedTruncatedFinding(bounded.Of(bounded.Paths), action.EnforcementCapable))
 	}
-	return findings
+	return withEffectsFoldedIntoCall(findings)
 }
 
 func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
@@ -1252,7 +1281,10 @@ func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest,
 		// guard) share the guest placement of one input (guestReadingMemo).
 		action.guestMemo = &guestReadingMemo{}
 	}
-	return trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient)
+	// Dispatch finishes the effect lane before the legacy hook reader runs.
+	// The request copies share only this call's proven target set.
+	action.preservedHookConfigTargets = &effectKnownHookConfigTargets{}
+	return withFloorRaiseOnlyMark(action, trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient), 0)
 }
 
 // trustedToolCallLaneFindings adds to findings every reading of the call but
@@ -1283,6 +1315,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	action trustedActionRequest,
 ) *ToolInspectVerdict {
 	action.StrictPolicy = a.strictPolicyTierForHook(ctx, action.Connector)
+	action.PolicyTier, action.Tiers = configTierTable(a.decisionConfig(ctx), action.Connector)
 	action.ManagedInstall = a.managedInstallForHook(ctx)
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
@@ -1400,6 +1433,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		waitCodeGuard = a.startCodeGuardOnArgs(ctx, cgReq)
 	}
 	cfg := a.decisionConfig(ctx)
+	aliasPending := action.aliasPending
+	ownAliasPending := aliasPending == nil && deferEffectAlias(action)
+	if ownAliasPending {
+		aliasPending = &effectAliasPending{}
+	}
+	action.aliasPending = aliasPending
 	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
@@ -1429,7 +1468,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		severity, _ := aggregateCodeGuardSeverity(cgFindings, HighestSeverity(ruleFindings), "NONE")
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := profileMeetActionForFindings(
+		runtimeAction, floorConfirm := profileMeetDecisionForFindings(
 			ctx, a.decisionConfig(ctx), req.Connector, ruleFindings, true, false,
 		)
 		// CodeGuard's findings carry no member and apply to every member.
@@ -1441,6 +1480,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 				ctx, a.decisionConfig(ctx), req.Connector, codeGuardSeverity, true, false,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
+			// A CodeGuard confirm or block is the levels' own.
+			floorConfirm = floorConfirm && codeGuardAction != guardrailActionConfirm && runtimeAction == guardrailActionConfirm
 		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
@@ -1471,10 +1512,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
 			Findings:         findingStrs,
 			DetailedFindings: append(ruleFindings, cgFindings...),
+			decisionConfirm:  floorConfirm,
+			floorConfirm:     floorConfirm,
 		}
 		detectionOnly := len(ruleFindings) > 0 && len(cgFindings) == 0
 		for _, finding := range ruleFindings {
-			if finding.enforcement != findingEnforcementDetectionOnly {
+			if !finding.Proof.Recorded() {
 				detectionOnly = false
 				break
 			}
@@ -1517,7 +1560,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	} else if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
-	return a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	verdict = a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	if ownAliasPending && aliasVerdictCanRun(verdict) {
+		aliasPending.commit()
+	}
+	return verdict
 }
 
 // highestInspectConfidence keeps verdict confidence aligned with the visible
@@ -2208,7 +2255,7 @@ func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
 	}
 	for i := range verdict.DetailedFindings {
 		verdict.DetailedFindings[i].Severity = "LOW"
-		verdict.DetailedFindings[i].enforcement = findingEnforcementDetectionOnly
+		verdict.DetailedFindings[i].Proof = verdict.DetailedFindings[i].Proof.Record()
 	}
 }
 
@@ -3023,7 +3070,21 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
-	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
+	// The scanner may finish before the HTTP route applies cascade, mode,
+	// approval and install-window policy. Only session-scoped calls need a
+	// recorder: a needless one bypasses the trusted dispatch memo.
+	var aliasPending *effectAliasPending
+	if req.SessionID != "" && deferEffectAlias(trustedActionRequest{
+		Connector: serverConnector, sessionID: req.SessionID,
+		Input: actionfacts.Input{ActiveHome: hookActiveHome(r.Context())},
+	}) {
+		aliasPending = &effectAliasPending{}
+		req.aliasPending = aliasPending
+	}
+	// The judge keeps the session's task and calls under the connector the
+	// call is scoped to (judgeSessionKeyFor), the one the OpenClaw event
+	// router names for its own turns (GAP-0152).
+	r = r.WithContext(withJudgeSessionConnector(openClawInspectIdentity(r.Context(), serverConnector), serverConnector))
 	r = r.WithContext(withCascadeTrace(r.Context(), a.decisionConfig(r.Context()), serverConnector))
 
 	ctx, cancel := context.WithTimeout(r.Context(), a.inspectScanBudget())
@@ -3139,6 +3200,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 		// A lock that appeared during the scan still decides this request.
 		a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
+	}
+
+	if aliasVerdictCanRun(verdict) {
+		aliasPending.commit()
 	}
 
 	// Count the check against the authenticated connector so /health (and the
@@ -3436,6 +3501,16 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	}
 	verdict.ApprovalTimeoutMS = int(timeout / time.Millisecond)
 
+	// A confirm that only the tier table's confirm floor gave (the default
+	// tier's ask on a ticket request, rel-1-0-10:GAP-0067) is an alert
+	// where the caller cannot ask, never the fail-closed block below: the
+	// call alerted in 1.0.10 and the ask adds a person, not a refusal.
+	canAsk := strings.EqualFold(a.connectorName(), "openclaw") &&
+		strings.EqualFold(strings.TrimSpace(req.ApprovalSurface), "native")
+	if !canAsk && verdict.floorConfirm && verdict.decisionConfirm {
+		verdict.Action = guardrailActionAlert
+		return
+	}
 	// a HIGH-severity tool call that policy escalated
 	// to `confirm` MUST NOT be downgraded to `alert` when the caller
 	// cannot deliver a human-in-the-loop approval. The previous

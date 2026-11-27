@@ -4,6 +4,8 @@
 
 package psparse
 
+import "strings"
+
 // parsePipelineChainOrAssignment parses a statement that is a pipeline, a
 // pipeline chain (&& / ||), a background job (trailing &), or an assignment.
 func (p *parser) parsePipelineChainOrAssignment(s stopSet) Statement {
@@ -31,6 +33,25 @@ func (p *parser) parsePipelineChainOrAssignment(s stopSet) Statement {
 		return p.parsePipelineChain(seed)
 	}
 	return p.parsePipelineChain(nil)
+}
+
+// commandWordLead reports whether the current token, in command position,
+// starts a command name rather than an expression: pwsh 7.6.6 reads "]" and
+// every operator word as a command name except the unary expression operators
+// (+ - ! ++ -- and the -not style operators).
+func (p *parser) commandWordLead() bool {
+	switch p.kind() {
+	case TokRBracket:
+		return p.inIndex == 0
+	case TokOperator:
+		switch v := p.cur().Value; v {
+		case "+", "-", "!", "++", "--":
+			return false
+		default:
+			return !strings.HasPrefix(v, "-")
+		}
+	}
+	return false
 }
 
 func (p *parser) isAssignOp() bool {
@@ -120,9 +141,9 @@ func (p *parser) parsePipelineElement() PipelineElement {
 	if _, ok := p.bareword(); ok {
 		return p.parseCommand("")
 	}
-	// % (ForEach-Object) and ? (Where-Object) are command aliases when they
-	// appear in command position.
-	if p.at(TokOperator) && (p.cur().Value == "%" || p.cur().Value == "?") {
+	// in command position a word that starts with an operator character or
+	// "]" is a command name (% and ? aliases, ***, =, ==, *=, ?x, ]x).
+	if p.commandWordLead() {
 		return p.parseCommand("")
 	}
 	// a statement that starts with a -Parameter is a command in PowerShell
@@ -160,8 +181,19 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 	for guard < 1<<16 {
 		guard++
 		switch p.kind() {
-		case TokEOF, TokNewline, TokSemi, TokPipe, TokAmpAmp, TokPipePipe, TokRParen, TokRBrace, TokRBracket:
+		case TokEOF, TokNewline, TokSemi, TokPipe, TokAmpAmp, TokPipePipe, TokRParen, TokRBrace:
 			goto done
+		case TokRBracket:
+			// in command mode "]" is word text (Write-Output a ] b); it ends the
+			// command only as the closer of an enclosing index ($a[& f])
+			if p.inIndex > 0 {
+				goto done
+			}
+			a := p.parseCommandArg()
+			if a == nil {
+				goto done
+			}
+			cmd.Elements = append(cmd.Elements, a)
 		case TokAmp:
 			goto done
 		case TokStopParse:
@@ -214,10 +246,13 @@ func (p *parser) parseNameRun(first Token) Expr {
 		case TokGeneric, TokVariable, TokNumber, TokDot, TokString, TokOperator:
 			end = t.End
 			p.advance()
-		case TokDollarParen, TokLBracket:
-			// a $( ) or [ ] glued into a name is literal (k=$(..), a[1<<2]=x);
-			// a plain ( / @( / { / @{ starts a separate argument (`$( ) -> name "$").
+		case TokDollarParen:
+			// a $( ) glued into a name is literal (k=$(..)); a plain ( / @( /
+			// { / @{ starts a separate argument (`$( ) -> name "$").
 			end = p.consumeBalancedEnd()
+		case TokLBracket, TokRBracket:
+			// [ and ] are word characters: a[1<<2]=x is one name
+			end = p.consumeBracketWord()
 		default:
 			goto doneName
 		}
@@ -233,6 +268,35 @@ doneName:
 		p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape in a name differs between PS 5.1 and 7")
 	}
 	return sl
+}
+
+// consumeBracketWord consumes the rest of a command-mode word from the
+// current "[" or "]" token and returns the offset just past it. In command
+// mode pwsh scans [ and ] as plain word characters that never group: the word
+// runs over every glued token (a[1>2], a[b]-c, a["b c"]) and ends, as any
+// generic word does, at whitespace or at ; newline | & , ( ) { } @( @{, so
+// Write-Output a[#; Remove-Item x is two commands. A glued $( ) is consumed
+// whole (a[$(b; c)] is one word).
+func (p *parser) consumeBracketWord() int {
+	end := p.cur().Start
+	for !p.at(TokEOF) {
+		t := p.cur()
+		if t.Start != end {
+			break
+		}
+		switch t.Kind {
+		case TokNewline, TokSemi, TokPipe, TokAmpAmp, TokPipePipe, TokAmp, TokComma,
+			TokLParen, TokRParen, TokLBrace, TokRBrace, TokAtParen, TokAtBrace,
+			TokStopParse, TokComment:
+			return end
+		case TokDollarParen:
+			end = p.consumeBalancedEnd()
+			continue
+		}
+		end = t.End
+		p.advance()
+	}
+	return end
 }
 
 // consumeBalancedEnd consumes a balanced ( ), [ ] or { } group (the current
@@ -287,10 +351,11 @@ func (p *parser) parseCommandName() Expr {
 			p.diag0(e, ReasonDynamicName, "call target is a variable")
 		}
 		return e
-	case TokOperator:
-		if v := p.cur().Value; v == "%" || v == "?" {
-			t := p.advance()
-			return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true, Raw: t.Raw}
+	case TokOperator, TokRBracket:
+		// a word that starts with an operator character or "]" in command
+		// position is a command name glued to what follows (***, =ab, ?x, %)
+		if p.commandWordLead() {
+			return p.parseNameRun(p.advance())
 		}
 	case TokParameter:
 		t := p.advance()
@@ -316,7 +381,17 @@ func (p *parser) parseParameter() CommandElement {
 		adjacent := !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == t.End
 		// -Name:value (adjacent) or -Name: value (the next value across
 		// whitespace, unless it is another parameter or a terminator).
-		if adjacent || p.colonValueFollows() {
+		if p.at(TokParameter) {
+			// -Name: -x and -a:-b: pwsh binds the next word as the value even
+			// when it starts with "-" (it is not a new parameter)
+			tk := p.advance()
+			v := "-" + tk.Value
+			if tk.HasColon {
+				v += ":"
+			}
+			par.Colon = &StringLit{span: span{tk.Start, tk.End}, Kind: StrBare, Value: v, Static: true, Bare: true, Raw: tk.Raw}
+			par.end = tk.End
+		} else if adjacent || p.colonValueFollows() {
 			if a, ok := p.parseCommandArg().(*Arg); ok && a != nil {
 				par.Colon = a.Value
 				_, par.end = a.Span()
@@ -438,21 +513,15 @@ func (p *parser) parseArgAtom() Expr {
 		// a ':name' at argument position is a bareword (Remove-Item :x -Force).
 		t := p.advance()
 		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true, Raw: t.Raw}
-	case TokLBracket:
-		// [..] at argument position is a literal bareword in command mode
-		// (Write-Output [int] -> "[int]"), not a type literal or an index.
+	case TokLBracket, TokRBracket:
+		// a word with [ or ] at argument position is a bareword in command
+		// mode (Write-Output [int] -> "[int]", [a b] -> "[a" "b]"), not a
+		// type literal or an index.
+		// The word is an expandable bareword like any generic argument, so a
+		// glued $( ) or $var in it is read: a[$(b; c)] runs b and c.
 		start := p.cur().Start
-		end := p.consumeBalancedEnd()
-		raw := ""
-		if start >= 0 && end <= len(p.src) && end >= start {
-			raw = p.src[start:end]
-		}
-		v, amb := p.decodeBacktick(raw, true)
-		sl := &StringLit{span: span{start, end}, Kind: StrBare, Value: v, Static: !amb, Bare: true, Raw: raw}
-		if amb {
-			p.diag(start, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
-		}
-		return sl
+		end := p.consumeBracketWord()
+		return p.barewordExpr(Token{Kind: TokGeneric, Str: StrBare, Start: start, End: end, Raw: p.rawSpan(start, end)})
 	}
 	return nil
 }
@@ -506,7 +575,7 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 // the current command argument (PowerShell's generic-token concatenation).
 func adjacentFusable(k TokenKind) bool {
 	switch k {
-	case TokGeneric, TokNumber, TokVariable, TokString, TokDollarParen, TokOperator, TokDot, TokLBracket:
+	case TokGeneric, TokNumber, TokVariable, TokString, TokDollarParen, TokOperator, TokDot, TokLBracket, TokRBracket:
 		return true
 	}
 	return false

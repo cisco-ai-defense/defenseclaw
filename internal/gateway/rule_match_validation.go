@@ -116,7 +116,7 @@ func firstAcceptedRuleMatchBy(rule PatternRule, text string, matches textMatches
 		return matches.first()
 	}
 	return firstAcceptedMatchBy(rule.Pattern, text, matches, func(match string, start, end int) bool {
-		return acceptedRuleMatchAt(rule.ID, text, match, start, end)
+		return acceptedPatternRuleMatchAt(rule, text, match, start, end)
 	})
 }
 
@@ -208,6 +208,31 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 	return validator == nil || validator(text, match, start, end)
 }
 
+// acceptedPatternRuleMatchAt is acceptedRuleMatchAt for a compiled rule: a
+// SEC-SECRET-ASSIGN whose pack gives its key vocabulary reads that one
+// (GAP-0433).
+func acceptedPatternRuleMatchAt(rule PatternRule, text, match string, start, end int) bool {
+	if rule.ID == secretAssignmentRuleID && rule.assignmentKeys != nil {
+		return secretAssignmentValidator(rule.assignmentKeys)(text, match, start, end)
+	}
+	return acceptedRuleMatchAt(rule.ID, text, match, start, end)
+}
+
+// secretAssignmentValidator is SEC-SECRET-ASSIGN's validator under the key
+// vocabulary keys (nil: the built-in one).
+func secretAssignmentValidator(keys *secretAssignmentKeys) func(text, match string, start, end int) bool {
+	return func(text, match string, start, _ int) bool {
+		// The call text is JSON: an escaped newline, return or tab is the two
+		// characters backslash and n, r or t, and the word boundary the
+		// pattern found sits between them and the key. The letter is the
+		// escape, not the first letter of the key.
+		if start > 0 && text[start-1] == '\\' && strings.IndexByte("nrt", match[0]) >= 0 {
+			match = match[1:]
+		}
+		return acceptedSecretAssignmentWith(keys, match)
+	}
+}
+
 // A nil validator means the regex match itself is decisive. Keep this dispatch
 // shared with firstAcceptedRuleMatch so a rule with later valid candidates can
 // never take the first-match shortcut.
@@ -293,16 +318,7 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 		return func(_, match string, _, _ int) bool { return acceptedPublicIPv4Download(match) }
 	}
 	if ruleID == secretAssignmentRuleID {
-		return func(text, match string, start, _ int) bool {
-			// The call text is JSON: an escaped newline, return or tab is the two
-			// characters backslash and n, r or t, and the word boundary the
-			// pattern found sits between them and the key. The letter is the
-			// escape, not the first letter of the key.
-			if start > 0 && text[start-1] == '\\' && strings.IndexByte("nrt", match[0]) >= 0 {
-				match = match[1:]
-			}
-			return acceptedSecretAssignment(match)
-		}
+		return secretAssignmentValidator(nil)
 	}
 	if strings.HasPrefix(ruleID, "SEC-") {
 		return func(_, match string, _, _ int) bool { return acceptedCredentialMatch(ruleID, match) }

@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 	"gopkg.in/yaml.v3"
 )
 
@@ -536,6 +537,17 @@ func agentHookConfigBool(object map[string]any, keys ...string) bool {
 // writes and how. native is false for a call that is not one, or whose
 // arguments it cannot read; the shell path judges those.
 func agentHookConfigFileChanges(tool string, args json.RawMessage) (changes []agentHookConfigChange, native bool) {
+	kind := strings.ToLower(strings.TrimSpace(tool))
+	switch kind {
+	case "write", "write_file", "writefile", "write-file", "create", "create_file",
+		"edit", "edit_file", "str_replace", "multiedit", "multi_edit", "multi-edit",
+		"apply_patch", "applypatch", "apply-patch", "patch":
+	default:
+		// No other tool changes a file here: its arguments are not decoded
+		// (a shell call's 1 MiB here-document was, every call, GAP-0299).
+		return nil, false
+	}
+	workcount.AddLarge(workcount.ArgsDecode, len(args))
 	var object map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(args))
 	decoder.UseNumber()
@@ -543,7 +555,7 @@ func agentHookConfigFileChanges(tool string, args json.RawMessage) (changes []ag
 		return nil, false
 	}
 	pathKeys := []string{"file_path", "filePath", "path"}
-	switch strings.ToLower(strings.TrimSpace(tool)) {
+	switch kind {
 	case "write", "write_file", "writefile", "write-file", "create", "create_file":
 		path, pathOK := agentHookConfigString(object, pathKeys...)
 		content, contentOK := agentHookConfigString(object, "content", "file_text")
@@ -957,6 +969,15 @@ func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, af
 		if reason := codexHooksSwitchedOff(old, updated); reason != "" {
 			return reason
 		}
+		// Codex also registers the turn bridge in the top-level notify
+		// array. Dropping that entry disables a registered DefenseClaw
+		// callback even when [hooks] remains intact.
+		notifyAfter := agentHookConfigFingerprint(updated["notify"])
+		for entry, count := range agentHookConfigFingerprint(old["notify"]) {
+			if notifyAfter[entry] < count {
+				return "removes or changes DefenseClaw's notify entry"
+			}
+		}
 	case gatewayconnector.AgentHookConfigKiroSettings:
 		if old != nil && !reflect.DeepEqual(old["chat.defaultAgent"], updated["chat.defaultAgent"]) {
 			return "changes the Kiro default agent"
@@ -1100,7 +1121,13 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	out := append([]RuleFinding(nil), findings...)
 	add := func(ruleID, note, target string) {
-		if slices.ContainsFunc(out, func(finding RuleFinding) bool { return finding.RuleID == ruleID }) {
+		if ruleID == agentHookConfigWriteRuleID && note == "" &&
+			request.preservedHookConfigTargets.preserves(target) {
+			// The effect reading proved this exact mixed-purpose config write
+			// keeps the registered hooks. Disable and opaque writes still grade.
+			return
+		}
+		if _, held := readingRuleSlot(out, ruleID); held {
 			return
 		}
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
@@ -1111,11 +1138,10 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		if note != "" {
 			title += " (" + note + ")"
 		}
-		out = append(out, RuleFinding{
+		out = withReadingFinding(out, RuleFinding{
 			RuleID: rule.ID, Title: title, Severity: rule.Severity, Confidence: rule.Confidence,
 			Evidence: filepath.Base(target), Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-			enforcement: findingEnforcementAllowed,
-			proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
+			proof: newExactFallbackFindingProof(rule.ID, true, true, true, true),
 		})
 	}
 	if managed {
@@ -1332,8 +1358,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 // (GAP-0433, GAP-0536, GAP-0577, GAP-0612).
 func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	ruleID, note, target := sandboxAgentHookConfigChange(ctx, request)
-	if target == "" ||
-		slices.ContainsFunc(findings, func(finding RuleFinding) bool { return finding.RuleID == ruleID }) {
+	if _, held := readingRuleSlot(findings, ruleID); target == "" || held {
 		return findings
 	}
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
@@ -1345,18 +1370,18 @@ func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRe
 		return findings
 	}
 	title := rule.Title
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if ruleID == agentHookConfigWriteRuleID && note == "" {
-		enforcement = findingEnforcementAlertOnly
+		enforcement = advisoryProof
 	}
 	if note != "" {
 		title += " (" + note + ")"
 	}
-	return append(append([]RuleFinding(nil), findings...), RuleFinding{
+	return withReadingFinding(append([]RuleFinding(nil), findings...), RuleFinding{
 		RuleID: rule.ID, Title: title, Severity: rule.Severity, Confidence: rule.Confidence,
 		Evidence: path.Base(target), Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
-		proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
+		Proof: enforcement,
+		proof: newExactFallbackFindingProof(rule.ID, true, true, true, true),
 	})
 }
 
@@ -2100,8 +2125,19 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 	if input.Command != "" {
 		return input.Command
 	}
+	return memoArgsBytes(argsRawShellCommand, input.Args, func() string {
+		return decodeAgentHookConfigRawShellCommand(input.Args)
+	})
+}
+
+// decodeAgentHookConfigRawShellCommand is the shell command the arguments
+// of a call carry. Every guard of one call asks it of the same arguments, so
+// agentHookConfigRawShellCommand remembers the answer for large arguments:
+// the 1 MiB here-document of GAP-0299 decoded them nine times per call.
+func decodeAgentHookConfigRawShellCommand(raw json.RawMessage) string {
+	workcount.AddLarge(workcount.ArgsDecode, len(raw))
 	var args map[string]json.RawMessage
-	if json.Unmarshal(input.Args, &args) != nil {
+	if json.Unmarshal(raw, &args) != nil {
 		return ""
 	}
 	for _, key := range []string{"command", "cmd"} {
@@ -2115,7 +2151,7 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 	// Antigravity command that stops or disables DefenseClaw, or rewrites an
 	// agent's hook configuration, raised no guard finding where every other
 	// hook connector blocks it.
-	if command, ok := actionfacts.ShellCommandArgument(input.Args); ok {
+	if command, ok := actionfacts.ShellCommandArgument(raw); ok {
 		return command
 	}
 	return ""

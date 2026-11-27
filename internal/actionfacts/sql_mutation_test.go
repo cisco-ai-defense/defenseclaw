@@ -61,6 +61,28 @@ func TestSQLMutationFactsExactInputs(t *testing.T) {
 			engine: "postgresql", operation: SQLMutationDeleteUnbounded,
 			scope: SQLMutationScopeTable, source: SQLMutationQueryArgv,
 		},
+		// GAP-1926 ruling B: each statement of a multi-statement inline query is
+		// read as its bare form. These three rows were hard negatives at 1.0.10;
+		// the mutation statement in each yields this same fact on its own at
+		// a64bfdb931 (see TestSQLMutationMultiStatementMatchesBareForm).
+		{
+			name:   "multiple statements",
+			input:  Input{Tool: "shell", Command: "psql -c 'DELETE FROM customers; SELECT 1'"},
+			engine: "postgresql", operation: SQLMutationDeleteUnbounded,
+			scope: SQLMutationScopeTable, source: SQLMutationQueryArgv,
+		},
+		{
+			name:   "multiple statements after rollback",
+			input:  Input{Tool: "shell", Command: "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK; DELETE FROM audit_log; SELECT 1'"},
+			engine: "postgresql", operation: SQLMutationDeleteUnbounded,
+			scope: SQLMutationScopeTable, source: SQLMutationQueryArgv,
+		},
+		{
+			name:   "explain analyze multi statement",
+			input:  Input{Tool: "shell", Command: "psql -c 'EXPLAIN ANALYZE DELETE FROM customers; SELECT 1'"},
+			engine: "postgresql", operation: SQLMutationDeleteUnbounded,
+			scope: SQLMutationScopeTable, source: SQLMutationQueryArgv,
+		},
 		{
 			name:   "literal quoted heredoc",
 			input:  Input{Tool: "shell", Command: "psql -d production <<'SQL'\nTRUNCATE TABLE scratch.events;\nSQL"},
@@ -168,21 +190,17 @@ func TestSQLMutationFactsHardNegatives(t *testing.T) {
 		{name: "explain analyze options", input: Input{Tool: "shell", Command: "psql -c 'EXPLAIN (ANALYZE, BUFFERS) DELETE FROM customers'"}},
 		{name: "mysql explain analyze", input: Input{Tool: "shell", Command: "mysql -e 'EXPLAIN ANALYZE DELETE FROM customers'"}},
 		{name: "rolled back explain analyze", input: Input{Tool: "shell", Command: "psql -c 'BEGIN; EXPLAIN ANALYZE DELETE FROM customers; ROLLBACK'"}},
-		{name: "explain analyze multi statement", input: Input{Tool: "shell", Command: "psql -c 'EXPLAIN ANALYZE DELETE FROM customers; SELECT 1'"}},
 		{name: "explain analyze dynamic table", input: Input{Tool: "shell", Command: "psql -c 'EXPLAIN ANALYZE DELETE FROM $TABLE'"}},
 		{name: "rollback", input: Input{Tool: "shell", Command: "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK'"}},
 		{name: "open transaction", input: Input{Tool: "shell", Command: "psql -c 'BEGIN; DELETE FROM customers'"}},
 		{name: "nested transaction", input: Input{Tool: "shell", Command: "psql -c 'BEGIN; BEGIN; DELETE FROM customers; ROLLBACK; COMMIT'"}},
 		{name: "open transaction after rollback", input: Input{Tool: "shell", Command: "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK; BEGIN; DELETE FROM audit_log'"}},
 		{name: "bounded delete after rollback", input: Input{Tool: "shell", Command: "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK; DELETE FROM audit_log WHERE id = 7'"}},
-		{name: "multiple statements after rollback", input: Input{Tool: "shell", Command: "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK; DELETE FROM audit_log; SELECT 1'"}},
-		{name: "multiple statements", input: Input{Tool: "shell", Command: "psql -c 'DELETE FROM customers; SELECT 1'"}},
 		{name: "dynamic table", input: Input{Tool: "shell", Command: "psql -c 'DELETE FROM $TABLE'"}},
 		{name: "interpolated query", input: Input{Tool: "shell", Command: `psql -c "DELETE FROM ${TABLE}"`}},
 		{name: "unquoted dynamic query", input: Input{Tool: "shell", Command: "psql -c $QUERY"}},
 		{name: "dry run", input: Input{Tool: "shell", Command: "psql --dry-run -c 'DELETE FROM customers'"}},
 		{name: "unknown option", input: Input{Tool: "shell", Command: "psql --file migration.sql -c 'DELETE FROM customers'"}},
-		{name: "duplicate query", input: Input{Tool: "shell", Command: "psql -c 'DELETE FROM customers' -c 'TRUNCATE audit_log'"}},
 		{name: "conflicting database", input: Input{Tool: "shell", Command: "psql -d one -c 'DELETE FROM customers' two"}},
 		{name: "joined short option", input: Input{Tool: "shell", Command: "psql '-cDELETE FROM customers'"}},
 		{name: "unquoted heredoc", input: Input{Tool: "shell", Command: "psql <<SQL\nDELETE FROM customers;\nSQL"}},
@@ -406,4 +424,30 @@ func sqliteWriteQueryInputWithIdentity(query, identity string) Input {
 
 func containsJSONText(encoded []byte, value string) bool {
 	return strings.Contains(string(encoded), value)
+}
+
+// TestSQLMutationMultiStatementMatchesBareForm pins GAP-1926 ruling B: a
+// mutation statement inside a multi-statement inline query yields exactly the
+// fact its bare form yields (same operation, scope and identities), never a
+// stronger one, and a statement rolled back before the read statement stays
+// unread.
+func TestSQLMutationMultiStatementMatchesBareForm(t *testing.T) {
+	for _, test := range []struct{ multi, bare string }{
+		{"psql -c 'DELETE FROM customers; SELECT 1'", "psql -c 'DELETE FROM customers'"},
+		{"psql -c 'SELECT 1; DELETE FROM customers'", "psql -c 'DELETE FROM customers'"},
+		{"psql -c 'BEGIN; DELETE FROM customers; ROLLBACK; DELETE FROM audit_log; SELECT 1'", "psql -c 'DELETE FROM audit_log'"},
+		{"psql -c 'EXPLAIN ANALYZE DELETE FROM customers; SELECT 1'", "psql -c 'EXPLAIN ANALYZE DELETE FROM customers'"},
+		{"mysql -e 'SELECT 1; TRUNCATE TABLE audit_log'", "mysql -e 'TRUNCATE TABLE audit_log'"},
+	} {
+		t.Run(test.multi, func(t *testing.T) {
+			multi := ExactSQLMutations(Analyze(Input{Tool: "shell", Command: test.multi}))
+			bare := ExactSQLMutations(Analyze(Input{Tool: "shell", Command: test.bare}))
+			if len(bare) != 1 {
+				t.Fatalf("bare form %q mutations=%#v, want one", test.bare, bare)
+			}
+			if len(multi) != 1 || multi[0] != bare[0] {
+				t.Fatalf("multi=%#v bare=%#v", multi, bare)
+			}
+		})
+	}
 }

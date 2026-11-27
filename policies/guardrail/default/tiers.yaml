@@ -1,0 +1,189 @@
+# Tier table of this rule pack (DET111 D4, internal/guardrail/decide).
+# One row per proof class; floor is the least action, levels false drops the
+# finding from the severity mapping, severity replaces the finding's own.
+version: 1
+tier: default
+rows:
+  - id: known-protected-write
+    source: rel-1-0-10:plain spelling of each restricted set (GAP-1865, GAP-1478)
+    per_user:
+      floor: allow
+    managed:
+      floor: allow
+  - id: effect-unknown
+    source: DET111 PLAN 5.3 MAYBE rule (GAP-1796)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: effect-content-decided
+    source: rel-1-0-10:persistence.shell_profile_write content-decided (GAP-1795)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: effect-own-key-write
+    source: rel-1-0-10:no rule on an own SSH private key write (GAP-1878)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: effect-link
+    source: DET111 effects link at a member (sweep T17)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: effect-read
+    source: DET111 effects credential read (GAP-1825, GAP-1826, GAP-1846)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: record
+    source: rel-1-0-10:detection-only
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: advisory
+    source: rel-1-0-10:alert-only
+    per_user:
+      floor: allow
+      ceiling: alert
+    managed:
+      floor: allow
+      ceiling: alert
+  - id: ask-ticket-request
+    source: rel-1-0-10:GAP-0017/GAP-0067
+    per_user:
+      floor: confirm
+    managed:
+      floor: confirm
+  - id: evaluation-fault
+    source: rel-1-0-10:GAP-0486
+    per_user:
+      floor: block
+    managed:
+      floor: block
+  - id: unverified-path
+    source: rel-1-0-10:TOOL-PATH-UNVERIFIED managed close
+    per_user:
+      floor: allow
+    managed:
+      floor: block
+  - id: truncated
+    source: rel-1-0-6:GAP-0675; rel-1-0-10:GAP-0851
+    per_user:
+      floor: alert
+      levels: false
+      severity: MEDIUM
+    managed:
+      floor: alert
+      levels: false
+      severity: MEDIUM
+  - id: state-write
+    source: rel-1-0-10:GAP-0747
+    per_user:
+      floor: alert
+    managed:
+      floor: alert
+  - id: shell-protected-file
+    source: rel-1-0-6:GAP-0675
+    per_user:
+      floor: alert
+    managed:
+      floor: alert
+  - id: copy-git-credential
+    source: rel-1-0-10:PATH-GIT-CREDS copy (lead ruling 2026-11-16, GAP-1794)
+    per_user:
+      floor: allow
+      severity: CRITICAL
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: CRITICAL
+  - id: read-ssh-private-key
+    source: rel-1-0-10:PATH-SSH-KEY
+    per_user:
+      floor: allow
+      severity: CRITICAL
+    managed:
+      floor: allow
+      severity: CRITICAL
+  - id: read-credential
+    source: rel-1-0-10:GAP-0888
+    per_user:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+  - id: effect-read-other-home-ssh-private-key
+    source: DET111 GAP-2135 effect-proven other-home key read
+    per_user:
+      floor: allow
+      severity: HIGH
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: HIGH
+      ceiling: alert
+  - id: read-other-home-ssh-private-key
+    source: rel-1-0-10:PATH-SSH-KEY other home (GAP-0837)
+    per_user:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+  - id: read-other-home-git-credential
+    source: rel-1-0-10:PATH-GIT-CREDS other home (GAP-0835)
+    per_user:
+      floor: allow
+      severity: CRITICAL
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: CRITICAL
+  - id: read-other-home-credential
+    source: rel-1-0-10:PATH-AWS-CREDS other home (GAP-0837)
+    per_user:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+  - id: tiered-strict
+    source: rel-1-0-10:request.StrictPolicy readers (GAP-0810, GAP-1069)
+    per_user:
+      floor: allow
+      ceiling: alert
+    managed:
+      floor: allow
+      ceiling: alert
+  - id: tiered-managed
+    source: rel-1-0-10:request.StrictPolicy||ManagedInstall readers (GAP-0594, GAP-0843)
+    per_user:
+      floor: allow
+      ceiling: alert
+    managed:
+      floor: allow

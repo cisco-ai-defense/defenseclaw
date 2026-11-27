@@ -114,6 +114,10 @@ func TestReviewProbesR3b(t *testing.T) {
 		{"Z48 ln -s rel ok", envOpts, `ln -s ../.ssh/authorized_keys /home/u/proj/k`},
 	}
 	for _, p := range cs {
-		checkRow(t, p.n, p.o, sh(p.c), "")
+		real := ""
+		if p.n == "Z10 7z x -o" {
+			real = "/home/u/.ssh/**"
+		}
+		checkRow(t, p.n, p.o, sh(p.c), real)
 	}
 }

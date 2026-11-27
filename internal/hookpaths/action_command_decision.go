@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -329,7 +331,7 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	}
 	// A patch envelope and each supported patch program spell "patch".
 	// Other commands cannot contribute patch targets to this writer list.
-	if strings.Contains(strings.ToLower(command), "patch") {
+	if strings.Contains(textlower.Lower(command), "patch") {
 		patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 		writes = append(writes, patches...)
 	}
@@ -566,7 +568,7 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 	return actionPosixPrivateKeyRead(command, cwd, home, dialect)
 }
 
-// ActionPrivateKeyReadBounded is ActionPrivateKeyReadWithDialect that also
+// ActionPrivateKeyReadBoundedIn is ActionPrivateKeyReadWithDialect that also
 // reports the caps its pattern expansions hit (actionBoundedGlob): a pattern
 // expanded on this host only up to its cap, with no key among the matches
 // read before it, is a truncated reading the caller judges at least at the
@@ -587,8 +589,12 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 // them and the repeat finds in that state. The file system is the same for
 // the whole decision, as for the call's other memories (callStat). The repeat
 // adds the caps the first read hit to the call, as a read would.
-func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
-	call, end := beginHookCall()
+//
+// found is the hook call the calling goroutine found a moment before (as for
+// JoinHookCall), which is not found again for each read; the zero Call finds
+// it.
+func ActionPrivateKeyReadBoundedIn(found Call, command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
+	call, end := joinHookCall(found)
 	defer end()
 	if call == nil {
 		return ActionPrivateKeyReadWithDialect(command, cwd, home, dialect), bounded.CapSet{}
@@ -610,7 +616,7 @@ func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.
 }
 
 // keyReadKey is one reading of the private-key reader
-// (ActionPrivateKeyReadBounded).
+// (ActionPrivateKeyReadBoundedIn).
 type keyReadKey struct {
 	command, cwd, home string
 	dialect            actionfacts.Dialect
@@ -1392,23 +1398,77 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 	pattern := OperandPath(value, cwd)
 	dotglob := mode&keyReadDotglob != 0
 	fold := runtime.GOOS == "darwin"
+	// The key paths are matched against the folder the pattern's dot-dot
+	// steps lead to (actionGlobPatternPlaced), not its spelling: x/../.ssh/*
+	// after cd .. names the key folder as .ssh/* does (rel-1-0-10:GAP-1020).
+	placed := actionGlobPatternPlaced(pattern)
 	for _, name := range actionPrivateKeyNames {
 		key := filepath.Join(home, ".ssh", name)
 		if fold {
-			if actionKeyPatternMatch(strings.ToLower(pattern), strings.ToLower(key), dotglob) {
+			if actionKeyPatternMatch(strings.ToLower(placed), strings.ToLower(key), dotglob) {
 				return true
 			}
-		} else if actionKeyPatternMatch(pattern, key, dotglob) {
+		} else if actionKeyPatternMatch(placed, key, dotglob) {
 			return true
 		}
 	}
 	return actionGlobReadsPrivateKey(pattern, dotglob, cwd, home)
 }
 
+// actionGlobPatternPlaced is an absolute pattern with its dot-dot steps
+// applied, for a component match against protected paths (the key paths, the
+// .ssh folder and its authorized keys files), which compares names and would
+// read a step as a name (rel-1-0-10:GAP-1020: x/../.ssh/* and proj/../.ssh/*
+// after cd .. matched no key and no authorized keys file, where .ssh/*
+// blocks). A step out of a folder that is there and is no link is the folder
+// above it, as the kernel opens it, so the step is applied by name and the
+// pattern keeps the spelling of the home it is matched against. A step out
+// of a link, or out of a name that is not there, stays as written: the
+// kernel leads it beside the link's target, and the shell expands nothing
+// under a missing folder. A step after a pattern component (*/../.ssh/*) is
+// applied by name, as the host expansion joins it (actionBoundedGlob). A
+// pattern with no step is returned as given.
+func actionGlobPatternPlaced(pattern string) string {
+	if !filepath.IsAbs(pattern) {
+		return pattern
+	}
+	volume := filepath.VolumeName(pattern)
+	slashed := filepath.ToSlash(pattern[len(volume):])
+	parts := strings.Split(slashed, "/")
+	if !slices.Contains(parts, "..") {
+		return pattern
+	}
+	separator := string(filepath.Separator)
+	var kept []string
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(kept) == 0 {
+				continue
+			}
+			if dir := strings.Join(kept, separator); !strings.ContainsAny(dir, "*?[") {
+				if info, err := pathLstat(volume + separator + dir); err != nil || !info.IsDir() {
+					return pattern
+				}
+			}
+			kept = kept[:len(kept)-1]
+			continue
+		}
+		kept = append(kept, part)
+	}
+	placed := volume + separator + strings.Join(kept, separator)
+	if strings.HasSuffix(slashed, "/") && len(kept) > 0 {
+		placed += separator
+	}
+	return placed
+}
+
 // actionGlobReadsPrivateKey reports a match of an absolute pattern, expanded
 // on this host (actionBoundedGlob), that reads an active private key. When
 // the expansion hit its cap and no match read before it is a key, the cap is
-// recorded on the hook call (ActionPrivateKeyReadBounded): the reading is
+// recorded on the hook call (ActionPrivateKeyReadBoundedIn): the reading is
 // truncated, not "reads no key".
 func actionGlobReadsPrivateKey(pattern string, dotglob bool, cwd, home string) bool {
 	matches, truncated := actionBoundedGlob(pattern, dotglob)

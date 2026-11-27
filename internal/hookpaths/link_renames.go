@@ -613,11 +613,39 @@ func (s stateReach) movedMatchHits(dir, pattern string) bool {
 	return s.inState(dir)
 }
 
-// maxLinkedTreeEntries bounds the walk of the directories the links name;
-// a larger tree is read as one that may hold a link to state. The bound counts
-// entries, never time: the answer of a call does not depend on the load of
-// the box (GAP-0339).
-const maxLinkedTreeEntries = 20000
+// maxLinkedTreeWork bounds the linked tree walks of one command
+// (linkedTreeWork): a tree past it is read as one that may hold a link to
+// state. The bound counts work,
+// never time: the answer of a call does not depend on the load of the box
+// (GAP-0339).
+const maxLinkedTreeWork = 20000
+
+// linkedTreeDirWork is the work of opening and reading one directory, in
+// entries. A cold directory read costs about as much as 16 to 32 warm
+// entries: a cold walk of /usr/lib read 20,000 entries in 3,397 folders in
+// 2.4 to 5.4 s (about 0.7 to 1.5 ms per folder, the entries themselves next
+// to nothing), past the 3.5 s hook answer deadline, where at 16 a folder
+// the walk stops by about 1,200 folders (rel-1-0-10:GAP-1727).
+const linkedTreeDirWork = 16
+
+// linkedTreeWork counts the work of the linked tree walks of one command
+// reading: every walk of it shares one budget, so a find -exec mv with many
+// matching folders does not get a fresh walk of maxLinkedTreeWork for each.
+type linkedTreeWork struct{ spent int }
+
+// spend charges one walked entry (a folder also its read) and reports that
+// the walk may go on. A walk past the bound is not TRUNCATED: its reading is
+// the one of an unread linked tree, which judges the link names the command
+// enters where they are written (nameOnly, GAP-0091), as 1.0.10 did past
+// its entry bound; a TRUNCATED finding there would alert on benign links
+// to large system trees (TestSelfProtLinkNameBesideReaders R02, R17).
+func (w *linkedTreeWork) spend(entry fs.DirEntry) bool {
+	w.spent++
+	if entry != nil && entry.IsDir() {
+		w.spent += linkedTreeDirWork
+	}
+	return w.spent <= maxLinkedTreeWork
+}
 
 // linkedTreesClear reports that a directory change in a nested shell or a
 // wrapper, or a find -exec mv, cannot reach SSH or DefenseClaw state through
@@ -629,7 +657,7 @@ const maxLinkedTreeEntries = 20000
 // a disk link. A find that names no link does not descend into one (find
 // does not follow links), so a large linked tree beside it is not read
 // (RV-c5-2). A plain cd resolves such disk links itself.
-func (l shellLinks) linkedTreesClear(command, cwd, home string, wrapped bool, moves []findMove) bool {
+func (l shellLinks) linkedTreesClear(command, cwd, home string, wrapped bool, moves []findMove, work *linkedTreeWork) bool {
 	state := newStateReach(home)
 	reach := Links{links: l}
 	var dirs []string
@@ -659,7 +687,7 @@ func (l shellLinks) linkedTreesClear(command, cwd, home string, wrapped bool, mo
 			enter = enter || l.pathEntersLink(path, cwd)
 		}
 	}
-	return !enter || treesAwayFromState(dirs, state)
+	return !enter || treesAwayFromState(dirs, state, work)
 }
 
 // pathEntersLink reports that an absolute path is at or under a link name
@@ -818,7 +846,7 @@ func commandWords(text string) []string {
 // to a new name does not. A find -exec mv takes the entries of its start
 // trees that match its pattern. A tree too large to read is not clear.
 // The moves after a directory change are read so (GAP-2602).
-func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bool {
+func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string, work *linkedTreeWork) bool {
 	state := newStateReach(home)
 	entryClear := func(path string) bool {
 		if parent, ok := ResolveWriteTarget(filepath.Dir(path)); !ok || state.within(parent) {
@@ -834,7 +862,7 @@ func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bo
 			resolved, ok := ResolveWriteTarget(path)
 			return ok && !state.hits(resolved)
 		case info.IsDir():
-			return treesAwayFromState([]string{path}, state)
+			return treesAwayFromState([]string{path}, state, work)
 		}
 		return true
 	}
@@ -845,13 +873,11 @@ func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bo
 			}
 		}
 	}
-	entries := 0
 	for _, move := range moves {
 		for _, start := range move.starts {
 			clear := true
 			err := pathWalkDir(start, func(path string, entry fs.DirEntry, err error) error {
-				entries++
-				if err != nil || entries > maxLinkedTreeEntries {
+				if err != nil || !work.spend(entry) {
 					clear = false
 					return filepath.SkipAll
 				}
@@ -871,10 +897,9 @@ func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bo
 
 // treesAwayFromState walks dirs and the directories their disk links reach,
 // and reports that no disk link reaches state.
-func treesAwayFromState(dirs []string, state stateReach) bool {
+func treesAwayFromState(dirs []string, state stateReach, work *linkedTreeWork) bool {
 	seen := make(map[string]bool)
 	queue := slices.Clone(dirs)
-	entries := 0
 	for len(queue) > 0 {
 		dir := queue[0]
 		queue = queue[1:]
@@ -884,8 +909,7 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 		seen[dir] = true
 		clear := true
 		err := pathWalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-			entries++
-			if err != nil || entries > maxLinkedTreeEntries {
+			if err != nil || !work.spend(entry) {
 				clear = false
 				return filepath.SkipAll
 			}

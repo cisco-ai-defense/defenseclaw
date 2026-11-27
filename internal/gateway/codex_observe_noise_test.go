@@ -75,7 +75,7 @@ func TestCodexResponseFor_ObserveContextRequiresImportantFinding(t *testing.T) {
 		Severity: "CRITICAL",
 		DetailedFindings: []RuleFinding{{
 			RuleID: "SOURCE-ONLY", Severity: "CRITICAL",
-			enforcement: findingEnforcementDetectionOnly,
+			Proof: recordProof,
 		}},
 	}) {
 		t.Fatal("detection-only finding must not be eligible for Observe context")
@@ -84,7 +84,6 @@ func TestCodexResponseFor_ObserveContextRequiresImportantFinding(t *testing.T) {
 		Severity: "MEDIUM",
 		DetailedFindings: []RuleFinding{{
 			RuleID: "MEDIUM-ALERT", Severity: "MEDIUM",
-			enforcement: findingEnforcementAllowed,
 		}},
 	}) {
 		t.Fatal("enforcement-eligible MEDIUM finding must be eligible for Observe context")
@@ -96,7 +95,6 @@ func TestCodexResponseFor_ObserveContextRequiresImportantFinding(t *testing.T) {
 		Severity: "HIGH",
 		DetailedFindings: []RuleFinding{{
 			RuleID: "IMPORTANT", Severity: "HIGH",
-			enforcement: findingEnforcementAllowed,
 		}},
 	}) {
 		t.Fatal("enforcement-eligible HIGH finding must remain eligible for Observe context")

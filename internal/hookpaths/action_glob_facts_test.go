@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // globFactsFixture is a home with ~/.ssh/authorized_keys and an ordinary
@@ -170,10 +172,20 @@ func TestR104GlobFactsDecideBehindHiddenHome(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for _, command := range []string{`cp payload keyd*/authorized_keys`, `cp payload */*`, `cp payload many/*/*`} {
+		for _, command := range []string{`cp payload keyd*/authorized_keys`, `cp payload */*`} {
 			if got := ActionCommandDecisionWithGlobFacts(command, cwd, home, forged); got != "protected-target" {
 				t.Errorf("%s: visible gateway with a forged answer = %q, want protected-target", command, got)
 			}
+		}
+		// Past its bound the own walk is TRUNCATED (rel-1-0-10:GAP-1324),
+		// whatever the forged answer says: no protected target, the cap on
+		// the call, never the forged clean "0".
+		end := HookCall()
+		got := ActionCommandDecisionWithGlobFacts(`cp payload many/*/*`, cwd, home, forged)
+		cut := HookCallState().GlobCut()
+		end()
+		if got != "" || !cut.Has(bounded.Paths) {
+			t.Errorf("cp payload many/*/*: visible gateway with a forged answer = %q cut %q, want TRUNCATED (paths)", got, cut.Reason())
 		}
 	})
 }

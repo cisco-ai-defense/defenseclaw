@@ -159,6 +159,7 @@ func (r *responseText) Add(p responsePiece) {
 		r.lanes = append(r.lanes, &strings.Builder{})
 		r.secret = append(r.secret, secretLane{})
 	}
+	r.secret[i].mark(r.lanes[i].Len(), r.n)
 	if p.lane.field == responseFieldAnswer && hadPrevious && previous.field == responseFieldReasoning && !previousSummary {
 		r.boundaries = append(r.boundaries, responseBoundary{
 			reasoning: previousIndex, answer: i,

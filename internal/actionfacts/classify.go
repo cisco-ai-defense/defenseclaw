@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -8969,6 +8970,31 @@ type nsenterInvocation struct {
 	complete      bool
 }
 
+// staticNSEnterWorkDir accepts the literal POSIX folder shapes that nsenter
+// can open before entering a namespace. Shell expansion and glob operands stay
+// unresolved so the child walk cannot mistake them for a local directory.
+func staticNSEnterWorkDir(value string) bool {
+	if staticAbsolutePOSIXPath(value) {
+		return true
+	}
+	// Keep relative native-path semantics unchanged on Windows (GAP-1881).
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	if value == "" || strings.HasPrefix(value, "/") ||
+		strings.TrimSpace(value) != value || hasUnresolvedPathSyntax(value) ||
+		strings.ContainsAny(value, "*?[]{}$`\\:%") ||
+		strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	switch pathFlavor(value) {
+	case PathFlavorPOSIX, PathFlavorUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 func parseNSEnterInvocation(argv []string) nsenterInvocation {
 	result := nsenterInvocation{childIndex: -1, complete: true}
 	target := ""
@@ -9032,14 +9058,14 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 		}
 		if strings.HasPrefix(arg, "--wd=") {
 			result.workDir = strings.TrimPrefix(arg, "--wd=")
-			if !staticAbsolutePOSIXPath(result.workDir) {
+			if !staticNSEnterWorkDir(result.workDir) {
 				result.folderUnknown = true
 			}
 			continue
 		}
 		if strings.HasPrefix(arg, "-w") && len(arg) > 2 {
 			result.workDir = arg[2:]
-			if !staticAbsolutePOSIXPath(result.workDir) {
+			if !staticNSEnterWorkDir(result.workDir) {
 				result.folderUnknown = true
 			}
 			continue

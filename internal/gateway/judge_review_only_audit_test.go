@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -48,6 +49,7 @@ func TestJudgeReviewOnlyAuditOnlyInTheDefaultPack(t *testing.T) {
 	cfgFor := func(pack string) *config.Config {
 		cfg := config.DefaultConfig()
 		cfg.DataDir = t.TempDir()
+		cfg.PolicyDir = filepath.Dir(filepath.Dir(levelsShippedPack(pack)))
 		cfg.Guardrail.RulePack = pack
 		cfg.Guardrail.RulePackDir = ""
 		return cfg
@@ -165,6 +167,7 @@ func TestJudgeReviewOnlyAuditKeepsUnmodeledCallsAlerted(t *testing.T) {
 	for _, pack := range []string{"default", "strict", "permissive"} {
 		cfg := config.DefaultConfig()
 		cfg.DataDir = t.TempDir()
+		cfg.PolicyDir = filepath.Dir(filepath.Dir(levelsShippedPack(pack)))
 		cfg.Guardrail.RulePack = pack
 		cfg.Guardrail.RulePackDir = ""
 		mapped := hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", lone)

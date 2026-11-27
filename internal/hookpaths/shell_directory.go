@@ -63,6 +63,15 @@ func GuestShellDirectoryWriteOperands(command, cwd, home string, directoryFacts 
 	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, false, true, true, nil, nil)
 }
 
+// GuestStaticDirectoryWriteOperands places concrete writes in the guest
+// namespace without requiring a directory fact. Only exact protected names
+// from this result may confirm a finding; its unknown result is deliberately
+// ignored because the host-side strict walk owns that decision.
+func GuestStaticDirectoryWriteOperands(command, cwd, home string) []RedirectOccurrence {
+	operands, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, true, nil, nil)
+	return operands
+}
+
 // shellDirectoryWriteOperandsWithFile reuses a previously parsed command
 // while preserving the same directory and literal-writer walk. parsedOut
 // reports whether the shared shell parser accepted the command, so a client
@@ -82,15 +91,18 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	}
 	physical := func(logical string) (string, bool) {
 		key := DirectoryFactPrefix + logical
+		// A guest's /proc/self/root/tmp is its /tmp and needs the same
+		// directory fact on every gateway OS (rel-1-0-10:GAP-2228).
+		named := logical
+		if linuxGuest {
+			named = GuestOwnRootPath(logical)
+		}
 		if !record && directoryFacts != nil {
 			if value, present := directoryFacts[key]; present {
 				return value, filepath.IsAbs(value)
 			}
-			if strict && directoryFactRequired(logical, home, linuxGuest) {
-				return "", false
-			}
 		}
-		if !record && strict && directoryFactRequired(logical, home, linuxGuest) {
+		if !record && strict && directoryFactRequired(named, home, linuxGuest) {
 			return "", false
 		}
 		if linuxGuest && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
@@ -99,10 +111,13 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			// written, as a Linux gateway, whose same-named system folders
 			// are no links, places it (rel-1-0-10:GAP-2203). A Windows host
 			// spells no POSIX folder, so its walk is left as it was.
-			if guestOtherProcessFolder(logical) {
+			// The guest's own root link (/proc/self/root) is its /, as a
+			// Linux gateway reads its own (rel-1-0-10:GAP-2223).
+			placed := GuestOwnRootPath(logical)
+			if guestOtherProcessFolder(placed) {
 				return "", false
 			}
-			return filepath.Clean(logical), true
+			return placed, true
 		}
 		value, ok := ResolveWriteTarget(logical)
 		if record && directoryFacts != nil {
@@ -119,7 +134,14 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	// (RV-c7-1); env --chdir=~/x does not expand it either.
 	setDirectory := func(s *shellDirectoryState, directory string, physicalMode bool) {
 		absolute := filepath.IsAbs(directory)
-		if absolute {
+		if linuxGuest {
+			// Retain link-boundary dot steps until the guest path is folded.
+			if absolute {
+				s.logical = directory
+			} else {
+				s.logical = s.logical + string(filepath.Separator) + directory
+			}
+		} else if absolute {
 			s.logical = filepath.Clean(directory)
 		} else {
 			s.logical = filepath.Join(s.logical, directory)
@@ -212,7 +234,13 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 				!strings.HasPrefix(name, "~/") && shellAuthorizedKeysBase(name) {
 				unknown = true
 			}
-			redirects = append(redirects, OperandPath(name, s.logical))
+			placed := OperandPath(name, s.logical)
+			if linuxGuest && !filepath.IsAbs(name) && strings.Contains(s.logical, "/proc/") {
+				// OperandPath cleans dot-dot before the guest root link is
+				// folded. Keep this relative write raw through that link.
+				placed = s.logical + string(filepath.Separator) + name
+			}
+			redirects = append(redirects, placed)
 			keys = append(keys, OperandPath(name, cwd))
 		}
 		if !s.changed {
@@ -240,6 +268,7 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			// walk does not; only the same operand inherits its safety.
 			if redirectIndex < len(safety) && safety[redirectIndex].Path == keys[i] {
 				occurrence.Safe = safety[redirectIndex].Safe
+				occurrence.Absolute = safety[redirectIndex].Absolute
 			}
 			redirectIndex++
 			writes = append(writes, occurrence)
@@ -890,6 +919,50 @@ func guestOtherProcessFolder(directory string) bool {
 		return false
 	}
 	return false
+}
+
+// GuestOwnRootPath folds guest-owned root links while walking the raw path.
+// A dot-dot after root stays at the guest root. The suffix after any other
+// process link stays raw for the process-link proof.
+// (GAP-2223, GAP-2227).
+func GuestOwnRootPath(path string) string {
+	if !strings.HasPrefix(path, "/") || !strings.Contains(path, "proc") {
+		return path
+	}
+	input := strings.Split(path, "/")
+	parts := make([]string, 0, len(input))
+	folded := false
+	for i := 1; i < len(input); i++ {
+		switch input[i] {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, input[i])
+		}
+		if len(parts) == 3 && parts[0] == "proc" &&
+			(parts[1] == "self" || parts[1] == "thread-self") && parts[2] == "root" {
+			// A dot-dot following this link stays at the guest root.
+			parts = parts[:0]
+			folded = true
+			continue
+		}
+		if processLinkHead(parts) {
+			// A process link owns its raw suffix even before any root fold.
+			prefix := "/" + strings.Join(parts, "/")
+			if i+1 < len(input) {
+				return prefix + "/" + strings.Join(input[i+1:], "/")
+			}
+			return prefix
+		}
+	}
+	if !folded {
+		return path
+	}
+	return "/" + strings.Join(parts, "/")
 }
 
 // directoryCreationFact reports a path fact of a POSIX mkdir call.

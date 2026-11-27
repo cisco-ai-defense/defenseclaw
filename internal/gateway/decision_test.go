@@ -51,7 +51,7 @@ func TestGuardrailRuntimeActionHILT(t *testing.T) {
 
 func TestGuardrailRuntimeActionStrictBlocksBeforeHILT(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Guardrail.RulePackDir = "/tmp/policies/guardrail/strict"
+	cfg.Guardrail.RulePackDir = levelsShippedPack("strict")
 	cfg.Guardrail.HILT.Enabled = true
 	cfg.Guardrail.HILT.MinSeverity = "HIGH"
 	if got := guardrailActionForConnector(cfg, "", "MEDIUM", true); got != "block" {
@@ -69,9 +69,9 @@ func TestGuardrailRuntimeActionStrictBlocksBeforeHILT(t *testing.T) {
 // guarantee — the pack IS the posture, resolved per connector.
 func TestGuardrailRuntimeActionPerConnectorPosture(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Guardrail.RulePackDir = "/tmp/policies/guardrail/strict" // global = strict
+	cfg.Guardrail.RulePackDir = levelsShippedPack("strict") // global = strict
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"claudecode": {RulePackDir: "/tmp/policies/guardrail/permissive"},
+		"claudecode": {RulePackDir: levelsShippedPack("permissive")},
 	}
 
 	// codex has no override → inherits global strict → MEDIUM/HIGH block.

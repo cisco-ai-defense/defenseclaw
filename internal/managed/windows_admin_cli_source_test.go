@@ -107,6 +107,7 @@ var managedWindowsCallAllowed = map[string]string{
 	"internal/cli/windows_managed_hook_settings.go": "reads registered hook commands: strips the call operator before the ownership check",
 	"internal/gateway/agent_not_installed.go":       "reads a cmd.exe shim prefix, where & is cmd's command separator",
 	"internal/gateway/windows_command.go":           "quoteWindowsArg's set of characters that need quoting (&'\") re-renders a parsed argv for policy matching",
+	"internal/actionfacts/ps_child_argv.go":         "re-renders a Windows wrapper's child argv as a PowerShell line for policy matching (rel-1-0-10:GAP-0201); never run",
 }
 
 // managedWindowsQuoteAllowed lists the files that double or read a
@@ -120,6 +121,7 @@ var managedWindowsQuoteAllowed = map[string]string{
 	"internal/gateway/trusted_action_dispatch.go": "the gateway's command-line reader for trusted actions",
 	"internal/gateway/powershell_state_write.go":  "re-renders a ${provider:path} variable as a literal for the state-write matcher",
 	"internal/audit/compact.go":                   "a SQLite string literal for PRAGMA temp_store_directory (SQL doubles ' too); no PowerShell",
+	"internal/actionfacts/ps_child_argv.go":       "re-renders a Windows wrapper's child argv as a PowerShell line for policy matching (rel-1-0-10:GAP-0201); never run",
 }
 
 var (

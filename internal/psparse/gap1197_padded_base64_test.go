@@ -19,8 +19,7 @@ import (
 // inside the base64 text. .NET Convert.FromBase64String skips them, so the host
 // runs the script and each is a Static table shape whose text is the decoded
 // script (rel-1-0-10:GAP-1197). A tab, CR or LF in the word is skipped by the
-// host too, but such a word is outside the strict static-literal class
-// (safeStaticLiteral) and stays NotStatic; see the GAP-1197 follow-up gap.
+// host too (gap1199_encoded_blanks_test.go).
 func gap1197PaddedRows(script string) [][]string {
 	enc := r6enc(script)
 	return [][]string{

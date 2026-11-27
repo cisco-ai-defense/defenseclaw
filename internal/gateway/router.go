@@ -793,6 +793,16 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 	readLoopLogf("[bifrost] session.message SKIPPED: no message field, stream=%q", envelope.Stream)
 }
 
+// openClawJudgeContext is the judge context of an OpenClaw session the event
+// router observes: the session and the connector, which are the judge's
+// session key (judgeSessionKeyFor). The WebSocket stream authenticates no
+// route, so the connector is named here; with it the session's turns are of
+// unknown sender (judgeTurnSenderFrom), as OpenClaw does not say who wrote
+// them (GAP-0152, GAP-1637).
+func openClawJudgeContext(sessionKey string) context.Context {
+	return withJudgeSessionConnector(ContextWithSessionID(context.Background(), sessionKey), "openclaw")
+}
+
 // scanInboundPrompt runs a best-effort guardrail scan on a user prompt
 // observed via the session.message WebSocket stream. This is the
 // observational cousin of the proxy-path guardrail: the prompt has
@@ -826,7 +836,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		if verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock {
 			task = ""
 		}
-		judge.ObserveSessionPromptScope(ContextWithSessionID(context.Background(), sessionKey), task, "")
+		judge.ObserveSessionPromptScope(openClawJudgeContext(sessionKey), task, "")
 	}
 
 	runJudge := judge != nil && verdict != nil && verdict.Severity == "HIGH"
@@ -841,7 +851,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 					verdict = mergeWithJudge(verdict, jv)
 					if guardrailSeverityRank(jv.Severity) >= guardrailSeverityRank("HIGH") {
 						// The prompt judge rates it HIGH: it is not a task either.
-						judge.ClearSessionTask(ContextWithSessionID(context.Background(), sessionKey))
+						judge.ClearSessionTask(openClawJudgeContext(sessionKey))
 					}
 				}
 			}()
@@ -1382,14 +1392,14 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	if judge := judgeOf(r.policyGeneration(), r.judge); !ManagedEnterpriseActive() && judge != nil && len(payload.Args) > 0 {
 		// An OpenClaw chat message may be a remote party's: the task it
 		// recorded excuses no call (rel-1-0-10:GAP-0149).
-		judgeCtx := withJudgeRemoteParty(ContextWithSessionID(context.Background(), payload.SessionID), "openclaw")
+		judgeCtx := withJudgeRemoteParty(openClawJudgeContext(payload.SessionID), "openclaw")
 		scopeReason := r.recordToolScopeFloor(judge, judgeCtx, payload.Tool, string(payload.Args))
 		judgeSample, judgeEligible := judge.prepareToolJudgeSample(judgeCtx, payload.Tool, string(payload.Args))
 		if judgeEligible {
 			go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage, sample, scopeReason string) {
 				r.judgeSem <- struct{}{}
 				defer func() { <-r.judgeSem }()
-				judgeCtx := ContextWithSessionID(context.Background(), sessionID)
+				judgeCtx := openClawJudgeContext(sessionID)
 				ctx, cancel := context.WithTimeout(judgeCtx, 60*time.Second)
 				defer cancel()
 				verdict := judge.runToolJudgeSample(ctx, tool, string(args), sample)

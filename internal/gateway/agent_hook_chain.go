@@ -3497,11 +3497,11 @@ func toolChainRuleFindings(
 		finding := RuleFinding{
 			RuleID: id, Title: definition.Title,
 			Severity: definition.Severity, Confidence: 0.98,
-			Tags:        []string{"tool-call-chain", "multi-step"},
-			enforcement: findingEnforcementDetectionOnly,
+			Tags:  []string{"tool-call-chain", "multi-step"},
+			Proof: recordProof,
 		}
 		if _, ok := enforcementSafe[id]; ok {
-			finding.enforcement = findingEnforcementAllowed
+			finding.Proof = finding.Proof.Enforce()
 		}
 		findings = append(findings, finding)
 	}

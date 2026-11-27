@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 )
 
 const (
@@ -123,20 +124,6 @@ func guardrailActionForGuardrailConnector(gc *config.GuardrailConfig, connector,
 		confirmable && hiltEnabled(gc, connector), hiltMinRank(gc, connector))
 }
 
-func guardrailActionForConnectorFindings(
-	cfg *config.Config,
-	connector string,
-	findings []RuleFinding,
-	confirmable bool,
-) string {
-	return guardrailActionForProfileUnknown(findings, cfg != nil && cfg.SecureClientIntegration(),
-		func() bool { return cfg.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict },
-		func() string { return cascadeUnknownForConfig(cfg, connector) },
-		func(severity string) string {
-			return guardrailActionForConnector(cfg, connector, severity, confirmable)
-		})
-}
-
 // profileMeetActionForFindings evaluates each member's own findings under its
 // own thresholds, HILT and mode on this request path. Untagged findings come
 // from shared scanners (such as CodeGuard) and apply to every member. The
@@ -146,15 +133,28 @@ func profileMeetActionForFindings(
 	ctx context.Context, cfg *config.Config, connector string, findings []RuleFinding,
 	confirmable, content bool,
 ) string {
+	action, _ := profileMeetDecisionForFindings(ctx, cfg, connector, findings, confirmable, content)
+	return action
+}
+
+// profileMeetDecisionForFindings is profileMeetActionForFindings with
+// floorConfirm: the confirm came only from a tier-table confirm floor
+// (decide.Output.FloorConfirm) of the member that set it, and no member
+// confirms by its levels. Where the agent cannot ask, such a confirm is an
+// alert, never the hook's block fallback (rel-1-0-10:GAP-0067, GAP-0371).
+func profileMeetDecisionForFindings(
+	ctx context.Context, cfg *config.Config, connector string, findings []RuleFinding,
+	confirmable, content bool,
+) (action string, floorConfirm bool) {
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || resolved.set == nil {
-		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
+		return singleProfileDecisionForFindings(cfg, connector, findings, confirmable, content)
 	}
 	meet := resolved.evaluationMeet()
 	if meet == nil {
-		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
+		return singleProfileDecisionForFindings(cfg, connector, findings, confirmable, content)
 	}
-	action := guardrailActionAllow
+	action = guardrailActionAllow
 	for _, member := range meet.members {
 		memberCfg := resolved.set.profileConfig(member)
 		var own []RuleFinding
@@ -163,41 +163,32 @@ func profileMeetActionForFindings(
 				own = append(own, finding)
 			}
 		}
-		candidate := singleProfileActionForFindings(memberCfg, connector, own, confirmable, content)
+		candidate, memberFloor := singleProfileDecisionForFindings(memberCfg, connector, own, confirmable, content)
 		if !configBlocksOn(memberCfg, connector, requestProfilePath(ctx)) &&
 			(candidate == guardrailActionBlock || candidate == guardrailActionConfirm) {
-			candidate = guardrailActionAlert
+			candidate, memberFloor = guardrailActionAlert, false
+		}
+		switch {
+		case strongerGuardrailAction(action, candidate) != action:
+			floorConfirm = memberFloor
+		case candidate == action && !memberFloor:
+			floorConfirm = false
 		}
 		action = strongerGuardrailAction(action, candidate)
 	}
+	return action, floorConfirm && action == guardrailActionConfirm
+}
+
+// singleProfileActionForFindings is the verdict of one profile's findings:
+// decide.Decide with the profile's levels, tier and deployment.
+func singleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
+	action, _ := singleProfileDecisionForFindings(cfg, connector, findings, confirmable, content)
 	return action
 }
 
-func singleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
-	if managedClosesOnUnverifiedPath(cfg, findings) {
-		return guardrailActionBlock
-	}
-	if content {
-		return guardrailContentActionForFindings(cfg, connector, findings, confirmable)
-	}
-	return guardrailActionForConnectorFindings(cfg, connector, findings, confirmable)
-}
-
-// managedClosesOnUnverifiedPath reports a managed deployment (any enterprise
-// profile with local rules) that holds an enforceable TOOL-PATH-UNVERIFIED
-// finding: a check the file system would not answer fails closed there, as in
-// the strict tier, whatever threshold its rule pack gives the finding. The
-// OSS default and permissive tiers keep the finding as a visible alert.
-func managedClosesOnUnverifiedPath(cfg *config.Config, findings []RuleFinding) bool {
-	if cfg == nil || cfg.EnterpriseProfile() == "" {
-		return false
-	}
-	for _, finding := range enforceableRuleFindings(findings) {
-		if finding.RuleID == windowsPathUnverifiedRuleID {
-			return true
-		}
-	}
-	return false
+func singleProfileDecisionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) (string, bool) {
+	out := decideRouteOutput("single", connector, decideInputForConfig(cfg, connector, findings, confirmable, content, true))
+	return decideAction(out.Action), out.FloorConfirm
 }
 
 func profileMeetActionForSeverity(ctx context.Context, cfg *config.Config, connector, severity string, confirmable, content bool) string {
@@ -219,9 +210,7 @@ func guardrailContentAction(cfg *config.Config, connector, severity string, conf
 }
 
 func guardrailContentActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable bool) string {
-	return guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailContentAction(cfg, connector, severity, confirmable)
-	})
+	return decideRoute("content", connector, decideInputForConfig(cfg, connector, findings, confirmable, true, false))
 }
 
 // guardrailContentActionForGuardrail is guardrailContentAction for a caller
@@ -267,31 +256,7 @@ func guardrailActionForGuardrailFindings(
 	// it from cfg.ManagedAIDOnly() (sidecar.go). A managed standalone install
 	// leaves it false, so its proxy limit findings map by the pack like the
 	// hook routes (TestBoundedProxyPathMapsByThePack).
-	strict := func() bool {
-		return gc != nil && guardrailPackPosture(gc, gc.EffectiveRulePackRef(connector)) == config.HookPolicyTierStrict
-	}
-	return guardrailActionForProfileUnknown(findings, ManagedEnterpriseActive(), strict,
-		func() string { return cascadeUnknownForGuardrail(gc, connector, strict) },
-		func(severity string) string {
-			return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
-		})
-}
-
-// guardrailActionForFindings maps enforceable findings with actionFor and
-// caps alert-only findings at an alert.
-func guardrailActionForFindings(findings []RuleFinding, actionFor func(severity string) string) string {
-	action := guardrailActionAllow
-	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		action = actionFor(HighestSeverity(enforceable))
-	}
-	if alerts := alertOnlyRuleFindings(findings); len(alerts) > 0 {
-		candidate := actionFor(HighestSeverity(alerts))
-		if candidate == guardrailActionBlock || candidate == guardrailActionConfirm {
-			candidate = guardrailActionAlert
-		}
-		action = strongerGuardrailAction(action, candidate)
-	}
-	return action
+	return decideRoute("guardrail", connector, decideInputForGuardrail(gc, connector, findings, confirmable))
 }
 
 func strongerGuardrailAction(left, right string) string {
@@ -345,20 +310,16 @@ func guardrailProfileThresholds(profile string) (blockThreshold int, alertThresh
 	}
 }
 
-// guardrailProfileForDir is the posture of a rule-pack folder without a
-// manifest posture: its base name (strict, permissive), else default. Shipped
-// packs carry manifests; this preserves the legacy directory fallback.
+// guardrailProfileForDir is the posture of a rule-pack folder whose pack
+// names no tier of its own (no manifest posture, no tiers.yaml tier): a
+// legacy copy in a folder named strict keeps strict, every other folder is
+// default (config.packFolderPosture; rel-1-0-10:GAP-1562 owner ruling: a
+// folder name never lowers a tier, a missing field never weakens one).
 func guardrailProfileForDir(dir string) string {
-	if strings.TrimSpace(dir) == "" {
-		return "default"
+	if strings.TrimSpace(dir) != "" && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "strict") {
+		return "strict"
 	}
-	base := strings.ToLower(filepath.Base(filepath.Clean(dir)))
-	switch base {
-	case "strict", "permissive":
-		return base
-	default:
-		return "default"
-	}
+	return "default"
 }
 
 // hiltEnabled reports whether human-in-the-loop confirmation is active for
@@ -473,4 +434,270 @@ func strictPackPosture(cfg *config.Config, connector string) bool {
 	}
 	ref := cfg.EffectiveRulePackRefForConnector(connector)
 	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) == config.HookPolicyTierStrict
+}
+
+// The one decision function (DET111 D4, internal/guardrail/decide). The
+// gateway resolves what the config says (levels, tier, deployment, the
+// cascade unknown tier) and hands decide.Decide the findings with their
+// proofs; the tier table of the pack says what each proof is worth.
+
+// decideFinding is f as decide.Decide reads it. The severity is read with
+// exact labels, so a finding the levels never ranked stays unranked. A
+// reader's uncertainty (Record, Advise) is part of the proof; the tier
+// table says what it is worth, so the same proof always gets the same cell
+// (DET111 R5: before, the reader's alert-only or detection-only mark beside
+// a known keys or state proof made one proof block, alert or allow).
+func decideFinding(f RuleFinding) decide.Finding {
+	out := decide.Finding{RuleID: f.RuleID, Severity: decide.Severity(severityRank[f.Severity]), Proof: f.Proof}
+	if out.Proof.Kind == decide.KindUnspecified {
+		if legacy := legacyFindingProof(f); !legacy.IsZero() {
+			if out.Proof.Certainty == decide.CertMaybe {
+				legacy.Certainty, legacy.Reach = out.Proof.Certainty, out.Proof.Reach
+			}
+			out.Proof = legacy
+		}
+	}
+	return out
+}
+
+// verdictSeverity is the severity a verdict reports for f: the tier
+// table's severity for its proof when the table gives one (a bound alone is
+// MEDIUM, GAP-0851, GAP-0962), else its own. ok is false for a label the
+// levels never rank. A pack's tiers.yaml cannot change a cell severity (the
+// loader refuses it, decide.packCellError), so the built-in severity is the
+// one Decide reads on the call's pack table (DET111 T19 review P3-1).
+func verdictSeverity(f RuleFinding) (string, int) {
+	if sev := decide.Builtin().Severity(decideFinding(f)); sev != decide.SevNone {
+		return sev.String(), int(sev)
+	}
+	return f.Severity, severityRank[f.Severity]
+}
+
+func decideFindings(findings []RuleFinding) []decide.Finding {
+	out := make([]decide.Finding, len(findings))
+	for i, f := range findings {
+		out[i] = decideFinding(f)
+	}
+	return out
+}
+
+// legacyFindingProof is the proof of a finding whose reader set none, from
+// the private marks the 1.0.10 readers put on it: a call the evaluation
+// failed on, the evaluation-limit finding the profile maps by tier, an
+// opened path the file system would not answer for, a DefenseClaw state
+// write, a shell command on a protected file. Any other finding maps by its
+// severity alone.
+func legacyFindingProof(f RuleFinding) decide.Proof {
+	id := canonicalTrustedRuleID(f.RuleID)
+	switch {
+	case f.evaluationFault:
+		return decide.Proof{Kind: decide.KindUnread, Certainty: decide.CertBound, Cap: "evaluation_fault", Source: "gateway:evaluation_fault"}
+	case profileMappedLimitFinding(f):
+		return decide.Proof{Kind: decide.KindTruncated, Certainty: decide.CertBound, Cap: "evaluation_limit", Source: "gateway:" + id}
+	case f.RuleID == windowsPathUnverifiedRuleID:
+		return decide.Proof{Kind: decide.KindRead, Target: decide.TargetOther, Certainty: decide.CertMaybe, Reach: decide.ReachFS, Source: "gateway:" + id}
+	case selfProtectionRules[id]:
+		return decide.Proof{Kind: decide.KindWrite, Target: decide.TargetState, Certainty: decide.CertKnown, Source: "gateway:" + id}
+	case f.shellProtectedFile:
+		return decide.Proof{Kind: decide.KindWrite, Target: shellProtectedFileTarget(id), Certainty: decide.CertKnown, Source: "gateway:" + id}
+	}
+	return decide.Proof{}
+}
+
+// shellProtectedFileTarget is the protected class of a shell protected-file
+// rule (shellProtectedFileRules).
+func shellProtectedFileTarget(canonicalID string) decide.TargetClass {
+	switch canonicalID {
+	case "PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND":
+		return decide.TargetAuthorizedKeys
+	case "PATH-SSH-DIR":
+		return decide.TargetCredential
+	default:
+		return decide.TargetAutostart
+	}
+}
+
+func decideSeverityOfRank(rank int) decide.Severity {
+	return decide.Severity(min(max(rank, 0), 255))
+}
+
+// decideLevels are the levels guardrailActionForRank maps by.
+func decideLevels(blockThreshold, alertThreshold int, confirm bool, hiltMin int) decide.Levels {
+	return decide.Levels{
+		Block: decideSeverityOfRank(blockThreshold), Alert: decideSeverityOfRank(alertThreshold),
+		Confirm: confirm, ConfirmAt: decideSeverityOfRank(hiltMin),
+	}
+}
+
+func connectorLevels(cfg *config.Config, connector string, confirmable bool) decide.Levels {
+	blockThreshold, alertThreshold := guardrailThresholdRanks(resolveThresholds(cfg, connector))
+	return decideLevels(blockThreshold, alertThreshold,
+		confirmable && hiltEnabledForConfig(cfg, connector), hiltMinRankForConfig(cfg, connector))
+}
+
+func contentLevels(cfg *config.Config, connector string, confirmable bool) decide.Levels {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		blockThreshold, alertThreshold := guardrailThresholdRanks(resolvePackThresholds(cfg, connector))
+		return decideLevels(blockThreshold, alertThreshold,
+			confirmable && hiltEnabledForConfig(cfg, connector), hiltMinRankForConfig(cfg, connector))
+	}
+	return connectorLevels(cfg, connector, confirmable)
+}
+
+func guardrailConnectorLevels(gc *config.GuardrailConfig, connector string, confirmable bool) decide.Levels {
+	blockThreshold, alertThreshold := guardrailThresholdRanks(resolveGuardrailThresholds(gc, connector))
+	return decideLevels(blockThreshold, alertThreshold, confirmable && hiltEnabled(gc, connector), hiltMinRank(gc, connector))
+}
+
+func decideTierOf(name string) decide.Tier {
+	tier, _ := decide.ParseTier(name)
+	return tier
+}
+
+func decideAction(a decide.Action) string {
+	switch a {
+	case decide.Block:
+		return guardrailActionBlock
+	case decide.Confirm:
+		return guardrailActionConfirm
+	case decide.Alert:
+		return guardrailActionAlert
+	default:
+		return guardrailActionAllow
+	}
+}
+
+// decideInputForConfig is the decide.Input of a hook or inspect call of
+// connector under cfg. content selects the content surface (prompt,
+// completion, tool response, message); managed is false for a content
+// caller that never had the managed unverified-path close.
+func decideInputForConfig(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content, managed bool) decide.Input {
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	in := decide.Input{
+		Findings:     decideFindings(findings),
+		SecureClient: secureClient,
+		Confirmable:  confirmable,
+		Table:        configPackTable(cfg, connector),
+		Tier:         func() decide.Tier { return decideTierOf(cfg.HookPolicyTierForConnector(connector)) },
+		PackTier: func() decide.Tier {
+			if cfg == nil {
+				// No config: the limit finding maps by the levels.
+				return decide.TierStrict
+			}
+			ref := cfg.EffectiveRulePackRefForConnector(connector)
+			return decideTierOf(packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)))
+		},
+		Unknown: func() (decide.Action, bool) {
+			if cfg == nil || secureClient {
+				return decide.Allow, false
+			}
+			if u := cfg.ResolveCascade(connector).Unknown; u != "" && u != config.CascadeUnknownPack {
+				return decide.ParseAction(u), true
+			}
+			return decide.Allow, false
+		},
+	}
+	if managed && cfg != nil && cfg.EnterpriseProfile() != "" {
+		in.Deployment = decide.Managed
+	}
+	if content {
+		in.Surface = decide.SurfaceContent
+		in.Levels = contentLevels(cfg, connector, confirmable)
+	} else {
+		in.Levels = connectorLevels(cfg, connector, confirmable)
+	}
+	return in
+}
+
+// decideInputForGuardrail is the decide.Input of a guardrail proxy call:
+// the pack posture is both the tier and the pack tier, and the Secure
+// Client posture is the process-wide managed flag (ManagedEnterpriseActive).
+func decideInputForGuardrail(gc *config.GuardrailConfig, connector string, findings []RuleFinding, confirmable bool) decide.Input {
+	tier := func() decide.Tier {
+		if gc == nil {
+			return decide.TierDefault
+		}
+		return decideTierOf(guardrailPackPosture(gc, gc.EffectiveRulePackRef(connector)))
+	}
+	return decide.Input{
+		Findings:     decideFindings(findings),
+		SecureClient: ManagedEnterpriseActive(),
+		Confirmable:  confirmable,
+		Table:        guardrailPackTable(gc, gcPackRef(gc, connector)),
+		Levels:       guardrailConnectorLevels(gc, connector, confirmable),
+		Tier:         tier,
+		Unknown: func() (decide.Action, bool) {
+			if u := gc.CascadeUnknown(connector); u != config.CascadeUnknownPack {
+				return decide.ParseAction(u), true
+			}
+			return decide.Allow, false
+		},
+	}
+}
+
+func gcPackRef(gc *config.GuardrailConfig, connector string) config.RulePackRef {
+	if gc == nil {
+		return config.RulePackRef{}
+	}
+	return gc.EffectiveRulePackRef(connector)
+}
+
+// decideRecordHook, set only by tests (DET111_S1_REC: the characterization
+// recorder), sees every decision with its input.
+var decideRecordHook func(route, connector string, in decide.Input, out decide.Output)
+
+func decideRoute(route, connector string, in decide.Input) string {
+	return decideAction(decideRouteOutput(route, connector, in).Action)
+}
+
+func decideRouteOutput(route, connector string, in decide.Input) decide.Output {
+	out := decide.Decide(in)
+	if decideRecordHook != nil {
+		decideRecordHook(route, connector, in, out)
+	}
+	return out
+}
+
+// The tier gates (DET111 step 1, R5 item 1): a reader whose 1.0.10
+// conclusion depended on the tier names the gate row of the tier table
+// instead of reading request.StrictPolicy or request.ManagedInstall, and
+// the table cell of the request's deployment and tier grades it. The two
+// rows hold the 1.0.10 cells (decide.RowTieredStrict, RowTieredManaged).
+const (
+	tierGateStrict  = decide.RowTieredStrict
+	tierGateManaged = decide.RowTieredManaged
+)
+
+// gateCeiling is gate row's cell for the request in its pack's tier table
+// (Tiers; nil is decide.Builtin()): the column of its hook or proxy tier
+// (PolicyTier, strict when StrictPolicy) and its deployment
+// (ManagedInstall).
+func (request trustedActionRequest) gateCeiling(row string) decide.Ceiling {
+	tier, deployment := request.PolicyTier, decide.PerUser
+	if request.StrictPolicy {
+		tier = decide.TierStrict
+	}
+	if request.ManagedInstall {
+		deployment = decide.Managed
+	}
+	return request.Tiers.GateCeiling(row, deployment, tier)
+}
+
+// tieredProof is p graded by gate row for the request: enforcing where the
+// cell has no ceiling, advisory under an alert ceiling, recorded under a
+// record ceiling.
+func (request trustedActionRequest) tieredProof(p decide.Proof, row string) decide.Proof {
+	switch request.gateCeiling(row) {
+	case decide.CeilingAlert:
+		return p.Advise()
+	case decide.CeilingRecord:
+		return p.Record()
+	}
+	return p.Enforce()
+}
+
+// tierEnforces reports whether gate row lets the reader's conclusion
+// enforce for the request.
+func (request trustedActionRequest) tierEnforces(row string) bool {
+	return request.gateCeiling(row) == decide.CeilingNone
 }

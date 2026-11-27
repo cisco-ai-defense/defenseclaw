@@ -30,6 +30,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -191,7 +193,23 @@ const LinksStableKey = "\x00links-stable"
 // user's view expanded it completely and no match reaches a protected file;
 // "1" means a match does. Only a gateway that cannot expand the pattern
 // itself (ProtectHome) reads it; a missing answer keeps its fallback.
+// "0" and "1" are the only values: a walk that stopped at a bound has no
+// GlobFactPrefix answer and is sent under GlobCapFactPrefix instead.
 const GlobFactPrefix = "\x00glob:"
+
+// GlobCapFactPrefix keys the hook client's answer for a pathname pattern
+// whose walk read every folder it reached, stopped at a counted bound and
+// found no protected match before it (a TRUNCATED reading,
+// rel-1-0-10:GAP-1324), by the absolute pattern. "1" is the only value. It
+// is a key of its own, not a GlobFactPrefix value, so a gateway that does not
+// know it (1.0.10 and older) ignores it and reads the pattern as a 1.0.10
+// client sent it, with no answer (its fallback). A GlobFactPrefix "1" for the
+// same pattern wins.
+const GlobCapFactPrefix = "\x00glob-cap:"
+
+// GlobFactCapped is the answer actionGlobs carries for a walk that stopped at
+// a bound (TRUNCATED); on the wire it is GlobCapFactPrefix.
+const GlobFactCapped = "c"
 
 // ReadingTargetPrefix keys the hook client resolution of one write operand
 // on a static reading of a call with a runtime-expanded operand word
@@ -589,8 +607,8 @@ func awkTwinTouchesNoLink(twin actionfacts.AwkTwin, cwd, home string) bool {
 // reaches for a plain shell command (the one an awk program starts too): a concrete write to a protected file, a
 // call with a word the shell expands that a per-user gateway resolves, a loop
 // copy destination that is protected, or a no-dereference touch that is not
-// safe.
-func clientProtectedDecision(command, cwd, home string) bool {
+// safe. dialect is the hook's shell dialect (hookShellDialect).
+func clientProtectedDecision(command, cwd, home string, dialect actionfacts.Dialect) bool {
 	var concrete actionConcreteOperands
 	decision := actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
 	if decision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
@@ -601,7 +619,7 @@ func clientProtectedDecision(command, cwd, home string) bool {
 		// word the shell expands carries the per-user decision, minus a value
 		// the call proves dead and writers the one resolver proves safe
 		// (rel-1-0-10 GAP-0415, GAP-0326, GAP-0327).
-		decision = ActionCommandDecision(command, cwd, home) != "" &&
+		decision = clientCommandDecision(command, cwd, home, dialect) != "" &&
 			!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
 			!actionClientProvedOverwrittenRedirect(command, cwd, home) &&
 			!writersAllProvenSafe(command, cwd, home, nil)
@@ -613,6 +631,25 @@ func clientProtectedDecision(command, cwd, home string) bool {
 		_, decision = noDereferenceTouchStatus(command, cwd, home)
 	}
 	return decision
+}
+
+// clientCommandDecision is the per-user decision of a shell command that the
+// hook client carries (ActionDecisionKey). It is the reading without a
+// dialect and, on a Windows home with a dialect hint, also the reading in the
+// hook's shell dialect: the one a per-user gateway judges the call with (a
+// Claude Code Bash call is Git Bash, DialectPOSIX). A hint only adds a
+// reading; a protected target either finds is the decision. Without the
+// hinted reading a Windows client sent no decision for a call the per-user
+// gateway blocks, so a managed gateway that cannot read the user's links had
+// no proof of it (rel-1-0-10:GAP-2178: 300 touch operands ending in a hard
+// link to the keys file). On a POSIX home the hint changes no reading, so the
+// command is read once.
+func clientCommandDecision(command, cwd, home string, dialect actionfacts.Dialect) string {
+	decision := ActionCommandDecision(command, cwd, home)
+	if decision != "" || dialect == "" || !actionWindowsHome(home) {
+		return decision
+	}
+	return ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, nil)
 }
 
 // mergeFacts is the facts of both maps; an entry of first stays.
@@ -1155,12 +1192,20 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 	parts := strings.Split(filepath.ToSlash(path), "/")
 	start := 0
 	// key is the memo key of parts[:i+1]: the volume root and the
-	// components as written.
-	var key string
+	// components as written, each after a NUL. Every key is a prefix of
+	// keys, the key of the whole path, built once: a key per component
+	// built by concatenation (and a copy of the stack per prefix met) cost
+	// the target scan of a 1 MiB here-document one allocation per
+	// component of each of its ~25,000 distinct words (rel-1-0-10:GAP-0299).
+	var key, keys string
 	if memo != nil {
+		workcount.Add(workcount.MemoWalk)
+		workcount.Add(workcount.WalkKey)
+		keys = current + "\x00" + strings.Join(parts, "\x00")
 		key = current
+		var walked walkState
 		for i, part := range parts {
-			next := key + "\x00" + part
+			next := keys[:len(key)+1+len(part)]
 			state, ok := memo.prefix(next)
 			if !ok {
 				break
@@ -1171,8 +1216,11 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 				}
 				return "", nil, state.linkDepth, false
 			}
-			key, start = next, i+1
-			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
+			key, start, walked = next, i+1, state
+		}
+		if start > 0 {
+			workcount.Add(workcount.WalkKey)
+			current, crossed, linkDepth = walked.current, append([]bool(nil), walked.crossed...), walked.linkDepth
 		}
 	}
 	// mark is the call's cut count when the walk began: a state read after
@@ -1194,7 +1242,7 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 	fail := func() (string, []string, int, bool) { return failAs(false) }
 	for _, part := range parts[start:] {
 		if memo != nil {
-			key += "\x00" + part
+			key = keys[:len(key)+1+len(part)]
 		}
 		switch part {
 		case "", ".":
@@ -1215,7 +1263,7 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 				return fail()
 			}
 			memo.noteWork()
-			info, err := pathLstat(candidate)
+			info, err := memo.lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return failRead(candidate, err)
 			}
@@ -1276,7 +1324,7 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 	return filepath.Clean(current), forms, linkDepth, true
 }
 
-func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
+func walkWritePathWithReaders(base, path string, linkDepth int, collect, patchTarget bool,
 	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
 	procLink func(path string, below bool) bool, tail bool,
 ) (string, []string, int, bool) {
@@ -1290,9 +1338,6 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 		path = strings.TrimPrefix(path, filepath.VolumeName(path))
 	} else if !filepath.IsAbs(base) {
 		return "", nil, linkDepth, false
-	}
-	if memo != nil && (base != "" || linkDepth != 0 || collect || patchTarget || !absolute) {
-		memo = nil
 	}
 	var forms []string
 	if collect && absolute {
@@ -1311,38 +1356,8 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 	// before the command executes.
 	var crossed []bool
 	parts := strings.Split(filepath.ToSlash(path), "/")
-	start := 0
-	// key is the memo key of parts[:i+1]: the volume root and the
-	// components as written.
-	var key string
-	if memo != nil {
-		key = current
-		for i, part := range parts {
-			next := key + "\x00" + part
-			state, ok := memo.prefix(next)
-			if !ok {
-				break
-			}
-			if state.failed {
-				return "", nil, state.linkDepth, false
-			}
-			key, start = next, i+1
-			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
-		}
-	}
-	// mark is the call's cut count when the walk began: a state read after
-	// the budget cut a share wait short is not kept (rel-1-0-10:GAP-1606).
-	mark := memo.cutMark()
-	fail := func() (string, []string, int, bool) {
-		if memo != nil {
-			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true}, mark)
-		}
-		return "", nil, linkDepth, false
-	}
-	for i, part := range parts[start:] {
-		if memo != nil {
-			key += "\x00" + part
-		}
+	fail := func() (string, []string, int, bool) { return "", nil, linkDepth, false }
+	for i, part := range parts {
 		switch part {
 		case "", ".":
 		case "..":
@@ -1361,7 +1376,6 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 			if !add(candidate) {
 				return fail()
 			}
-			memo.noteWork()
 			info, err := lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return fail()
@@ -1371,7 +1385,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				// A process link the hook reads for another process than the
 				// one opening the operand would prove a different path. below
 				// tells whether the path goes on below the link.
-				below := tail || stepFollows(parts[start+i+1:])
+				below := tail || stepFollows(parts[i+1:])
 				if procLink(candidate, below) {
 					return fail()
 				}
@@ -1388,7 +1402,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				var extra []string
 				var nextDepth int
 				var ok bool
-				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink, procLink, below)
+				current, extra, nextDepth, ok = walkWritePathWithReaders(current, link, linkDepth+1, collect, patchTarget, lstat, readlink, procLink, below)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
@@ -1403,9 +1417,6 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				current = candidate
 				crossed = append(crossed, unknown)
 			}
-		}
-		if memo != nil {
-			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth}, mark)
 		}
 	}
 	return filepath.Clean(current), forms, linkDepth, true
@@ -2124,6 +2135,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	if toolArgs != nil {
+		shellDialect := hookShellDialect(connector, tool)
 		for _, command := range clientShellCommands(tool, toolArgs, args) {
 			if command != "" {
 				var concreteOperands actionConcreteOperands
@@ -2220,7 +2232,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					backupUnresolved = SedInPlaceBackupUnresolved(command, cwd, home)
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
+					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, shellDialect)
 				}
 				// The plain-call decision of this command, read once: the
 				// carry below and the past-the-limits check both ask it, and
@@ -2229,7 +2241,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				decidedFor, plainDecision := "", ""
 				commandDecision := func() string {
 					if decidedFor != command || decidedFor == "" {
-						decidedFor, plainDecision = command, ActionCommandDecision(command, cwd, home)
+						decidedFor, plainDecision = command, clientCommandDecision(command, cwd, home, shellDialect)
 					}
 					return plainDecision
 				}
@@ -2426,7 +2438,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					truncated = truncated || shellCaps.Any()
 					if isTwin && shellTwin != command {
 						addReading(shellTwin, true)
-						protectedDecision = protectedDecision || clientProtectedDecision(shellTwin, cwd, home)
+						protectedDecision = protectedDecision || clientProtectedDecision(shellTwin, cwd, home, shellDialect)
 						if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(shellTwin); isTwin && wrapped != shellTwin {
 							addReading(wrapped, false)
 						}
@@ -2457,7 +2469,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						// and reads these targets only from this map.
 						for _, body := range awkTwin.Bodies {
 							addReading(body, true)
-							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
+							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home, shellDialect)
 						}
 					}
 					// A program file the client cannot read is code the map does
@@ -3815,6 +3827,10 @@ func Decode(value string) (map[string]string, bool) {
 			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
 			return nil, false
 		}
+		if strings.HasPrefix(key, GlobCapFactPrefix) && (value != "1" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, GlobCapFactPrefix))) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, CopySourceGlobFactPrefix) {
 			position, dir, ok := strings.Cut(strings.TrimPrefix(key, CopySourceGlobFactPrefix), ":")
 			if !ok || !filepath.IsAbs(dir) || position == "" ||
@@ -4048,6 +4064,10 @@ type shellLinks struct {
 	opaque       bool
 	relative     bool // a link operand is relative to the working directory
 	globalOpaque bool
+	// cdOnlyGlobal marks a global hold caused only by a directory change
+	// whose fixed absolute copy scope could not be placed. Absolute writes
+	// outside that scope do not move with cd.
+	cdOnlyGlobal bool
 	// cdScopes: the scopes follow a static top-level directory change that
 	// the statement walk placed them after. Every write is opaque but the own
 	// destination of a placed copy, which that walk places too (GAP-2579).
@@ -4452,8 +4472,10 @@ func (l shellLinks) globalCopyScopesAfter(ownCopy string) bool {
 }
 
 type opaqueScope struct {
-	path string
-	copy bool
+	path         string
+	copy         bool
+	childrenOnly bool
+	anchored     bool // a static absolute destination independent of cd
 	// at is the offset of the call of the top-level walk that opened the
 	// scope, or -1 when that order is not known (a nested body, the end
 	// checks).
@@ -4551,6 +4573,15 @@ func (l *shellLinks) unknownIn(scope string) {
 	l.addOpaqueScope(scope, false)
 }
 
+// unknownInChildren holds links copied under a directory without treating
+// the destination directory entry itself as a link.
+func (l *shellLinks) unknownInChildren(scope string) {
+	l.addOpaqueScope(scope, false)
+	if scope != "" {
+		l.opaqueScopes[len(l.opaqueScopes)-1].childrenOnly = true
+	}
+}
+
 func (l *shellLinks) unknownCopyIn(scope string) {
 	l.addOpaqueScope(scope, true)
 }
@@ -4567,7 +4598,7 @@ func (l *shellLinks) addOpaqueScope(scope string, copyScope bool) {
 		}
 		return
 	}
-	l.opaqueScopes = append(l.opaqueScopes, opaqueScope{filepath.Clean(scope), copyScope, l.scopeAt})
+	l.opaqueScopes = append(l.opaqueScopes, opaqueScope{path: filepath.Clean(scope), copy: copyScope, at: l.scopeAt})
 }
 
 func (l shellLinks) opaqueTarget(path string) bool {
@@ -4663,6 +4694,10 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 			forms = []string{filepath.Clean(name)}
 		}
 		for _, scope := range l.opaqueScopes {
+			if scope.childrenOnly && filepath.Clean(path) == scope.path &&
+				complete && len(forms) > 0 && forms[len(forms)-1] == scope.path {
+				continue
+			}
 			if scope.copy && scope.path == ownCopy {
 				continue
 			}
@@ -4784,16 +4819,27 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	return commandLinks(command, cwd, home, facts, record, false)
 }
 
+// guestCommandLinksWithFacts places a Linux guest's link calls in its logical
+// directories even when this host resolves a directory such as /tmp through a
+// different physical spelling.
+func guestCommandLinksWithFacts(command, cwd, home string, facts map[string]string) shellLinks {
+	return commandLinksForGuest(command, cwd, home, facts, false, false, true)
+}
+
 // commandLinks reads the links of command. A nested literal shell body
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
 func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
-	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true)
+	return commandLinksForGuest(command, cwd, home, facts, record, nested, false)
+}
+
+func commandLinksForGuest(command, cwd, home string, facts map[string]string, record, nested, guest bool) shellLinks {
+	links, fallback := commandLinksReadForGuest(command, cwd, home, facts, record, nested, true, guest)
 	if fallback {
 		// A copy of links on disk that the end of the command does not let
 		// us read is read as before, an opaque copy scope at the copy call
 		// (rel-1-0-6:GAP-0274).
-		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false)
+		links, _ = commandLinksReadForGuest(command, cwd, home, facts, record, nested, false, guest)
 	}
 	return links
 }
@@ -4802,6 +4848,10 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 // of links on disk as those links (copyDiskLinks). fallback reports such a
 // copy that could not be read so.
 func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool) (shellLinks, bool) {
+	return commandLinksReadForGuest(command, cwd, home, facts, record, nested, readDisk, false)
+}
+
+func commandLinksReadForGuest(command, cwd, home string, facts map[string]string, record, nested, readDisk, guest bool) (shellLinks, bool) {
 	links := shellLinks{known: true, callAt: -1, scopeAt: -1}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -4811,7 +4861,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// -ItemType spelling opaqueLink finds was read here).
 		if opaqueLink.MatchString(command) || commandNewItemLinkSpelled(command) {
 			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
-				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+				return commandLinksReadForGuest(twin, cwd, home, facts, record, nested, readDisk, guest)
 			}
 			links.unknown(true)
 		}
@@ -4822,7 +4872,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other
 		// link-making text keeps the opaque reading.
 		if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
-			return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+			return commandLinksReadForGuest(twin, cwd, home, facts, record, nested, readDisk, guest)
 		}
 		if !links.addPythonLiteralLinks(file, command, cwd, home) {
 			links.unknown(true)
@@ -4831,6 +4881,14 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, nestedCopyDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
+	if guest && linkCall != nil {
+		// The special three-statement reader checks cd on this host and
+		// returns its physical directory. Only the guest link proof must
+		// place the link where the Linux guest names that directory.
+		if dirs := linkDirs[linkCall]; len(dirs) == 1 {
+			linkCWD = dirs[0]
+		}
+	}
 	knownWords, knownValues := knownWordParameters(command, file, home, cdEnterable(cwd, facts, record), linkDirs)
 	loopWords := boundedLoopIteratorWords(command, file, home)
 	lineWords := straightLineWords(command, file, home)
@@ -4994,6 +5052,13 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			words, static, stackSources = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
 				return archiveDestination(program, words[1:], static[1:], cwd)
 			})
+			if slices.Contains(static, false) {
+				// A PowerShell call of a Windows home names its folder in
+				// PowerShell words: read the call with those (GAP-1634).
+				if psWords, psStatic, ok := psArchiveCallWords(command[call.Pos().Offset():call.End().Offset()], program, home); ok {
+					words, static = psWords, psStatic
+				}
+			}
 		}
 		if opaqueProgram(program) {
 			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:], pipedCalls[call]) {
@@ -5195,7 +5260,12 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					copyScopes = append(copyScopes, destination)
 					treeCopies = append(treeCopies, archiveTreeCopy(words[1:], static[1:], dir, destination))
 					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record, stackSources) {
-						links.unknownIn(destination)
+						if destination != "" && rsyncDirectoryDestination(program, words[1:], static[1:]) && len(links.aliases) == 0 {
+							links.unknownInChildren(destination)
+							links.opaqueScopes[len(links.opaqueScopes)-1].anchored = true
+						} else {
+							links.unknownIn(destination)
+						}
 					}
 				}
 			}
@@ -5249,7 +5319,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				// placed its call (rel-1-0-6:GAP-0260).
 				bodyDir, placedBody = callDirs[0], true
 			}
-			inner := commandLinks(body, bodyDir, home, facts, record, true)
+			inner := commandLinksForGuest(body, bodyDir, home, facts, record, true, guest)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
@@ -5383,6 +5453,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// the gateway own; only a move source it may not read is judged
 		// by that user-side reading (GAP-0091).
 		stable := true
+		// One work budget for every linked tree walk of this reading
+		// (linkedTreeWork, rel-1-0-10:GAP-1727).
+		work := &linkedTreeWork{}
 		moves := len(renameOps) > 0 || len(findMoves) > 0
 		walked := moves || wrappedCds
 		_, readable := ResolveWriteTarget(cwd)
@@ -5406,12 +5479,12 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			// A nested cd or a find -exec mv may also go below a linked
 			// directory through a disk link to state (RV-c4-1).
 			if stable && (wrappedCds || len(findMoves) > 0) {
-				stable = links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves)
+				stable = links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves, work)
 			}
 			// A move after a directory change is followed as a plain one
 			// only when no entry it takes is a disk link to state (GAP-2602).
 			if stable && cds {
-				stable = movedEntriesAwayFromState(renameOps, findMoves, home)
+				stable = movedEntriesAwayFromState(renameOps, findMoves, home, work)
 			}
 			links.movesStable = stable
 			walkFailed = !stable
@@ -5426,7 +5499,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			stable, unplacedRelative = links.followRenames(renameOps, userView), false
 			if stable && !userView {
 				stable = links.dotDotPastLinksClear(command, cwd, home) && links.aliasesAwayFromState(cwd, home) &&
-					movedEntriesAwayFromState(renameOps, findMoves, home)
+					movedEntriesAwayFromState(renameOps, findMoves, home, work)
 				links.movesStable = stable
 			}
 		}
@@ -5460,6 +5533,11 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				}
 			}
 		} else {
+			anchored := !links.globalOpaque && !links.globalOther && !links.unread
+			for _, scope := range links.opaqueScopes {
+				anchored = anchored && scope.anchored
+			}
+			links.cdOnlyGlobal = anchored
 			links.globalOpaque, links.globalOther = true, true
 		}
 	}
@@ -5469,6 +5547,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	// so a relative write may land in a scope under another name; with or
 	// without a cd, every write is then opaque (rel-1-0-6:GAP-0260 review).
 	if len(links.opaqueScopes) > 0 && hiddenDirectoryChange(file, home, 0) {
+		links.cdOnlyGlobal = false
 		links.globalOpaque, links.globalOther = true, true
 	}
 	// A plain cd whose archive and move statements were both placed keeps
@@ -6133,8 +6212,9 @@ func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
 // RedirectOccurrence is one shell redirect in source order. The safety bit
 // belongs to that occurrence, even when a later writer names the same path.
 type RedirectOccurrence struct {
-	Path string
-	Safe bool
+	Path     string
+	Safe     bool
+	Absolute bool // the redirect word begins with a static literal root
 	// NoInnerCommand proves that this redirect's own statement evaluates no
 	// nested command before opening the file. Earlier statements are separate.
 	NoInnerCommand bool
@@ -6164,6 +6244,49 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	file, ok := parseShell(command)
 	if !ok {
 		return result
+	}
+	// Only rsync can make the anchored absolute copy scope below. Keep the
+	// extra redirect walk off every other hook call.
+	if len(result) > 0 && strings.Contains(command, "rsync") {
+		// Record absolute redirect words even when a pipeline makes the linear
+		// before-link proof unavailable. Only the static occurrence gets the
+		// narrow absolute-scope proof; expanded words keep their own hold.
+		absolute, seen := map[string]bool{}, map[string]bool{}
+		descriptorOut := false
+		env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+		syntax.Walk(file, func(node syntax.Node) bool {
+			redirect, ok := node.(*syntax.Redirect)
+			if !ok || redirect.Word == nil {
+				return true
+			}
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			case syntax.DplOut:
+				descriptorOut = true
+				return true
+			default:
+				return true
+			}
+			word, static := staticShellWord(redirect.Word, env, home != "")
+			if !static {
+				return true
+			}
+			if word == "" {
+				return true
+			}
+			path := OperandPath(word, cwd)
+			if !seen[path] {
+				absolute[path] = filepath.IsAbs(word) && rootLiteralWord(redirect.Word)
+			}
+			seen[path] = true
+			absolute[path] = absolute[path] && filepath.IsAbs(word) && rootLiteralWord(redirect.Word)
+			return true
+		})
+		if !descriptorOut {
+			for i := range result {
+				result[i].Absolute = seen[result[i].Path] && absolute[result[i].Path]
+			}
+		}
 	}
 	statements, linear := linearShellStatements(file)
 	if !linear {
@@ -6290,10 +6413,26 @@ func CommandLinks(tool, command, cwd, home string) Links {
 
 // CommandLinksWithFacts uses copy-source link evidence from the user-side hook.
 func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) Links {
+	return commandLinksWithGuestFacts(tool, command, cwd, home, facts, false)
+}
+
+// GuestCommandLinksWithFacts places a Linux guest's same-command links in its
+// namespace on every gateway OS. It is used only for guest write proof.
+func GuestCommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) Links {
+	return commandLinksWithGuestFacts(tool, command, cwd, home, facts, true)
+}
+
+func commandLinksWithGuestFacts(tool, command, cwd, home string, facts map[string]string, guest bool) Links {
 	if command == "" || isApplyPatchToolName(tool) {
 		return Links{links: shellLinks{known: true}}
 	}
-	links := Links{links: commandLinksWithFacts(command, cwd, home, facts, false)}
+	var shell shellLinks
+	if guest {
+		shell = guestCommandLinksWithFacts(command, cwd, home, facts)
+	} else {
+		shell = commandLinksWithFacts(command, cwd, home, facts, false)
+	}
+	links := Links{links: shell}
 	if len(links.links.aliases) > 0 {
 		links.protected = newProtectedFiles(home)
 	}
@@ -6315,6 +6454,23 @@ func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string
 		return l.links.opaqueTargetWithFacts(path, path, facts)
 	}
 	return l.links.opaqueTargetWithFacts(path, "", facts)
+}
+
+// AbsoluteRedirectOutsideCDScopes proves that an absolute redirect is
+// outside every fixed absolute copy scope. A cd can move relative writes,
+// but cannot move the redirect or the copy destination. A pre-existing link
+// into a scope is checked by the same bounded path resolver.
+func (l Links) AbsoluteRedirectOutsideCDScopes(path string, facts map[string]string) bool {
+	if !l.links.cdOnlyGlobal || !filepath.IsAbs(path) {
+		return false
+	}
+	scoped := l.links
+	scoped.globalOpaque, scoped.globalOther = false, false
+	if scoped.opaqueTargetWithFacts(path, "", facts) {
+		return false
+	}
+	resolved, ok := ResolveWriteTarget(path)
+	return ok && !scoped.opaqueTargetWithFacts(resolved, "", facts)
 }
 
 // SplitOpaqueScopeFacts separates the OpaqueScopeFactPrefix entries from the
@@ -6455,6 +6611,96 @@ func (l Links) AliasTargets(path string, entry bool) []string {
 			seen[next] = true
 			out = append(out, next)
 			queue = append(queue, next)
+		}
+	}
+	return out
+}
+
+// GuestAliasTargets keeps the raw link text until the guest-owned root has
+// been folded. A host Clean would erase root/.. before the guest can judge it.
+// Only the guest write proof uses this reading; other callers retain the
+// established lexical AliasTargets behavior.
+func (l Links) GuestAliasTargets(path string, entry bool) []string {
+	if len(l.links.aliases) == 0 || path == "" {
+		return nil
+	}
+	var out []string
+	// Keep a dot-dot after a command-created link: the kernel applies it
+	// after following the link, not against its lexical parent.
+	seen := map[string]bool{path: true}
+	queue := []string{path}
+	logicalNames := map[string]string{}
+	// The host link walker may place a guest link under the host's physical
+	// spelling of its directory (for example /private/tmp on macOS). Match
+	// that spelling at the link component, even when the write goes below
+	// the link. Keep the guest spelling for relative target text.
+	if filepath.IsAbs(path) {
+		for _, alias := range l.links.aliases {
+			marker := string(filepath.Separator) + filepath.Base(alias.name)
+			for offset := 0; offset < len(path) && len(queue) < maxLinkAliasSteps; {
+				at := strings.Index(path[offset:], marker)
+				if at < 0 {
+					break
+				}
+				at += offset
+				end := at + len(marker)
+				offset = end
+				if end < len(path) && path[end] != filepath.Separator {
+					continue
+				}
+				if dir, ok := ResolveWriteTarget(filepath.Dir(path[:end])); ok {
+					physical := filepath.Join(dir, filepath.Base(alias.name)) + path[end:]
+					if !seen[physical] {
+						seen[physical] = true
+						queue = append(queue, physical)
+						logicalNames[physical] = path
+					}
+				}
+			}
+		}
+	}
+	roots := len(queue)
+	for step := 0; len(queue) > 0 && len(out) < maxLinkAliasSteps; step++ {
+		first := step < roots
+		name := queue[0]
+		queue = queue[1:]
+		for _, alias := range l.links.aliases {
+			// The guest is Linux even when this gateway host compares
+			// names without case. A link named L does not alias l.
+			rest, under := strings.CutPrefix(name, alias.name)
+			if !under || rest != "" && !strings.HasPrefix(rest, "/") {
+				continue
+			}
+			rest = strings.TrimPrefix(rest, "/")
+			if first && entry && rest == "" {
+				continue
+			}
+			// The recorded target is rooted at the guest link name. The
+			// host may also record a physical alias (/private/tmp for /tmp);
+			// deriving relative text from that physical name changes what
+			// a Linux guest would open.
+			next := alias.target
+			if logical := logicalNames[name]; logical != "" && logical != name &&
+				alias.text != "" && !filepath.IsAbs(alias.text) {
+				// Host-walk aliases may be rooted in the host's physical
+				// directory. Rebase relative link text on the guest's
+				// logical name, including a suffix below the link.
+				logicalLink := strings.TrimSuffix(logical, rest)
+				logicalLink = strings.TrimSuffix(logicalLink, "/")
+				next = filepath.Dir(logicalLink) + "/" + alias.text
+			}
+			if rest != "" {
+				next += string(filepath.Separator) + rest
+			}
+			next = GuestOwnRootPath(next)
+			out = append(out, next)
+			if !seen[next] {
+				seen[next] = true
+				queue = append(queue, next)
+			}
+			if len(out) >= maxLinkAliasSteps {
+				break
+			}
 		}
 	}
 	return out
@@ -6618,11 +6864,7 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 			continue
 		}
 		if !strings.HasPrefix(args[i], "-") {
-			path := args[i]
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(cwd, path)
-			}
-			return filepath.Clean(path)
+			return OperandPath(args[i], cwd)
 		}
 	}
 	return ""
@@ -7260,11 +7502,9 @@ func cpDestination(args []string, static []bool, cwd string) string {
 	if !parsed.ok {
 		return ""
 	}
-	destination := parsed.destination
-	if !filepath.IsAbs(destination) {
-		destination = filepath.Join(cwd, destination)
-	}
-	return filepath.Clean(destination)
+	// A process link in the destination must survive a following dot-dot
+	// until the write proof can resolve the link boundary.
+	return OperandPath(parsed.destination, cwd)
 }
 
 // CopyDestination returns a statically understood cp destination.
@@ -7429,6 +7669,15 @@ func treeHasSymlink(root string) bool {
 		return nil
 	})
 	return found || err != nil
+}
+
+// rsyncDirectoryDestination proves that the destination is a local
+// directory entry. A link copied from the source can occupy a child name,
+// but cannot replace the directory entry named by a trailing-slash target.
+func rsyncDirectoryDestination(program string, args []string, static []bool) bool {
+	last := len(args) - 1
+	return program == "rsync" && last >= 0 && staticAt(static, last) &&
+		filepath.IsAbs(args[last]) && strings.HasSuffix(args[last], "/")
 }
 
 // archiveDestination is the directory an archive call writes in, or "" when
@@ -7710,7 +7959,7 @@ func cmdMklinkDriveRelative(words, args []string, cwd string) ([]string, bool) {
 // maskCmdMklinkCalls blanks the cmd /c mklink calls that cmdMklinkArgs
 // reads, so the opaque link text scan sees only the others.
 func maskCmdMklinkCalls(file *syntax.File, command, home string) string {
-	if !strings.Contains(strings.ToLower(command), "mklink") {
+	if !strings.Contains(textlower.Lower(command), "mklink") {
 		return command
 	}
 	masked := []byte(command)

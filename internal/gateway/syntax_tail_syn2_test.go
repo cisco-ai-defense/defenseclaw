@@ -49,14 +49,13 @@ func TestGAP0744ReadStatementOverTheBudgetStillBlocks(t *testing.T) {
 	}
 }
 
-// A syntax-error remainder the run window or the cut-back tries of
-// shellparse.ReadSyntaxTail do not read is never a silent allow: the call
-// carries the detection-only ACTION-PARSE-FAILURE record in every pack, a
-// control read before the error still blocks, and a control inside the
-// unread part blocks in the strict packs through the raw text scan of the
-// unread remainder (lead ruling (a) on rel-1-0-10:GAP-0745). Rows P10, P11,
-// P31 and P38 of s7-syntchk: a control inside a body of more than
-// maxSyntaxTailRun pieces after a leading fi.
+// A syntax-error remainder shellparse.ReadSyntaxTail cannot read (here the
+// leading fi) is never a silent allow: the call carries the detection-only
+// ACTION-PARSE-FAILURE record in every pack, the record alone never blocks,
+// and a control read before the error still blocks. Rows P10, P11, P31 and
+// P38 of s7-syntchk: a body of more than syntaxTailRunWindow pieces after a
+// leading fi, read whole since rel-1-0-10:GAP-0745
+// (TestGAP0745StatementPastTheRunWindowIsRead).
 func TestGAP0745UnreadRunWindowIsRecordedNeverSilent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixtures are POSIX shell text")

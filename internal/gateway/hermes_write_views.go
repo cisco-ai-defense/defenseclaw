@@ -59,6 +59,15 @@ func (a *APIServer) inspectHermesWriteToolPolicyCtx(
 		return verdict
 	}
 	cfg, connectorName := a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector)
+	if hermesV4ANamesUnplacedTarget(req, views) {
+		// A V4A header that names its file by a Windows spelling no reader
+		// places (C:x, a device path, a share without a file) writes a file
+		// no path rule can name: the unknown tier at least, as the same
+		// envelope through apply_patch is (rel-1-0-10:GAP-1057, GAP-1052).
+		verdict = mergeSandboxShellCommandVerdict(ctx, cfg, connectorName, verdict,
+			withUnknownFinding(nil, unknownReasonFinding(unplacedPatchTargetTitle,
+				actionfacts.UnplacedPatchTargetReason, action.EnforcementCapable)))
+	}
 	for _, extra := range hermesWriteViewRequests(ctx, action, views) {
 		found := dispatchTrustedAction(ctx, extra.request)
 		if extra.selfProtectionOnly {
@@ -67,6 +76,27 @@ func (a *APIServer) inspectHermesWriteToolPolicyCtx(
 		verdict = mergeSandboxShellCommandVerdict(ctx, cfg, connectorName, verdict, found)
 	}
 	return verdict
+}
+
+// hermesV4ANamesUnplacedTarget reports a Hermes patch call in V4A mode one of
+// whose views targets a file by an unplaced Windows name
+// (actionfacts.PatchPathIsUnplacedWindowsName).
+func hermesV4ANamesUnplacedTarget(req *ToolInspectRequest, views []connector.HermesWriteView) bool {
+	if req == nil || req.Tool != "patch" {
+		return false
+	}
+	var mode struct {
+		Mode string `json:"mode"`
+	}
+	if json.Unmarshal(req.Args, &mode) != nil || mode.Mode != "patch" {
+		return false
+	}
+	for _, view := range views {
+		if actionfacts.PatchPathIsUnplacedWindowsName(view.Path) {
+			return true
+		}
+	}
+	return false
 }
 
 // hermesViewRequest is the request of one Hermes write view; a view of a

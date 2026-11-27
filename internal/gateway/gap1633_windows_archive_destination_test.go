@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -87,9 +86,10 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 	if filepath.Separator == '\\' {
 		state = filepath.Join(home, ".defenseclaw")
 	}
-	// rel-1-0-10 GAP-1634 (open): on a Windows host this staged archive
-	// also takes persistence.ssh_authorized_keys_command, a block in every
-	// tier. The state write is what this test proves.
+	// rel-1-0-10 GAP-1634: a staged archive extracted under
+	// $env:USERPROFILE is the state write alone; the link walk reads the
+	// folder in PowerShell words, so the copy that stages the archive is not
+	// a write a link of the extraction may lead to an SSH keys file.
 	staged := `Copy-Item cfgarch.tar staged.tar; tar -xf staged.tar -C $env:USERPROFILE\.defenseclaw`
 	// rel-1-0-10 GAP-1662: a listing before the call does not stage the
 	// archive, a copy onto it still does.
@@ -191,7 +191,7 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 				want := tier.want
 				// The listed-then-copied rows land in the home, which holds
 				// .ssh: the same GAP-1634 block on every host.
-				if (command == staged && runtime.GOOS == "windows" || command == listedCopied || command == listedCopiedPosix) && action == "block" &&
+				if (command == listedCopied || command == listedCopiedPosix) && action == "block" &&
 					strings.Contains(findings, "persistence.ssh_authorized_keys_command") {
 					want = "block"
 				}

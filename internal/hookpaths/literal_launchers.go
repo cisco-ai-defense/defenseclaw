@@ -371,6 +371,16 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 				names = append(names, name)
 			}
 		}
+		// The file of a w or W command, or of the w flag of s, is opened for
+		// writing by name, so a hard link there writes its file, with or
+		// without -i (rel-1-0-10:GAP-1288, GAP-1318).
+		if scripts, ok := sedScriptTexts(words[1:]); ok {
+			for _, script := range scripts {
+				if files, ok := sedScriptWriteFiles(script); ok {
+					names = append(names, files...)
+				}
+			}
+		}
 		return add(names)
 	case program == "cp" || program == "gcp":
 		if len(words) < 3 {
@@ -394,6 +404,72 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			break
 		}
 		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); dest != "" {
+			return []string{dest}
+		}
+	case program == "mv" || program == "gmv":
+		op, ok := parseRename(words[1:], cwd)
+		if !ok || len(op.sources) == 0 {
+			return nil
+		}
+		if op.targetDir != "" {
+			var names []string
+			for _, source := range op.sources {
+				names = append(names, OperandPath(op.targetDir, cwd)+"/"+filepath.Base(source))
+			}
+			return names
+		}
+		if op.dest != "" {
+			return []string{OperandPath(op.dest, cwd)}
+		}
+	case program == "install" || program == "ginstall":
+		if len(words) < 3 {
+			return nil
+		}
+		var destination string
+		var sources []string
+		for i := 1; i < len(words); i++ {
+			word := words[i]
+			switch {
+			case word == "--":
+				sources = append(sources, words[i+1:]...)
+				i = len(words)
+			case word == "-d" || word == "--directory":
+				return nil
+			case word == "-t" || word == "--target-directory":
+				i++
+				if i >= len(words) {
+					return nil
+				}
+				destination = words[i]
+			case strings.HasPrefix(word, "--target-directory="):
+				destination = strings.TrimPrefix(word, "--target-directory=")
+			case strings.HasPrefix(word, "-t") && len(word) > 2:
+				destination = word[2:]
+			case strings.HasPrefix(word, "-"):
+				continue
+			default:
+				sources = append(sources, word)
+			}
+		}
+		if destination != "" {
+			if len(sources) == 0 {
+				return nil
+			}
+			var names []string
+			for _, source := range sources {
+				names = append(names, OperandPath(destination, cwd)+"/"+filepath.Base(source))
+			}
+			return names
+		}
+		if len(sources) >= 2 {
+			return []string{OperandPath(sources[len(sources)-1], cwd)}
+		}
+	case program == "rsync":
+		if len(words) < 3 {
+			return nil
+		}
+		dest := archiveCopyDestination(words[1:], makeStatic(len(words)-1), cwd)
+		if dest != "" {
 			return []string{dest}
 		}
 	case program == "tee" || program == "gtee":

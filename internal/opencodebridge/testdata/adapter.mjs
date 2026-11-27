@@ -119,3 +119,47 @@ assert.equal(handlers.size, 0, "unload disposes every hook");
   console.warn = warn;
   await cleanup2();
 }
+// The user's turn (OpenCode 2.x session.prompt) is delivered to the bridge as
+// a session.prompt event for a root session only, bounded, never changed or
+// awaited; a host with no session hook, or a child session, sends nothing.
+{
+  let promptHandler, parentID = "";
+  const seen = [];
+  const prompt = { text: "refactor the loader", files: [] };
+  const ctx3 = { ...ctx, event: { subscribe: async function* () {} },
+    session: { ...ctx.session,
+      get: async ({ sessionID }) => ({ id: sessionID, location: foreign ? { ...location, directory: "/other" } : location, ...(parentID ? { parentID } : {}) }),
+      hook: async (name, callback) => { assert.equal(name, "prompt"); promptHandler = callback; return { dispose: async () => { promptHandler = undefined; } }; } } };
+  const cleanup3 = await defenseclawV2Setup(ctx3, async () => ({
+    initialize: async () => {}, "tool.execute.before": async () => {}, "tool.execute.after": async () => {},
+    event: async ({ event }) => { seen.push(event); },
+  }));
+  assert.equal(typeof promptHandler, "function", "the prompt hook is registered");
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(promptHandler({ sessionID: "session", messageID: "m1", prompt, delivery: "immediate" }), undefined, "the hook never holds the prompt");
+  await settle();
+  assert.deepEqual(seen.map(e => [e.type, e.id, e.prompt, e.properties.sessionID]), [["session.prompt", "m1", "refactor the loader", "session"]]);
+  assert.equal(prompt.text, "refactor the loader", "the turn is never changed");
+  promptHandler({ sessionID: "session", messageID: "m2", prompt: { text: "x".repeat(40000) } });
+  await settle();
+  assert.equal(seen.at(-1).prompt.length, 16 * 1024, "the text is bounded");
+  const count = seen.length;
+  parentID = "root";
+  promptHandler({ sessionID: "child", messageID: "m3", prompt });
+  promptHandler({ sessionID: "session", messageID: "m4", prompt: { text: "" } });
+  await settle();
+  assert.equal(seen.length, count, "a child session's prompt and an empty one are not sent");
+  parentID = "";
+  foreign = true;
+  promptHandler({ sessionID: "session", messageID: "m5", prompt });
+  await settle();
+  foreign = false;
+  assert.equal(seen.length, count, "a session of another location is not sent");
+  await cleanup3();
+  assert.equal(promptHandler, undefined, "unload disposes the prompt hook");
+}
+{
+  // A host without session.hook: nothing to register, setup still succeeds.
+  const ctx4 = { ...ctx, event: { subscribe: async function* () {} }, session: { get: ctx.session.get } };
+  await (await defenseclawV2Setup(ctx4, async () => ({ initialize: async () => {}, "tool.execute.before": async () => {}, "tool.execute.after": async () => {}, event: async () => {} })))();
+}

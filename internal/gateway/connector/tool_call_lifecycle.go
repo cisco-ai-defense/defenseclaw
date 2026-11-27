@@ -983,7 +983,7 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			StructuredActionEvents: []string{"tool.execute.before"},
 			ResultContentEvents:    []string{"tool.execute.after"},
 			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"session.created", "session.status", "session.idle", "session.error", "session.deleted"},
+			AuditOnlyEvents:        []string{"session.created", "session.status", "session.idle", "session.error", "session.deleted", "session.prompt"},
 		},
 		CoveredToolSurfaces: []ToolSurface{
 			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,

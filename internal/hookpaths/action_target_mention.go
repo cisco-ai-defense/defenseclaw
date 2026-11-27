@@ -28,9 +28,11 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -168,6 +170,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		if windowsHost {
 			value = actionMSYSDrivePath(value)
+			if placed, ok := actionCmdHomeVariablePath(value, home); ok {
+				value = placed
+			}
 		}
 		if spelledWindows {
 			return actionSpelledWindowsTarget(value, tilde, base, home, stateOnly)
@@ -347,14 +352,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					return true
 				}
 			}
-			// On a Windows host a Windows home's paths are spelled with
-			// backslashes (C:\Users\me\.ssh\authorized_keys). The resolver
-			// reads a backslash as a POSIX escape and removes it, so its
-			// reading never names the key that spelling names; the plain
-			// value keeps the spelling, and it still judges the word there,
-			// as on rel/1.0.10 (rel-1-0-10:GAP-1624). The resolver's own
-			// candidates below are judged too.
-			if (!resolverPattern || windowsHost) && known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
+			if actionPlainValueJudged(resolverPattern, windowsHost, value) && known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				// A parsed value has had its shell tilde expanded already;
 				// a remaining "~/" was quoted, escaped or parameter-derived.
 				if check(value, false, effectiveCWD) {
@@ -2098,10 +2096,14 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	}
 	pattern = OperandPath(pattern, cwd)
 	dots := sync.OnceValue(func() bool { return windows || globs.dotNames() || actionShellProfileMayDotglob(home) })
+	// The names are matched in the folder the pattern's dot-dot steps lead
+	// to: rm -f x/../.ssh/* after cd .. names the authorized keys files as
+	// rm -f .ssh/* does (actionGlobPatternPlaced, rel-1-0-10:GAP-1020).
+	placed := actionGlobPatternPlaced(pattern)
 	for _, target := range append([]string{ssh}, ProtectedAuthorizedKeysPaths(home)...) {
 		// In a POSIX shell * and ? skip a leading dot: at the home folder
 		// echo * names no .ssh unless dotglob may be on (rel-1-0-6:GAP-0211).
-		if actionGlobPathMatch(pattern, target) && (actionGlobDotComponentsMatch(pattern, target) || dots()) {
+		if actionGlobPathMatch(placed, target) && (actionGlobDotComponentsMatch(placed, target) || dots()) {
 			return true
 		}
 	}
@@ -2112,21 +2114,47 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	}
 	hidden := actionGlobViewHidden(cwd, home)
 	userView := !hidden && actionProcessOwnsHome(home)
-	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, userView, dots)
+	candidates, complete, unseen, capped := actionExpandGlobWalk(pattern, literal, hidden, userView, dots, false, false)
 	for _, candidate := range candidates {
-		if protectedReachPath(candidate, protected, ssh) {
+		resolved, ok := ResolveWriteTarget(candidate)
+		if !ok {
+			// A match this process cannot resolve in a hidden view (a link
+			// from a folder it reads into the home it cannot: the managed
+			// gateway behind ProtectHome) names a file the walk did not
+			// see: the walk is unseen there, and the client's answer
+			// decides, else the pattern is unproved (rel-1-0-10:GAP-0444).
+			unseen = unseen || hidden
+			continue
+		}
+		if protectedReachResolved(resolved, protected, ssh) {
 			globs.note(pattern, "1")
 			return true
 		}
 	}
-	if complete {
+	if complete && (!hidden || !unseen) {
 		globs.note(pattern, "0")
+		return false
+	}
+	if capped {
+		// The walk read every folder it reached and stopped only at a
+		// counted bound, with no protected file among the matches it read:
+		// the reading is TRUNCATED (the one bound rule), recorded on the
+		// hook call (noteGlobCut), not a protected target. The name match
+		// above still holds a pattern that can spell .ssh or a key file
+		// (rel-1-0-10:GAP-1324).
+		globs.note(pattern, GlobFactCapped)
+		noteGlobCut(bounded.Of(bounded.Paths))
 		return false
 	}
 	if hidden && unseen {
 		if answer := globs.answer(pattern); answer != "" {
 			// A walk this process could not see defers to the client,
-			// which expanded the pattern as the user.
+			// which expanded the pattern as the user; its walk past a
+			// bound is TRUNCATED, as this process's own would be.
+			if answer == GlobFactCapped {
+				noteGlobCut(bounded.Of(bounded.Paths))
+				return false
+			}
 			return answer == "1"
 		}
 		if !globs.fromClient() {
@@ -2190,7 +2218,7 @@ type actionGlobs struct {
 	// nested body's scan shares it.
 	memo *TargetMemo
 	// dots is set when the command may make * and ? match a leading dot
-	// (actionCommandMayDotglob).
+	// (CommandMayDotglob).
 	dots bool
 }
 
@@ -2201,7 +2229,7 @@ func (g *actionGlobs) forCommand(command string) *actionGlobs {
 	if g != nil {
 		scan = *g
 	}
-	scan.dots = actionCommandMayDotglob(command)
+	scan.dots = CommandMayDotglob(command)
 	return &scan
 }
 
@@ -2241,19 +2269,16 @@ func actionDotglobSettingIn(folded string) bool {
 	return false
 }
 
-// actionCommandMayDotglob reads the command with plain substring checks
-// first: the regular expression is an automaton run over every byte, which
-// costs a large heredoc body hundreds of milliseconds, and it can match only
-// where a glob character is followed by an opening parenthesis.
-func actionCommandMayDotglob(command string) bool {
-	return CommandMayDotglob(command)
-}
-
-// CommandMayDotglob is actionCommandMayDotglob, for the gateway's lexical
-// gate on the by-name reading (copyModeCallMayNameSSHFolder): a call that
-// may turn dotglob on lets any pattern select the SSH folder.
+// CommandMayDotglob reports a command whose own words may make * and ?
+// match a leading dot. The glob scan of each command and the gateway's
+// lexical gate on the by-name reading (copyModeCallMayNameSSHFolder: a call
+// that may turn dotglob on lets any pattern select the SSH folder) read it.
+// It reads the command with plain substring checks first: the regular
+// expression is an automaton run over every byte, which costs a large
+// heredoc body hundreds of milliseconds, and it can match only where a glob
+// character is followed by an opening parenthesis.
 func CommandMayDotglob(command string) bool {
-	if actionDotglobSettingIn(strings.ReplaceAll(strings.ToLower(command), "_", "")) {
+	if actionDotglobSettingIn(strings.ReplaceAll(textlower.Lower(command), "_", "")) {
 		return true
 	}
 	if !strings.Contains(command, "*(") && !strings.Contains(command, "?(") && !strings.Contains(command, "](") {
@@ -2307,7 +2332,7 @@ func RegisterSandboxGuestHome(home string) { sandboxGuestHome = home }
 // A decision by name alone (fixturefs.Unread) reads no startup file: the
 // actor's files are not on this host, so it reads the actor's home as the
 // laptop reads a home whose files set no dotglob, and only the call's own
-// words (actionCommandMayDotglob) or the inherited options turn it on.
+// words (CommandMayDotglob) or the inherited options turn it on.
 // Taking the unread home as one that may set dotglob made ~/* and ~/?ssh
 // select .ssh: the actor blocked tar cz ~/* and cp -r ~/?ssh /tmp/x, which
 // the laptop, the parent and rel allow (substrate-1 GAP-1023).
@@ -2360,9 +2385,10 @@ func (g *actionGlobs) recording() bool { return g != nil && g.record != nil }
 func (g *actionGlobs) full() bool { return g.recording() && len(g.record) >= maxGlobFacts }
 
 // note records the client's answer: "1" when a match reaches a protected
-// file, "0" when its walk was complete and no match does.
+// file, "0" when its walk was complete and no match does, GlobFactCapped when
+// it stopped at a bound (sent as GlobCapFactPrefix, actionGlobFacts).
 func (g *actionGlobs) note(pattern, answer string) {
-	if !g.recording() || len(GlobFactPrefix)+len(pattern) > MaxWriteTargetPathBytes {
+	if !g.recording() || len(GlobCapFactPrefix)+len(pattern) > MaxWriteTargetPathBytes {
 		return
 	}
 	if key := GlobFactPrefix + pattern; g.record[key] != "1" {
@@ -2378,7 +2404,13 @@ func (g *actionGlobs) answer(pattern string) string {
 	if g == nil || g.facts == nil {
 		return ""
 	}
-	return g.facts[GlobFactPrefix+pattern]
+	if answer := g.facts[GlobFactPrefix+pattern]; answer != "" {
+		return answer
+	}
+	if g.facts[GlobCapFactPrefix+pattern] == "1" {
+		return GlobFactCapped
+	}
+	return ""
 }
 
 // actionGlobFacts expands, as the user, each pathname pattern the action
@@ -2391,6 +2423,16 @@ func actionGlobFacts(command, cwd, home string) map[string]string {
 	}
 	globs := &actionGlobs{record: map[string]string{}}
 	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
+	// A capped walk goes on the wire under its own key (GlobCapFactPrefix),
+	// never as a GlobFactPrefix value: a 1.0.10 gateway refuses the whole
+	// map for an answer it does not know and falls back to its closed
+	// default, and ignores a key it does not know.
+	for key, answer := range globs.record {
+		if answer == GlobFactCapped {
+			delete(globs.record, key)
+			globs.record[GlobCapFactPrefix+strings.TrimPrefix(key, GlobFactPrefix)] = "1"
+		}
+	}
 	return globs.record
 }
 
@@ -2437,6 +2479,20 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 // unless dots, and no symlink to a directory followed. The folders it reads
 // count toward the walk's bounds (rel-1-0-10:GAP-0380).
 func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots func() bool, fold, globstar bool) (candidates []string, complete, unseen bool) {
+	candidates, complete, unseen, _ = actionExpandGlobWalk(pattern, literal, hidden, userView, dots, fold, globstar)
+	return candidates, complete, unseen
+}
+
+// actionExpandGlobWalk is actionExpandGlobStar; capped tells that the walk is
+// incomplete only because it reached one of its counted bounds (reads, names,
+// entries), with every folder it read readable and every name it read
+// decided, so what it did not read is a TRUNCATED reading, not an unproved
+// one (rel-1-0-10:GAP-1324).
+func actionExpandGlobWalk(pattern, literal string, hidden, userView bool, dots func() bool, fold, globstar bool) (candidates []string, complete, unseen, capped bool) {
+	// undecided: a folder the walk could not read or a name it could not
+	// match exactly; with it, a cap is not the only gap.
+	undecided := false
+	defer func() { capped = capped && !complete && !undecided && !unseen }()
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -2464,27 +2520,30 @@ func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots f
 				next = append(next, tree...)
 				complete = complete && treeComplete
 				unseen = unseen || treeUnseen
+				// A globstar tree past its bounds is not told apart from
+				// one it could not read: unproved, as before.
+				undecided = undecided || !treeComplete
 				if len(next) > actionGlobMaxNames {
-					complete = false
+					complete, capped = false, true
 					break
 				}
 			}
 			if len(next) == 0 {
-				return nil, complete, unseen
+				return nil, complete, unseen, capped
 			}
 			paths = next
 			continue
 		}
 		if !strings.ContainsAny(component, "*?[") {
 			for i := range paths {
-				paths[i] = filepath.Join(paths[i], component)
+				paths[i] = actionGlobJoin(paths[i], component)
 			}
 			continue
 		}
 		var next []string
 		for _, dir := range paths {
 			if reads++; reads > actionGlobMaxReads || len(next) >= actionGlobMaxNames {
-				complete = false
+				complete, capped = false, true
 				break
 			}
 			directory, err := actionGlobOpenDir(dir)
@@ -2527,7 +2586,7 @@ func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots f
 					if !exact {
 						// The user's locale or shell version decides this
 						// name: the walk cannot prove it either way.
-						complete = false
+						complete, undecided = false, true
 					}
 					if (hit || !exact) && !actionGlobSkipsDotName(component, name, dots) {
 						matched = append(matched, name)
@@ -2547,25 +2606,50 @@ func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots f
 				// the shell skips it (*/* in a project with files).
 				continue
 			}
-			if err != nil && err != io.EOF || entries > actionGlobMaxEntries {
-				complete = false
+			if err != nil && err != io.EOF {
+				complete, undecided = false, true
+			}
+			if entries > actionGlobMaxEntries {
+				complete, capped = false, true
 			}
 			for _, name := range matched {
 				next = append(next, filepath.Join(dir, name))
 			}
 		}
 		if len(next) == 0 {
-			return nil, complete, unseen
+			return nil, complete, unseen, capped
 		}
 		paths = next
 	}
-	return paths, complete, unseen
+	return paths, complete, unseen, capped
 }
 
 // actionGlobStarTree is what a globstar ** names under root: root and every
 // directory below it, and with files every other entry below it too. A
 // symlink is a name, never a folder to read; a name with a leading dot is
 // skipped unless dots. reads and entries are the walk's counters.
+// actionGlobJoin joins one literal component of a pattern as the kernel
+// walks it. On a POSIX host a '..' after a name the walk reached that is a
+// link ascends from the link target's folder, not from the
+// folder that holds the link: u*/../keydir/x with u* matching a link up ->
+// project/sub is project/keydir/x (rel-1-0-10:GAP-0443; the literal
+// spelling up/../keydir/x was walked so since GAP-0400). Anything else, a
+// link that does not resolve, and every '..' on Windows are joined by name
+// as before.
+func actionGlobJoin(dir, component string) string {
+	// Windows resolves '..' by name, through junctions and links alike (the
+	// Win32 path is normalized before the file system walks it): the name
+	// join is what it opens there.
+	if component == ".." && runtime.GOOS != "windows" {
+		if info, err := pathLstat(dir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if physical, err := pathEvalSymlinks(dir); err == nil {
+				return filepath.Dir(physical)
+			}
+		}
+	}
+	return filepath.Join(dir, component)
+}
+
 func actionGlobStarTree(root string, files, hidden, userView bool, dots func() bool, reads, entries *int) (out []string, complete, unseen bool) {
 	complete = true
 	if !files {
@@ -2901,8 +2985,9 @@ func ResolveActiveStateHardlinkTarget(value, home string) (state string, same, c
 		if !os.SameFile(info, file.info) {
 			continue
 		}
-		// The index can be up to activeStateIndexTTL old: confirm the name
-		// still holds this file before mapping the alias to it.
+		// A name of the index may have been replaced since its walk (a
+		// change in the same fingerprint tick): confirm the name still holds
+		// this file before mapping the alias to it.
 		path := filepath.Join(activeRoot, filepath.FromSlash(file.relative))
 		if current, err := pathStat(path); err == nil && os.SameFile(info, current) {
 			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true, true
@@ -2920,23 +3005,26 @@ func stateReadUnanswered(unanswered bool) bool {
 	return unanswered
 }
 
-// The identity index of one active state tree is built at most once per
-// activeStateIndexTTL and shared by every shell operand and request in that
-// time, so a command naming many ordinary hard links costs one bounded walk.
-// The walk stops after activeStateIndexEntries entries, well inside every hook
-// deadline; a file it did not reach is not mapped (no block), which never
-// refuses ordinary shell work. Every bound of these walks counts entries,
-// never wall-clock time, so a call gets the same answer on a loaded box and
-// an idle one (GAP-0339). A native patch target is
-// judged by ResolveActiveStateIdentity instead, which neither caches nor
-// treats an unfinished walk as an answer (GAP-0488, GAP-0073).
+// The identity index of one active state tree is kept while every folder and
+// link it read keeps its fingerprint (activeStateView.unchanged), and shared
+// by every shell operand and request in that time, so a command naming many
+// ordinary hard links costs one bounded walk. A view whose folders changed
+// too recently to be fingerprinted (activeStateSettleLimit) is kept for the
+// hook call only. No answer depends on how much time passed: the old index
+// was kept for 2 s whatever changed in it (DET111 step 2, no wall clock in the
+// readers). The walk stops after activeStateIndexEntries entries, well inside
+// every hook deadline; a file it did not reach is not mapped (no block), which
+// never refuses ordinary shell work. Every bound of these walks counts
+// entries, never wall-clock time, so a call gets the same answer on a loaded
+// box and an idle one (GAP-0339). A native patch target is judged by
+// ResolveActiveStateIdentity instead, which neither caches nor treats an
+// unfinished walk as an answer (GAP-0488, GAP-0073).
 var (
 	activeStateIndexEntries = 4096
-	activeStateIndexTTL     = 2 * time.Second
 	activeStateIndexWalks   atomic.Int64
 	activeStateIndex        struct {
 		sync.Mutex
-		byRoot map[string]activeStateIdentityIndex
+		byRoot map[string]activeStateView
 	}
 	// The identity walk of a patch target has a large entry bound only: it
 	// runs for an existing multiply linked target, never answers from a
@@ -2949,40 +3037,54 @@ type activeStateIdentity struct {
 	info     os.FileInfo
 }
 
-type activeStateIdentityIndex struct {
-	built time.Time
-	files []activeStateIdentity
-}
-
 // activeStateIdentities is the identity index of the active state at
 // activeRoot. unanswered reports that a read of its walk did not answer
-// (activeStateWalk.unanswered): such an index is not kept, so the next call
-// reads the state again.
+// (activeStateWalk.unanswered): such an index is kept neither across calls
+// nor for the hook call, so the next lookup reads the state again
+// (GAP-1789).
 func activeStateIdentities(activeRoot string) (files []activeStateIdentity, unanswered bool) {
-	activeStateIndex.Lock()
-	defer activeStateIndex.Unlock()
-	now := time.Now()
-	if index, ok := activeStateIndex.byRoot[activeRoot]; ok && now.Sub(index.built) < activeStateIndexTTL {
-		return index.files, false
-	}
-	for root, index := range activeStateIndex.byRoot {
-		if now.Sub(index.built) >= activeStateIndexTTL {
-			delete(activeStateIndex.byRoot, root)
+	call := currentHookCall()
+	if call != nil {
+		if files, ok := call.stateIdentities[activeRoot]; ok {
+			return files, false
 		}
 	}
-	if activeStateIndex.byRoot == nil {
-		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
+	activeStateIndex.Lock()
+	defer activeStateIndex.Unlock()
+	if view, ok := activeStateIndex.byRoot[activeRoot]; ok {
+		if view.unchanged() {
+			return view.files, false
+		}
+		delete(activeStateIndex.byRoot, activeRoot)
 	}
+	settleLimit := activeStateSettleLimit(time.Now())
 	activeStateIndexWalks.Add(1)
-	walk := &activeStateWalk{limit: activeStateIndexEntries, visit: func(relative string, info os.FileInfo) bool {
-		files = append(files, activeStateIdentity{relative: relative, info: info})
-		return false
-	}}
+	walk := &activeStateWalk{
+		limit:  activeStateIndexEntries,
+		record: true,
+		visit: func(relative string, info os.FileInfo) bool {
+			files = append(files, activeStateIdentity{relative: relative, info: info})
+			return false
+		},
+	}
 	walk.run(activeRoot)
 	if walk.unanswered {
 		return files, true
 	}
-	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
+	// The identity walk is capped at activeStateIndexEntries; keeping all of
+	// its fingerprints costs fewer stats than walking the same over-limit
+	// directory tree on every call, and still invalidates on any change.
+	if walk.settledBefore(settleLimit) {
+		if activeStateIndex.byRoot == nil || len(activeStateIndex.byRoot) >= 4 {
+			activeStateIndex.byRoot = make(map[string]activeStateView)
+		}
+		activeStateIndex.byRoot[activeRoot] = activeStateView{files: files, watches: walk.watches}
+	} else if call != nil && len(call.stateIdentities) < 4 {
+		if call.stateIdentities == nil {
+			call.stateIdentities = make(map[string][]activeStateIdentity)
+		}
+		call.stateIdentities[activeRoot] = files
+	}
 	return files, false
 }
 
@@ -3553,6 +3655,69 @@ func actionWordHasUnquotedGlob(word *syntax.Word, command string) bool {
 		strings.ContainsAny(actionMaskLiteralMetacharacters(command[start:end]), "*?[]")
 }
 
+// actionInertSetOptions and actionInertShoptOptions are the shell options
+// that change neither pathname expansion, word expansion nor which command a
+// word runs: error, unset-name and pipeline exit handling, tracing and the
+// last pipeline stage of a non-interactive shell. One spec string each, not a
+// literal per name (the GAP-0749 bounded sweep reads every package string
+// literal as a word).
+var (
+	actionInertSetOptions   = strings.Fields("errexit nounset pipefail xtrace verbose")
+	actionInertShoptOptions = strings.Fields("lastpipe inherit_errexit checkwinsize histappend cmdhist lithist huponexit checkjobs")
+)
+
+// actionInertShellOptions reports a set or shopt call (its words after the
+// program) that only turns inert options on or off or prints them:
+// set -e, set -euo pipefail, set +x, shopt -s lastpipe, shopt -u checkjobs
+// (rel-1-0-10:GAP-1748). set with an operand (set -- a b) rebinds the
+// positional parameters and is not inert; an option outside the inert lists
+// (dotglob, noglob, nullglob, expand_aliases, ...) is not either.
+func actionInertShellOptions(program string, args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch program {
+	case "set":
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			if len(arg) < 2 || arg[0] != '-' && arg[0] != '+' {
+				return false
+			}
+			flags := arg[1:]
+			named := strings.HasSuffix(flags, "o")
+			if named {
+				flags = flags[:len(flags)-1]
+			}
+			if strings.Trim(flags, "euxv") != "" {
+				return false
+			}
+			if named {
+				if i+1 == len(args) || !slices.Contains(actionInertSetOptions, args[i+1]) {
+					return false
+				}
+				i++
+			}
+		}
+		return true
+	case "shopt":
+		names := 0
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") {
+				if names > 0 || len(arg) < 2 || strings.Trim(arg[1:], "supq") != "" {
+					return false
+				}
+				continue
+			}
+			if !slices.Contains(actionInertShoptOptions, arg) {
+				return false
+			}
+			names++
+		}
+		return names > 0
+	}
+	return false
+}
+
 func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 	return actionKnownReadOnlyShellDepth(file, home, 0)
 }
@@ -3687,6 +3852,15 @@ func actionKnownReadOnlyShellMode(file *syntax.File, home string, depth int, bod
 			}
 		case "dirs":
 			// dirs prints or clears the directory stack (GAP-2552).
+		case "set", "shopt":
+			// An option that changes neither what a later word expands to
+			// nor what runs (set -euo pipefail, shopt -s lastpipe) reads and
+			// writes nothing: shopt -s lastpipe; cd ~/.ssh | cat; cat notes.txt
+			// is the read-only call it is without the option
+			// (rel-1-0-10:GAP-1748). Any other option, or set with operands,
+			// keeps the call off the list.
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionInertShellOptions(programBase(program), words[1:])
 		case "less":
 			for _, arg := range call.Args[1:] {
 				option, known := StaticWord(arg, home)
@@ -6167,10 +6341,16 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 // (GAP-2279 answer budget); a relative value is always read. missing reports
 // an absolute value that Lstat found not to exist.
 func actionStateEntryMayDiffer(value string) (differ, missing bool) {
+	return actionStateEntryMayDifferWith(value, nil)
+}
+
+// actionStateEntryMayDifferWith is actionStateEntryMayDiffer reading the
+// entry through memo's Lstat answers (nil: the file system).
+func actionStateEntryMayDifferWith(value string, memo *TargetMemo) (differ, missing bool) {
 	if !filepath.IsAbs(value) {
 		return true, false
 	}
-	info, err := pathLstat(value)
+	info, err := memo.lstat(value)
 	if err != nil {
 		return !os.IsNotExist(err), os.IsNotExist(err)
 	}
@@ -6500,4 +6680,19 @@ func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bo
 		}
 	}
 	return out
+}
+
+// actionPlainValueJudged reports whether the plain value of a word is judged
+// beside its resolver reading in actionPosixTargetMention. A word the
+// resolver reads (resolverPattern) is judged by its escaped pattern, not by
+// the flattened value: 'authorized_key[s]'* names no key. On a Windows host a
+// Windows home's paths are spelled with backslashes
+// (C:\Users\me\.ssh\authorized_keys); the resolver reads a backslash as a
+// POSIX escape and removes it, so its reading never names the key that
+// spelling names. The plain value keeps the spelling and still judges such a
+// word there, as on rel/1.0.10 (rel-1-0-10:GAP-1624), and only such a word:
+// the check ran for every resolver word on a Windows host, so the flattened
+// glob reading of a quoted pattern came back there (rel-1-0-10:GAP-1627).
+func actionPlainValueJudged(resolverPattern, windowsHost bool, value string) bool {
+	return !resolverPattern || windowsHost && strings.Contains(value, `\`)
 }

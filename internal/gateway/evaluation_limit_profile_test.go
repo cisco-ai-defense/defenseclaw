@@ -36,7 +36,7 @@ func TestEvaluationLimitOnlyVerdictMapsByProfile(t *testing.T) {
 	omitted := withOmittedOperandLimitFinding(nil, true)
 	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH"}
 	keys := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
-	advisory := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", enforcement: findingEnforcementAlertOnly}
+	advisory := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", Proof: advisoryProof}
 	with := func(findings []RuleFinding, more ...RuleFinding) []RuleFinding {
 		return append(slices.Clone(findings), more...)
 	}

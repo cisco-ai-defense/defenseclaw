@@ -500,6 +500,10 @@ var (
 // envelope binds no call.
 func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []bool) {
 	lines := strings.Split(text, "\n")
+	// An envelope-bearing script needs the conservative operator-line scan:
+	// malformed quoting or a staged feed can turn data into another call.
+	// Ordinary search patterns without a complete envelope stay shell data.
+	hasEnvelope := false
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))
 	fedBody = make([]bool, len(lines))
@@ -518,6 +522,7 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 		if end == len(lines) {
 			continue // patchEnvelopePaths already rejects an open envelope
 		}
+		hasEnvelope = true
 		inputLine, opener := start, lines[start][:begin]
 		if strings.TrimSpace(opener) == "" && start > 0 {
 			inputLine, opener = start-1, lines[start-1]
@@ -580,7 +585,8 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 	}
 	for i, line := range lines {
 		if inert[i] ||
-			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
+			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 &&
+				(!hasEnvelope || !strings.ContainsAny(line, ";|&")) {
 			continue
 		}
 		count := patchProgramWordCount(line)
@@ -833,11 +839,11 @@ func invokesApplyPatch(text string) bool {
 	if !tactics.MayNameProgram(text, applyPatchNames...) {
 		return false
 	}
-	if tactics.RunsProgram(text, applyPatchNames...) {
+	if tactics.RunsProgramIncludingLaunchers(text, applyPatchNames...) {
 		return true
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if tactics.RunsProgram(line, applyPatchNames...) {
+		if tactics.RunsProgramIncludingLaunchers(line, applyPatchNames...) {
 			return true
 		}
 	}

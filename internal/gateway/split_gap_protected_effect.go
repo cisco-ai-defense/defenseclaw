@@ -423,7 +423,7 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 // (persistence.shell_profile_write is MEDIUM: an alert in default, a block
 // in strict).
 func splitGapEnforcedFinding(finding RuleFinding) bool {
-	if finding.dataWordRecord || canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID {
+	if finding.boundRecord || canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID {
 		return false
 	}
 	if !finding.contributesToEnforcement() && !finding.contributesToAlertOnly() {

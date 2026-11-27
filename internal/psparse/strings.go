@@ -273,25 +273,15 @@ func (p *parser) decodeBacktick(raw string, stripQuotes bool) (string, bool) {
 }
 
 // scanParenBody returns the text inside a $( ... ) starting just after the '(',
-// and how many runes were consumed including the closing ')'.
+// and how many runes were consumed including the closing ')'. The end is found
+// the way the lexer finds it in a string (scanSubexpr: quotes, nested strings,
+// comments and backtick escapes are skipped whole, so a ")" inside 'a)b' does
+// not end the group). A group that never closes takes the rest of the text.
 func scanParenBody(runes []rune) (string, int) {
-	depth := 1
-	var b strings.Builder
-	i := 0
-	for ; i < len(runes); i++ {
-		r := runes[i]
-		switch r {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return b.String(), i + 1
-			}
-		}
-		b.WriteRune(r)
+	if end, ok := scanSubexpr(runes, 0); ok {
+		return string(runes[:end-1]), end
 	}
-	return b.String(), i
+	return string(runes), len(runes)
 }
 
 // scanEmbeddedVar reads a $var / ${...} / $scope:name beginning at runes[0]=='$'

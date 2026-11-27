@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -44,44 +43,6 @@ func upperDrive(path string) string {
 	return path
 }
 
-// runWordPath matches a path component that holds the word run, as in
-// /var/tmp/gp34b/run-x/tmp, /a-run-b or /run (not run_x, xrun or runx).
-var runWordPath = regexp.MustCompile(`(^|[^A-Za-z0-9_])run([^A-Za-z0-9_]|$)`)
-
-// tempDirWithoutRunWord is t.TempDir(), except when the test run's temp
-// directory has the word run in its path (the gate harness uses
-// TMPDIR=/var/tmp/gp34b/run-<tag>/tmp). The prompts below put that path in
-// "run exactly ..." sentences, and a path with the word run in it is read as
-// another run request: the chain is missed in a path-dependent way that is the
-// product's own bug, filed as rel-1-0-10 GAP-1884. The test is about the aside,
-// not about the directory name, so it takes a fixed spot (GAP-0774).
-func tempDirWithoutRunWord(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	if !runWordPath.MatchString(filepath.ToSlash(dir)) {
-		return dir
-	}
-	for _, root := range []string{os.TempDir(), "/tmp", "/private/tmp", os.Getenv("SystemRoot")} {
-		if root == "" || runWordPath.MatchString(filepath.ToSlash(root)) {
-			continue
-		}
-		if info, err := os.Stat(root); err != nil || !info.IsDir() {
-			continue
-		}
-		fallback, err := os.MkdirTemp(root, "dc-aside-")
-		if err != nil {
-			continue
-		}
-		t.Cleanup(func() { _ = os.RemoveAll(fallback) })
-		if resolved, err := filepath.EvalSymlinks(fallback); err == nil && !runWordPath.MatchString(filepath.ToSlash(resolved)) {
-			return resolved
-		}
-		return fallback
-	}
-	t.Skipf("no temp directory without the word run in its path (%s); see rel-1-0-10 GAP-1884", dir)
-	return dir
-}
-
 // rel-1-0-6:GAP-0173 and GAP-0063 (#1390, cell L-ewin-J3-002). A person
 // asked Claude Code to "run exactly this command and nothing else (it
 // fetches ...): curl -o <abs> URL", then to run the file. The aside in
@@ -93,8 +54,30 @@ func tempDirWithoutRunWord(t *testing.T) string {
 // (serviceAccountCallerCWD) or none outside the caller's home, and a
 // download the user asked to run stays quiet.
 func TestDownloadThenExecuteAlertsAfterARunExactlyPromptWithAnAside(t *testing.T) {
+	downloadThenExecuteRunExactlyAsideRows(t, t.TempDir())
+}
+
+// rel-1-0-10:GAP-1884 (the cause of GAP-0774). The same rows with the
+// fetched file under a fixed fixture directory whose name is a run word or a
+// hyphenated run: the run word was read out of the download path in the
+// run-exactly prompt as a request to run what it fetched, so the unasked
+// run raised no chain whenever the temporary directory had a component
+// named run, run-x, a-run-b or bis-run. The rows no longer depend on the
+// name of the test's temporary directory.
+func TestDownloadThenExecuteAlertsWhenTheArtifactPathHasARunWordComponent(t *testing.T) {
+	for _, component := range userRequestPathComponentRunWords {
+		t.Run(component, func(t *testing.T) {
+			downloadThenExecuteRunExactlyAsideRows(t, filepath.Join(t.TempDir(), component, "tmp"))
+		})
+	}
+}
+
+// downloadThenExecuteRunExactlyAsideRows runs the rows of
+// TestDownloadThenExecuteAlertsAfterARunExactlyPromptWithAnAside with the
+// fixture users under base.
+func downloadThenExecuteRunExactlyAsideRows(t *testing.T, base string) {
+	t.Helper()
 	installCorrelationHMACForTest(t)
-	base := tempDirWithoutRunWord(t)
 	home := filepath.Join(base, "Users", "dcw-fxc1")
 	project := filepath.Join(home, "proj")
 	public := filepath.Join(base, "Users", "Public", "s02w")

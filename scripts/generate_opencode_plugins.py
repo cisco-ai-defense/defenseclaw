@@ -9,10 +9,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BEGIN = "// BEGIN GENERATED OPENCODE V2 ADAPTER\n"
 END = "// END GENERATED OPENCODE V2 ADAPTER"
+# The Secure Client copy (hooks/opencode-plugin-secure-client.js) is not a
+# target: its reviewed bytes are pinned by TestSecureClientPluginTemplatesArePinned
+# and the Secure Client release, so it keeps the adapter it was reviewed with
+# (it has no session.prompt delivery) until that pin is deliberately renewed.
 TARGETS = (
     "internal/gateway/connector/hooks/opencode-plugin.js",
     "internal/enterprisepolicy/opencode_managed_plugin.js",
-    "internal/gateway/connector/hooks/opencode-plugin-secure-client.js",
     "internal/gateway/connector/testdata/bridge_host/opencode-plugin.js",
     "internal/gateway/connector/testdata/bridge_host/opencode-plugin-managed.js",
 )

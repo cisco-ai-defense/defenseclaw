@@ -66,6 +66,10 @@ func TestGAP1409OrdinaryHardlinksShareOneStateIndex(t *testing.T) {
 		}
 		words = append(words, name+".link")
 	}
+	// One request is one hook call: the fixture was just written, so the
+	// index is kept for the call (its folders have not settled).
+	end := HookCall()
+	defer end()
 	before := activeStateIndexWalks.Load()
 	command := "cat " + strings.Join(words, " ") + " > report.txt"
 	if ActionStateTargetMention(command, cwd, home) {
