@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
 )
 
 // gap1156OpenPad is gap1156Pad with two more pad kinds: tests of present

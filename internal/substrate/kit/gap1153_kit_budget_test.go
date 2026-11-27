@@ -46,11 +46,12 @@ func gap1153Bash(t *testing.T, command, cwd string) []byte {
 // TestGAP1153KitOverBudgetDecisionOnlyForClaimableWords: a shell command
 // over the statement budget gets no protected-target decision when none of
 // its words gives the gateway a claim to read (substrate-1 GAP-1153): a
-// direct write to ~/.ssh/authorized_keys padded past the budget has the
-// key-read proof's facts and the word facts as before, less the decision's
-// proof, which rel made. A word a link moves (ak-link), or a private place
-// of the home (a word in a private working folder), keeps the decision, so
-// those facts are rel's; and the write alone gets the decision as before.
+// write to an ordinary file padded past the budget in an open folder has
+// no proof. A word a link moves (ak-link), a private place of the home (a
+// word in a private working folder), or a word that names a protected file
+// (a direct write to the SSH folder's key list, substrate-1 GAP-1156 item
+// 4) keeps the decision, so those facts are rel's; and the write alone
+// gets the decision as before.
 func TestGAP1153KitOverBudgetDecisionOnlyForClaimableWords(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -87,8 +88,9 @@ func TestGAP1153KitOverBudgetDecisionOnlyForClaimableWords(t *testing.T) {
 		return f.Proofs
 	}
 	direct := "echo k >> ~/.ssh/authorized_keys; " + padding
-	if got := proofs(facts(direct, open, false)); len(got) != 0 {
-		t.Errorf("direct write past the budget in an open folder: proofs %v, want none (no claimable word)", got)
+	ordinary := "echo k >> out.txt; " + padding
+	if head, rel := facts(ordinary, open, false), facts(ordinary, open, true); len(proofs(head)) != 0 || !reflect.DeepEqual(head, rel) {
+		t.Errorf("ordinary write past the budget in an open folder: head facts %+v, rel %+v: want no proof (no claimable word)", head, rel)
 	}
 	if got := proofs(facts(direct, open, true)); !slices.Contains(got, ProofProtectedWrite) {
 		t.Errorf("direct write past the budget with rel's decision: proofs %v, want %s", got, ProofProtectedWrite)
@@ -97,6 +99,7 @@ func TestGAP1153KitOverBudgetDecisionOnlyForClaimableWords(t *testing.T) {
 		{"write alone", "echo k >> ak-link", app},
 		{"link word past the budget", "echo k >> ak-link; " + padding, app},
 		{"private working folder past the budget", direct, app},
+		{"protected word past the budget in an open folder", direct, open},
 	} {
 		head, rel := facts(row.command, row.cwd, false), facts(row.command, row.cwd, true)
 		if !slices.Contains(proofs(head), ProofProtectedWrite) || !reflect.DeepEqual(head, rel) {
