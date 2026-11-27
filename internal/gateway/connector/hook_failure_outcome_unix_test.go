@@ -84,10 +84,12 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 		}
 		runs = append(runs, hookRun{invoke.script, NewCodexConnector(), invoke})
 	}
+	warmNativeGatewayForHookTests(t)
 	for _, run := range runs {
 		for _, mode := range []string{"open", "closed"} {
 			for _, scenario := range []string{"outage", "strict-outage", "malformed", "oversized"} {
 				t.Run(run.name+"/"+mode+"/"+scenario, func(t *testing.T) {
+					parallelHookCase(t)
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 						_, _ = w.Write([]byte("not-json"))
 					}))

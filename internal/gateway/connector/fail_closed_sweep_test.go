@@ -264,6 +264,7 @@ func TestClosedShellHookRejectsMissingHome(t *testing.T) {
 		{"antigravity-hook.sh", `{}`, `"decision":"deny"`, []string{"PreToolUse"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			parallelHookCase(t)
 			cmd := exec.Command("bash", append([]string{filepath.Join(dir, tc.name)}, tc.args...)...)
 			cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+filepath.Join(t.TempDir(), "missing"))
 			cmd.Stdin = strings.NewReader(tc.payload)
