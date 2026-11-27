@@ -487,7 +487,7 @@ func lateFactMayProtect(place, home string, memo *hookpaths.TargetMemo) bool {
 	return place != "" && hookpaths.ProtectedReach(place, home, memo) == hookpaths.GradeNamed
 }
 
-// minBudgetCheckBytes is the shortest shell command shellDecisionOverBudget
+// minBudgetCheckBytes is the shortest shell command shellStatementsOverBudget
 // counts. A call over the statement budget has more than 128 statements,
 // each a word and a separator; a shorter call is never counted and gets
 // the decision, as before, so ordinary calls pay nothing for the check.
@@ -507,25 +507,20 @@ func SetOverBudgetShellProofsForTest(on bool) (restore func()) {
 	return func() { overBudgetDecisionForTest.Store(was) }
 }
 
-// shellDecisionOverBudget reports a POSIX shell command over the statement
-// budget, as the laptop hook client reads a POSIX call
+// shellStatementsOverBudget reports a POSIX shell command over the
+// statement budget, as the laptop hook client reads a POSIX call
 // (clientStatementBudgetExceeded: actionfacts.ShellStatementsOverBudget,
 // the same function), which describes no such call to its gateway
 // (rel-1-0-2:GAP-0568). The gateway refuses it at the budget before any
 // reader that reads the kit's protected-write proof of the whole command
-// runs (dispatchTrustedAction); the readers its twins and cap-floor pieces
-// run judge other text, and read only the kit's word claims, which the
-// caller keeps the decision for. Run on such a call, the decision re-read
-// each statement alone after a dynamic program and cost the actor's hook
-// 140 to 290 ms on an 8 KB script (substrate-1 GAP-1153).
-func shellDecisionOverBudget(command string) bool {
-	return !overBudgetDecisionForTest.Load() && shellStatementsOverBudget(command)
-}
-
-// shellStatementsOverBudget reports a POSIX shell command over the
-// statement budget, whatever SetOverBudgetShellProofsForTest says: the
-// facts of such a call do not depend on whether the kit makes the
-// protected-target decision on it.
+// runs (dispatchTrustedAction), except the budget refusal itself, which
+// reads it with a word claim (substrate-1 GAP-1156); the readers its twins
+// and cap-floor pieces run judge other text, and read only the kit's word
+// claims, which the caller keeps the decision for. Run on such a call, the
+// decision re-read each statement alone after a dynamic program and cost
+// the actor's hook 140 to 290 ms on an 8 KB script (substrate-1 GAP-1153).
+// The answer does not depend on SetOverBudgetShellProofsForTest: the facts
+// of such a call are the same whether the kit makes the decision or not.
 func shellStatementsOverBudget(command string) bool {
 	return len(command) >= minBudgetCheckBytes && actionfacts.ShellStatementsOverBudget(command)
 }
