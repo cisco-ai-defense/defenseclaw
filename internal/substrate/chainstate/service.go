@@ -1639,11 +1639,25 @@ func (s *Service) undone(ctx context.Context, e *actorEntry, in LifecycleEvent) 
 	if len(removed)+len(restored) == 0 {
 		return res, nil
 	}
+	upto := s.stamp(e, s.opts.Now()).UnixNano()
 	res.Forgotten, err = st.ForgetToolChainArtifacts(ctx, instance, func(digest string, received time.Time) bool {
-		after := known && received.UnixNano() > mark
-		return (removed[digest] && (after || !known)) || (restored[digest] && after)
+		return undoForgets(removed[digest], restored[digest], known, mark, upto, received.UnixNano())
 	})
 	return res, err
+}
+
+// undoForgets says whether an undo forgets a stored fact about one file
+// recorded at received (running time): a removed file's facts after the
+// checkpoint's mark (all of them without a mark), a put-back file's only
+// after the mark, and never a fact the leader recorded after it received
+// the undo report (upto, its own stamp), such as a download of the same
+// path after the undo.
+func undoForgets(isRemoved, isRestored, known bool, mark, upto, received int64) bool {
+	if received > upto {
+		return false
+	}
+	after := known && received > mark
+	return (isRemoved && (after || !known)) || (isRestored && after)
 }
 
 func validCommit(c string) bool {

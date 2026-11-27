@@ -253,3 +253,29 @@ func TestGAP0476WorkspaceEventsAreChecked(t *testing.T) {
 		t.Fatalf("a download before the checkpoint was forgotten: %+v", r)
 	}
 }
+
+// RV-0476 N1: an undo never forgets a fact the leader recorded after it
+// received the undo report (its own stamp), with or without the mark.
+func TestGAP0476UndoForgetsNothingRecordedAfterTheReport(t *testing.T) {
+	const mark, upto = 100, 200
+	cases := []struct {
+		removed, restored, known bool
+		received                 int64
+		want                     bool
+	}{
+		{removed: true, known: true, received: 150, want: true},
+		{removed: true, known: true, received: 90, want: false},
+		{removed: true, known: true, received: 201, want: false},
+		{removed: true, received: 50, want: true},
+		{removed: true, received: 201, want: false},
+		{restored: true, known: true, received: 150, want: true},
+		{restored: true, received: 150, want: false},
+		{restored: true, known: true, received: 201, want: false},
+		{known: true, received: 150, want: false},
+	}
+	for i, c := range cases {
+		if got := undoForgets(c.removed, c.restored, c.known, mark, upto, c.received); got != c.want {
+			t.Fatalf("case %d %+v: forget %v", i, c, got)
+		}
+	}
+}

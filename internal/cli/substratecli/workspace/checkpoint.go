@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -106,10 +107,11 @@ type UndoInfo struct {
 	Pushes int
 	ID     string
 	Commit string
-	// Removed and Restored are the files (paths in the actor) the undo
-	// removed (added since the checkpoint) and put back (changed or deleted
-	// since), at most 512 KiB of names each; an actor that does not list
-	// them (an older script) leaves both empty. The launcher reports them
+	// Removed and Restored are the files (paths in the actor, below the
+	// folder) the undo removed (added since the checkpoint and gone after
+	// it) and put back (changed or deleted since), at most 512 KiB of names
+	// each; an actor that does not list them (an older script) leaves both
+	// empty. The launcher reports them
 	// to the cluster's chain state (substrate-1:GAP-0476).
 	Removed  []string
 	Restored []string
@@ -145,13 +147,15 @@ else
 fi
 L="$state/undo.$$"
 g diff --name-status --no-renames -z "dc-checkpoint-$id" -- >"$L.d" 2>/dev/null || : >"$L.d"
-g ls-files --others --exclude-standard -z >"$L.u" 2>/dev/null || : >"$L.u"
+g diff --name-only --no-renames --diff-filter=A -z "dc-checkpoint-$id" -- >"$L.a" 2>/dev/null || : >"$L.a"
 g reset -q --hard "dc-checkpoint-$id"
+g ls-files --others --exclude-standard -z >>"$L.a" 2>/dev/null || :
 g clean -q -fd
+xargs -0 sh -c 'for f; do [ -e "$f" ] || [ -L "$f" ] || printf "%s\0" "$f"; done' dc-gone <"$L.a" >"$L.u" 2>/dev/null || : >"$L.u"
 printf 'restored=%s\ncommit=%s\n' "$id" "$(g rev-parse HEAD)"
 printf 'changes=%s,%s\n' "$(head -c 524288 "$L.d" | wc -c | tr -d ' ')" "$(head -c 524288 "$L.u" | wc -c | tr -d ' ')"
 head -c 524288 "$L.d"; head -c 524288 "$L.u"
-rm -f "$L.d" "$L.u"
+rm -f "$L.d" "$L.a" "$L.u"
 `
 
 var idRE = regexp.MustCompile(`^(dc-checkpoint-)?[0-9]+$`)
@@ -347,10 +351,17 @@ func undoAnswer(out []byte) (head, changes []byte) {
 	return out[:i+1+j+1], out[i+1+j+1:]
 }
 
-// undoChanges reads the two NUL-separated lists the undo script printed:
-// git diff --name-status against the checkpoint (A: added since, so
-// removed; M, T, D: put back) then the untracked files (removed), sizes
-// from the changes line. A name cut off at the size bound is dropped.
+// undoChanges reads the two NUL-separated lists the undo script printed,
+// sizes from the changes line: git diff --name-status against the
+// checkpoint (M, T, D: put back) then the files the undo removed. A name
+// counts as removed only when nothing is left at its path after the reset
+// and the clean (added since the checkpoint, or untracked and not ignored
+// under the rules the reset put back), so a file clean kept (ignored again
+// by a .gitignore the reset restored) is not listed (substrate-1:GAP-0476).
+// A name cut off at the size bound is dropped, and so is one that is
+// absolute, has a ".." element or does not name a path below dir: the
+// answer comes from the actor, and the chain state must never forget a
+// file outside the folder.
 func undoChanges(dir, sizes string, b []byte) (removed, restored []string) {
 	ds, us, ok := strings.Cut(sizes, ",")
 	nd, err1 := strconv.Atoi(ds)
@@ -358,27 +369,29 @@ func undoChanges(dir, sizes string, b []byte) (removed, restored []string) {
 	if !ok || err1 != nil || err2 != nil || nd < 0 || nu < 0 || nd+nu > len(b) {
 		return nil, nil
 	}
-	abs := func(rel string) string { return path.Join(dir, rel) }
+	below := func(rel string) (string, bool) {
+		if rel == "" || path.IsAbs(rel) || slices.Contains(strings.Split(rel, "/"), "..") {
+			return "", false
+		}
+		p := path.Join(dir, rel)
+		return p, strings.HasPrefix(p, dir+"/")
+	}
 	// The last piece of each list follows its last NUL: empty, or a name
 	// cut off at the bound.
 	diff := strings.Split(string(b[:nd]), "\x00")
 	diff = diff[:len(diff)-1]
 	for i := 0; i+1 < len(diff); i += 2 {
-		status, name := diff[i], diff[i+1]
-		if name == "" {
-			continue
-		}
-		switch status {
-		case "A":
-			removed = append(removed, abs(name))
+		switch diff[i] {
 		case "M", "T", "D":
-			restored = append(restored, abs(name))
+			if p, ok := below(diff[i+1]); ok {
+				restored = append(restored, p)
+			}
 		}
 	}
-	untracked := strings.Split(string(b[nd:nd+nu]), "\x00")
-	for _, name := range untracked[:len(untracked)-1] {
-		if name != "" {
-			removed = append(removed, abs(name))
+	gone := strings.Split(string(b[nd:nd+nu]), "\x00")
+	for _, name := range gone[:len(gone)-1] {
+		if p, ok := below(name); ok {
+			removed = append(removed, p)
 		}
 	}
 	return removed, restored
