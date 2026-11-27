@@ -27,15 +27,10 @@ type pythonCodeFrame struct {
 	braces int
 }
 
-// pythonExecutableCodePosition distinguishes an f-string replacement field
-// from an ordinary string. A writer-looking token inside an ordinary string
-// is data; the same token between a live f-string's braces is executed.
-func pythonExecutableCodePosition(code string, position int) bool {
-	return newPythonCodeScanner(code).at(position)
-}
-
-// pythonCodeScanner answers pythonExecutableCodePosition for many positions
-// of one program. The reading of a byte never depends on the position asked,
+// pythonCodeScanner distinguishes an f-string replacement field from an
+// ordinary string. A writer-looking token inside an ordinary string is data;
+// the same token between a live f-string's braces is executed. It answers
+// that for many positions of one program. The reading of a byte never depends on the position asked,
 // so the state at the first step at or past one position is the start of the
 // reading for a later one: questions in ascending order (the matches of a
 // regexp) read the program once. A position before the last one asked starts
