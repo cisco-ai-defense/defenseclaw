@@ -268,8 +268,13 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 			f.hidden = true
 		case "no-hidden":
 			f.hidden = false
+		case "no-ignore":
+			f.noIgnore = true
+		case "ignore":
+			f.noIgnore = false
 		case "unrestricted":
 			unrestricted++
+			f.noIgnore = true
 			if unrestricted == 2 {
 				f.hidden = true
 			}

@@ -1996,6 +1996,13 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 		return
 	}
 	dir, shown = filepath.Clean(dir), filepath.ToSlash(shown)
+	// rg reads the ignore files of the folder and of every folder above
+	// it: a whitelist line there lifts its hidden rule for the names it
+	// matches (rel-1-0-10:GAP-1652).
+	read := map[string]bool{}
+	if filter.rg.readsIgnoreFiles() {
+		filter.rg = filter.rg.withWhitelist(r.ignoreWhitelistAbove(dir, read))
+	}
 	r.probeWithin(id, dir, shown, filter)
 	left := credentialPathWalkBounds.minus(r.walkUsed)
 	if left.spent() {
@@ -2005,6 +2012,27 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	}
 	walk := credentialPathWalk(r.wait, dir, shown, filter, left, credentialWalkRoomOf(r))
 	r.walkUsed = r.walkUsed.plus(walk.used)
+	if filter.rg.readsIgnoreFiles() && !walk.cut {
+		// An ignore file below the folder whitelists more names: walk again
+		// with them, once (a whitelist line there is rare).
+		var globs []rgGlob
+		for _, file := range walk.ignores {
+			if !read[file] && len(read) < rgIgnoreFilesRead && r.lookups.Take() {
+				read[file] = true
+				globs = append(globs, rgIgnoreWhitelist(file)...)
+			}
+		}
+		if len(globs) > 0 {
+			filter.rg = filter.rg.withWhitelist(globs)
+			if left = credentialPathWalkBounds.minus(r.walkUsed); !left.spent() {
+				again := credentialPathWalk(r.wait, dir, shown, filter, left, credentialWalkRoomOf(r))
+				r.walkUsed = r.walkUsed.plus(again.used)
+				walk.found, walk.cut = append(walk.found, again.found...), again.cut
+			} else {
+				walk.cut = true
+			}
+		}
+	}
 	for _, file := range walk.found {
 		if r.stopped() {
 			return
@@ -2014,6 +2042,35 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	if walk.cut {
 		r.probeUnder(id, dir, shown, filter)
 		r.add(id, "", true)
+	}
+}
+
+// rgIgnoreFilesRead bounds the ignore files one searched folder reads for
+// whitelist lines (rel-1-0-10:GAP-1652).
+const rgIgnoreFilesRead = 64
+
+// ignoreWhitelistAbove returns the whitelist globs (rgIgnoreWhitelist) of
+// the ignore files in dir and in every folder above it, and marks each file
+// read. Each folder costs one lookup per ignore file name; a spent budget
+// stops it.
+func (r *credentialPathResolver) ignoreWhitelistAbove(dir string, read map[string]bool) []rgGlob {
+	var globs []rgGlob
+	for folder := dir; ; {
+		for _, name := range rgIgnoreFileNames {
+			if !r.lookups.Take() {
+				return globs
+			}
+			file := filepath.Join(folder, name)
+			if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+				read[file] = true
+				globs = append(globs, rgIgnoreWhitelist(file)...)
+			}
+		}
+		parent := filepath.Dir(folder)
+		if parent == folder {
+			return globs
+		}
+		folder = parent
 	}
 }
 
@@ -2157,6 +2214,9 @@ type credentialPathWalkResult struct {
 	found []string
 	cut   bool
 	used  credentialPathWalkLimits
+	// ignores are the ignore files the walk met (rgIgnoreFileNames), for an
+	// rg filter whose hidden rule they can lift (rel-1-0-10:GAP-1652).
+	ignores []string
 }
 
 // credentialPathWalk walks dir breadth first and reads each folder once, a
@@ -2246,6 +2306,7 @@ func credentialPathWalk(wait CredentialWalkBudget, dir, shown string, filter cre
 					walk.found = append(walk.found, file)
 				}
 			}
+			walk.ignores = append(walk.ignores, s.ignores...)
 			count += len(s.ends)
 		}
 		if budget.stop.Load() {
@@ -2312,10 +2373,11 @@ func credentialWalkPathTooLong(file string) bool {
 // for consecutive ends e, f, the first from 0) and, when rg globs read the
 // path, as rg names them (shown).
 type credentialPathFolderScan struct {
-	found []string
-	names []byte
-	ends  []int
-	shown []string
+	found   []string
+	names   []byte
+	ends    []int
+	shown   []string
+	ignores []string // the ignore files in it, for an rg that reads them
 }
 
 // credentialWalkFolder is one folder of a walk and its path as rg names it.
@@ -2339,6 +2401,9 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter cred
 	readCredentialWalkFolder(folder.dir, func(name []byte, isDir, regular bool, dirfd int) bool {
 		if !b.take(&b.entries, b.limits.entries) {
 			return false
+		}
+		if regular && filter.rg.readsIgnoreFiles() && slices.Contains(rgIgnoreFileNames, string(name)) {
+			s.ignores = append(s.ignores, filepath.Join(folder.dir, string(name)))
 		}
 		for _, probe := range groups[string(name)] {
 			if !filter.admits(folder.shown, probe.segments) {

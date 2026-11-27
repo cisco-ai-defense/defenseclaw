@@ -17,6 +17,8 @@
 package actionfacts
 
 import (
+	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -43,7 +45,10 @@ import (
 //     type matches is skipped. Types never decide a folder;
 //   - else a dot-named file or folder is skipped unless hidden is on.
 //
-// .gitignore and .ignore rules are not modelled: a file they skip counts.
+// .gitignore and .ignore rules that skip a file are not modelled: a file
+// they skip counts. Their whitelist ("!") lines are (rel-1-0-10:GAP-1652):
+// one makes rg search a dot-named file or folder it matches, so the hidden
+// rule no longer skips a name any of them matches (rgIgnoreWhitelist).
 // grep -r has no rgFilter (credentialWalkFilter).
 type rgFilter struct {
 	hidden   bool
@@ -52,6 +57,11 @@ type rgFilter struct {
 	types    []rgTypeSelection
 	selected bool // a -t selection: a file no selected type matches is skipped
 	cwd      string
+	// noIgnore: --no-ignore or -u, rg reads no ignore file.
+	noIgnore bool
+	// whitelist is the name globs of the whitelist lines of the ignore
+	// files the walk reads (withWhitelist).
+	whitelist []rgGlob
 }
 
 // rgFilterAll is the filter of an rg this model is unsure of (count when
@@ -139,7 +149,7 @@ func (f *rgFilter) enters(p, name string) bool {
 	case -1:
 		return false
 	}
-	return f.hidden || !strings.HasPrefix(name, ".")
+	return f.hidden || !strings.HasPrefix(name, ".") || f.whitelisted(name)
 }
 
 // reads reports a file rg searches, as enters.
@@ -161,7 +171,77 @@ func (f *rgFilter) reads(p, name string) bool {
 	if f.selected {
 		return false
 	}
-	return f.hidden || !strings.HasPrefix(name, ".")
+	return f.hidden || !strings.HasPrefix(name, ".") || f.whitelisted(name)
+}
+
+// whitelisted reports a dot-named file or folder name a whitelist line of
+// an ignore file matches: rg searches it, hidden or not.
+func (f *rgFilter) whitelisted(name string) bool {
+	for _, g := range f.whitelist {
+		if g.matches(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// readsIgnoreFiles reports an rg filter whose hidden rule an ignore file's
+// whitelist line can lift: not rgFilterAll (or any filter that already
+// searches hidden names), and an rg that reads its ignore files.
+func (f *rgFilter) readsIgnoreFiles() bool {
+	return f != nil && !f.hidden && !f.noIgnore
+}
+
+// withWhitelist is the filter with more whitelist globs: a copy, so a
+// filter a walk reads is never changed.
+func (f *rgFilter) withWhitelist(globs []rgGlob) *rgFilter {
+	if len(globs) == 0 {
+		return f
+	}
+	c := *f
+	c.whitelist = append(slices.Clip(f.whitelist), globs...)
+	return &c
+}
+
+// rgIgnoreFileNames are the ignore files rg reads in each folder it walks
+// and in each folder above the one it is given: .ignore, .rgignore and
+// .gitignore (rg reads a .gitignore only in a git repository; it counts
+// everywhere here, count when unsure).
+var rgIgnoreFileNames = []string{".ignore", ".rgignore", ".gitignore"}
+
+// rgIgnoreFileReadBytes is how much of one ignore file is read for its
+// whitelist lines.
+const rgIgnoreFileReadBytes = 64 << 10
+
+// rgIgnoreWhitelist returns the name globs of the whitelist ("!") lines of
+// the ignore file at file: each line's last path segment, matched against a
+// name anywhere below (an anchored line, or one for a folder, then matches
+// more names than rg's, count when unsure). A glob this model does not read
+// exactly (nil re) matches every name. A file that cannot be read gives
+// none.
+func rgIgnoreWhitelist(file string) []rgGlob {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	data, _ := io.ReadAll(io.LimitReader(f, rgIgnoreFileReadBytes))
+	var globs []rgGlob
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, " \t\r")
+		if !strings.HasPrefix(line, "!") {
+			continue
+		}
+		line = strings.TrimSuffix(line[1:], "/")
+		if index := strings.LastIndex(line, "/"); index >= 0 {
+			line = line[index+1:]
+		}
+		if line == "" {
+			continue
+		}
+		globs = append(globs, rgGlob{re: rgGlobRegexp(line, false)})
+	}
+	return globs
 }
 
 // admits reports a probe path under the folder rg names parent: every
