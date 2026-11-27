@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -100,10 +99,12 @@ func TestGAP1915GuessedDialectShapesKeepTheT21aRaise(t *testing.T) {
 				got, findings := inspect(server, command)
 				// an authorized_keys write may carry the persistence rule instead.
 				restricted := slices.ContainsFunc(findings, func(f string) bool { return strings.HasPrefix(f, "effect.protected_target_restricted") })
-				// On a Windows host the 1.0.10 state reader reads these
-				// shapes itself, and the effect finding folds into its
-				// finding, which names the set (DET111 ruling A).
-				if runtime.GOOS == "windows" && slices.ContainsFunc(findings, func(f string) bool { return strings.HasPrefix(f, "tamper.detector_state_write") }) {
+				// The 1.0.10 state reader reads these shapes itself (on
+				// Linux and macOS too: GAP-1151 reads the dot-stdin text as
+				// current-shell statements), and the effect finding folds
+				// into its finding, which names the set (DET111 ruling A;
+				// LEAD 2026-11-27 R3: same verdict, every OS).
+				if slices.ContainsFunc(findings, func(f string) bool { return strings.HasPrefix(f, "tamper.detector_state_write") }) {
 					restricted = true
 				}
 				if got != want || (!restricted && !strings.Contains(target, ".ssh")) {
