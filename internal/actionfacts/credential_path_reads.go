@@ -1352,21 +1352,33 @@ func (r *credentialPathResolver) programWord(id int64, argument ArgumentFact) {
 // fs.writeFileSync('.env', ...), open('.env', 'w')), a word right after a
 // bare print verb (puts ".env"), and the target of an awk output redirect or
 // pipe (print > ".env"). A word inside a read call stays, however it is
-// nested: print(open('.env').read()) reads .env.
+// nested: print(open('.env').read()) reads .env. A print, log or write name
+// the text binds itself (credentialProgramBoundNames: info=open, import
+// open as log) may be any call, a read among them, so it is no print verb
+// there (rel-1-0-10:GAP-1653).
 func credentialProgramReadTokens(text string) []string {
 	var tokens, calls []string
 	var quote rune
 	prev, start := "", -1
+	var bound map[string]bool
+	boundRead := false
+	nonRead := func(name string) bool {
+		if !boundRead {
+			bound, boundRead = credentialProgramBoundNames(text), true
+		}
+		return !bound[name]
+	}
 	emit := func(end int) {
 		if start < 0 {
 			return
 		}
 		token := text[start:end]
 		start = -1
+		verb := strings.ToLower(prev)
 		skip := strings.HasPrefix(token, "-") || prev == ">" || prev == ">>" || prev == "|" ||
-			credentialProgramPrintVerbs[strings.ToLower(prev)]
+			credentialProgramPrintVerbs[verb] && nonRead(verb)
 		if !skip && len(calls) > 0 {
-			skip = credentialProgramNonReadCall(calls[len(calls)-1], text[end:])
+			skip = credentialProgramNonReadCall(calls[len(calls)-1], text[end:], nonRead)
 		}
 		prev = token
 		if !skip {
@@ -1426,16 +1438,42 @@ var credentialProgramWriteMode = regexp.MustCompile(`^['"]?\s*,\s*(?:mode\s*=\s*
 
 // credentialProgramNonReadCall reports a call that prints, logs or writes
 // its arguments rather than reading a file they name. rest is the program
-// text after the word.
-func credentialProgramNonReadCall(call, rest string) bool {
+// text after the word; unbound reports a print or write name the text does
+// not bind to something else.
+func credentialProgramNonReadCall(call, rest string, unbound func(name string) bool) bool {
 	name := strings.ToLower(call[strings.LastIndexAny(call, ".:$@")+1:])
 	switch {
 	case credentialProgramPrintVerbs[name], credentialProgramWriteCalls[name]:
-		return true
+		return unbound(name)
 	case name == "open" || name == "opensync":
 		return credentialProgramWriteMode.MatchString(rest)
 	}
 	return false
+}
+
+// credentialProgramBinding matches a name program text binds, by its last
+// name segment: an assignment (info=open, $log = \&open, const debug =
+// fs.readFileSync; not ==), an import alias (open as info) and a definition
+// (def info, function log, sub say).
+var credentialProgramBinding = regexp.MustCompile(`(?i)(?:([A-Za-z_][A-Za-z0-9_]*)\s*=(?:[^=~]|$)|\bas\s+([A-Za-z_][A-Za-z0-9_]*)|\b(?:def|function|sub)\s+([A-Za-z_][A-Za-z0-9_]*))`)
+
+// credentialProgramBoundNames returns the names, lower case, program text
+// binds (credentialProgramBinding): such a name may stand for a read call,
+// so it does not only print or write (rel-1-0-10:GAP-1653).
+func credentialProgramBoundNames(text string) map[string]bool {
+	var names map[string]bool
+	for _, match := range credentialProgramBinding.FindAllStringSubmatch(text, -1) {
+		for _, name := range match[1:] {
+			if name == "" {
+				continue
+			}
+			if names == nil {
+				names = make(map[string]bool)
+			}
+			names[strings.ToLower(name)] = true
+		}
+	}
+	return names
 }
 
 // credentialSearchFilter keeps, of grep -r's credentials-file probes,
