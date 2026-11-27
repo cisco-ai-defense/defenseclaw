@@ -372,4 +372,29 @@ func TestGAP2249FolderTreeLookup(t *testing.T) {
 	if got, ok := tree.lookup("/a/b/d"); !ok || got != ids["/a/b/d"] {
 		t.Errorf("lookup after done = %d, %v", got, ok)
 	}
+
+	// child under a shared hash: /b is filed where /a already is, so child
+	// must check the parent and the name, make /b a folder of its own, file
+	// it under the same hash, and find it there again.
+	scratch := newGuestFolderTree()
+	hashB := scratch.hashes[scratch.child(0, "b", false)]
+	shared := newGuestFolderTree()
+	a := shared.child(0, "a", false)
+	shared.byHash[hashB] = a
+	b := shared.child(0, "b", false)
+	if b == a || shared.path(b) != "/b" || shared.path(a) != "/a" {
+		t.Fatalf("child under a shared hash = %d (%q), /a = %d", b, shared.path(b), a)
+	}
+	if more := shared.more[hashB]; len(more) != 1 || more[0] != b {
+		t.Fatalf("child under a shared hash is filed as %v, want [%d]", more, b)
+	}
+	if again := shared.child(0, "b", false); again != b {
+		t.Fatalf("child again under a shared hash = %d, want %d", again, b)
+	}
+	if deep := shared.child(b, "c", false); shared.path(deep) != "/b/c" {
+		t.Fatalf("a child of the folder under a shared hash is %q", shared.path(deep))
+	}
+	if got, ok := shared.lookup("/b"); !ok || got != b {
+		t.Fatalf("lookup(/b) under a shared hash = %d, %v, want %d", got, ok, b)
+	}
 }
