@@ -858,7 +858,7 @@ func pathOwnerSafeNegative(
 				continue
 			}
 			command, ok := integrityCommandByID(facts, candidate.CommandID)
-			if ok && integrityCommandMutatesPath(command, candidate) {
+			if ok && (integrityCommandMutatesPath(command, candidate) || pathMoveTakesSourceAway(command, candidate)) {
 				return false
 			}
 		}
@@ -878,6 +878,17 @@ func pathOwnerSafeNegative(
 		}
 		return sawCandidate
 	}
+}
+
+// pathMoveTakesSourceAway reports a move (mv, a rename) whose source is
+// candidate: the file is gone from where it was, as after rm, so a
+// credential file moved away is judged as its delete, never as a safe
+// negative that drops the rule (substrate-1:GAP-0706, GAP-0700). The
+// integrity owners keep their own reading of a move source
+// (integrityCommandMutatesPath).
+func pathMoveTakesSourceAway(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	return command.Effect == actionfacts.EffectExecute && candidate.Access == actionfacts.PathAccessDelete &&
+		hasOperation(command, actionfacts.OperationMove)
 }
 
 func semanticPathCandidates(facts actionfacts.Facts) []actionfacts.PathFact {
