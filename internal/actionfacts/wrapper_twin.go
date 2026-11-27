@@ -505,13 +505,9 @@ func WrapperChildIndex(argv []string, static []bool) int {
 		if len(argv) > 1 && !strings.HasPrefix(argv[1], "-") {
 			return 1
 		}
-	case "chroot":
-		if parsed := parseChrootInvocation(argv); parsed.complete && parsed.childIndex > 0 {
-			return wrapperChildProgram(argv, static, parsed.childIndex)
-		}
-	case "nsenter":
-		if parsed := parseNSEnterInvocation(argv); parsed.childKnown {
-			return wrapperChildProgram(argv, static, parsed.childIndex)
+	case "chroot", "nsenter":
+		if child, known := rootWrapperChild(argv); known {
+			return wrapperChildProgram(argv, static, child)
 		}
 	case "xargs":
 		if start, _, known := XargsProgram(argv); known {
@@ -519,6 +515,29 @@ func WrapperChildIndex(argv []string, static []bool) int {
 		}
 	}
 	return -1
+}
+
+// rootWrapperChild is the index of the child a root or namespace wrapper at
+// argv[0] runs (chroot ROOT CHILD, nsenter OPTIONS CHILD), by the grammar the
+// action analysis reads the wrapper with (parseChrootInvocation,
+// parseNSEnterInvocation). It is the one child reading of that wrapper class
+// for WrapperChildIndex and for the run-time shell twin (shellCallProgram,
+// rel-1-0-10:GAP-2132).
+func rootWrapperChild(argv []string) (int, bool) {
+	if len(argv) == 0 {
+		return 0, false
+	}
+	switch commandProgram(argv[0]) {
+	case "chroot":
+		if parsed := parseChrootInvocation(argv); parsed.complete && parsed.childIndex > 0 {
+			return parsed.childIndex, true
+		}
+	case "nsenter":
+		if parsed := parseNSEnterInvocation(argv); parsed.childKnown {
+			return parsed.childIndex, true
+		}
+	}
+	return 0, false
 }
 
 // wrapperChildProgram is index when argv[index] can be the program the

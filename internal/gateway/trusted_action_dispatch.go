@@ -11181,11 +11181,17 @@ func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRe
 	if !known {
 		return trustedActionRequest{}, false, caps, false
 	}
-	rewritten, ok, caps, unread := actionfacts.RunTimeShellTwin(command)
+	rewritten, ok, caps, unread, rootWrapper := actionfacts.RunTimeShellTwinReading(command)
 	if !ok || rewritten == command {
 		return trustedActionRequest{}, false, caps, unread
 	}
-	return bashReadingRequest(request, command, rewritten), true, caps, unread
+	twin = bashReadingRequest(request, command, rewritten)
+	// A twin read through chroot or nsenter is a reading 1.0.10 did not
+	// have: it raises the call and takes no effect finding of it
+	// (foldTargetsFor), so chroot / sh <<E keeps the CRITICAL its effect
+	// finding gives (rel-1-0-10:GAP-2132, GAP-1984).
+	twin.Input.FloorRaiseOnly = twin.Input.FloorRaiseOnly || rootWrapper
+	return twin, true, caps, unread
 }
 
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
