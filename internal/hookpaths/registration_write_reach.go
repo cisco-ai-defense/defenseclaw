@@ -444,68 +444,62 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 // (ResolveWriteTarget), so a spelling read once holds for the rest of the
 // call; a caller keeps one only for the call it reads. nil reads afresh.
 type RegistrationSpellings struct {
-	mu      sync.Mutex
-	names   map[string]string
-	folders map[string]registrationFolder
+	mu    sync.Mutex
+	paths map[string]registrationSpelling
 }
 
-// registrationFolder is a folder of registration names as the link-aware
-// walk resolves it.
-type registrationFolder struct {
+// registrationSpelling is a name or one of its folders as the link-aware walk
+// resolves it.
+type registrationSpelling struct {
 	resolved string
 	ok       bool
 }
 
 // NewRegistrationSpellings is an empty set of spellings for one hook call.
 func NewRegistrationSpellings() *RegistrationSpellings {
-	return &RegistrationSpellings{names: make(map[string]string), folders: make(map[string]registrationFolder)}
+	return &RegistrationSpellings{paths: make(map[string]registrationSpelling)}
 }
 
 // physical is the spelling ResolveWriteTarget gives path ("" when it does
 // not resolve), read once for each name.
 func (s *RegistrationSpellings) physical(path string) string {
-	s.mu.Lock()
-	physical, found := s.names[path]
-	s.mu.Unlock()
-	if found {
-		return physical
+	if resolved, ok := s.walk(path); ok {
+		return resolved
 	}
-	physical = s.resolve(path)
-	s.mu.Lock()
-	s.names[path] = physical
-	s.mu.Unlock()
-	return physical
+	return ""
 }
 
-// resolve is ResolveWriteTarget of an absolute clean path. The folder of the
-// path is resolved once for every name in it; a last component that is no
-// link (a file, a folder, or missing) is then joined to it, as the walk joins
-// it (walkWritePathWhy). Any other last component (a link, an unreadable
-// entry) is walked whole, and so is every name on Windows, where a mount
-// point is a link too and the call memory already keeps the walks.
-func (s *RegistrationSpellings) resolve(path string) string {
+// walk is ResolveWriteTarget of an absolute clean path with every folder on
+// the way read once for the call, since the names share their folders: a
+// component that is no link (a file, a folder, or missing) is joined to its
+// resolved folder, as the walk joins it (walkWritePathWhy). Any other
+// component (a link, an unreadable entry) is walked whole, and so is every
+// path on Windows, where a mount point is a link too and the call memory
+// already keeps the walks.
+func (s *RegistrationSpellings) walk(path string) (string, bool) {
+	s.mu.Lock()
+	known, found := s.paths[path]
+	s.mu.Unlock()
+	if found {
+		return known.resolved, known.ok
+	}
+	var answer registrationSpelling
+	joined := false
 	if parent := filepath.Dir(path); runtime.GOOS != "windows" && parent != path {
-		s.mu.Lock()
-		folder, found := s.folders[parent]
-		s.mu.Unlock()
-		if !found {
-			folder.resolved, folder.ok = ResolveWriteTarget(parent)
-			s.mu.Lock()
-			s.folders[parent] = folder
-			s.mu.Unlock()
-		}
-		if folder.ok {
-			candidate := filepath.Join(folder.resolved, filepath.Base(path))
+		if folder, ok := s.walk(parent); ok {
+			candidate := filepath.Join(folder, filepath.Base(path))
 			if info, err := pathLstat(candidate); err == nil && info.Mode()&os.ModeSymlink == 0 || os.IsNotExist(err) {
-				return candidate
+				answer, joined = registrationSpelling{resolved: candidate, ok: true}, true
 			}
 		}
 	}
-	resolved, ok := ResolveWriteTarget(path)
-	if !ok {
-		return ""
+	if !joined {
+		answer.resolved, answer.ok = ResolveWriteTarget(path)
 	}
-	return resolved
+	s.mu.Lock()
+	s.paths[path] = answer
+	s.mu.Unlock()
+	return answer.resolved, answer.ok
 }
 
 // registrationRootedOperand is an operand of a call run under root (chroot;
