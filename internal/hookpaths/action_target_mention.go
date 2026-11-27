@@ -6744,7 +6744,14 @@ func actionPlainValueJudged(resolverPattern, windowsHost bool, value string) boo
 // actionExcludeOptionValueWords are the words of a tar or rsync call that
 // hold an --exclude pattern (--exclude=.ssh, or the word after --exclude):
 // what the call leaves out of an archive or a copy, never a file it reads
-// or writes (substrate-1 GAP-0994). A word after -- is an operand.
+// or writes (substrate-1 GAP-0994). A word after -- is an operand. A word
+// that is the value of the option before it is no --exclude
+// (actionExcludeValueTaken): in rsync -a /tmp/k -e --exclude
+// ~/.ssh/authorized_keys the --exclude is the -e command and the next word
+// the destination, and reading it as a pattern lowered the
+// persistence.ssh_authorized_keys_command block of base to an allow
+// (CHK-T6-SGB rows E1, E8). The last word of an rsync call is never a
+// pattern: it is the destination wherever rsync does not take it as one.
 func actionExcludeOptionValueWords(call *syntax.CallExpr, home string) []*syntax.Word {
 	if call == nil || len(call.Args) < 2 {
 		return nil
@@ -6753,29 +6760,93 @@ func actionExcludeOptionValueWords(call *syntax.CallExpr, home string) []*syntax
 	if !known {
 		return nil
 	}
-	switch programBase(program) {
+	base := programBase(program)
+	switch base {
 	case "tar", "gtar", "bsdtar", "rsync":
 	default:
 		return nil
 	}
+	rsync := base == "rsync"
+	last := len(call.Args) - 1
+	// pending counts the words the options before take as their values:
+	// a tar old-style first word (cf) takes one per value letter, in order.
+	pending := 0
 	var out []*syntax.Word
 	for i := 1; i < len(call.Args); i++ {
 		word, static := StaticWord(call.Args[i], home)
-		if !static || word == "--" {
+		if !static || word == "--" && pending == 0 {
 			break
+		}
+		if pending > 0 {
+			pending--
+			continue
 		}
 		switch {
 		case strings.HasPrefix(word, "--exclude="):
-			out = append(out, call.Args[i])
+			if !rsync || i != last {
+				out = append(out, call.Args[i])
+			}
 		case word == "--exclude" && i+1 < len(call.Args):
-			if _, static := StaticWord(call.Args[i+1], home); !static {
+			if _, static := StaticWord(call.Args[i+1], home); !static || rsync && i+1 == last {
 				return out
 			}
 			out = append(out, call.Args[i+1])
 			i++
+		default:
+			pending = actionExcludeValueTaken(word, rsync, i == 1)
 		}
 	}
 	return out
+}
+
+// actionExcludeValueTaken is how many of the next words an option word of
+// a tar or rsync call takes as values: 1 for a long option with no = that
+// is, or abbreviates, one that takes a value (getopt_long takes a unique
+// prefix), and for a short cluster whose first letter that takes a value
+// ends it (-e, -ae, -czf); for a tar old-style first word with no dash
+// (cf, czf), one per letter that takes a value. Any other word takes none.
+// An unknown long option that abbreviates a value option counts as one.
+// The options that take a value (GNU tar, bsdtar and rsync 3.x manuals; a
+// letter or name that takes one in any of the tars counts for every tar)
+// are tables of tminTableSpec, so they add no literals to the package sweep
+// (TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget).
+func actionExcludeValueTaken(word string, rsync, first bool) int {
+	shortValues, longValues := tminTable(tminExcludeTarLetters)[0], tminTable(tminExcludeTarOptions)
+	if rsync {
+		shortValues, longValues = tminTable(tminExcludeRsyncLetters)[0], tminTable(tminExcludeRsyncOptions)
+	}
+	switch {
+	case strings.HasPrefix(word, "--"):
+		name := word[2:]
+		if name == "" || strings.Contains(name, "=") {
+			return 0
+		}
+		for _, long := range longValues {
+			if strings.HasPrefix(long, name) {
+				return 1
+			}
+		}
+		return 0
+	case strings.HasPrefix(word, "-") && len(word) > 1:
+		for at := 1; at < len(word); at++ {
+			if strings.IndexByte(shortValues, word[at]) >= 0 {
+				if at == len(word)-1 {
+					return 1
+				}
+				return 0
+			}
+		}
+		return 0
+	case first && !rsync && word != "" && !strings.ContainsFunc(word, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsLetter(r) }):
+		count := 0
+		for at := 0; at < len(word); at++ {
+			if strings.IndexByte(shortValues, word[at]) >= 0 {
+				count++
+			}
+		}
+		return count
+	}
+	return 0
 }
 
 // actionGitStatusOnly reports git arguments that are a plain status with

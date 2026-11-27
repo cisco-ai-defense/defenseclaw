@@ -41,6 +41,21 @@ func TestGAP0994ExcludedSSHAndStatusInSSHAllow(t *testing.T) {
 		{"a04 rsync exclude other ssh", "rsync -a --exclude .git ~/.ssh/ /tmp/b/", false},
 		{"a05 cd ssh append keys", "cd ~/.ssh && echo k >> authorized_keys", false},
 		{"a06 cd ssh git add", "cd ~/.ssh && git init && git add . && git commit -m k", false},
+		// The word after a separate --exclude is a pattern only when --exclude
+		// is an option itself, not the value of one before it (rsync -e, -T,
+		// a short cluster ending in one, a long option or its abbreviation,
+		// tar old-style letters), and the last rsync word stays an operand
+		// (CHK-T6-SGB rows E1, E8).
+		{"E1 rsync e value", "rsync -a /tmp/k -e --exclude ~/.ssh/authorized_keys", false},
+		{"E8 rsync T value", "rsync -a /tmp/k/ -T --exclude ~/.ssh/", false},
+		{"rsync cluster ending in e", "rsync -ae --exclude ~/.ssh/authorized_keys /tmp/k", false},
+		{"rsync long rsh", "rsync -a --rsh --exclude ~/.ssh/authorized_keys /tmp/k", false},
+		{"rsync abbreviated rsh", "rsync -a --rs --exclude ~/.ssh/authorized_keys /tmp/k", false},
+		{"rsync e value not last", "rsync -a -e --exclude ~/.ssh/ /tmp/b/", false},
+		{"rsync include value", "rsync -a /tmp/k --include --exclude ~/.ssh/", false},
+		{"rsync last operand", "rsync -a /tmp/k/ --exclude ~/.ssh/", false},
+		{"tar old style f value", "tar cf --exclude .ssh src", false},
+		{"tar T value", "tar -czf /tmp/k.tgz -T --exclude .ssh", false},
 	}
 	for _, pack := range []string{"default", "permissive", "strict"} {
 		t.Run(pack, func(t *testing.T) {
