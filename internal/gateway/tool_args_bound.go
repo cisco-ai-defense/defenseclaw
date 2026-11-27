@@ -20,8 +20,8 @@ import (
 // reading of the call also reads its bounded projections
 // (substrateMCPProjectionsRead: the members the structured reading reads,
 // heads and tails of their long strings cut at word boundaries; the whole
-// call is judged as well, so the rest is dropped). Only when the projections leave unread a
-// part the structured reading reads (substrateMCPProjectionsRead: a cut
+// call is judged as well, so the rest is dropped). Only when the projections
+// leave unread a part the structured reading reads (substrateMCPProjectionsRead: a cut
 // command, path or url value, a dropped member that is or holds a read
 // field) does the call get the unknown tier of the pack
 // (ACTION-COMPOUND-LIMIT: an alert in the default pack, a block in the

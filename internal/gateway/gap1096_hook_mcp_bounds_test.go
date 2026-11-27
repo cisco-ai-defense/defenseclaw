@@ -2,6 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
+// This test reuses the bridge fixture command (tixgCommand), which the
+// !windows bridge test file defines.
+
 package gateway
 
 import (
