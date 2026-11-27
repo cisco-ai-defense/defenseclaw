@@ -2109,7 +2109,7 @@
    "TestGAP1257FileInfoChildAndRebound": 19.7,
    "TestGAP1258BenignDotNetRows": 19.3,
    "TestGAP1260TargetDirectoryUnknownSources": 3.3,
-   "TestGAP1265NumericTableIsNotCutAtHeldBound": 37.0,
+   "TestGAP1265NumericTableOverHeldBoundIsTruncated": 37.0,
    "TestGAP1265OpenRunIdleIsNotTruncated": 20.1,
    "TestGAP1266NumericOrSymbolPasswordStillAlerts": 5.6,
    "TestGAP1267BacktickPasswordStillAlerts": 3.7,
