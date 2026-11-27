@@ -413,7 +413,6 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	if len(all) == 0 {
 		return tracker // no function, so no mover
 	}
-	tracker.unset, tracker.unsetAny = workFolderUnsetNames(calls)
 	tracker.movers, tracker.decls = map[string]bool{}, map[string]*syntax.FuncDecl{}
 	tracker.runners = map[string]bool{}
 	notRunner := map[string]bool{}
@@ -427,6 +426,7 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	for name := range notRunner {
 		delete(tracker.runners, name)
 	}
+	tracker.unset, tracker.unsetAny = workFolderUnsetNames(calls, all, tracker.runners)
 	tracker.defs, tracker.callsOf = map[*syntax.FuncDecl]workFolderDef{}, map[string][]*syntax.CallExpr{}
 	tracker.calls, tracker.defined = new(int), map[workFolderDefinedKey]bool{}
 	tracker.firstRun = map[workFolderDefinedKey]workFolderFirstRun{}
@@ -666,23 +666,61 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 func (t *workFolderTracker) mayUnset(name string) bool { return t.unsetAny || t.unset[name] }
 
 // workFolderUnsetNames returns the function names the unset calls among
-// calls may remove, wherever they are in the text (one after a call in a
-// loop runs before its next turn): unset -f NAME, and unset NAME, which
-// removes the function when no variable has the name (only -v or -n with
-// no -f leaves functions alone). expands says an option or operand of one
-// expands, so it may remove any function (substrate-1:GAP-1166). An unset
-// run through builtin or command is read the same.
-func workFolderUnsetNames(calls []*syntax.CallExpr) (names map[string]bool, expands bool) {
+// calls may remove: unset -f NAME, and unset NAME, which removes the function
+// when no variable has the name (only -v or -n with no -f leaves functions
+// alone). It reads every unset of the text, before or after a call: one
+// after a call in a loop runs before its next turn, and one after the last
+// call (a script that removes its helper at its end) only adds the folder
+// the shell was in. An unset run through builtin or command, with or
+// without their options, is read the same. expands says the text may run
+// an unset it does not spell out, so it may remove any function
+// (substrate-1:GAP-1166): an option or operand of an unset expands, a
+// command name expands ($u -f f), or eval or trap runs text that expands or
+// names unset. A runner's name before an unset runs it too.
+func workFolderUnsetNames(calls []*syntax.CallExpr, decls []*syntax.FuncDecl, runners map[string]bool) (names map[string]bool, expands bool) {
+	// The "$@" of a runner body runs the arguments of its calls, read
+	// below as the command after the runner's name.
+	runs := map[*syntax.CallExpr]bool{}
+	for _, decl := range decls {
+		if runners[decl.Name.Value] && workFolderArgRunner(decl.Body) {
+			runs[decl.Body.Cmd.(*syntax.Block).Stmts[0].Cmd.(*syntax.CallExpr)] = true
+		}
+	}
 	for _, call := range calls {
+		if runs[call] {
+			continue
+		}
 		args := call.Args
 		for len(args) > 1 {
 			prefix := projectPOSIXWord(args[0])
+			if !prefix.Expands && runners[prefix.Value] {
+				args = args[1:] // f unset -f g runs the unset
+				continue
+			}
 			if prefix.Expands || prefix.Value != "builtin" && prefix.Value != "command" {
 				break
 			}
-			args = args[1:]
+			// command -p unset ...: the options of builtin and command
+			// do not change the command they run.
+			for args = args[1:]; len(args) > 1; args = args[1:] {
+				if option := projectPOSIXWord(args[0]); option.Expands || len(option.Value) < 2 || option.Value[0] != '-' {
+					break
+				}
+			}
 		}
-		if program := projectPOSIXWord(args[0]); program.Expands || program.Value != "unset" {
+		program := projectPOSIXWord(args[0])
+		if program.Expands {
+			return nil, true
+		}
+		if program.Value == "eval" || program.Value == "trap" {
+			for _, arg := range args[1:] {
+				if word := projectPOSIXWord(arg); word.Expands || strings.Contains(word.Value, "unset") {
+					return nil, true
+				}
+			}
+			continue
+		}
+		if program.Value != "unset" {
 			continue
 		}
 		functions, variablesOnly, operands := false, false, false
@@ -690,8 +728,12 @@ func workFolderUnsetNames(calls []*syntax.CallExpr) (names map[string]bool, expa
 		for _, arg := range args[1:] {
 			word := projectPOSIXWord(arg)
 			if word.Expands {
-				expands = true
-				break
+				if variablesOnly && !functions {
+					// unset -v "$X" removes a variable: a word that
+					// expands to -f then is a usage error.
+					break
+				}
+				return nil, true
 			}
 			if !operands && word.Value == "--" {
 				operands = true
@@ -715,7 +757,7 @@ func workFolderUnsetNames(calls []*syntax.CallExpr) (names map[string]bool, expa
 			names[name] = true
 		}
 	}
-	return names, expands
+	return names, false
 }
 
 // add is s with the folders of in, the hook's own folder for an empty in.

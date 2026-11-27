@@ -17,8 +17,10 @@ import (
 // shell may stay where it was, so the next relative operand keeps at least
 // the verdict of its plain form there in every pack (rel 03e3969a86:
 // alert/alert/block), on the folder tracker and on the straight-line walk.
-// A mover of the name is read the same way. The same runner with no unset,
-// or with an unset of variables only, still runs its cd (allow).
+// A mover of the name is read the same way, and so is an unset the text
+// does not spell out (an expanding command name, eval, command -p). The same runner with no unset,
+// or with an unset of variables only (even of an expanding name), still runs
+// its cd (allow).
 func TestGAP1166UnsetRunnerIsNotInForce(t *testing.T) {
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
@@ -34,10 +36,17 @@ func TestGAP1166UnsetRunnerIsNotInForce(t *testing.T) {
 		`true() { "$@"; }; unset -f true; true cd /tmp; rm .aws/credentials`,
 		`true() { "$@"; }; builtin unset -f -- true; true cd /tmp && rm .aws/credentials`,
 		`true() { cd /tmp; }; unset -f true; true && rm .aws/credentials`,
+		// An unset the text does not spell out (CHK-SCB4 Z:x1-x3): an
+		// expanding command name, eval, command with an option.
+		`true() { "$@"; }; u=unset; $u -f true; true cd /tmp && rm .aws/credentials`,
+		`true() { "$@"; }; eval unset -f true; true cd /tmp && rm .aws/credentials`,
+		`true() { "$@"; }; command -p unset -f true; true cd /tmp && rm .aws/credentials`,
 	}
 	controls := []string{
 		`true() { "$@"; }; true cd /tmp && rm .aws/credentials`,
 		`true() { "$@"; }; unset -v true; true cd /tmp && rm .aws/credentials`,
+		// A variable-only unset whose operand expands (CHK-SCB4 Z:b2).
+		`run() { "$@"; }; unset -v "$X"; run cd /tmp && rm .aws/credentials`,
 	}
 	for _, pack := range []string{"default", "permissive", "strict"} {
 		handler := hostClaudeHookHandlerForTest(t, pack)
