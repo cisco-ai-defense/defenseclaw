@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,10 @@ import (
 // tier (the env input demoted the named write to an unknown role); at
 // 25efdf4371 only a HOME change was taken back. LANG=C and TZ=UTC are inert
 // names and pin the unchanged rows. A log, w or output file in a project
-// folder stays allowed under every wrapper.
+// folder stays allowed under every wrapper. On a Windows host the calls are
+// Git Bash text (hardP5Routes: Claude Code's Bash only), the home is the
+// active USERPROFILE spelled with forward slashes (hardP5Path) and /tmp is a
+// test folder, as in the other DET111 hard rows.
 func TestGAP1478WrappedOptionWriteIsTheUnwrappedWrite(t *testing.T) {
 	home := t.TempDir()
 	for _, f := range []string{".defenseclaw/audit.db", ".defenseclaw/config.yaml", ".codex/config.toml", "proj/notes.txt"} {
@@ -35,6 +39,14 @@ func TestGAP1478WrappedOptionWriteIsTheUnwrappedWrite(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // the active home on Windows
+	sh := filepath.ToSlash(home)  // the home as POSIX text spells it (hardP5Path)
+	tmp := "/tmp"
+	if runtime.GOOS == "windows" {
+		// Git Bash maps /tmp to a folder of its own install, which a Windows
+		// host's reading cannot place; a drive path of the test stands in.
+		tmp = filepath.ToSlash(t.TempDir())
+	}
 	writers := map[string]string{
 		"rsync -n log":  "rsync -n --log-file={t} a/ b/",
 		"rsync -an log": "rsync -an --log-file={t} a/ b/",
@@ -47,20 +59,20 @@ func TestGAP1478WrappedOptionWriteIsTheUnwrappedWrite(t *testing.T) {
 		"HOME=/tmp FOO=1 ", "PATH=/usr/bin:/bin ", "env -i PATH=/usr/bin ", "LANG=C ", "TZ=UTC "}
 	targets := []string{".defenseclaw/audit.db", ".defenseclaw/config.yaml", ".codex/config.toml"}
 	benign := []string{
-		"rsync -an --log-file=" + home + "/proj/rs.log " + home + "/proj/ /tmp/bk/",
-		"rsync -av " + home + "/proj/ /tmp/bk/",
-		"sed -n \"w " + home + "/proj/out.txt\" " + home + "/proj/notes.txt",
-		"sed \"s/a/b/w " + home + "/proj/out.txt\" " + home + "/proj/notes.txt",
-		"curl -sS -o " + home + "/proj/out.txt https://example.invalid/c",
+		"rsync -an --log-file=" + sh + "/proj/rs.log " + sh + "/proj/ " + tmp + "/bk/",
+		"rsync -av " + sh + "/proj/ " + tmp + "/bk/",
+		"sed -n \"w " + sh + "/proj/out.txt\" " + sh + "/proj/notes.txt",
+		"sed \"s/a/b/w " + sh + "/proj/out.txt\" " + sh + "/proj/notes.txt",
+		"curl -sS -o " + sh + "/proj/out.txt https://example.invalid/c",
 	}
 	useDefaultEffectsLane(t)
 	for _, tier := range boundedTestTiers {
-		for _, route := range []string{"claudecode", "codex"} {
+		for _, route := range hardP5Routes() {
 			api := gap0589TierAPI(t, route, tier.posture, tier.managed, tier.tier)
 			for _, target := range targets {
-				member := filepath.Join(home, target)
+				member := hardP5Path(home, target)
 				spellings := map[string]string{"abs": member, "tilde": "~/" + target}
-				ctlAction, _ := hardP2Verdict(t, api, route, home, "cp /tmp/x "+member)
+				ctlAction, _ := hardP2Verdict(t, api, route, home, "cp "+tmp+"/x "+member)
 				if ctlAction == "allow" && tier.name == "default" {
 					t.Fatalf("%s %s: plain cp control on %s allows: the control is void", tier.name, route, target)
 				}
@@ -81,7 +93,7 @@ func TestGAP1478WrappedOptionWriteIsTheUnwrappedWrite(t *testing.T) {
 			}
 			for i, command := range benign {
 				for _, wrap := range append([]string{""}, wrappers...) {
-					if action, _ := hardP2Verdict(t, api, route, home+"/proj", wrap+command); action != "allow" {
+					if action, _ := hardP2Verdict(t, api, route, filepath.Join(home, "proj"), wrap+command); action != "allow" {
 						t.Errorf("%s %s benign #%d %q: %s, want allow", tier.name, route, i, wrap, action)
 					}
 				}
