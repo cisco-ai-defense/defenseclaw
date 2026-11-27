@@ -162,6 +162,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// the request cwd for the text scan.
 	// Git Bash spells a Windows drive /c/... (GAP-0781 RV8-1).
 	windowsHost := runtime.GOOS == "windows" && actionWindowsHome(home)
+	// globRead: the value is a word of a statement the scan reads as
+	// read-only, where a pattern walk stopped at its bound is TRUNCATED; in
+	// every other position (a writer operand, a redirect, an assignment, a
+	// nested body, the text scan) it keeps the rel/1.0.10 protected-target
+	// verdict (rel-1-0-10:GAP-2300, GAP-1324).
+	globRead := false
 	// literal: the value is one entry name whose *, ?, [ and ] were quoted
 	// or escaped, so they are not a pattern (GAP-0293).
 	checkValue := func(value string, tilde bool, base string, literal bool) bool {
@@ -191,7 +197,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if actionPosixWindowsHome(home) {
 				return actionPosixWindowsProtectedGlob(value, base, home)
 			}
-			return actionProtectedFileGlobReach(value, base, protected, ssh, home, globs)
+			return actionProtectedFileGlobReach(value, base, protected, ssh, home, globs, !globRead)
 		}
 		if actionPosixWindowsHome(home) {
 			if stateOnly {
@@ -199,7 +205,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			}
 			return actionPosixWindowsProtected(value, base, home)
 		}
-		operand := OperandPath(value, base)
+		operand := MentionOperandPath(value, base)
 		if stateOnly {
 			return actionProtectedStatePath(operand, stateHome)
 		}
@@ -220,12 +226,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// resolved once per scan, because its answer depends only on the value,
 	// its tilde form and its base (GAP-2279, answer budget).
 	type mention struct {
-		value, base    string
-		tilde, literal bool
+		value, base          string
+		tilde, literal, read bool
 	}
 	answers := map[mention]bool{}
 	checkAs := func(value string, tilde bool, base string, literal bool) bool {
-		key := mention{value: value, base: base, tilde: tilde, literal: literal}
+		key := mention{value: value, base: base, tilde: tilde, literal: literal, read: globRead}
 		found, seen := answers[key]
 		if !seen {
 			found = checkValue(value, tilde, base, literal)
@@ -373,7 +379,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// through the one resolver, and every candidate it names is
 			// judged by identity (GAP-0293, GAP-0324, GAP-0325).
 			if resolverWord {
-				resolved := resolveWriteWord(word, values, effectiveCWD, globOptions)
+				options := globOptions
+				options.readPosition = globRead
+				resolved := resolveWriteWord(word, values, effectiveCWD, options)
 				for _, candidate := range resolved.candidates {
 					if checkAs(candidate, false, effectiveCWD, true) {
 						return true
@@ -601,6 +609,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// A cd in a read-only group moves only the group, where
 				// nothing writes: its folder word is no write target.
 				groupedCD := groupedReads[stmt] && actionCallChangesDirectory(call, home)
+				globRead = readOnly
 				for _, word := range call.Args {
 					if blankReads && len(removedEntries) == 0 && len(replacedEntries) == 0 {
 						judgedWords = append(judgedWords, word)
@@ -655,6 +664,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// destination, as the next word of -t DIR is. Each word above is
 				// judged whole, so the folder is read out of it with the shared
 				// writer reader (rel-1-0-10:GAP-0186, GAP-1149).
+				globRead = false
 				for _, destination := range actionAttachedCopyDestinations(call, home) {
 					if actionExpandedWordGlob(destination, values, effectiveCWD, home, check) ||
 						checkBraceFields(destination, false) || checkWord(destination) {
@@ -2093,14 +2103,21 @@ func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
 // the user and sends its answer (GlobFactPrefix); that answer decides, as
 // the walk of a gateway that can see the home would (GAP-1460 review). With
 // no answer, the name fallback below keeps the pattern closed.
-func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs) bool {
-	return actionProtectedFileGlobReachAs(pattern, cwd, protected, ssh, home, globs, false)
+//
+// write: the pattern is a word in a write position. There a walk stopped at
+// its bound keeps the rel/1.0.10 verdict, a protected target: what it did not
+// read may hold a link to a key file (a folder the walk reads last), and
+// nothing short of reading past the bound tells a benign capped write from
+// one. Elsewhere (a word of a read-only statement) the capped walk is
+// TRUNCATED (rel-1-0-10:GAP-1324, GAP-2300).
+func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, write bool) bool {
+	return actionProtectedFileGlobReachAs(pattern, cwd, protected, ssh, home, globs, false, write)
 }
 
 // actionProtectedFileGlobReachAs is actionProtectedFileGlobReach; windows
 // reads the pattern as a PowerShell or cmd wildcard, which matches a leading
 // dot, where a POSIX shell's * and ? skip it (Git Bash too, GAP-1717).
-func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, windows bool) bool {
+func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, windows, write bool) bool {
 	literal := ""
 	if !filepath.IsAbs(pattern) {
 		literal = filepath.Clean(cwd)
@@ -2148,12 +2165,16 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	}
 	if capped {
 		// The walk read every folder it reached and stopped only at a
-		// counted bound, with no protected file among the matches it read:
-		// the reading is TRUNCATED (the one bound rule), recorded on the
-		// hook call (noteGlobCut), not a protected target. The name match
+		// counted bound, with no protected file among the matches it read.
+		// In a write position that stays a protected target, as on
+		// rel/1.0.10; elsewhere the reading is TRUNCATED (the one bound
+		// rule), recorded on the hook call (noteGlobCut). The name match
 		// above still holds a pattern that can spell .ssh or a key file
-		// (rel-1-0-10:GAP-1324).
+		// (rel-1-0-10:GAP-1324, GAP-2300).
 		globs.note(pattern, GlobFactCapped)
+		if write {
+			return true
+		}
 		noteGlobCut(bounded.Of(bounded.Paths))
 		return false
 	}
@@ -2161,8 +2182,11 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		if answer := globs.answer(pattern); answer != "" {
 			// A walk this process could not see defers to the client,
 			// which expanded the pattern as the user; its walk past a
-			// bound is TRUNCATED, as this process's own would be.
+			// bound reads as this process's own would (above).
 			if answer == GlobFactCapped {
+				if write {
+					return true
+				}
 				noteGlobCut(bounded.Of(bounded.Paths))
 				return false
 			}
@@ -6210,7 +6234,7 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	// On the host, expand every component through junctions and links
 	// (GAP-1445).
 	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReachAs(
-		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil, true) {
+		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil, true, true) {
 		return true
 	}
 	if strings.ContainsAny(parent, "*?[") {

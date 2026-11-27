@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
@@ -14,9 +15,16 @@ import (
 func TestDET111KnownCredentialReadsProducePerMemberDecisionProofs(t *testing.T) {
 	useEffectsRulesMode(t, "on")
 	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if runtime.GOOS == "windows" {
+		// A POSIX host's call (no file is read): a drive-path home would make
+		// it a Windows call (effectWindowsCall), where ${PWD%/proj} and
+		// /home/bob are no paths of that host.
+		home, cwd = "/home/alice", "/home/alice/proj"
+	}
 	request := shadowLiveRequest(`cat ${PWD%/proj}/.aws/credentials /home/bob/.ssh/id_rsa`)
 	request.Input.ActiveHome = home
-	request.Input.CWD = filepath.Join(home, "proj")
+	request.Input.CWD = cwd
 
 	res := effectShadowRun(request, effectRulesOn, tierRestricted)[0]
 	findings := effectShadowFindings(res, effectRulesOn)

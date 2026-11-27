@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +90,12 @@ func TestDET111MaybeReachNeverRaisesLiveFiveTiers(t *testing.T) {
 			}
 		}
 		for _, command := range known {
+			if runtime.GOOS == "windows" && strings.HasPrefix(command, "sed ") {
+				// The exec call of a Windows host has no dialect hint and is
+				// read as PowerShell or cmd (effectCall), where sed is no
+				// program of the table: the row is a POSIX-host row.
+				continue
+			}
 			setLiveEffectsLane(t, "on")
 			// a known effect on a set a 1.0.10 finding of the call names folds
 			// into it (DET111 ruling A): that finding carries the set.

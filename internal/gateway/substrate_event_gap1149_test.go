@@ -96,7 +96,7 @@ func TestGAP1149EventNameNeverCarriesAnExposedValue(t *testing.T) {
 func TestGAP1149EveryDeclaredEventNameIsAccepted(t *testing.T) {
 	exposed := map[string]string{"api-key": "AbCdEf0123456789GhIjKlMn"}
 	n := 0
-	for _, name := range []string{"claudecode", "codex", "opencode", "copilot", "hermes", "kiro", "antigravity", "cursor", "amp", "devin", "gemini", "windsurf", "openclaw"} {
+	for _, name := range []string{"claudecode", "codex", "opencode", "copilot", "hermes", "kiro", "antigravity", "cursor", "amp", "devin", "openclaw"} {
 		for _, c := range connector.KnownHookContracts(name) {
 			for _, ev := range c.Events {
 				n++

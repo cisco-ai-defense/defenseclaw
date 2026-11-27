@@ -106,6 +106,12 @@ func TestFIX2223DGuestOwnRootKeepsProcessLinkBoundary(t *testing.T) {
 }
 
 func TestFIX2223DGuestRelativeAliasAfterDirectoryChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The gateway reads a guest's links and directories only for a
+		// guest cwd that is absolute on this host, which a Linux guest's
+		// /sandbox/app is not on Windows (rel-1-0-10:GAP-2301).
+		t.Skip("guest POSIX alias parser is not used on Windows")
+	}
 	command := "cd /tmp && ln -s ../proc/self/root/sandbox/.ssh/authorized_keys l && echo k >> l"
 	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
 	aliases := links.GuestAliasTargets("/tmp/l", false)
@@ -121,6 +127,12 @@ func TestFIX2223DGuestRelativeAliasAfterDirectoryChange(t *testing.T) {
 }
 
 func TestFIX2223DGuestRelativeDirectoryAliasAfterChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The gateway reads a guest's links and directories only for a
+		// guest cwd that is absolute on this host, which a Linux guest's
+		// /sandbox/app is not on Windows (rel-1-0-10:GAP-2301).
+		t.Skip("guest POSIX alias parser is not used on Windows")
+	}
 	command := "cd /tmp && ln -s ../proc/self/root/sandbox/.ssh l && echo k >> l/authorized_keys"
 	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
 	aliases := links.GuestAliasTargets("/tmp/l/authorized_keys", false)
@@ -133,6 +145,12 @@ func TestFIX2223DGuestRelativeDirectoryAliasAfterChange(t *testing.T) {
 }
 
 func TestFIX2223EGuestAbsoluteAliasAfterDirectoryChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The gateway reads a guest's links and directories only for a
+		// guest cwd that is absolute on this host, which a Linux guest's
+		// /sandbox/app is not on Windows (rel-1-0-10:GAP-2301).
+		t.Skip("guest POSIX alias parser is not used on Windows")
+	}
 	command := "cd /tmp && ln -s /proc/self/root/sandbox/.ssh/authorized_keys l && echo k >> l"
 	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
 	aliases := links.GuestAliasTargets("/tmp/l", false)
@@ -145,6 +163,12 @@ func TestFIX2223EGuestAbsoluteAliasAfterDirectoryChange(t *testing.T) {
 }
 
 func TestFIX2223DGuestRelativeAliasBelowLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The gateway reads a guest's links and directories only for a
+		// guest cwd that is absolute on this host, which a Linux guest's
+		// /sandbox/app is not on Windows (rel-1-0-10:GAP-2301).
+		t.Skip("guest POSIX alias parser is not used on Windows")
+	}
 	command := "ln -s /proc/self/root/sandbox l1 && ln -s l1/.ssh l2 && echo k >> l2/authorized_keys"
 	links := CommandLinksWithFacts("Bash", command, "/sandbox/app", "/sandbox", nil)
 	aliases := links.GuestAliasTargets("/sandbox/app/l2/authorized_keys", false)
@@ -168,6 +192,12 @@ func TestGAP2223GuestAliasTargetsUseLinuxCase(t *testing.T) {
 }
 
 func TestFIX2223CGuestAliasTargetsProcessLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The gateway reads a guest's links and directories only for a
+		// guest cwd that is absolute on this host, which a Linux guest's
+		// /sandbox/app is not on Windows (rel-1-0-10:GAP-2301).
+		t.Skip("guest POSIX alias parser is not used on Windows")
+	}
 	rows := []struct{ command, want string }{
 		{"ln -s /proc/4242/root/sandbox/.ssh/authorized_keys l && echo k >> l", "/proc/4242/root/sandbox/.ssh/authorized_keys"},
 		{"exec 3< /sandbox && ln -s /dev/fd/3/.ssh/authorized_keys l && echo k >> l", "/dev/fd/3/.ssh/authorized_keys"},
@@ -192,6 +222,12 @@ func TestFIX2223CGuestAliasTargetsProcessLinks(t *testing.T) {
 }
 
 func TestFIX2223CGuestStaticDirectoryPlacesRootBoundWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The gateway reads a guest's links and directories only for a
+		// guest cwd that is absolute on this host, which a Linux guest's
+		// /sandbox/app is not on Windows (rel-1-0-10:GAP-2301).
+		t.Skip("guest POSIX alias parser is not used on Windows")
+	}
 	key := "authorized_" + "keys"
 	for _, command := range []string{
 		"cd /proc/self/root/.. && echo k >> sandbox/.ssh/" + key,

@@ -177,15 +177,19 @@ func TestR104GlobFactsDecideBehindHiddenHome(t *testing.T) {
 				t.Errorf("%s: visible gateway with a forged answer = %q, want protected-target", command, got)
 			}
 		}
-		// Past its bound the own walk is TRUNCATED (rel-1-0-10:GAP-1324),
-		// whatever the forged answer says: no protected target, the cap on
-		// the call, never the forged clean "0".
+		// Past its bound the own walk decides whatever the forged answer
+		// says, never the forged clean "0": a write into the pattern is the
+		// rel/1.0.10 protected target (rel-1-0-10:GAP-2300), a read-only
+		// statement is TRUNCATED, the cap on the call (GAP-1324).
+		if got := ActionCommandDecisionWithGlobFacts(`cp payload many/*/*`, cwd, home, forged); got != "protected-target" {
+			t.Errorf("cp payload many/*/*: visible gateway with a forged answer = %q, want protected-target", got)
+		}
 		end := HookCall()
-		got := ActionCommandDecisionWithGlobFacts(`cp payload many/*/*`, cwd, home, forged)
+		got := ActionCommandDecisionWithGlobFacts(`ls many/*/*; cp payload out.txt`, cwd, home, forged)
 		cut := HookCallState().GlobCut()
 		end()
 		if got != "" || !cut.Has(bounded.Paths) {
-			t.Errorf("cp payload many/*/*: visible gateway with a forged answer = %q cut %q, want TRUNCATED (paths)", got, cut.Reason())
+			t.Errorf("ls many/*/*: visible gateway with a forged answer = %q cut %q, want TRUNCATED (paths)", got, cut.Reason())
 		}
 	})
 }

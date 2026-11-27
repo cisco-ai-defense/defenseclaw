@@ -44,6 +44,11 @@ type shellGlobOptions struct {
 	dotGlob, noCaseGlob, nullGlob, failGlob, noGlob bool
 	globStar, extGlob, globIgnore, unknown          bool
 	may                                             uint8
+	// readPosition: the word is one of a statement the target scan reads as
+	// read-only, not an operand the call may write: a walk stopped at its
+	// bound is TRUNCATED there, and unread elsewhere, as on rel/1.0.10
+	// (rel-1-0-10:GAP-1324, GAP-2300). Not a shell option.
+	readPosition bool
 }
 
 // unmodeled reports an option state the resolver cannot expand exactly.
@@ -187,11 +192,13 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	var truncated bounded.Truncated
 	candidates := bounded.NewCounter(&truncated, bounded.Paths, MaxResolvedCandidates)
 	switch {
-	case capped:
+	case capped && opts.readPosition:
 		// A walk that read every folder it reached and stopped only at a
-		// counted bound is TRUNCATED, as a result past MaxResolvedCandidates
-		// is: the bound rule judges it, on the hook call
-		// (rel-1-0-10:GAP-1324).
+		// counted bound, in a read-only statement, is TRUNCATED, as a result
+		// past MaxResolvedCandidates is: the bound rule judges it, on the
+		// hook call (rel-1-0-10:GAP-1324). As a write operand its unread
+		// folders may hold a link to a key file: unread below, as on
+		// rel/1.0.10 (GAP-2300).
 		cut := bounded.Of(bounded.Paths)
 		noteGlobCut(cut)
 		return resolvedWord{uncertain: wordUncertainTruncated, caps: cut}

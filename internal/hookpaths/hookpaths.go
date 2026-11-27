@@ -674,6 +674,11 @@ func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
 }
 
+// MentionOperandPath is actionfacts.MentionOperandPath.
+func MentionOperandPath(name, cwd string) string {
+	return actionfacts.MentionOperandPath(name, cwd)
+}
+
 func init() { actionfacts.SetOperandLinkProbe(directoryHasLink) }
 
 // directoryHasLink reports a directory whose path, or the longest existing
