@@ -206,19 +206,19 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			return actionPosixWindowsProtected(value, base, home)
 		}
 		operand := MentionOperandPath(value, base)
-		if stateOnly {
-			return actionProtectedStatePath(operand, stateHome)
-		}
-		if _, resolved := memo.resolveWriteTarget(operand); !resolved {
-			// A gateway behind ProtectHome cannot resolve the home: a word
-			// that names the .ssh directory itself (rel-1-0-6:GAP-0130) or
-			// one of its authorized-keys files (rel-1-0-6:GAP-0046) is still
-			// that path, as a per-user gateway reads it.
-			if clean := filepath.Clean(operand); samePathName(clean, ssh) || protected.has(clean) {
+		// A word through the command's own working-directory link names the
+		// file below the folder it runs in: judge it as that plain spelling,
+		// whatever program and position (rel-1-0-10:GAP-2265).
+		if placed, ok := actionfacts.ProcessCWDLinkSpelling(operand, base); ok && placed != operand {
+			if stateOnly && actionProtectedStatePath(placed, stateHome) ||
+				!stateOnly && actionProtectedMentionPath(placed, protected, ssh, memo) {
 				return true
 			}
 		}
-		return protectedReachPathWith(operand, protected, ssh, memo)
+		if stateOnly {
+			return actionProtectedStatePath(operand, stateHome)
+		}
+		return actionProtectedMentionPath(operand, protected, ssh, memo)
 	}
 	// The hook client records an answer for every pattern the scan checks,
 	// so while recording it never stops at a match. A long command repeats
@@ -1567,6 +1567,21 @@ func patchCommandResolutionChange(line string) bool {
 // name the shell passes. It is marked so the scan resolves it below the cwd,
 // not the home. Writers and redirects keep the conservative home spelling.
 const actionLiteralTilde = "\x1e"
+
+// actionProtectedMentionPath reports a placed word that names a protected
+// file or the .ssh directory, through the links the host can follow.
+func actionProtectedMentionPath(operand string, protected protectedFiles, ssh string, memo *TargetMemo) bool {
+	if _, resolved := memo.resolveWriteTarget(operand); !resolved {
+		// A gateway behind ProtectHome cannot resolve the home: a word
+		// that names the .ssh directory itself (rel-1-0-6:GAP-0130) or
+		// one of its authorized-keys files (rel-1-0-6:GAP-0046) is still
+		// that path, as a per-user gateway reads it.
+		if clean := filepath.Clean(operand); samePathName(clean, ssh) || protected.has(clean) {
+			return true
+		}
+	}
+	return protectedReachPathWith(operand, protected, ssh, memo)
+}
 
 // actionMentionTokenByte reports a byte a mention token is made of: an ASCII
 // letter or digit, or one of _ . / ~ * ? [ ] - and the literal-tilde mark.

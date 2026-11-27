@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"io"
 	"os"
 	"path/filepath"
@@ -790,6 +791,20 @@ func processLinkPrefix(path string) string {
 		}
 	}
 	return path
+}
+
+// entryWalkPath is the path whose folder an entry-only proof (touch -h, the
+// replace verbs) walks on this host. A word through the command's own
+// working-directory link names the entry below the folder the command runs
+// in (actionfacts.ProcessCWDLinkSpelling). Any other process link names a
+// folder of a process the host cannot walk for the agent: the walk would
+// follow the gateway's own process link, so ok is false and the proof does
+// not hold (rel-1-0-10:GAP-2265).
+func entryWalkPath(path, cwd string) (string, bool) {
+	if placed, ok := actionfacts.ProcessCWDLinkSpelling(path, cwd); ok {
+		return placed, true
+	}
+	return path, !throughProcessLink(path)
 }
 
 // processLinkWrites keeps the write operands whose placed path passes
