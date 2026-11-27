@@ -445,7 +445,10 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	}
 	for _, decl := range all {
 		name := decl.Name.Value
-		if !tracker.movers[name] {
+		if !tracker.movers[name] && !tracker.runners[name] {
+			// A runner keeps its definition too: its call is read as its
+			// arguments only where the definition has run
+			// (substrate-1:GAP-0713, CHK-T6-SCB).
 			continue
 		}
 		if _, seen := tracker.decls[name]; seen {
@@ -847,8 +850,21 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		if len(cmd.Args) > 1 && len(t.runners) != 0 {
 			if name := projectPOSIXWord(cmd.Args[0]); !name.Expands && t.runners[name.Value] {
 				// After f() { "$@"; }, f cd X is the cd X, run in the shell
-				// itself (substrate-1:GAP-0713).
-				return t.command(&syntax.Stmt{Cmd: &syntax.CallExpr{Args: cmd.Args[1:]}}, in)
+				// itself (substrate-1:GAP-0713). Only a definition at the
+				// top level of the text before the call has surely run; one
+				// that may have run (in a list, a branch or a body) may leave
+				// the call to a builtin or program of the name, so the shell
+				// may also stay where it was; one that cannot have run yet
+				// leaves it there (CHK-T6-SCB).
+				decl := t.decls[name.Value]
+				if decl == nil || !t.definedAt(decl, cmd, 0) {
+					return in, in
+				}
+				ok, after := t.command(&syntax.Stmt{Cmd: &syntax.CallExpr{Args: cmd.Args[1:]}}, in)
+				if !t.defs[decl].topLevel {
+					ok, after = unionWorkFolders(ok, in), unionWorkFolders(after, in)
+				}
+				return ok, after
 			}
 		}
 		return in, in
