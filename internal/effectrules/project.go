@@ -28,7 +28,7 @@ type Env struct {
 	AccountHomes []string
 	// Resolve follows a write path through links; nil falls back to
 	// hookpaths.ResolveWriteTarget for the host's own path flavor and to the
-	// placed path for the other flavor (resolverFor).
+	// placed path for the other flavor (resolverForWith).
 	Resolve func(string) (string, bool)
 	// HostResolve, when Resolve is nil, replaces hookpaths.ResolveWriteTarget
 	// as the resolver of the host's own path flavor (resolverForWith): the
