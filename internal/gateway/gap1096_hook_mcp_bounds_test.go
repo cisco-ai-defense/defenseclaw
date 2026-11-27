@@ -86,27 +86,31 @@ func TestGAP1096HookMCPOverBoundArgumentsAreJudged(t *testing.T) {
 }
 
 // TestGAP1096HookMCPOverBoundBenignFloor: a large benign MCP call is never a
-// silent allow and never a block at defaults: it is allowed with the
-// evaluation-limit finding (the unknown tier of the default pack), and
-// blocked where guardrail.cascade.unknown says block. A small benign call
-// stays a plain allow in both.
+// silent allow where the bounded projections leave unread a part the
+// structured reading reads (here a long command value): it is allowed with
+// the evaluation-limit finding at defaults (the unknown tier of the default
+// pack) and blocked where guardrail.cascade.unknown says block. Padding the
+// structured reading does not read (a large payload) is read whole by the
+// projections and stays a plain allow in both, as a small call does
+// (FIXLEAD3 ruling: floor only what the projections leave unread).
 func TestGAP1096HookMCPOverBoundBenignFloor(t *testing.T) {
-	large := `{"path":"/notes/a.txt","content":"` + strings.Repeat("hello ", 12000) + `"}`
+	words := strings.Repeat("hello ", 12000)
+	longCommand := `{"command":"echo ` + words + `"}`
+	largePayload := `{"path":"/notes/a.txt","content":"` + words + `"}`
 	small := `{"path":"/notes/a.txt","content":"hello"}`
-	a := gap1096HookAPI("")
-	if got := gap1096Hook(t, a, "mcp__notes__write_note", small); got.Action != "allow" || len(got.RuleIDs) != 0 {
-		t.Fatalf("small benign call action=%s rules=%v, want a plain allow", got.Action, got.RuleIDs)
-	}
-	got := gap1096Hook(t, a, "mcp__notes__write_note", large)
-	if got.Action == "block" || !slices.Contains(got.RuleIDs, evaluationLimitRuleID) {
-		t.Fatalf("large benign call action=%s rules=%v, want no block with %s", got.Action, got.RuleIDs, evaluationLimitRuleID)
-	}
-	strict := gap1096HookAPI(config.CascadeBlock)
-	if got := gap1096Hook(t, strict, "mcp__notes__write_note", large); got.Action != "block" ||
-		!slices.Contains(got.RuleIDs, evaluationLimitRuleID) {
-		t.Fatalf("large benign call with cascade.unknown block action=%s rules=%v, want block", got.Action, got.RuleIDs)
-	}
-	if got := gap1096Hook(t, strict, "mcp__notes__write_note", small); got.Action != "allow" || len(got.RuleIDs) != 0 {
-		t.Fatalf("small benign call with cascade.unknown block action=%s rules=%v, want a plain allow", got.Action, got.RuleIDs)
+	for _, unknown := range []string{"", config.CascadeBlock} {
+		a := gap1096HookAPI(unknown)
+		for name, args := range map[string]string{"small": small, "large payload": largePayload} {
+			if got := gap1096Hook(t, a, "mcp__notes__write_note", args); got.Action != "allow" || len(got.RuleIDs) != 0 {
+				t.Errorf("unknown=%q %s benign call action=%s rules=%v, want a plain allow", unknown, name, got.Action, got.RuleIDs)
+			}
+		}
+		got := gap1096Hook(t, a, "mcp__notes__run_note", longCommand)
+		if !slices.Contains(got.RuleIDs, evaluationLimitRuleID) {
+			t.Errorf("unknown=%q long command action=%s rules=%v, want %s", unknown, got.Action, got.RuleIDs, evaluationLimitRuleID)
+		}
+		if wantBlock := unknown == config.CascadeBlock; (got.Action == "block") != wantBlock {
+			t.Errorf("unknown=%q long command action=%s rules=%v, want block=%v", unknown, got.Action, got.RuleIDs, wantBlock)
+		}
 	}
 }

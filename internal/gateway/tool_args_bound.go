@@ -19,13 +19,19 @@ import (
 // now judged as the substrate MCP callout judges it (GAP-1094): every rule
 // reading of the call also reads its bounded projections
 // (substrateMCPArgsProjections: the read keys first, heads and tails of long
-// strings cut at word boundaries), and the call gets the unknown tier of the
-// pack (ACTION-COMPOUND-LIMIT: an alert in the default pack, a block in the
-// strict pack or under guardrail.cascade.unknown block). A large benign call
-// is never a silent allow and, at defaults, never a block. Projections go to
-// the rules alone; the LLM judge and AID read the whole arguments as before.
-// A shell or native file-tool call keeps its own bounds
-// (nonShellToolApplies: posixParseTruncation, the over-limit write readings).
+// strings cut at word boundaries). Only when the projections leave unread a
+// part the structured reading reads (substrateMCPProjectionsRead: a cut
+// command, path or url value, a dropped member that is or holds a read
+// field) does the call get the unknown tier of the pack
+// (ACTION-COMPOUND-LIMIT: an alert in the default pack, a block in the
+// strict pack or under guardrail.cascade.unknown block). Padding the
+// structured reading does not read (a long note, a large payload, many
+// unread members) is judged whole by the projections and by the non-shell
+// lanes, which keep their own caps and floors, so a large benign call stays
+// a plain allow. Projections go to the rules alone; the LLM judge and AID
+// read the whole arguments as before. A shell or native file-tool call keeps
+// its own bounds (nonShellToolApplies: posixParseTruncation, the over-limit
+// write readings).
 
 type toolArgsProjectedKey struct{}
 
@@ -45,7 +51,8 @@ func toolArgsProjected(ctx context.Context) bool {
 // overBoundToolArgsFindings adds to findings, the rule readings of an MCP or
 // app tool call, the findings of its bounded projections when its arguments
 // pass a bound of the shared reading, and the unknown-tier finding of that
-// bound. A call inside the bounds keeps findings as they are.
+// bound when the projections leave a read part unread. A call inside the
+// bounds keeps findings as they are.
 func overBoundToolArgsFindings(ctx context.Context, action trustedActionRequest, findings []RuleFinding, mcpServer string, secureClient bool) []RuleFinding {
 	if len(action.Input.Args) == 0 || toolArgsProjected(ctx) {
 		return findings
@@ -55,12 +62,16 @@ func overBoundToolArgsFindings(ctx context.Context, action trustedActionRequest,
 	if issue == "" || !nonShellToolApplies(action, mcpServer) {
 		return findings
 	}
-	for _, projection := range substrateMCPArgsProjections(action.Input.Args) {
+	projections, unread := substrateMCPProjectionsRead(action.Input.Args, substrateMCPMaxProjections)
+	for _, projection := range projections {
 		twin := action
 		twin.Input.Args = projection
 		twin.LegacyText = string(projection)
 		twin.guestMemo, twin.conflictSource = nil, nil
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
+	}
+	if !unread {
+		return findings
 	}
 	set := bounded.Of(bounded.Bytes)
 	if issue == actionfacts.IssueDepthLimit {
