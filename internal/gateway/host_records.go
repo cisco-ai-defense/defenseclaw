@@ -55,9 +55,16 @@ const (
 )
 
 // hostRecordUnifiedLogPredicate selects the hook's decision records in the
-// macOS unified log: lines the managed hook binary sent, not any process's
-// line with the same text.
-const hostRecordUnifiedLogPredicate = `(process == "defenseclaw-hook" OR senderImagePath ENDSWITH "/defenseclaw-hook") AND eventMessage CONTAINS "component=\"hook\""`
+// macOS unified log by what the hook writes, not by the sending process: the
+// hook sends its own syslog datagram, which the unified log may attribute to
+// syslogd or to the binary that runs the hook. A record starts with the
+// gateway's syslog tag (source) or, when the tag is not kept, with a record
+// marker, and is a hook record. source must hold no quote or backslash.
+func hostRecordUnifiedLogPredicate(source string) string {
+	return `(eventMessage BEGINSWITH "` + source + `[" OR eventMessage BEGINSWITH "` + source + `:" OR ` +
+		`eventMessage BEGINSWITH "` + managed.MarkerBoundary + ` " OR eventMessage BEGINSWITH "` + managed.MarkerDegraded + ` ") ` +
+		`AND eventMessage CONTAINS "component=\"hook\""`
+}
 
 // HostRecordsSnapshot is the /health and /status "host_records" object of a
 // managed gateway.
@@ -436,7 +443,9 @@ func parseJournalRecords(out []byte) []string {
 
 // parseUnifiedLogRecords reads log show --style ndjson lines (newest
 // first): eventMessage, with the syslog tag of the sender removed when it
-// is kept.
+// is kept. A message that starts with neither the tag nor a record marker is
+// not the hook's (the same rule as hostRecordUnifiedLogPredicate) and is
+// skipped, whatever process sent it.
 func parseUnifiedLogRecords(entries []string, source string) []string {
 	var lines []string
 	for _, raw := range entries {
@@ -450,7 +459,12 @@ func parseUnifiedLogRecords(entries []string, source string) []string {
 		if entry.EventMessage == nil {
 			continue // the closing summary object
 		}
-		lines = append(lines, stripSyslogTag(*entry.EventMessage, source))
+		line := stripSyslogTag(*entry.EventMessage, source)
+		if line == *entry.EventMessage && !strings.HasPrefix(line, managed.MarkerBoundary+" ") &&
+			!strings.HasPrefix(line, managed.MarkerDegraded+" ") {
+			continue
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }

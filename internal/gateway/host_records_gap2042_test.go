@@ -163,17 +163,49 @@ func TestGAP2042UnifiedLogKeepsTheNewest(t *testing.T) {
 	if len(got) != 3 || got[0] != `{"eventMessage":"b"}` || got[1] != hostRecordTooLong || got[2] != `{"eventMessage":"a"}` || small.evicted {
 		t.Fatalf("tail = %q evicted=%v", got, small.evicted)
 	}
-	if lines := parseUnifiedLogRecords(got, "DefenseClawGateway"); len(lines) != 3 || lines[1] != "" {
+	// "a" and "b" are not hook records and are skipped; the oversized entry
+	// is dropped.
+	if lines := parseUnifiedLogRecords(got, "DefenseClawGateway"); len(lines) != 1 || lines[0] != "" {
 		t.Fatalf("an oversized entry was read: %q", lines)
 	}
 }
 
-// TestGAP2042UnifiedLogPredicateNamesTheHook: the unified log query reads
-// the managed hook's own lines, not any process's line with the same text.
-func TestGAP2042UnifiedLogPredicateNamesTheHook(t *testing.T) {
-	for _, want := range []string{`process == "defenseclaw-hook"`, `senderImagePath ENDSWITH "/defenseclaw-hook"`, `component=\"hook\"`, ") AND eventMessage"} {
-		if !strings.Contains(hostRecordUnifiedLogPredicate, want) {
-			t.Fatalf("predicate %q lacks %q", hostRecordUnifiedLogPredicate, want)
+// TestGAP2042UnifiedLogScopedByTheRecord: the hook sends its own syslog
+// datagram, so the unified log may name syslogd or the binary that runs the
+// hook as its process. The query and the parser go by what the hook writes:
+// the gateway's syslog tag or a record marker at the start of the message,
+// and component="hook"; the process does not matter.
+func TestGAP2042UnifiedLogScopedByTheRecord(t *testing.T) {
+	block := hookRecordLine(managed.MarkerBoundary, "block")
+	entry := func(process, message string) string {
+		return fmt.Sprintf(`{"processImagePath":%q,"senderImagePath":%q,"eventMessage":%q}`, process, process, message)
+	}
+	entries := []string{
+		entry("/usr/sbin/syslogd", "DefenseClawGateway[4242]: "+block),              // the tag, another process: counted
+		entry("/usr/local/bin/node", "DefenseClawGateway: "+block),                  // the tag without a pid: counted
+		entry("/usr/sbin/syslogd", hookRecordLine(managed.MarkerDegraded, "allow")), // the tag not kept, the marker leads: counted
+		entry("/Applications/Other.app/Contents/MacOS/Other", "Other[7]: "+block),   // another tag: not counted
+		entry("/usr/bin/python3", "note: "+block),                                   // the text inside another line: not counted
+		entry("/usr/sbin/syslogd", "DefenseClawGatewayX[1]: "+block),                // a longer tag: not counted
+		`{"count":6,"finished":1}`,
+	}
+	snap := countHostRecords(hostRecordRead{lines: parseUnifiedLogRecords(entries, "DefenseClawGateway")})
+	if snap.Blocks != 2 || snap.Allows != 1 || snap.Dropped != 0 {
+		t.Fatalf("counts = %+v", snap)
+	}
+	predicate := hostRecordUnifiedLogPredicate("DefenseClawGateway")
+	for _, want := range []string{
+		`eventMessage BEGINSWITH "DefenseClawGateway["`, `eventMessage BEGINSWITH "DefenseClawGateway:"`,
+		`eventMessage BEGINSWITH "defenseclaw_boundary "`, `eventMessage BEGINSWITH "defenseclaw_degraded "`,
+		`) AND eventMessage CONTAINS "component=\"hook\""`,
+	} {
+		if !strings.Contains(predicate, want) {
+			t.Fatalf("predicate %q lacks %q", predicate, want)
+		}
+	}
+	for _, gone := range []string{"process ==", "senderImagePath", "defenseclaw-hook"} {
+		if strings.Contains(predicate, gone) {
+			t.Fatalf("predicate %q still goes by the process (%q)", predicate, gone)
 		}
 	}
 }
