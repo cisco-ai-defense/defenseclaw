@@ -18,8 +18,9 @@ import (
 // made a laptop PreToolUse a silent allow (substrate-1:GAP-1096). The call is
 // now judged as the substrate MCP callout judges it (GAP-1094): every rule
 // reading of the call also reads its bounded projections
-// (substrateMCPArgsProjections: the read keys first, heads and tails of long
-// strings cut at word boundaries). Only when the projections leave unread a
+// (substrateMCPProjectionsRead: the members the structured reading reads,
+// heads and tails of their long strings cut at word boundaries; the whole
+// call is judged as well, so the rest is dropped). Only when the projections leave unread a
 // part the structured reading reads (substrateMCPProjectionsRead: a cut
 // command, path or url value, a dropped member that is or holds a read
 // field) does the call get the unknown tier of the pack
@@ -62,7 +63,7 @@ func overBoundToolArgsFindings(ctx context.Context, action trustedActionRequest,
 	if issue == "" || !nonShellToolApplies(action, mcpServer) {
 		return findings
 	}
-	projections, unread := substrateMCPProjectionsRead(action.Input.Args, substrateMCPMaxProjections)
+	projections, unread := substrateMCPProjectionsRead(action.Input.Args, substrateMCPMaxProjections, true)
 	for _, projection := range projections {
 		twin := action
 		twin.Input.Args = projection

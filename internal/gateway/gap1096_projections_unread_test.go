@@ -15,7 +15,9 @@ import (
 // unread only a part the structured reading reads: a cut command, path or
 // url value (at the top level or in an input envelope), a dropped level of
 // such a value. Padding the reading does not read (a note, a payload,
-// unread members, containers under unread keys) loses nothing.
+// unread members, containers under unread keys) loses nothing, and the
+// hook routes' read-only projections keep no member the reading does not
+// read.
 func TestGAP1096ProjectionsReportUnread(t *testing.T) {
 	long := strings.Repeat("w ", 40000)
 	members := func(n int, extra string) string {
@@ -50,12 +52,29 @@ func TestGAP1096ProjectionsReportUnread(t *testing.T) {
 			if !json.Valid([]byte(tc.args)) {
 				t.Fatal("test arguments are not JSON")
 			}
-			out, unread := substrateMCPProjectionsRead(json.RawMessage(tc.args), substrateMCPMaxProjections)
-			if len(out) == 0 {
-				t.Fatal("no projection")
-			}
-			if unread != tc.unread {
-				t.Fatalf("unread=%v, want %v", unread, tc.unread)
+			for _, readOnly := range []bool{false, true} {
+				out, unread := substrateMCPProjectionsRead(json.RawMessage(tc.args), substrateMCPMaxProjections, readOnly)
+				if len(out) == 0 {
+					t.Fatalf("readOnly=%v: no projection", readOnly)
+				}
+				if unread != tc.unread {
+					t.Fatalf("readOnly=%v: unread=%v, want %v", readOnly, unread, tc.unread)
+				}
+				if !readOnly {
+					continue
+				}
+				// The hook routes' projections keep only what the reading reads.
+				for _, p := range out {
+					var top map[string]any
+					if err := json.Unmarshal(p, &top); err != nil {
+						t.Fatalf("projection is not an object: %v", err)
+					}
+					for k := range top {
+						if !substrateMCPReadKey(k) {
+							t.Fatalf("read-only projection keeps the unread key %q", k)
+						}
+					}
+				}
 			}
 		})
 	}

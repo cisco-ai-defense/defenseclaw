@@ -535,7 +535,7 @@ func substrateMCPArgsProjections(raw json.RawMessage) []json.RawMessage {
 // differs), cut at a word boundary so a cut never makes a word the call did
 // not carry.
 func substrateMCPProjectionsUpTo(raw json.RawMessage, limit int) []json.RawMessage {
-	out, _ := substrateMCPProjectionsRead(raw, limit)
+	out, _ := substrateMCPProjectionsRead(raw, limit, false)
 	return out
 }
 
@@ -549,7 +549,13 @@ func substrateMCPProjectionsUpTo(raw json.RawMessage, limit int) []json.RawMessa
 // payload field keeps what the reading keeps of it, its kind and that it is
 // not empty; members, containers and strings the reading does not read lose
 // nothing. False only when every part the rules read was judged whole.
-func substrateMCPProjectionsRead(raw json.RawMessage, limit int) ([]json.RawMessage, bool) {
+//
+// With readOnly the projections keep only the members the structured
+// reading reads (substrateMCPReadKey, at the top level and in envelopes):
+// the hook routes judge the whole call as well, so a projection there only
+// has to give the structured reading its facts, and dropping the rest keeps
+// a padded call to one small extra reading (substrate-1:GAP-1096).
+func substrateMCPProjectionsRead(raw json.RawMessage, limit int, readOnly bool) ([]json.RawMessage, bool) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
@@ -559,6 +565,15 @@ func substrateMCPProjectionsRead(raw json.RawMessage, limit int) ([]json.RawMess
 	windows := [][]string{nil}
 	var dropped []string // top-level keys past the last window
 	obj, isObj := v.(map[string]any)
+	if isObj && readOnly {
+		kept := make(map[string]any, len(obj))
+		for k, e := range obj {
+			if substrateMCPReadKey(k) {
+				kept[k] = e
+			}
+		}
+		obj, v = kept, kept
+	}
 	if isObj && len(obj) > substrateMCPWindowMembers {
 		keys := substrateMCPKeyOrder(obj)
 		windows = nil
@@ -588,7 +603,7 @@ func substrateMCPProjectionsRead(raw json.RawMessage, limit int) ([]json.RawMess
 				break
 			}
 			for _, strMax := range substrateMCPStringLimits {
-				p := substrateMCPProjector{tail: tail, strMax: strMax}
+				p := substrateMCPProjector{tail: tail, strMax: strMax, readOnly: readOnly}
 				enc, err := substrateMCPEncode(p.value(v, 0, window))
 				if err != nil || actionfacts.ArgsLimitIssue(enc) != "" {
 					continue
@@ -693,6 +708,8 @@ type substrateMCPProjector struct {
 	// lost is set when the projection cuts or drops a part the structured
 	// reading reads (substrateMCPProjectionsRead).
 	lost bool
+	// readOnly drops the members of an envelope the reading does not read.
+	readOnly bool
 }
 
 // value is v within the reading's bounds; only, when set, is the keys a
@@ -725,6 +742,9 @@ func (p *substrateMCPProjector) valueRead(v any, depth int, only []string, read,
 		}
 		out := make(map[string]any, len(keys))
 		for i, k := range keys {
+			if p.readOnly && envelope && !read && !substrateMCPReadKey(k) {
+				continue
+			}
 			if p.members >= actionfacts.MaxJSONMembers {
 				for _, rest := range keys[i:] {
 					p.lost = p.lost || read || envelope && substrateMCPReadKey(rest)
