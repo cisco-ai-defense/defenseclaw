@@ -26,14 +26,15 @@ func gap1324Tree(t *testing.T, dir string, folders int) {
 
 // GAP-1324: the target scan's pattern walk (actionExpandGlob) that stopped at
 // its read bound (actionGlobMaxReads, 64 folders) held the pattern as a
-// protected target, so a benign in-home cp into w/b*/c* past 64 folders was
-// the CRITICAL authorized-keys block in every tier. A walk that read every
-// folder it reached and stopped only at a counted bound, with no protected
-// file among its matches, is now a TRUNCATED reading (the one bound rule):
-// no protected target, the cap recorded on the hook call, and the managed
-// hook client sends it under GlobCapFactPrefix (never as a GlobFactPrefix
-// value, which a 1.0.10 gateway refuses), so a gateway behind ProtectHome
-// reads the same.
+// protected target in every position. A walk that read every folder it
+// reached and stopped only at a counted bound, with no protected file among
+// its matches, is a TRUNCATED reading (the one bound rule) in a read-only
+// statement: no protected target, the cap recorded on the hook call. As a
+// write operand (cp into w/b*/c* past 64 folders) it keeps the rel/1.0.10
+// protected target: an unread folder may hold a link to a key file
+// (rel-1-0-10:GAP-2300). The managed hook client sends the cap under
+// GlobCapFactPrefix (never as a GlobFactPrefix value, which a 1.0.10 gateway
+// refuses), so a gateway behind ProtectHome reads the same.
 func TestGAP1324GlobWalkCapIsTruncated(t *testing.T) {
 	home := t.TempDir()
 	project := filepath.Join(home, "proj")
@@ -60,7 +61,8 @@ func TestGAP1324GlobWalkCapIsTruncated(t *testing.T) {
 		command, decision, fact string
 	}{
 		{"cp a.txt at/b*/c*", "", "0"},
-		{"cp a.txt past/b*/c*", "", "cap"},
+		{"cp a.txt past/b*/c*", "protected-target", "cap"},
+		{"ls past/b*/c*; cp a.txt b.txt", "", "cap"},
 		{"cp a.txt alias/b*/a*", "protected-target", "1"},
 	} {
 		if got := ActionCommandDecision(row.command, project, home); got != row.decision {
