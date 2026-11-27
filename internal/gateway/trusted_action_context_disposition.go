@@ -120,7 +120,7 @@ func applyTrustedActionContextDisposition(
 					adjusted[index] = finding
 					continue
 				}
-				if scope.strictPolicy && finding.enforcement != findingEnforcementDetectionOnly &&
+				if scope.strictPolicy && !finding.Proof.Recorded() &&
 					trustedActionStrictCredentialContentRead(findingFacts, finding) {
 					// The strict pack blocks a proven content read of a
 					// credential file, as it blocks the private key's; the

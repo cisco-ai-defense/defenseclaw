@@ -27,11 +27,11 @@ func TestGAP2242DotDotAfterJunctionOrMissingNameStepsByName(t *testing.T) {
 	makeProjectSkillJunction(t, filepath.Join(home, "J"), t.TempDir())
 	protected := newProtectedFiles(home)
 	for _, base := range []string{`.ssh\*`, `.ssh\authorized_key?`, `.ssh\.\*`} {
-		if !actionProtectedFileGlobReachAs(base, home, protected, ssh, home, nil, true) {
+		if !actionProtectedFileGlobReachAs(base, home, protected, ssh, home, nil, true, true) {
 			t.Fatalf("%q from the profile does not reach the authorized keys files", base)
 		}
 		for _, prefix := range []string{`J\..\`, `nosuch\..\`, `J\nosuch\..\..\`, `.\J\..\`} {
-			if !actionProtectedFileGlobReachAs(prefix+base, home, protected, ssh, home, nil, true) {
+			if !actionProtectedFileGlobReachAs(prefix+base, home, protected, ssh, home, nil, true, true) {
 				t.Errorf("%q from the profile is not reached, %q is", prefix+base, base)
 			}
 		}
