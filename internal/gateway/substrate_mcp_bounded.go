@@ -276,7 +276,8 @@ func substrateMCPReadingOf(ctx context.Context) substrateMCPReading {
 // early. Item and input limits use the configured unknown tier; a spent
 // bridge byte budget refuses an unresolved alias.
 func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry.Registration, connectorName string,
-	args json.RawMessage, full SubstrateCalloutVerdict, judge func(json.RawMessage) SubstrateCalloutVerdict) SubstrateCalloutVerdict {
+	args json.RawMessage, full SubstrateCalloutVerdict, judge func(json.RawMessage) SubstrateCalloutVerdict,
+	hidden *substrateMCPHiddenReadings) SubstrateCalloutVerdict {
 	issue := actionfacts.ArgsLimitIssue(args)
 	rd := substrateMCPReadingOf(ctx)
 	out := full
@@ -307,17 +308,16 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 	// Hidden actions are rules readings of their own; they spend neither the
 	// projection count nor the byte reserve, so a call is never floored for
 	// how many it carries (the scan bounds them by the call's own size).
-	for _, c := range scan.candidates {
-		if out.Verdict == "deny" {
+	// They started with the full reading (substrateMCPHiddenReadings: each
+	// candidate no earlier reading of the call judged) and fold here in scan
+	// order; a deny is final for the call.
+	if out.Verdict == "deny" {
+		return out
+	}
+	for _, v := range hidden.wait() {
+		if out = substrateMCPStricter(out, v); out.Verdict == "deny" {
 			return out
 		}
-		if rd.judged != nil {
-			if rd.judged[string(c)] {
-				continue
-			}
-			rd.judged[string(c)] = true
-		}
-		out = substrateMCPStricter(out, judge(c))
 	}
 	read := func(raw json.RawMessage) {
 		if out.Verdict == "deny" {
