@@ -36,6 +36,10 @@ const (
 	// roleCommandPath is where the actor's PATH finds a bare server
 	// command; Path is the command, Content its resolved absolute path.
 	roleCommandPath = "mcp_command_path"
+	// roleCommandPathHit is the PATH entry itself (absolute, no link
+	// followed) when it differs from roleCommandPath: a link of the
+	// folder is the folder's, whatever it points at (GAP-0632).
+	roleCommandPathHit = "mcp_command_path_hit"
 )
 
 // fetchMarkers are project configs that change what a fetcher runs or
@@ -155,7 +159,8 @@ func nodeModulesNames(dir string) AttachedFile {
 
 // attachCommandPath records where the actor's PATH finds a bare server
 // command (a name with no separator), resolved through links, so the
-// gateway can tell an installed program from one of the folder.
+// gateway can tell an installed program from one of the folder, and, when
+// a link was followed, the PATH entry itself (GAP-0632).
 func attachCommandPath(f *Facts, cmd string) {
 	if cmd == "" || strings.ContainsAny(cmd, `/\`) {
 		return
@@ -172,10 +177,16 @@ func attachCommandPath(f *Facts, cmd string) {
 	if abs, err := filepath.Abs(p); err == nil {
 		p = abs
 	}
+	hit := p
 	if r, err := winpath.EvalLinks(p); err == nil {
 		p = r
 	}
 	sum := sha256.Sum256([]byte(p))
 	f.Files = append(f.Files, AttachedFile{Role: roleCommandPath, Path: cmd, Resolved: p, Content: []byte(p),
 		Size: int64(len(p)), SHA256: hex.EncodeToString(sum[:])})
+	if hit != p {
+		sum := sha256.Sum256([]byte(hit))
+		f.Files = append(f.Files, AttachedFile{Role: roleCommandPathHit, Path: cmd, Resolved: p, Content: []byte(hit),
+			Size: int64(len(hit)), SHA256: hex.EncodeToString(sum[:])})
+	}
 }

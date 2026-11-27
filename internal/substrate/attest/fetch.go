@@ -19,6 +19,9 @@ const (
 	RoleFetchConfig  = "mcp_fetch_config"
 	RoleFetchNames   = "mcp_fetch_names"
 	RoleCommandPath  = "mcp_command_path"
+	// RoleCommandPathHit is the PATH entry of a bare command before links
+	// are followed, when it differs from RoleCommandPath (GAP-0632).
+	RoleCommandPathHit = "mcp_command_path_hit"
 )
 
 // fetchFamily is the package ecosystem of a fetcher.
@@ -320,11 +323,12 @@ func packageJSONClean(f AttachedFile, names map[string]bool) bool {
 	return empty(pj.Bin) && empty(pj.Workspaces) && !names[pj.Name]
 }
 
-// commandPath is where the kit found a bare command on the actor's PATH,
-// or "" when it did not report one.
-func commandPath(cmd string, files []AttachedFile) string {
+// commandPath is where the kit found a bare command on the actor's PATH
+// (role RoleCommandPath: links followed; RoleCommandPathHit: the PATH
+// entry itself), or "" when it did not report one.
+func commandPath(role, cmd string, files []AttachedFile) string {
 	for _, f := range files {
-		if f.Role == RoleCommandPath && f.Path == cmd {
+		if f.Role == role && f.Path == cmd {
 			if p := filepath.ToSlash(string(f.Content)); path.IsAbs(p) {
 				return path.Clean(p)
 			}

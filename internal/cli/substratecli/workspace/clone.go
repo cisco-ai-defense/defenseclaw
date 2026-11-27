@@ -504,9 +504,34 @@ func cloneLFSFetch(ctx context.Context, c *Client, root, dir string, env map[str
 			warns = append(warns, notFetched(p, lastLine(err.Error())))
 		case pull.ExitCode != 0:
 			warns = append(warns, notFetched(p, lastLine(string(pull.Stderr), string(pull.Stdout))))
+		default:
+			// git lfs pull can exit 0 and still leave files as pointers
+			// (an object address on plain http outside the loopback gets no
+			// credential, and its answer may not check out), so the files
+			// are counted after it, never assumed fetched (GAP-0984).
+			if n := cloneLFSPointers(ctx, c, root, path.Join(dir, p), env); n > 0 {
+				warns = append(warns, notFetched(p, fmt.Sprintf("git lfs pull left %d of them as pointers: an object it could not download or check out, such as a private one at a plain http address, which gets no credential", n)))
+			}
 		}
 	}
 	return warns
+}
+
+// cloneLFSPointers counts the files in the checkout at dir that git lfs
+// lists as pointers ("-"), not checked-out objects ("*"). An error counts
+// as none: the pull itself said it worked.
+func cloneLFSPointers(ctx context.Context, c *Client, root, dir string, env map[string]string) int {
+	res, err := c.Exec(ctx, "", osw.ExecRequest{Argv: []string{"git", "-C", dir, "lfs", "ls-files"}, Workdir: root, Env: env, Timeout: time.Minute})
+	if err != nil || res.ExitCode != 0 {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(string(res.Stdout), "\n") {
+		if f := strings.Fields(line); len(f) >= 3 && f[1] == "-" {
+			n++
+		}
+	}
+	return n
 }
 
 // cloneLFSWarning says when files the clone's attributes mark for LFS
