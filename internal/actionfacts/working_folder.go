@@ -263,7 +263,8 @@ type workFolderTracker struct {
 	movers map[string]bool
 	// shadowed: the text defines a function named cd, chdir, pushd, popd,
 	// builtin or command, so a call of that name may run it instead of the
-	// builtin: every move goes to an unresolved folder (substrate-1:GAP-0684).
+	// builtin: every move may go to an unresolved folder (substrate-1:GAP-0684)
+	// as well as where the builtin goes (substrate-1:GAP-0686).
 	shadowed bool
 	// decls are the definitions of the movers the text defines once (nil
 	// for one defined more than once): a call of one the definition may
@@ -367,7 +368,7 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 		case *syntax.FuncDecl:
 			if node.Name != nil {
 				// A function of a move's name may run instead of the
-				// builtin (substrate-1:GAP-0684): every move goes to an
+				// builtin (substrate-1:GAP-0684): every move may go to an
 				// unresolved folder, in the text and in mover bodies.
 				switch node.Name.Value {
 				case "cd", "chdir", "pushd", "popd", "builtin", "command":
@@ -736,12 +737,16 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 			}
 		}
 		if target, isCD := staticWorkFolderMove(cmd); isCD {
-			if t.shadowed {
-				target = "\x00"
-			}
 			moved := in.with(target)
 			for _, candidate := range cdPathCandidates(cmd, target) {
 				moved = unionWorkFolders(moved, in.with(candidate))
+			}
+			if t.shadowed {
+				// A function of the move's name may run instead of the
+				// builtin and go anywhere, or where the builtin goes
+				// (cd(){ builtin cd "$@"; }): both, so the call is never
+				// weaker than its plain form (substrate-1:GAP-0686).
+				moved = unionWorkFolders(moved, unresolvedWorkFolders)
 			}
 			// The cd may fail: after it the shell is in the moved folder if
 			// it worked, where it was if not.
