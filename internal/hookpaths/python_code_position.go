@@ -31,66 +31,92 @@ type pythonCodeFrame struct {
 // from an ordinary string. A writer-looking token inside an ordinary string
 // is data; the same token between a live f-string's braces is executed.
 func pythonExecutableCodePosition(code string, position int) bool {
+	return newPythonCodeScanner(code).at(position)
+}
+
+// pythonCodeScanner answers pythonExecutableCodePosition for many positions
+// of one program. The reading of a byte never depends on the position asked,
+// so the state at the first step at or past one position is the start of the
+// reading for a later one: questions in ascending order (the matches of a
+// regexp) read the program once. A position before the last one asked starts
+// over. Each question read the whole prefix again, the square of dense code
+// (rel-1-0-10:GAP-2276).
+type pythonCodeScanner struct {
+	code    string
+	i, last int
+	frames  []pythonCodeFrame
+	comment bool
+}
+
+func newPythonCodeScanner(code string) *pythonCodeScanner {
+	return &pythonCodeScanner{code: code, frames: []pythonCodeFrame{{region: pythonSource}}}
+}
+
+func (s *pythonCodeScanner) at(position int) bool {
+	code := s.code
 	if position < 0 || position > len(code) {
 		return false
 	}
-	frames := []pythonCodeFrame{{region: pythonSource}}
-	comment := false
-	for i := 0; i < position; {
-		top := &frames[len(frames)-1]
-		c := code[i]
-		if comment {
+	if position < s.last {
+		s.i, s.comment = 0, false
+		s.frames = append(s.frames[:0], pythonCodeFrame{region: pythonSource})
+	}
+	s.last = position
+	for s.i < position {
+		top := &s.frames[len(s.frames)-1]
+		c := code[s.i]
+		if s.comment {
 			if c == '\n' {
-				comment = false
+				s.comment = false
 			}
-			i++
+			s.i++
 			continue
 		}
 		switch top.region {
 		case pythonString, pythonFStringText:
 			if c == '\\' {
-				i += min(2, len(code)-i)
+				s.i += min(2, len(code)-s.i)
 				continue
 			}
-			if c == top.quote && (!top.triple || strings.HasPrefix(code[i:], strings.Repeat(string(c), 3))) {
+			if c == top.quote && (!top.triple || strings.HasPrefix(code[s.i:], strings.Repeat(string(c), 3))) {
 				length := 1
 				if top.triple {
 					length = 3
 				}
-				frames = frames[:len(frames)-1]
-				i += length
+				s.frames = s.frames[:len(s.frames)-1]
+				s.i += length
 				continue
 			}
 			if top.region == pythonFStringText && c == '{' {
-				if i+1 < len(code) && code[i+1] == '{' {
-					i += 2
+				if s.i+1 < len(code) && code[s.i+1] == '{' {
+					s.i += 2
 					continue
 				}
-				frames = append(frames, pythonCodeFrame{region: pythonFStringExpr})
-				i++
+				s.frames = append(s.frames, pythonCodeFrame{region: pythonFStringExpr})
+				s.i++
 				continue
 			}
-			if top.region == pythonFStringText && c == '}' && i+1 < len(code) && code[i+1] == '}' {
-				i += 2
+			if top.region == pythonFStringText && c == '}' && s.i+1 < len(code) && code[s.i+1] == '}' {
+				s.i += 2
 				continue
 			}
 		case pythonSource, pythonFStringExpr:
 			if c == '#' {
-				comment = true
-				i++
+				s.comment = true
+				s.i++
 				continue
 			}
 			if c == '\'' || c == '"' {
-				triple := strings.HasPrefix(code[i:], strings.Repeat(string(c), 3))
+				triple := strings.HasPrefix(code[s.i:], strings.Repeat(string(c), 3))
 				region := pythonString
-				if pythonFStringPrefix(code, i) {
+				if pythonFStringPrefix(code, s.i) {
 					region = pythonFStringText
 				}
-				frames = append(frames, pythonCodeFrame{region: region, quote: c, triple: triple})
+				s.frames = append(s.frames, pythonCodeFrame{region: region, quote: c, triple: triple})
 				if triple {
-					i += 3
+					s.i += 3
 				} else {
-					i++
+					s.i++
 				}
 				continue
 			}
@@ -100,18 +126,18 @@ func pythonExecutableCodePosition(code string, position int) bool {
 					top.braces++
 				case '}':
 					if top.braces == 0 {
-						frames = frames[:len(frames)-1]
-						i++
+						s.frames = s.frames[:len(s.frames)-1]
+						s.i++
 						continue
 					}
 					top.braces--
 				}
 			}
 		}
-		i++
+		s.i++
 	}
-	region := frames[len(frames)-1].region
-	return !comment && (region == pythonSource || region == pythonFStringExpr)
+	region := s.frames[len(s.frames)-1].region
+	return !s.comment && (region == pythonSource || region == pythonFStringExpr)
 }
 
 func pythonFStringPrefix(code string, quote int) bool {

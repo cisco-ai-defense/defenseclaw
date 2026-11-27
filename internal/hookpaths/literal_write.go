@@ -1118,9 +1118,10 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 		}
 	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
+		python := newPythonCodeScanner(code)
 		for _, loc := range unprovenWriter.FindAllStringIndex(code, -1) {
 			name := strings.TrimSpace(code[loc[0] : loc[1]-1])
-			if (name != "write_text" && name != "write_bytes") || !pythonExecutableCodePosition(code, loc[0]) {
+			if (name != "write_text" && name != "write_bytes") || !python.at(loc[0]) {
 				continue
 			}
 			if destination, fixed := pythonReboundReceiver(code, loc[1], home); fixed {
@@ -1128,7 +1129,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 			}
 		}
 		for _, match := range literalPathHomeJoinOpen.FindAllStringSubmatchIndex(code, -1) {
-			if !pythonExecutableCodePosition(code, match[0]) {
+			if !python.at(match[0]) {
 				continue
 			}
 			call, fixed := literalBoundedCall(code, match[1]-1)
@@ -1144,7 +1145,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 			}
 		}
 		for _, loc := range literalPythonPathCall.FindAllStringIndex(code, -1) {
-			if !pythonExecutableCodePosition(code, loc[0]) {
+			if !python.at(loc[0]) {
 				continue
 			}
 			call, fixed := literalBoundedCall(code, loc[1]-1)

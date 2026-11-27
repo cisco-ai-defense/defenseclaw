@@ -41,8 +41,9 @@ func pythonArchiveExtractions(code, cwd, home string, read *archiveExtractionSca
 		return
 	}
 	archive, format, opened := "", archiveFormat(0), 0
+	python := newPythonCodeScanner(code)
 	for _, loc := range pythonArchiveOpen.FindAllStringIndex(code, -1) {
-		if !pythonExecutableCodePosition(code, loc[0]) {
+		if !python.at(loc[0]) {
 			continue
 		}
 		opened++
@@ -68,7 +69,7 @@ func pythonArchiveExtractions(code, cwd, home string, read *archiveExtractionSca
 	}
 	module := strings.Contains(code, "tarfile") || strings.Contains(code, "zipfile")
 	for _, loc := range pythonArchiveExtract.FindAllStringIndex(code, -1) {
-		if !pythonExecutableCodePosition(code, loc[0]) {
+		if !python.at(loc[0]) {
 			continue
 		}
 		name := strings.TrimSpace(strings.TrimPrefix(code[loc[0]:loc[1]-1], "."))
