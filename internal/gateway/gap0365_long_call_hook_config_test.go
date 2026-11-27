@@ -37,6 +37,15 @@ func TestGAP0365LongCallNamesHookConfigWrite(t *testing.T) {
 		{"settings-no-cd", "echo " + big + "; echo '{}' > .claude/settings.json", true},
 		{"settings-8000", "cd .cache && echo '{}' > ../.claude/settings.json && echo " + strings.Repeat("A", 8000), true},
 		{"benign-long", "cd .cache && echo " + big + " && ls", false},
+		// Sixteen statements with an expansion fill the first cap; the
+		// settings write after them is still read (substrate-1 GAP-1160).
+		{"settings-after-16-expansions", strings.Repeat("echo $HOME >/dev/null; ", 16) +
+			"cd .cache && echo \x27{}\x27 > ../.claude/settings.json; echo " + big, true},
+		{"benign-40-expansions", strings.Repeat("echo $HOME >/dev/null; ", 40) + "ls; echo " + big, false},
+		// More statements name a hook file than both caps read: the write
+		// rule, as an alert.
+		{"settings-past-both-caps", strings.Repeat("echo $HOME >/dev/null; ", 16) +
+			strings.Repeat("cat .claude/settings.json >/dev/null; ", 16) + "cd .cache; echo \x27{}\x27 > ../.claude/settings.json; echo " + big, true},
 	}
 	for _, pack := range []string{"default", "strict"} {
 		t.Run(pack, func(t *testing.T) {
@@ -76,8 +85,9 @@ func TestGAP0365LongCallNamesHookConfigWrite(t *testing.T) {
 }
 
 // TestGAP0365LongCallStatementsBounded: the long-call reading keeps at
-// most agentHookConfigLongCallStatementCap statements, each within the
-// placement bound, and reads nothing past the analyzer's command bound.
+// most twice agentHookConfigLongCallStatementCap statements, each within the
+// placement bound, says when it cut one naming a hook file (substrate-1
+// GAP-1160), and reads nothing past the analyzer's command bound.
 func TestGAP0365LongCallStatementsBounded(t *testing.T) {
 	var parts []string
 	for i := 0; i < 200; i++ {
@@ -85,19 +95,23 @@ func TestGAP0365LongCallStatementsBounded(t *testing.T) {
 	}
 	parts = append(parts, "echo "+strings.Repeat("A", 9000))
 	command := strings.Join(parts, "; ")
-	got := agentHookConfigLongCallStatements(command, "/home/alice", "/home/alice")
-	if len(got) != agentHookConfigLongCallStatementCap {
-		t.Fatalf("kept %d statements", len(got))
+	got, cut := agentHookConfigLongCallStatements(command, "/home/alice", "/home/alice")
+	if len(got) != 2*agentHookConfigLongCallStatementCap || !cut {
+		t.Fatalf("kept %d statements, cut %v", len(got), cut)
+	}
+	expansions := strings.Repeat("echo $HOME >/dev/null; ", 40) + "echo " + strings.Repeat("A", 9000)
+	if got, cut := agentHookConfigLongCallStatements(expansions, "/home/alice", "/home/alice"); len(got) != agentHookConfigLongCallStatementCap || cut {
+		t.Fatalf("statements naming no hook file in plain letters: kept %d, cut %v", len(got), cut)
 	}
 	for _, statement := range got {
 		if len(statement.Command) > agentHookConfigMaxPlacedBytes {
 			t.Fatalf("kept a statement over the bound: %d bytes", len(statement.Command))
 		}
 	}
-	if got := agentHookConfigLongCallStatements("echo '{}' > .claude/settings.json; echo "+strings.Repeat("A", agentHookConfigLongCallMaxBytes), "/home/alice", "/home/alice"); got != nil {
+	if got, _ := agentHookConfigLongCallStatements("echo '{}' > .claude/settings.json; echo "+strings.Repeat("A", agentHookConfigLongCallMaxBytes), "/home/alice", "/home/alice"); got != nil {
 		t.Fatalf("read a call over the analyzer bound: %d", len(got))
 	}
-	if got := agentHookConfigLongCallStatements("cd .cache && echo "+strings.Repeat("A", 9000)+" && ls", "/home/alice", "/home/alice"); len(got) != 0 {
+	if got, _ := agentHookConfigLongCallStatements("cd .cache && echo "+strings.Repeat("A", 9000)+" && ls", "/home/alice", "/home/alice"); len(got) != 0 {
 		t.Fatalf("kept statements that name no hook file: %+v", got)
 	}
 }
