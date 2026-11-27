@@ -33,15 +33,21 @@ const (
 // defenseclaw-hook.exe behave as a launcher that runs, on Windows, where a
 // shell script is not an executable. By default it prints its arguments, each
 // followed by "|", copies its stdin to stdout and exits 7 (or the code in
-// guardLauncherExitEnv). In "review" mode it reads one line: "protected" and
-// "down" are denied (exit 2, "review denied" on stderr), "ordinary" is
-// allowed (exit 0, an allow answer), anything else exits 2.
+// guardLauncherExitEnv). It answers only when guardLauncherModeEnv is set.
+// In "review" mode it reads one line: "protected" and "down" are denied
+// (exit 2, "review denied" on stderr), "ordinary" is allowed (exit 0, an
+// allow answer), anything else exits 2.
 func answerAsGuardPassthroughLauncher() {
-	if len(os.Args) < 2 || os.Args[1] != "hook" ||
+	// Only a test that sets guardLauncherModeEnv (to "" or "review") asks for
+	// this answer: other tests copy the test binary as defenseclaw-hook.exe
+	// too (the Hermes execution probe, the Copilot adapter install window)
+	// and need TestMain's own dispatch, not exit 7.
+	mode, asked := os.LookupEnv(guardLauncherModeEnv)
+	if !asked || len(os.Args) < 2 || os.Args[1] != "hook" ||
 		!strings.EqualFold(filepath.Base(os.Args[0]), guardPassthroughLauncherName) {
 		return
 	}
-	if os.Getenv(guardLauncherModeEnv) == "review" {
+	if mode == "review" {
 		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		switch strings.TrimSpace(line) {
 		case "protected", "down":
@@ -66,6 +72,11 @@ func answerAsGuardPassthroughLauncher() {
 // <dir>/defenseclaw-hook.exe and returns its path.
 func copyTestBinaryAsLauncher(t *testing.T, dir string) string {
 	t.Helper()
+	// The copy answers as the launcher only while guardLauncherModeEnv is set
+	// (the empty mode unless the test picks one).
+	if _, ok := os.LookupEnv(guardLauncherModeEnv); !ok {
+		t.Setenv(guardLauncherModeEnv, "")
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
