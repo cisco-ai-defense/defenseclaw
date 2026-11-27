@@ -33,6 +33,10 @@ func TestRefuseStandaloneInPlaceRepairDecision(t *testing.T) {
 		{name: "twin: Secure Client, Users write", dacl: usersWriteDACL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.standalone && !tc.refused {
+				// The twin is repairable only with a trusted owner.
+				requireElevatedTrustFixture(t, "the repairable twin needs an Administrators-owned object")
+			}
 			path := filepath.Join(t.TempDir(), "object")
 			kind := ObjectAdminFile
 			if tc.directory {
