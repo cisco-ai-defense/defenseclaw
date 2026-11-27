@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
@@ -82,6 +83,11 @@ func TestGAP1915GuessedDialectShapesKeepTheT21aRaise(t *testing.T) {
 	}
 	for _, pack := range gap0437Packs[:2] { // default, strict
 		server := gap0437Server(t, pack, "openclaw", "action")
+		// Policy semantics, not latency: on a native Windows host the
+		// find -exec shapes take 160-240 ms of the 200 ms production
+		// deadline at 47dab74894 and after, so a production deadline made
+		// the verdict a coin toss (rel-1-0-10:GAP-2303).
+		server.inspectToolScanTimeout = 30 * time.Second
 		setLiveEffectsLane(t, "on")
 		for _, target := range []string{home + `\.defenseclaw\config.yaml`, home + `\.defenseclaw\audit.db`, home + `\.ssh\authorized_keys`} {
 			// default alerts on a DefenseClaw state file and blocks an
