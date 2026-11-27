@@ -6864,7 +6864,7 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 			continue
 		}
 		if !strings.HasPrefix(args[i], "-") {
-			return OperandPath(args[i], cwd)
+			return copyDestinationPath(args[i], cwd)
 		}
 	}
 	return ""
@@ -7502,9 +7502,24 @@ func cpDestination(args []string, static []bool, cwd string) string {
 	if !parsed.ok {
 		return ""
 	}
-	// A process link in the destination must survive a following dot-dot
-	// until the write proof can resolve the link boundary.
-	return OperandPath(parsed.destination, cwd)
+	return copyDestinationPath(parsed.destination, cwd)
+}
+
+// copyDestinationPath places a copy destination. A destination below a
+// process link keeps a following dot-dot raw: the kernel applies it from the
+// link target, so the write proof resolves the link boundary first
+// (rel-1-0-10:GAP-2227, GAP-2237). Every other destination is cleaned as
+// before, so readers that match it against a registered file (the hook
+// config guard) see the file it names: keeping a plain dot-dot raw lost the
+// tamper finding of a copy into a hook config through x/.. (GAP-2274).
+func copyDestinationPath(name, cwd string) string {
+	if placed := OperandPath(name, cwd); throughProcessLink(placed) {
+		return placed
+	}
+	if !filepath.IsAbs(name) {
+		name = filepath.Join(cwd, name)
+	}
+	return filepath.Clean(name)
 }
 
 // CopyDestination returns a statically understood cp destination.
