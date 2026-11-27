@@ -280,8 +280,11 @@ func ExactKerberosS4USecretsDumpSink(
 	return facts.KerberosS4USecretsDumps[0], true
 }
 
-func projectKerberosS4USecretsDumps(input Input) []KerberosS4USecretsDumpFact {
-	fact, ok := exactKerberosS4USecretsDumpInput(input)
+// projectKerberosS4USecretsDumps reads input with analyzeReading's own
+// argument reading of it (extractArgsForTool(input.Args, input.Tool)), so
+// an analysis decodes the arguments once (substrate-1:GAP-1164).
+func projectKerberosS4USecretsDumps(input Input, extracted extractedInput) []KerberosS4USecretsDumpFact {
+	fact, ok := exactKerberosS4USecretsDumpInput(input, extracted)
 	if !ok {
 		return nil
 	}
@@ -289,9 +292,9 @@ func projectKerberosS4USecretsDumps(input Input) []KerberosS4USecretsDumpFact {
 }
 
 func exactKerberosS4USecretsDumpInput(
-	input Input,
+	input Input, extracted extractedInput,
 ) (KerberosS4USecretsDumpFact, bool) {
-	commandText, explicitArgv, ok := exactKerberosS4UInputCommand(input)
+	commandText, explicitArgv, ok := exactKerberosS4UInputCommand(input, extracted)
 	if !ok || len(commandText) > maxCommandBytes || !utf8.ValidString(commandText) ||
 		strings.IndexByte(commandText, 0) >= 0 {
 		return KerberosS4USecretsDumpFact{}, false
@@ -396,11 +399,12 @@ func exactKerberosS4UPrefixAssignment(call *syntax.CallExpr) (string, bool) {
 	return artifact.Value, !artifact.Expands && artifact.Value != ""
 }
 
-func exactKerberosS4UInputCommand(input Input) (string, []string, bool) {
+// exactKerberosS4UInputCommand is the command of input; extracted is
+// extractArgsForTool(input.Args, input.Tool).
+func exactKerberosS4UInputCommand(input Input, extracted extractedInput) (string, []string, bool) {
 	if input.DialectHint == DialectPowerShell || input.DialectHint == DialectCMD {
 		return "", nil, false
 	}
-	extracted := extractArgsForTool(input.Args, input.Tool)
 	if len(extracted.issues) != 0 ||
 		(extracted.status != StatusComplete && extracted.status != StatusNotApplicable) {
 		return "", nil, false

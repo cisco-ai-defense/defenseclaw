@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
@@ -71,13 +72,38 @@ const (
 	maxSkillCacheEntries = 1024
 )
 
-// skillScanEvents are the events on which the kit looks at the roots:
-// UserPromptSubmit runs before the model reads the prompt, so a folder
-// copied in between turns (outside any tool call) is scanned before the
-// next turn.
-var skillScanEvents = map[string]bool{
-	"UserPromptSubmit": true, "userPromptSubmit": true,
-	"PostToolUse": true, "postToolUse": true, "SessionStart": true, "sessionStart": true, "Stop": true, "stop": true,
+// skillScanEvents are the events on which the kit looks at the roots, every
+// connector's names for the moments a folder can have appeared outside a
+// tool call, read from the shared connector event map
+// (connector.CorrelationLifecycleEventNames): the session start, the turn
+// start (before the model reads the prompt, so a folder copied in between
+// turns is scanned before the next turn), a tool's result and the turn's
+// end. A hand list missed Hermes, Cursor, Copilot and Antigravity, so their
+// actors never ran the pass (GAP-1143, GAP-1150). OpenCode's session.idle
+// and Copilot's userPromptSubmit are not in that map.
+var skillScanEvents = kitEventSet(connector.CorrelationLifecycleEventNames(connector.CorrelationLifecycleSessionStart,
+	connector.CorrelationLifecycleTurnStart, connector.CorrelationLifecycleToolEnd, connector.CorrelationLifecycleTurnEnd),
+	"session.idle", "userPromptSubmit")
+
+// claudeSkillScanEvents are the Claude Code kit's scan events, as at
+// rel/1.0.11: its PostToolUseFailure and PermissionDenied are in the map's
+// tool-end names, and do not run the pass.
+var claudeSkillScanEvents = kitEventSet([]string{"UserPromptSubmit", "PostToolUse", "SessionStart", "Stop"})
+
+// skillScanEvent reports that event runs the skill pass for connectorName.
+func skillScanEvent(connectorName, event string) bool {
+	if connectorName == "claudecode" {
+		return claudeSkillScanEvents[event]
+	}
+	return skillScanEvents[event]
+}
+
+func kitEventSet(names []string, extra ...string) map[string]bool {
+	set := make(map[string]bool, len(names)+len(extra))
+	for _, n := range append(names, extra...) {
+		set[n] = true
+	}
+	return set
 }
 
 // skillRoots are the directories whose subfolders an agent loads as skills,
@@ -639,10 +665,11 @@ const skillStuckName = "skill-stuck.json"
 // maxStuckSkills bounds the record.
 const maxStuckSkills = 64
 
-// preToolEvents are the events that can deny a tool call before it runs.
-var preToolEvents = map[string]bool{
-	"PreToolUse": true, "preToolUse": true, "beforeShellExecution": true, "beforeMCPExecution": true,
-}
+// preToolEvents are the events that can deny a tool call before it runs:
+// every connector's tool-start names in the shared connector event map
+// (OpenCode tool.execute.before, Amp tool.call, Hermes pre_tool_call, Cursor
+// beforeReadFile, ...; GAP-1143, GAP-1150).
+var preToolEvents = kitEventSet(connector.CorrelationLifecycleEventNames(connector.CorrelationLifecycleToolStart))
 
 func skillStuckPath(home string) string { return filepath.Join(home, ".defenseclaw", skillStuckName) }
 

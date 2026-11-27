@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -716,8 +717,12 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	bCtx := newBifrostRequestContext(ctx, req)
 	stream, bErr := client.ChatCompletionStreamRequest(bCtx, bReq)
 	if bErr != nil {
+		if status, ok := bifrostStreamAnswer(bCtx, bErr); ok {
+			markUpstreamAnswered(ctx, status)
+		}
 		return nil, bifrostRequestError(bCtx, bp.providerKey, bErr)
 	}
+	markUpstreamAnswered(ctx, http.StatusOK)
 
 	var usage *ChatUsage
 	for chunk := range stream {
@@ -738,6 +743,40 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	}
 
 	return usage, nil
+}
+
+// bifrostStreamAnswer says whether the provider answered a stream request
+// that Bifrost returned as an error, and with what status. Bifrost reads the
+// stream's first event before it returns the stream (it checks that event
+// for an error, to retry or fall back), so a stream that broke off after the
+// provider's HTTP 200 and before its first event (a reset, the agent leaving
+// while a reasoning model thinks, an SSE error event) comes back as an
+// error, like a 429. The provider answered (any status) when Bifrost has its
+// response headers: every provider adapter stores them right after the
+// response arrives, before its status check; a refused connect or a timeout
+// before the response leaves none. An error status the provider answered
+// with is the error's status code on an error Bifrost did not make itself;
+// any other error came from the stream after a 200 (rel-1-0-10:GAP-2233).
+// The gateway configures no retries or fallbacks, so the headers are this
+// attempt's.
+func bifrostStreamAnswer(bCtx *schemas.BifrostContext, bErr *schemas.BifrostError) (int, bool) {
+	if _, ok := bCtx.Value(schemas.BifrostContextKeyProviderResponseHeaders).(map[string]string); !ok {
+		return 0, false
+	}
+	if bErr.StatusCode != nil && *bErr.StatusCode >= 400 && !bErr.IsBifrostError && !bifrostStreamBreak(bErr) {
+		return *bErr.StatusCode, true
+	}
+	return http.StatusOK, true
+}
+
+// bifrostStreamBreak is an error Bifrost reports when a stream it was
+// reading stopped: the caller went away (499) or the stream went idle (504).
+func bifrostStreamBreak(bErr *schemas.BifrostError) bool {
+	if bErr.Error == nil || bErr.Error.Type == nil {
+		return false
+	}
+	t := *bErr.Error.Type
+	return t == schemas.RequestCancelled || t == schemas.RequestTimedOut
 }
 
 // ---------- Type conversion helpers ----------

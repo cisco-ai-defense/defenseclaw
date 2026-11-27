@@ -365,7 +365,7 @@ func analyzeReading(input Input, twinCommand string, capture *redirectTargetCapt
 		projectCompromisedCredentialAuthentications(input, facts)
 	facts.DirectoryCredentialAcquisitions =
 		projectDirectoryCredentialAcquisitions(input, &facts)
-	facts.KerberosS4USecretsDumps = projectKerberosS4USecretsDumps(input)
+	facts.KerberosS4USecretsDumps = projectKerberosS4USecretsDumps(input, extracted)
 	facts.StagedPayloadPersistenceOperations =
 		projectStagedPayloadPersistenceOperations(input)
 	facts.CloudMetadataCredentialReads =

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -1485,6 +1486,15 @@ func guestOwnShellWalk(command, cwd, home string) (*guestShellReadings, map[stri
 	return readings, placed
 }
 
+// guestOwnShellWork counts the own-shell walk's work for a test
+// (gap0885_own_shell_work_test.go): the folder entries each join probes and
+// the statement bytes each unread-command check is handed. It is nil outside
+// a test, where each count is one load and a nil check. The walk was
+// O(statements x folders^2) when join scanned its output for each folder,
+// and quadratic in an && chain when the unread check was handed each
+// subtree again at every level (substrate-1 GAP-0885).
+var guestOwnShellWork atomic.Pointer[func(probes, unreadBytes int)]
+
 // guestWalks holds the last walks of guestOwnShellWalk. A copy-mode call is
 // walked by its placed children (sandboxGuestPlacedChildren) and again by
 // the sandbox hook-config guard, with the same script, folder and home: the
@@ -1545,6 +1555,13 @@ func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[
 	var seen []uint32
 	mark := uint32(0)
 	join := func(sets ...[]int32) []int32 {
+		if count := guestOwnShellWork.Load(); count != nil {
+			probes := 0
+			for _, set := range sets {
+				probes += len(set)
+			}
+			(*count)(probes, 0)
+		}
 		var out []int32
 		if mark++; mark == 0 {
 			clear(seen)
@@ -1630,7 +1647,12 @@ func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[
 			}
 		}
 		read(stmt, in)
-		defer func() { unread = unread || guestNodeRunsUnreadCommand(stmt, home) }()
+		defer func() {
+			if count := guestOwnShellWork.Load(); count != nil && !unread {
+				(*count)(0, int(stmt.End().Offset()-stmt.Pos().Offset()))
+			}
+			unread = unread || guestNodeRunsUnreadCommand(stmt, home)
+		}()
 		if stmt.Background {
 			return in, in // an & list runs in a subshell
 		}

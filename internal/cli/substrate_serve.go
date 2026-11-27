@@ -1380,6 +1380,15 @@ func substrateChainRegistrations(store registry.Store) chainstate.Options {
 		Current: func(ctx context.Context, atespace, name, uid string) (bool, error) {
 			return registry.Current(ctx, store, atespace, name, uid)
 		},
+		// An actor registered in this leader term, not a fork, skips the
+		// chain start grace (GAP-0642).
+		Born: func(ctx context.Context, atespace, uid string) (time.Time, string, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil || !ok {
+				return time.Time{}, "", err
+			}
+			return reg.CreatedAt, reg.ParentUID, nil
+		},
 	}
 }
 

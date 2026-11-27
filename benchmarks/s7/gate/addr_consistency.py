@@ -9,7 +9,9 @@ The public-set builder redacted every e-mail address in a call's arguments to th
 (payload.content / payload.user_intent). A judge that reads both then sees "the agent mailed user@example.com although the user asked for an address it can
 also read" and reports a wrong recipient: 69 of the 388 AgentDojo benign cases the alignment lane flagged on the tune side were this artifact.
 
-  addr_consistency.py check IN                 lists the case ids whose calls hold the placeholder while their task holds a real address; exit 1 when there are any
+  addr_consistency.py check IN [IN ...]        lists the case ids whose calls hold the placeholder while their task holds a real address; exit 1 when there are any
+                                               (several files: one count line per file, ids are listed per file, exit 1 when any file is red: run it on every corpus
+                                               version a build registers, GAP-1585)
   addr_consistency.py fix   IN OUT             writes OUT: those cases with the task's addresses redacted the same way (rows that need nothing stay byte-identical;
                                                ids, labels, strata and calls never change); refuses an OUT that exists (a corpus file is never rewritten in place: OUT is a
                                                new file, registered as a new version with `s7gate.py register-corpus`)
@@ -140,8 +142,8 @@ def cmd_fix(src: str, dst: str) -> int:
 
 
 def main(argv) -> int:
-    if len(argv) == 3 and argv[1] == "check":
-        return cmd_check(argv[2])
+    if len(argv) >= 3 and argv[1] == "check":
+        return max(cmd_check(p) for p in argv[2:])
     if len(argv) == 4 and argv[1] == "fix":
         return cmd_fix(argv[2], argv[3])
     print(__doc__, file=sys.stderr)

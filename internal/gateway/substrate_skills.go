@@ -526,10 +526,14 @@ type substrateSkillAnswer struct {
 	// ask, when set, turns an allow of this PreToolUse call into the
 	// connector's ask with this text (B5.4 skill_pending, OSS).
 	ask string
+	// calloutNote, when set, is added to the connector's native answer: the
+	// actor reaches only DefenseClaw because another callout holds
+	// Substrate's egress slot (GAP-0505, substrateAddCalloutNote).
+	calloutNote string
 }
 
 func (s substrateSkillAnswer) empty() bool {
-	return len(s.Quarantine) == 0 && len(s.Scanned) == 0 && len(s.Unscanned) == 0 && s.ask == ""
+	return len(s.Quarantine) == 0 && len(s.Scanned) == 0 && len(s.Unscanned) == 0 && s.ask == "" && s.calloutNote == ""
 }
 
 // substrateSkills runs the skill pass of one hook post.
@@ -596,7 +600,16 @@ func withSubstrateAnswer(w http.ResponseWriter, r *http.Request, next http.Handl
 				obj["claude_code_output"], _ = json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
 					"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": sk.ask}})
 			}
-			if merged, err := json.Marshal(obj); err == nil {
+			noted := false
+			if env, ok := substrateEnvelopeFrom(r.Context()); ok && sk.calloutNote != "" {
+				noted = substrateNoteAnswer(obj, env, sk.calloutNote)
+			}
+			// A note this answer cannot carry leaves it byte for byte.
+			sk.calloutNote = ""
+			if !noted && sk.empty() {
+				obj = nil
+			}
+			if merged, err := json.Marshal(obj); obj != nil && err == nil {
 				body = append(merged, '\n')
 				rec.header.Set("Content-Type", "application/json")
 			}
