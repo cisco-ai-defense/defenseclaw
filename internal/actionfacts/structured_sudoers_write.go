@@ -4,8 +4,10 @@
 package actionfacts
 
 import (
+	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -153,7 +155,15 @@ func posixOperandPath(name, cwd string) string {
 // which only the component walk that follows links can tell, so the spelling
 // stays raw. A step after a name, and any step of an absolute operand, stay
 // raw.
+//
+// On Windows a rooted name with no drive (/tmp/x, \x) names a path on the
+// drive or share of the working directory, never one below it: the name is
+// placed at that volume's root first, as a rooted apply_patch header is
+// (hookpaths patchTargetPaths). Joined to the directory, a POSIX redirect such
+// as > /tmp/list was keyed inside the project, where a link the command copies
+// made it an unknown write (rel-1-0-10:GAP-2300).
 func OperandPath(name, cwd string) string {
+	name = windowsRootedOnVolume(name, cwd)
 	slashed := filepath.ToSlash(name)
 	leading, rest := leadingDotDotSteps(slashed)
 	inner := hasDotDotStep(rest)
@@ -172,6 +182,17 @@ func OperandPath(name, cwd string) string {
 		}
 	}
 	return cwd + string(filepath.Separator) + name
+}
+
+// windowsRootedOnVolume places a Windows rooted name that has no volume on
+// the volume of an absolute cwd. Any other name, and every name off Windows,
+// is returned as is.
+func windowsRootedOnVolume(name, cwd string) string {
+	if runtime.GOOS != "windows" || name == "" || !os.IsPathSeparator(name[0]) ||
+		filepath.VolumeName(name) != "" || !filepath.IsAbs(cwd) {
+		return name
+	}
+	return filepath.VolumeName(cwd) + name
 }
 
 // maxOperandLeadingSteps bounds the link probes one operand may cost; an
