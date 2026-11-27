@@ -1036,8 +1036,9 @@ var enterpriseWindowsMCPRefresh mcpasuser.Coalescer
 // connector in mcpasuser.PublishedConnectors for the users manifest enrolls
 // for the gateway, whose service account reads nothing in a profile:
 // ~/.claude.json (GAP-0424), a protected ~/.kiro/settings/mcp.json
-// (GAP-1468), Codex config.toml (GAP-0686). Standalone only: the Secure Client
-// profile gateway has no enrolled-user watcher. When something was not
+// (GAP-1468), Codex config.toml (GAP-0686). The Secure Client gateway consumes
+// the same records only for AI inventory; it does not start an enrolled-user
+// watcher. When something was not
 // published (also logged) it returns a *mcpasuser.RefreshIncomplete that
 // names, per connector, the records it could not publish, or the connector
 // whose record folder could not be written: the gateway reads the records
@@ -1045,7 +1046,7 @@ var enterpriseWindowsMCPRefresh mcpasuser.Coalescer
 // user's failed record does not refuse other users' or other connectors'
 // calls.
 func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) error {
-	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+	if cfg == nil || !(cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() && cfg.AIDiscovery.Enabled) {
 		return nil
 	}
 	enterpriseWindowsMCPPublishMu.Lock()

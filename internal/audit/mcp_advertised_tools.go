@@ -45,15 +45,15 @@ func migrateMCPAdvertisedTools(ex dbExecer) error {
 
 func validateMCPAdvertisedToolSnapshot(input MCPAdvertisedToolSnapshot) (MCPAdvertisedToolSnapshot, error) {
 	base, err := validateMCPObservedTool(MCPObservedTool{
-		ParentComponentID: input.ParentComponentID, Connector: input.Connector,
+		ObservationGroupID: input.ParentComponentID, Connector: input.Connector,
 		ServerName: input.ServerName, ToolName: "placeholder", LastObservedAt: input.ListedAt,
 	})
 	if err != nil {
 		return MCPAdvertisedToolSnapshot{}, err
 	}
-	input.ParentComponentID, input.Connector, input.ServerName = base.ParentComponentID, base.Connector, base.ServerName
+	input.ParentComponentID, input.Connector, input.ServerName = base.ObservationGroupID, base.Connector, base.ServerName
 	input.ListedAt = base.LastObservedAt
-	if len(input.ToolNames) > maxMCPObservedToolsPerParent {
+	if len(input.ToolNames) > maxMCPToolsPerGroup {
 		return MCPAdvertisedToolSnapshot{}, fmt.Errorf("audit: too many advertised MCP tools")
 	}
 	seen := make(map[string]struct{}, len(input.ToolNames))

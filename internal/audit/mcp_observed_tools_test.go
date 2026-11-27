@@ -17,11 +17,14 @@ func TestMCPObservedToolsPreserveSiblingsAndSurviveRestart(t *testing.T) {
 	store := openTestStore(t, path)
 	first := time.Date(2026, 11, 17, 1, 2, 3, 0, time.UTC)
 	base := MCPObservedTool{
-		ParentComponentID: "endpoint-mcp-entry-parent",
-		Connector:         "claudecode",
-		ServerName:        "notes",
-		FirstObservedAt:   first,
-		LastObservedAt:    first,
+		ObservationGroupID: "endpoint-mcp-entry-parent",
+		Connector:          "claudecode",
+		ServerName:         "notes",
+		UserID:             "S-1-5-21-1000",
+		UserIDKind:         "windows_sid",
+		UserName:           `EXAMPLE\alice`,
+		FirstObservedAt:    first,
+		LastObservedAt:     first,
 	}
 	ctx := WithCallWriteBatch(context.Background(), store)
 	search := base
@@ -53,7 +56,9 @@ func TestMCPObservedToolsPreserveSiblingsAndSurviveRestart(t *testing.T) {
 		got[row.ToolName] = row
 	}
 	if !got["search"].LastObservedAt.Equal(search.LastObservedAt) ||
-		!got["read"].LastObservedAt.Equal(read.LastObservedAt) {
+		!got["read"].LastObservedAt.Equal(read.LastObservedAt) ||
+		got["search"].UserID != base.UserID || got["search"].UserIDKind != base.UserIDKind ||
+		got["search"].UserName != base.UserName {
 		t.Fatalf("sibling timestamps=%+v", got)
 	}
 	if err := store.Close(); err != nil {
@@ -71,11 +76,29 @@ func TestMCPObservedToolsPreserveSiblingsAndSurviveRestart(t *testing.T) {
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("restored rows=%+v err=%v", rows, err)
 	}
-	if err := reopened.DeleteMCPObservedToolsForParents(context.Background(), []string{base.ParentComponentID}); err != nil {
+	if err := reopened.DeleteMCPAdvertisedToolsForParents(context.Background(), []string{base.ObservationGroupID}); err != nil {
 		t.Fatal(err)
 	}
-	if rows, err = reopened.ListMCPObservedTools(context.Background()); err != nil || len(rows) != 0 {
-		t.Fatalf("retired rows=%+v err=%v", rows, err)
+	if rows, err = reopened.ListMCPObservedTools(context.Background()); err != nil || len(rows) != 2 {
+		t.Fatalf("observed rows changed by advertised-parent delete=%+v err=%v", rows, err)
+	}
+}
+
+func TestMCPObservedToolCorrelationMigrationIsIdempotent(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	tool := MCPObservedTool{
+		ObservationGroupID: "observation-group", Connector: "codex", ServerName: "notes",
+		ToolName: "search", UserID: "501", UserIDKind: "uid", LastObservedAt: time.Now(),
+	}
+	if err := store.UpsertMCPObservedTool(t.Context(), tool); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateMCPObservedToolCorrelationFields(store.db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ListMCPObservedTools(t.Context())
+	if err != nil || len(rows) != 1 || rows[0].UserID != tool.UserID {
+		t.Fatalf("idempotent migration changed current rows=%+v err=%v", rows, err)
 	}
 }
 
@@ -84,7 +107,7 @@ func TestMCPObservedToolReverseUpsertPreservesEarliestFirstSeen(t *testing.T) {
 	newer := time.Date(2026, 11, 18, 2, 0, 0, 0, time.UTC)
 	older := newer.Add(-time.Hour)
 	tool := MCPObservedTool{
-		ParentComponentID: "endpoint-mcp-entry-parent", Connector: "claudecode",
+		ObservationGroupID: "endpoint-mcp-entry-parent", Connector: "claudecode",
 		ServerName: "notes", ToolName: "search", FirstObservedAt: newer, LastObservedAt: newer,
 	}
 	if err := store.UpsertMCPObservedTool(t.Context(), tool); err != nil {
@@ -108,7 +131,7 @@ func TestMCPObservedToolDeferredUpsertRevalidatesParent(t *testing.T) {
 	ctx := WithCallWriteBatch(context.Background(), store)
 	current := true
 	if err := store.UpsertMCPObservedToolIf(ctx, MCPObservedTool{
-		ParentComponentID: "retired-parent", Connector: "claudecode", ServerName: "notes",
+		ObservationGroupID: "retired-parent", Connector: "claudecode", ServerName: "notes",
 		ToolName: "search", LastObservedAt: time.Now(),
 	}, func() bool { return current }); err != nil {
 		t.Fatal(err)
@@ -130,7 +153,7 @@ func TestMCPObservedToolDeferredUpsertReportsCommit(t *testing.T) {
 	settled := make(chan error, 1)
 	writeCtx, report := WithCallWriteReport(ctx, store, func(err error) { settled <- err })
 	if err := store.UpsertMCPObservedToolIf(writeCtx, MCPObservedTool{
-		ParentComponentID: "parent", Connector: "claudecode", ServerName: "notes",
+		ObservationGroupID: "parent", Connector: "claudecode", ServerName: "notes",
 		ToolName: "search", LastObservedAt: time.Now(),
 	}, func() bool { return true }); err != nil {
 		t.Fatal(err)
@@ -157,16 +180,16 @@ func TestMCPObservedToolDeferredUpsertReportsCommit(t *testing.T) {
 func TestMCPObservedToolOverflowIsDurableAndDoesNotReplaceSiblings(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	at := time.Date(2026, 11, 17, 1, 2, 3, 0, time.UTC)
-	for index := 0; index <= maxMCPObservedToolsPerParent; index++ {
+	for index := 0; index <= maxMCPToolsPerGroup; index++ {
 		if err := store.UpsertMCPObservedTool(context.Background(), MCPObservedTool{
-			ParentComponentID: "parent", Connector: "claudecode", ServerName: "notes",
+			ObservationGroupID: "parent", Connector: "claudecode", ServerName: "notes",
 			ToolName: fmt.Sprintf("tool-%03d", index), LastObservedAt: at.Add(time.Duration(index) * time.Second),
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	rows, err := store.ListMCPObservedTools(context.Background())
-	if err != nil || len(rows) != maxMCPObservedToolsPerParent {
+	if err != nil || len(rows) != maxMCPToolsPerGroup {
 		t.Fatalf("rows=%d err=%v", len(rows), err)
 	}
 	for _, row := range rows {
@@ -182,7 +205,7 @@ func TestMCPObservedToolOverflowIsDurableAndDoesNotReplaceSiblings(t *testing.T)
 func TestMCPObservedToolRejectsContentLikeOversizedNames(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	err := store.UpsertMCPObservedTool(context.Background(), MCPObservedTool{
-		ParentComponentID: "parent", Connector: "claudecode", ServerName: "notes",
+		ObservationGroupID: "parent", Connector: "claudecode", ServerName: "notes",
 		ToolName: strings.Repeat("a", maxMCPObservedToolName+1), LastObservedAt: time.Now(),
 	})
 	if err == nil {

@@ -24,6 +24,7 @@ DefenseClaw 1.0.10 lets you decide what each guardrail layer does, adds model ro
 - **CLI and TUI:** `defenseclaw acp refresh` re-pins an ACP agent that updated itself. The TUI config editor covers routing and tokenomics. The main TUI tables fit 80x24. MCP inventory export works for local and remote servers (#1406).
 
 ### Changed
+- **MCP tool inventory correlates in AI Defense.** macOS and managed Windows now emit the same MCP server contract, while authenticated runtime tool observations are sent independently with device, agent, user, and runtime-server indicators. Config refreshes no longer delete observed tools or assign them an endpoint-generated server parent.
 - **A tool's output never blocks in the default pack.** A tool result is HIGH at most, so the default and permissive packs alert on it and only the strict pack blocks.
 - **A credential a tool call writes out now alerts.** This covers a `Write`, an `Edit`, a send-tool message and a redirected `echo`. Before, it stayed audit telemetry (rule `SEC-SECRET-ASSIGN` and related rules).
 - **Hook answers keep up under load.** A late hook answer no longer starts a 140 MB gateway process per call, the hook journal commits once per batch, and a hook no longer costs more the longer its session runs. macOS per-user Claude Code hooks use the native `defenseclaw-hook-user` launcher. Managed hook budgets are now 120 requests a second, a burst of 240 and 64 in flight per account (before: 60, 120 and 32).

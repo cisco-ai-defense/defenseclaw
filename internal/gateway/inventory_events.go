@@ -92,6 +92,7 @@ type endpointInventoryComponent struct {
 	mcpSourceScope              string
 	mcpServerURL                string
 	mcpIsRemote                 bool
+	mcpRuntimeServerName        string
 	mcpToolParentID             string
 	mcpToolSource               string
 	mcpToolObservedAt           string
@@ -397,38 +398,26 @@ func emitEndpointInventory(
 	}
 	managedParentIDs := managedMCPParentIDs(perConnectorMCP, acceptedParentIDs, fullParentSnapshotCovered)
 	if toolState != nil {
-		incompleteConnectors := perConnectorStatus.incompleteConnectors
 		if err := toolState.flushPendingAdvertised(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err := toolState.flushPendingObserved(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		observedReadPartial := toolState.observedIncomplete(incompleteConnectors)
-		if perConnectorPartial && len(perConnectorStatus.incompleteConnectors) == 0 {
-			// A partial result without connector attribution is not safe to scope.
-			observedReadPartial = true
-		}
+		observedReadPartial := toolState.observedIncomplete()
 		for _, collection := range []struct {
-			source     string
-			remote     bool
-			toolSource string
+			source string
+			remote bool
 		}{
-			{"endpoint_local_mcp_tool_inventory", false, "advertised"},
-			{"endpoint_remote_mcp_tool_inventory", true, "advertised"},
-			{"endpoint_local_mcp_observed_tool_inventory", false, "observed"},
-			{"endpoint_remote_mcp_observed_tool_inventory", true, "observed"},
+			{"endpoint_local_mcp_tool_inventory", false},
+			{"endpoint_remote_mcp_tool_inventory", true},
 		} {
-			rows, toolPartial := toolState.components(perConnectorMCP, collection.remote, collection.toolSource)
+			rows, toolPartial := toolState.advertisedComponents(perConnectorMCP, collection.remote)
 			parentsEligible := mcpToolParentsManaged(rows, managedParentIDs)
-			readPartial := perConnectorPartial
-			if collection.toolSource == "observed" {
-				readPartial = observedReadPartial
-			}
 			// A child can use the managed route only when its parent did too. In
 			// particular, an over-limit parent collection is diagnostic-only even
 			// when a small child collection would pass its independent limit.
-			snapshotPartial := readPartial || toolPartial || !parentsEligible
+			snapshotPartial := perConnectorPartial || toolPartial || !parentsEligible
 			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, snapshotPartial,
 				config.ObservabilityV8ManagedMCPInventoryAction, publish)
 			if err != nil && firstErr == nil {
@@ -445,6 +434,23 @@ func emitEndpointInventory(
 			}
 			toolState.recordMetric(ctx, "export", outcome, reason)
 		}
+		rows, toolPartial := toolState.observedComponents()
+		snapshotPartial := observedReadPartial || toolPartial
+		err := emitEndpointInventorySnapshot(ctx, emitter, "endpoint_mcp_observed_tool_inventory", rows, snapshotPartial,
+			config.ObservabilityV8ManagedMCPInventoryAction, publish)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		outcome, reason := "submitted", "none"
+		switch {
+		case err != nil:
+			outcome, reason = "error", "publish_error"
+		case snapshotPartial:
+			outcome, reason = "partial", "incomplete"
+		case len(rows) == 0:
+			outcome = "empty"
+		}
+		toolState.recordMetric(ctx, "export", outcome, reason)
 	}
 	return firstErr
 }
@@ -590,7 +596,7 @@ func (m *mcpToolInventory) readAndReconcileParents(
 		removed = m.refreshCompleteParents(components, status.incompleteConnectors)
 	}
 	if m.store != nil && len(removed) > 0 {
-		if err := m.store.DeleteMCPObservedToolsForParents(ctx, removed); err == nil {
+		if err := m.store.DeleteMCPAdvertisedToolsForParents(ctx, removed); err == nil {
 			m.acknowledgeRemovedParents(removed)
 		}
 	}
@@ -680,9 +686,8 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 		owners[key] = owner
 		return owner
 	}
-	appendServers := func(connectorName, homeScope, home string, servers []config.MCPServerEntry) {
+	projectServers := func(connectorName, homeScope string, owner llmEventUser, servers []config.MCPServerEntry) {
 		slug := inventoryStableToken(connectorName, 128)
-		owner := ownerFor(connectorName, home)
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
 			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
@@ -727,6 +732,7 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 				mcpArgumentsFingerprint: argumentsFingerprint,
 				mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
 				mcpServerURL:            serverURL,
+				mcpRuntimeServerName:    name,
 				mcpIsRemote:             server.URL != "",
 				mcpURLHost:              host,
 				mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
@@ -739,6 +745,45 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 				userEmail:               owner.Email,
 			})
 		}
+	}
+	appendServers := func(connectorName, homeScope, home string, servers []config.MCPServerEntry) {
+		projectServers(connectorName, homeScope, ownerFor(connectorName, home), servers)
+	}
+	// A managed Windows gateway runs as LocalSystem and must not read user
+	// profiles. The enumerator already publishes each enrolled user's MCP
+	// configuration into the trusted guardian spool; this adapter projects that
+	// source through the same platform-neutral contract as direct macOS reads.
+	if goos == "windows" && (cfg.StandaloneEnterprise() || cfg.SecureClientIntegration()) {
+		authorization, reason := readManagedGuardianAuthorization(cfg.DataDir)
+		if reason != "" || authorization == nil {
+			status.partial = true
+			return components, status
+		}
+		available := make(map[string]struct{}, len(connectors))
+		for _, name := range connectors {
+			available[canonicalConnectorRulePackKey(name)] = struct{}{}
+		}
+		for _, target := range authorization.ProtectedTargets {
+			connectorName := managedGuardianTargetConnector(target)
+			home, sid := strings.TrimSpace(target.UserHome), strings.TrimSpace(target.SID)
+			if home == "" && target.Result != nil {
+				home = strings.TrimSpace(target.Result.UserHome)
+			}
+			if !target.OK || connectorName == "" || sid == "" || home == "" {
+				continue
+			}
+			if _, ok := available[connectorName]; !ok {
+				continue
+			}
+			servers, unreadable := enrolledSpoolMCPServers(enrolledMCPSpoolDir(cfg, connectorName), connectorName, sid)
+			if unreadable != nil {
+				status.markIncomplete(connectorName)
+				continue
+			}
+			owner := llmEventUser{ID: sid, IDKind: useridentity.KindWindowsSID, Name: sanitizeLLMEventUser(target.User)}
+			projectServers(connectorName, endpointInventoryScopeKey(home), owner, servers)
+		}
+		return components, status
 	}
 	// Pass 1 — daemon's own HOME (covers zero-HomeDirs installs and dev runs).
 	// ReadMCPServersForConnector's default case reads the OpenClaw registry, so
@@ -1451,7 +1496,8 @@ func endpointInventoryCarrierFor(
 	case config.ObservabilityV8ManagedMCPInventoryAction:
 		if len(components) > 0 && components[0].componentType == "mcp_tool" {
 			for _, component := range components {
-				if component.componentType != "mcp_tool" || component.mcpToolParentID == "" || component.mcpToolSource == "" {
+				if component.componentType != "mcp_tool" || component.mcpRuntimeServerName == "" || component.mcpToolSource == "" ||
+					component.mcpToolSource == "advertised" && component.mcpToolParentID == "" {
 					return endpointInventoryCarrier{}, false
 				}
 			}
@@ -1659,6 +1705,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryMcpArgumentsFingerprint:     aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
 			DefenseClawInventoryMcpSourceScope:              aiDiscoveryV8OptionalText(component.mcpSourceScope),
 			DefenseClawInventoryMcpServerURL:                aiDiscoveryV8OptionalText(component.mcpServerURL),
+			DefenseClawInventoryMcpRuntimeServerName:        aiDiscoveryV8OptionalText(component.mcpRuntimeServerName),
 			DefenseClawInventoryMcpToolParentID:             aiDiscoveryV8OptionalText(component.mcpToolParentID),
 			DefenseClawInventoryMcpToolSource:               aiDiscoveryV8OptionalText(component.mcpToolSource),
 			DefenseClawInventoryMcpToolObservedAt:           aiDiscoveryV8OptionalText(component.mcpToolObservedAt),
