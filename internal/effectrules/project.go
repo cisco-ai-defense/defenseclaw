@@ -29,8 +29,15 @@ type Env struct {
 	AccountHomes []string
 	// Resolve follows a write path through links; nil falls back to
 	// hookpaths.ResolveWriteTarget for the host's own path flavor and to the
-	// placed path for the other flavor (resolverFor).
+	// placed path for the other flavor (resolverForWith).
 	Resolve func(string) (string, bool)
+	// HostResolve, when Resolve is nil, replaces hookpaths.ResolveWriteTarget
+	// as the resolver of the host's own path flavor (resolverForWith): the
+	// gateway passes the hook call's target memo, so a target graded against
+	// every set and its hard link identity is walked once per call, with the
+	// answers the readers of the call already hold. Nil reads the disk
+	// (rel-1-0-10:GAP-2302).
+	HostResolve func(string) (string, bool)
 	// Identity reads a file's device and inode to find a hard link of a
 	// protected member (one stat per resolved target); nil reads the disk
 	// (DiskIdentity). Tests pass a HardLinkFixture.
@@ -64,7 +71,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 	}
 	rsv := env.Resolve
 	if rsv == nil {
-		rsv = resolverFor(flavor)
+		rsv = resolverForWith(flavor, env.HostResolve)
 	}
 	sets := buildSets(env.Home, flavor)
 	if len(env.AccountHomes) > 0 {

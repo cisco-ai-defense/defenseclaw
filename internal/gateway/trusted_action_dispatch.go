@@ -733,6 +733,10 @@ func dispatchTrustedActionOnceIn(
 				return snapshotRulePackGenerationFor(parent, request.Connector)
 			}
 			defer func() {
+				// The lane reads links through the target memo the readers
+				// of the call fill (made below, after this copy), not the disk
+				// again for every set (effectShadowFacts, rel-1-0-10:GAP-2302).
+				effectRequest.targetMemo = request.targetMemo
 				findings = joinEffectFindings(withFloorRaiseOnlyMark(effectRequest, findings, 0),
 					effectLiveFindings(effectRequest, mode, effectsRulesTierFor(), generation))
 			}()

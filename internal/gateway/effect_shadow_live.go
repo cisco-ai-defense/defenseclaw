@@ -289,13 +289,23 @@ func effectShadowFacts(request trustedActionRequest, result effects.Result, opts
 	if opts.Flavor == effects.FlavorPOSIX {
 		accountHomes = append(accountHomes, effectMountedAccountHomes(result, request.Input.ActiveHome, opts.Login, accountHomes)...)
 	}
-	return effectrules.Project(result, effectrules.Env{
+	env := effectrules.Env{
 		Home:         request.Input.ActiveHome,
 		Flavor:       opts.Flavor,
 		AccountHomes: accountHomes,
 		Resolve:      effectResolverOverride,
 		Lstat:        effectLstatOverride,
-	})
+	}
+	// The ON lane runs on the hook's path: its link walks go through the
+	// call's target memo, as the readers' do. On a POSIX host the package
+	// resolver keeps no memory (hookpaths.memoReads), so each target was
+	// walked on disk once per protected set and again for its hard link
+	// identity: L1 t-long, 60 statements on a linked home, 1.17x the 1.0.10
+	// hook p99 (rel-1-0-10:GAP-2302). The answers are the same file system's.
+	if request.targetMemo != nil {
+		env.HostResolve = request.targetMemo.ResolveWriteTarget
+	}
+	return effectrules.Project(result, env)
 }
 
 // effectPowerShellHostConflict is the second reading of a PowerShell call
@@ -437,6 +447,9 @@ func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, ti
 	// The shadow runs on another goroutine, which runs no hook call of the
 	// dispatch's (trustedActionRequest.hookCall).
 	request = request.withoutHookCall()
+	// Nor does it share the call's target memo: the readers fill it on the
+	// hook's goroutine, under the call's read budget (effectShadowFacts).
+	request.targetMemo = nil
 	goEffectShadow(func() { record(effectShadowRun(request, mode, tier)[0]) })
 }
 
