@@ -55,13 +55,14 @@ func withOverBudgetKitProofs(parent context.Context, request trustedActionReques
 		analyzed := actionfacts.Analyze(request.Input)
 		facts = &analyzed
 	}
+	start := len(findings)
 	if write {
 		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, *facts)
 	}
 	if read {
 		findings = appendTrustedPrivateKeyReaderFinding(findings, generation, request, *facts)
 	}
-	return withOverBudgetOwnSSHFolderCopyAlert(request, findings)
+	return withOverBudgetOwnSSHFolderCopyAlert(request, findings, start)
 }
 
 // withOverBudgetOwnSSHFolderCopyAlert keeps the alert of an own SSH folder
@@ -71,10 +72,11 @@ func withOverBudgetKitProofs(parent context.Context, request trustedActionReques
 // sees its own home, alerts on the same copy. The kit places decide when
 // they hold the destination; without them every place of the home outside
 // its SSH folder is the owner one, as for an actor call with no kit facts
-// (substrate-1 GAP-0922). Only the key findings are lowered, and only to the
-// alert: the budget finding still decides the call in its pack.
-func withOverBudgetOwnSSHFolderCopyAlert(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if !slices.ContainsFunc(findings, overBudgetKitKeyFinding) {
+// (substrate-1 GAP-0922). Only the key findings withOverBudgetKitProofs
+// added (findings[start:]) are lowered, and only to the alert: the budget
+// finding and every finding made before still decide the call in its pack.
+func withOverBudgetOwnSSHFolderCopyAlert(request trustedActionRequest, findings []RuleFinding, start int) []RuleFinding {
+	if !slices.ContainsFunc(findings[start:], overBudgetKitKeyFinding) {
 		return findings
 	}
 	// The whole call is past a bound, so no reading of it proves that
@@ -103,7 +105,15 @@ func withOverBudgetOwnSSHFolderCopyAlert(request trustedActionRequest, findings 
 			return findings
 		}
 	}
-	for index := range findings {
+	adviseOverBudgetKitKeyFindings(findings, start)
+	return findings
+}
+
+// adviseOverBudgetKitKeyFindings lowers to the alert the key findings of
+// findings[start:], the ones withOverBudgetKitProofs added for an own SSH
+// folder copy; the findings before start keep their proofs.
+func adviseOverBudgetKitKeyFindings(findings []RuleFinding, start int) {
+	for index := start; index < len(findings); index++ {
 		if overBudgetKitKeyFinding(findings[index]) {
 			findings[index].Proof = findings[index].Proof.Advise()
 			if findings[index].RuleID == "persistence.ssh_authorized_keys_command" {
@@ -111,7 +121,6 @@ func withOverBudgetOwnSSHFolderCopyAlert(request trustedActionRequest, findings 
 			}
 		}
 	}
-	return findings
 }
 
 // ownSSHFolderCopyWithoutHelpers is command without its top-level
