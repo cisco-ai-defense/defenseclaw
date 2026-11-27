@@ -37,8 +37,11 @@ import (
 //   - `a && b` runs b where a succeeded; `a || b` runs b where a failed; `a;
 //     b` runs b wherever a left the shell;
 //   - `( cd X; a )` runs a as above and leaves the shell where it was; a pipe
-//     member, a background statement, a command or process substitution and a
-//     coprocess run in a copy and change nothing outside;
+//     member before the last, a background statement, a command or process
+//     substitution and a coprocess run in a copy and change nothing outside;
+//     the last member of a pipe runs in a copy under Bash and in the shell
+//     itself under zsh, so the commands after it may run in either folder
+//     (rel-1-0-10:GAP-2292);
 //   - an if, while, until, for or case reads every branch, and a loop that
 //     moves by a relative step on each pass leaves an unresolved folder;
 //   - a cd whose target is not one static word (a variable, a command
@@ -769,10 +772,17 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 			leftOK, leftAfter := t.stmt(cmd.X, in)
 			rightOK, rightAfter := t.stmt(cmd.Y, leftAfter)
 			return unionWorkFolders(leftOK, rightOK), unionWorkFolders(leftAfter, rightAfter)
-		default: // a pipe: each member runs in a copy of the shell
+		default: // a pipe
+			// Every stage but the last runs in a copy of the shell. Bash runs
+			// the last one in a copy too, but zsh (the login shell of macOS)
+			// and Bash with lastpipe run it in the shell itself, so a cd
+			// there, or in text it sources or a group it runs, may move the
+			// commands after the pipeline: they run where the shell was or
+			// where that stage left it (rel-1-0-10:GAP-2292). The status of
+			// a pipeline is the status of its last stage.
 			t.stmt(cmd.X, in)
-			t.stmt(cmd.Y, in)
-			return in, in
+			lastOK, lastAfter := t.stmt(cmd.Y, in)
+			return unionWorkFolders(in, lastOK), unionWorkFolders(in, lastAfter)
 		}
 	case *syntax.Subshell:
 		t.list(cmd.Stmts, in)
