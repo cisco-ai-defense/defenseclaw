@@ -353,6 +353,16 @@ func MayMatch(re *regexp.Regexp, text string) bool {
 	return NewText(text).MayMatch(re)
 }
 
+// HoldsLiterals is RequiredLiteralsIn for the text, of any length: false
+// only when re cannot match it. The text keeps its fold for the next
+// expression, so several expressions read one short text cheaply.
+func (t *Text) HoldsLiterals(re *regexp.Regexp) bool {
+	if t == nil || re == nil {
+		return true
+	}
+	return t.holds(re)
+}
+
 // RequiredLiteralsIn reports whether text, of any length, satisfies every
 // clause derived for re (true when none is known). Tests use it to check that
 // each match of re holds the literals the check relies on.

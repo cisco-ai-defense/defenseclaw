@@ -6,6 +6,8 @@ package gateway
 import (
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
 
 // The open-secret hold of a streamed reply (rel-1-0-10:GAP-0429).
@@ -137,7 +139,20 @@ var streamSecretExempt = map[string]bool{"SEC-ENV-DUMP-REQUEST": true, "SEC-PRIV
 
 // streamTokenOpen matches a token, or a card or SSN digit run, still running
 // at the end of a text.
-var streamTokenOpen = func() *regexp.Regexp {
+var streamTokenOpen = regexp.MustCompile(`(?:` + strings.Join(streamTokenOpenAlts(), "|") + `)$`)
+
+// streamTokenOpenEach are the alternatives of streamTokenOpen, each anchored
+// at the end on its own (streamTokenOpenStart).
+var streamTokenOpenEach = func() []*regexp.Regexp {
+	alts := streamTokenOpenAlts()
+	out := make([]*regexp.Regexp, len(alts))
+	for i, alt := range alts {
+		out[i] = regexp.MustCompile(`(?:` + alt + `)$`)
+	}
+	return out
+}()
+
+func streamTokenOpenAlts() []string {
 	alts := make([]string, 0, len(streamTokenRules)+len(streamPIIRules))
 	for _, r := range streamTokenRules {
 		alts = append(alts, r.open)
@@ -145,8 +160,29 @@ var streamTokenOpen = func() *regexp.Regexp {
 	for _, r := range streamPIIRules {
 		alts = append(alts, r.open)
 	}
-	return regexp.MustCompile(`(?:` + strings.Join(alts, "|") + `)$`)
-}()
+	return alts
+}
+
+// streamTokenOpenStart is the start of streamTokenOpen's match in tail, -1
+// for none. The joined expression matches at the leftmost offset where one
+// of its alternatives matches up to the end, so the start is the least start
+// of the alternatives' matches. An alternative whose required literals the
+// tail lacks (rxprefilter) cannot match and is not run: the one automaton of
+// every alternative read the whole tail at each piece of a stream, the
+// largest cost of a streamed reply after GAP-0515 (substrate-1:GAP-1107).
+func streamTokenOpenStart(tail string) int {
+	text := rxprefilter.NewText(tail)
+	best := -1
+	for _, re := range streamTokenOpenEach {
+		if !text.HoldsLiterals(re) {
+			continue
+		}
+		if loc := re.FindStringIndex(tail); loc != nil && (best < 0 || loc[0] < best) {
+			best = loc[0]
+		}
+	}
+	return best
+}
 
 // secretLane is the open-secret state of one lane of reply text. The lane
 // only grows; the state is advanced over the new text when asked.
@@ -239,11 +275,11 @@ func (s *secretLane) token(t string) bool { return s.tokenStart(t) >= 0 }
 // end of t, -1 for none.
 func (s *secretLane) tokenStart(t string) int {
 	from := max(len(t)-streamSecretTail, 0)
-	loc := streamTokenOpen.FindStringIndex(t[from:])
-	if loc == nil {
+	at := streamTokenOpenStart(t[from:])
+	if at < 0 {
 		return -1
 	}
-	start := from + loc[0]
+	start := from + at
 	if start < s.tokenFrom || len(t)-start >= streamSecretMaxToken {
 		return -1
 	}
