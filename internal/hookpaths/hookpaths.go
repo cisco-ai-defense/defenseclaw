@@ -6861,6 +6861,15 @@ func ProcCWDWriteOperand(path string) bool {
 // archiveCopyDestination reads the final destination of an rsync, pax, or
 // cpio copy. Their operand grammar differs from cp's option grammar.
 func archiveCopyDestination(args []string, static []bool, cwd string) string {
+	if word := archiveCopyDestinationWord(args, static); word != "" {
+		return copyDestinationPath(word, cwd, nil)
+	}
+	return ""
+}
+
+// archiveCopyDestinationWord is the destination word archiveCopyDestination
+// places, as written.
+func archiveCopyDestinationWord(args []string, static []bool) string {
 	for i := len(args) - 1; i >= 0; i-- {
 		if !static[i] {
 			return ""
@@ -6869,7 +6878,7 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 			continue
 		}
 		if !strings.HasPrefix(args[i], "-") {
-			return copyDestinationPath(args[i], cwd)
+			return args[i]
 		}
 	}
 	return ""
@@ -7503,11 +7512,16 @@ func (l *shellLinks) copyLinks(copied linkCopy, facts map[string]string) bool {
 }
 
 func cpDestination(args []string, static []bool, cwd string) string {
+	return cpDestinationWith(args, static, cwd, nil)
+}
+
+// cpDestinationWith is cpDestination with the links the command makes.
+func cpDestinationWith(args []string, static []bool, cwd string, made madeLinks) string {
 	parsed := cpOperands(args, static)
 	if !parsed.ok {
 		return ""
 	}
-	return copyDestinationPath(parsed.destination, cwd)
+	return copyDestinationPath(parsed.destination, cwd, made)
 }
 
 // copyDestinationPath places a copy destination. A destination below a
@@ -7516,9 +7530,12 @@ func cpDestination(args []string, static []bool, cwd string) string {
 // (rel-1-0-10:GAP-2227, GAP-2237). Every other destination is cleaned as
 // before, so readers that match it against a registered file (the hook
 // config guard) see the file it names: keeping a plain dot-dot raw lost the
-// tamper finding of a copy into a hook config through x/.. (GAP-2274).
-func copyDestinationPath(name, cwd string) string {
-	if placed := OperandPath(name, cwd); throughProcessLink(placed) {
+// tamper finding of a copy into a hook config through x/.. (GAP-2274). A
+// dot-dot that steps out of a link, one the command makes (made) or one on
+// disk, also stays raw: the kernel applies it from the link target, which a
+// clean erases (rel-1-0-10:GAP-2287).
+func copyDestinationPath(name, cwd string, made madeLinks) string {
+	if placed := OperandPath(name, cwd); throughProcessLink(placed) || made.linkBeforeStep(placed) {
 		return placed
 	}
 	if !filepath.IsAbs(name) {

@@ -28,20 +28,20 @@ func TestGAP2275ThroughProcessLink(t *testing.T) {
 			t.Errorf("throughProcessLink(%q) = %t, want %t", row.path, got, row.want)
 		}
 	}
-	if got := processLinkWrites([]string{"/srv/out/a"}, "/proc/self/cwd"); len(got) != 1 {
+	if got := processLinkWrites([]string{"/srv/out/a"}, "/proc/self/cwd", nil); len(got) != 1 {
 		t.Errorf("a call placed below a process link keeps its operands, got %q", got)
 	}
 }
 
 func TestGAP2274CopyDestinationPath(t *testing.T) {
 	cwd := t.TempDir()
-	if got := copyDestinationPath("/proc/self/cwd/../x", cwd); got != "/proc/self/cwd/../x" {
+	if got := copyDestinationPath("/proc/self/cwd/../x", cwd, nil); got != "/proc/self/cwd/../x" {
 		t.Errorf("process-link destination = %q, want it raw", got)
 	}
-	if got := copyDestinationPath("out/../x", cwd); got != cwd+"/x" {
+	if got := copyDestinationPath("out/../x", cwd, nil); got != cwd+"/x" {
 		t.Errorf("relative destination = %q, want %s/x", got, cwd)
 	}
-	if got := copyDestinationPath("/home/u/p/../.claude/settings.json", cwd); got != "/home/u/.claude/settings.json" {
+	if got := copyDestinationPath("/home/u/p/../.claude/settings.json", cwd, nil); got != "/home/u/.claude/settings.json" {
 		t.Errorf("absolute dot-dot destination = %q, want it cleaned", got)
 	}
 }

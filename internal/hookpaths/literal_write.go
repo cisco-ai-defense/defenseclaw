@@ -157,15 +157,16 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 	// is the only reading (rel-1-0-9:GAP-1038).
 	placed := newPlacedCalls(file, command, cwd, home)
 	placed.renamed = include != nil
+	made := commandMadeLinks(file, command, cwd, home)
 	programOperands := func(words []string, stmt *syntax.Stmt, call *syntax.CallExpr, environment actionValues) []string {
 		readFiles := len(file.Stmts) == 1
 		dirs := placed.of(call)
 		if len(dirs) == 1 && dirs[0] == cwd {
-			return literalProgramOperandsKnown(words, stmt, cwd, home, depth, readFiles, environment, include)
+			return literalProgramOperandsKnown(words, stmt, cwd, home, depth, readFiles, environment, include, made)
 		}
 		var names []string
 		for _, dir := range dirs {
-			names = append(names, literalProgramOperandsKnown(words, stmt, dir, home, depth, readFiles, environment, include)...)
+			names = append(names, literalProgramOperandsKnown(words, stmt, dir, home, depth, readFiles, environment, include, made)...)
 		}
 		return names
 	}
