@@ -430,13 +430,6 @@ func currentHookCall() *hookCall {
 	return hookCalls.calls[id]
 }
 
-// networkPathUnanswered reports a path below a network share that has not
-// answered in time. A local path is never reported and costs no probe.
-func networkPathUnanswered(path string) bool {
-	unanswered, _ := networkPathRead(path)
-	return unanswered
-}
-
 // shareReadCut is why a read of a path that did not answer is not final.
 type shareReadCut uint8
 
@@ -455,16 +448,10 @@ const (
 	shareReadRemote
 )
 
-// linkUnanswered is networkPathUnanswered for a read that opens no link at
-// the end of the path (lstat, readlink, a directory walk).
-func linkUnanswered(path string) bool {
-	unanswered, _ := networkPathReadAs(path, false)
-	return unanswered
-}
-
-// networkPathRead is networkPathUnanswered that also reports whether the
-// call budget, not the own wait of the share, ended the wait for a share
-// that did not answer (it might have answered had the call had more
+// networkPathRead reports a path below a network share that has not
+// answered in time (a local path is never reported and costs no probe), and
+// whether the call budget, not the own wait of the share, ended the wait for
+// a share that did not answer (it might have answered had the call had more
 // budget), or the link bound stopped the walk to the path.
 func networkPathRead(path string) (unanswered bool, cut shareReadCut) {
 	return networkPathReadAs(path, true)
@@ -761,7 +748,9 @@ func readGated[T any](op, name string, read func(path string) (T, error), discar
 	}
 	still, err := pathidentity.HoldUnlinked(path)
 	switch {
-	case errors.Is(err, pathidentity.ErrLinked):
+	case errors.Is(err, pathidentity.ErrLinked), errors.Is(err, pathidentity.ErrUnpinned):
+		// A link on the way, or a component the hold cannot pin: unknown,
+		// never read unheld (rel-1-0-10:GAP-1263, GAP-1264).
 		return none, shareReadRemote, networkShareError(op, name)
 	case err != nil:
 		return none, shareReadFinal, err
@@ -914,10 +903,11 @@ const pathReadDirChunk = 1024
 // first n in directory order made a key link that sorts early drop out of a
 // directory past the cap (rel-1-0-10:GAP-1468).
 func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("readdir", name)
-	}
-	dir, err := os.Open(fixturefs.Map(name))
+	// The directory is opened as pathOpen opens it, on the path the share
+	// gate read under its hold; every entry below is read through that
+	// handle. Asking the gate and then opening the name looked the name up
+	// again after the share decision (rel-1-0-10:GAP-1264).
+	dir, err := pathOpen(name)
 	if err != nil {
 		return nil, err
 	}
@@ -966,6 +956,13 @@ func pathReadlink(name string) (string, error) {
 
 func pathEvalSymlinks(name string) (string, error) {
 	resolved, _, err := readGated("evalsymlinks", name, winpath.EvalLinks, nil)
+	return fixturefs.Unmap(resolved), err
+}
+
+// pathFinalPath is pathEvalSymlinks with the real final path always
+// (winpath.FinalPath): no subst or mapped drive letter kept.
+func pathFinalPath(name string) (string, error) {
+	resolved, _, err := readGated("evalsymlinks", name, winpath.FinalPath, nil)
 	return fixturefs.Unmap(resolved), err
 }
 
@@ -1030,14 +1027,61 @@ func ReadFile(name string) ([]byte, error) {
 // ReadRegularFileBounded is safefile.ReadRegularFileBounded for a path a
 // hook call names, read as pathOpen reads it: a share on another machine is
 // never contacted, and the file read is the file the share decision was
-// made for (rel-1-0-10:GAP-1074). safefile refuses a name that passes any
-// link, so it reads the name itself: a name the walk read through a link is
-// refused as before, and one it read without is the path the walk read.
+// made for (rel-1-0-10:GAP-1074). safefile reads the path the gate read,
+// under its hold, never the name again: opening the name would follow a
+// link on the way as it is now, which may lead to a share since the walk
+// (rel-1-0-10:GAP-1264). A name the walk read through a link that safefile
+// refuses for the name is refused here before anything opens it
+// (readNameAsSafefile), so the answer stays the one safefile gives the name.
 func ReadRegularFileBounded(name string, maxBytes int64) ([]byte, error) {
-	body, _, err := readGated("open", name, func(string) ([]byte, error) {
-		return safefile.ReadRegularFileBounded(name, maxBytes)
+	body, _, err := readGated("open", name, func(path string) ([]byte, error) {
+		if err := readNameAsSafefile("open", name, path); err != nil {
+			return nil, err
+		}
+		return safefile.ReadRegularFileBounded(path, maxBytes)
 	}, nil)
 	return body, err
+}
+
+// readNameAsSafefile refuses (errNameReadThroughLink) a name that the walk
+// read through a link where safefile refuses one: on Windows any link on the
+// way (rejectReparseChain); elsewhere a link as the last component or as the
+// folder that holds it, which are looked at with the walk's own reads
+// (pathLstat). A link further up is read through, as safefile does.
+func readNameAsSafefile(op, name, path string) error {
+	if path == fixturefs.Map(name) {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+	}
+	for _, component := range []string{name, filepath.Dir(name)} {
+		info, err := pathLstat(component)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+		}
+	}
+	return nil
+}
+
+// errNameReadThroughLink is the refusal of a reader that reads the name it
+// is given as a name (safefile, GetLongPathName) when the share walk read
+// that name through a link: the gate's path is the link's target, and the
+// name would be looked up again through the link as it is now.
+var errNameReadThroughLink = errors.New("hookpaths: the name passes a link the share gate resolved")
+
+// readNameAsGated is the rule of a reader that must read a name as spelled
+// (it refuses links, or it spells the name back): it reads only when the
+// path the gate read (path, mapped) is the name itself, so the read is the
+// gate's read under its hold. Otherwise it refuses (errNameReadThroughLink).
+func readNameAsGated(op, name, path string) error {
+	if path != fixturefs.Map(name) {
+		return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+	}
+	return nil
 }
 
 // LstatPinned is pathidentity.LstatPinned for a path a hook call names,

@@ -34,13 +34,13 @@ func TestPatchHeaderTargetPlacesOnlyALoneLeadingHome(t *testing.T) {
 		file := mustParsePOSIXHeredocBody(t, "apply_patch <<P\n"+tc.body+"P\n")
 		text, _, _ := posixHeredocText(file, false, false)
 		name := patchDirectivePath(firstLine(text), "*** Add File: ")
-		got, placed := patchHeaderTarget(name, true)
+		got, placed := patchHeaderTarget(name, patchView{shellView: true})
 		if placed != tc.placed || placed && got != tc.want {
 			t.Errorf("%q: %q placed %v, want %q placed %v", tc.body, got, placed, tc.want, tc.placed)
 		}
 	}
 	// The text of an envelope no shell expands is read as written.
-	if got, placed := patchHeaderTarget(patchHomeMarker+"/.bashrc", false); placed && got == "~/.bashrc" {
+	if got, placed := patchHeaderTarget(patchHomeMarker+"/.bashrc", patchView{}); placed && got == "~/.bashrc" {
 		t.Errorf("a non-shell envelope placed the marker under the home: %q", got)
 	}
 }

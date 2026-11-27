@@ -107,7 +107,7 @@ func analyzeReading(input Input, twinCommand string, capture *redirectTargetCapt
 		return facts
 	}
 
-	extracted := extractArgsForTool(input.Args, input.Tool)
+	extracted := extractArgsForToolAt(input.Args, input.Tool, patchCallCWD(input))
 	for _, issue := range extracted.issues {
 		base.addIssue(issue)
 	}

@@ -42,12 +42,9 @@ func actionProcessOwnsHome(home string) bool {
 // does (rel-1-0-6:GAP-0211, parity). A deny entry that only some accounts
 // carry, or one that is only inherited by children, proves nothing.
 func actionGlobDirDeniesEveryoneList(dir string) bool {
-	read, release, ok := gatedPath(dir)
-	if !ok {
-		return false
-	}
-	defer release()
-	descriptor, err := windows.GetNamedSecurityInfo(read, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	descriptor, err := readGatedValue("security", dir, func(read string) (*windows.SECURITY_DESCRIPTOR, error) {
+		return windows.GetNamedSecurityInfo(read, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	})
 	if err != nil || descriptor == nil {
 		return false
 	}
