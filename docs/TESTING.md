@@ -39,6 +39,31 @@ npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.tes
 opa test policies/rego/ -v
 ```
 
+## Tests That Run a Decision Without a File System
+
+Some tests decide a call by its words alone, with no file system behind it, for
+example a Substrate actor's command in copy mode, whose files live on the actor
+and not on the host. `internal/fixturefs` provides `Unread` for this: while a
+decision runs inside `Unread`, reads on that goroutine see no files, and other
+goroutines are not affected.
+
+To tell which goroutine is inside `Unread`, `fixturefs` uses a key per
+goroutine, and the cost of that key depends on the platform:
+
+| Platform | Key | Cost of a check while a decision runs |
+|---|---|---|
+| Linux and Windows | The id of the operating system thread, which `Unread` holds its goroutine on | One system call |
+| macOS | The goroutine number, read from a stack capture | One stack capture per `fixturefs.Map` call |
+
+On macOS a test run therefore spends more time on each by-name decision, and on
+every other test that reads files while one runs. This only costs time; the
+verdicts are the same. The thread-id key is not used on macOS because it has
+not been checked there, and a wrong key could make other goroutines read as
+inside `Unread`, which would weaken verdicts. Do not change the macOS key
+without a macOS test run. `TestUnreadKeyStrategyPerPlatform` in
+`internal/fixturefs` fails if macOS stops using the stack capture or if Linux
+or Windows go back to it.
+
 ## TUI Tests
 
 The Textual TUI (`cli/defenseclaw/tui/`) is tested mostly without a running
