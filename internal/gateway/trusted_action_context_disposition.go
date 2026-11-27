@@ -32,6 +32,9 @@ type trustedActionDispositionScope struct {
 	// sendDestination: the arguments are the routing values of a message
 	// call, where its text is sent (trustedActionRequest.sendDestination).
 	sendDestination bool
+	// strictPolicy: the strict pack judges the call
+	// (trustedActionRequest.StrictPolicy).
+	strictPolicy bool
 }
 
 // applyTrustedActionContextDisposition is the trusted-action-only disposition
@@ -111,6 +114,21 @@ func applyTrustedActionContextDisposition(
 					// The Local file tool opens this exact credential or control
 					// target. Keep its path rule enforceable, as for a direct
 					// mutation of the same file.
+					finding = finding.withTrustedActionProof(
+						trustedActionContextFindingProof(finding.RuleID, findingFacts),
+					)
+					adjusted[index] = finding
+					continue
+				}
+				if scope.strictPolicy && finding.enforcement != findingEnforcementDetectionOnly &&
+					trustedActionStrictCredentialContentRead(findingFacts, finding) {
+					// The strict pack blocks a proven content read of a
+					// credential file, as it blocks the private key's; the
+					// other packs keep the alert below (substrate-1:GAP-0706,
+					// owner ruling 2026-11-19). A read is HIGH at most: the
+					// CRITICAL of the rule is for its upload or mutation
+					// (rel-1-0-10:GAP-0888).
+					finding.Severity = trustedActionLowerSeverity(finding.Severity, "HIGH")
 					finding = finding.withTrustedActionProof(
 						trustedActionContextFindingProof(finding.RuleID, findingFacts),
 					)
@@ -218,9 +236,61 @@ func sshPrivateKeyContentReadBy(
 	facts actionfacts.Facts,
 	isKey func(actionfacts.Facts, actionfacts.PathFact) bool,
 ) bool {
+	return pathContentReadBy(facts, isKey, matchesSSHPrivateKey, sshPrivateKeyContentReaders)
+}
+
+// trustedActionStrictCredentialNotStore are the credential-tagged path rules
+// whose files the strict pack does not block a read of: a project .env, the
+// shell history and the SSH folder's other files (its keys have their own
+// proof) are read in ordinary work. They keep the alert, as do the system
+// files (rules tagged system-file, /etc/shadow: GAP-1058 keeps rel's tier).
+var trustedActionStrictCredentialNotStore = []string{"PATH-ENV-FILE", "PATH-HISTORY", "PATH-SSH-DIR"}
+
+// trustedActionStrictCredentialContentRead reports a content read of a file
+// of finding's credential path rule by an executing command, with the proof
+// of a private key read (pathContentReadBy): no copy kept in the same home,
+// no glob operand, no read of no byte (substrate-1:GAP-0706). The copy
+// programs read it as cat does (TestCredentialFileCopyIsJudgedLikeItsRead).
+func trustedActionStrictCredentialContentRead(facts actionfacts.Facts, finding RuleFinding) bool {
+	if finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY" {
+		// A private key read has its own proof below (the active key, the
+		// key reached through a linked folder): judged here first, it was
+		// capped at HIGH and skipped that proof, and the strict block of
+		// cd -P <link to ~/.ssh> && cat id_ed25519 became an alert
+		// (substrate-1:GAP-1165).
+		return false
+	}
+	if !slices.Contains(finding.Tags, "credential") || slices.Contains(finding.Tags, "detection-only") ||
+		slices.Contains(finding.Tags, "system-file") ||
+		slices.Contains(trustedActionStrictCredentialNotStore, finding.RuleID) {
+		return false
+	}
+	isFile := func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		return trustedActionPathMatchesRule(facts, candidate, finding.RuleID)
+	}
+	anyGlob := func(string) bool { return true }
+	return pathContentReadBy(facts, isFile, anyGlob, credentialContentReaders)
+}
+
+// credentialContentReaders are the programs whose read of a credential file
+// returns its content: the private key readers, the other copy programs and
+// the common text viewers (a search may print a count or a name only).
+var credentialContentReaders = append(slices.Clone(sshPrivateKeyContentReaders),
+	"rsync", "install", "less", "more", "strings", "xxd", "od", "hexdump", "jq", "tac", "nl")
+
+// pathContentReadBy reports a read of a file isFile accepts that returns its
+// content: an executing content reader (one of readers; head and tail
+// unless they read no byte), never a copy to a private place of the same
+// home, never a command with a glob operand globTarget accepts.
+func pathContentReadBy(
+	facts actionfacts.Facts,
+	isFile func(actionfacts.Facts, actionfacts.PathFact) bool,
+	globTarget func(string) bool,
+	readers []string,
+) bool {
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessRead ||
-			!isKey(facts, candidate) {
+			!isFile(facts, candidate) {
 			continue
 		}
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
@@ -234,7 +304,7 @@ func sshPrivateKeyContentReadBy(
 		}
 		expandingOperand := false
 		for _, argument := range command.Arguments {
-			if argument.Expands && matchesSSHPrivateKey(argument.Value) {
+			if argument.Expands && globTarget(argument.Value) {
 				expandingOperand = true
 				break
 			}
@@ -256,7 +326,7 @@ func sshPrivateKeyContentReadBy(
 				continue
 			}
 			return true
-		case slices.Contains(sshPrivateKeyContentReaders, program):
+		case slices.Contains(readers, program):
 			return true
 		}
 	}
@@ -374,7 +444,7 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 	},
 	{
 		ruleIDs: []string{"PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS"},
-		matcher: trustedActionPathValueMatcher(matchesAWSCredentials),
+		matcher: trustedActionWithFolderTree(trustedActionPathValueMatcher(matchesAWSCredentials), actionfacts.CredentialFileAWS, true),
 	},
 	{
 		ruleIDs: []string{"PATH-PASSWORD-CRACKER-POTFILE"},
@@ -382,11 +452,11 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 	},
 	{
 		ruleIDs: []string{"PATH-KUBE", "PATH-WIN-KUBE-CONFIG"},
-		matcher: trustedActionPathValueMatcher(matchesKubeConfig),
+		matcher: trustedActionWithFolderTree(trustedActionPathValueMatcher(matchesKubeConfig), actionfacts.CredentialFileKubeconfig, true),
 	},
 	{
 		ruleIDs: []string{"PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC"},
-		matcher: trustedActionPathValueMatcher(matchesPackageCredentialFile),
+		matcher: trustedActionWithFolderTree(trustedActionPathValueMatcher(matchesPackageCredentialFile), actionfacts.CredentialFilePackageRegistry, true),
 	},
 	{
 		ruleIDs: []string{
@@ -434,7 +504,7 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 	},
 	{
 		ruleIDs: []string{"SECRETS.CLOUD_CREDENTIAL_READ"},
-		matcher: matchesContextualCloudCredentialFile,
+		matcher: trustedActionWithFolderTree(matchesContextualCloudCredentialFile, actionfacts.CredentialFileCloudCLI, false),
 	},
 	{
 		ruleIDs: []string{"SECRETS.BROWSER_SESSION_STORE_READ"},
@@ -444,6 +514,24 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 		ruleIDs: []string{"SECRETS.WORKLOAD_IDENTITY_TOKEN_READ"},
 		matcher: trustedActionPathValueMatcher(matchesWorkloadIdentityToken),
 	},
+}
+
+// trustedActionWithFolderTree is matcher joined to the folder side of the
+// owner of the same rule (credentialFolderTreeMatcher, semantic_owners.go):
+// an archive or recursive copy of a credentials folder reads the file
+// matcher names, so its read is classified as the read of that file. Before,
+// only the owner took the folder (substrate-1:GAP-0995 part 2), and this
+// catalog, which grades the finding, saw no read of a matched path: the
+// finding was an audit record (LOW, allow) where the file read alerts.
+func trustedActionWithFolderTree(
+	matcher trustedActionSensitivePathMatcher,
+	class actionfacts.CredentialFileClass,
+	otherHomes bool,
+) trustedActionSensitivePathMatcher {
+	folder := credentialFolderTreeMatcher(class, otherHomes)
+	return func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		return matcher(facts, candidate) || folder(facts, candidate)
+	}
 }
 
 func trustedActionPathValueMatcher(

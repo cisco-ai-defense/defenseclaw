@@ -152,7 +152,13 @@ type splitGapTwinSet struct {
 // broader reading of its text.
 func (set *splitGapTwinSet) add(facts actionfacts.Facts) {
 	prefixes := map[int64]string{}
-	for _, candidate := range facts.Paths {
+	candidates := facts.Paths
+	if links := facts.LinkTargetReads(); len(links) != 0 {
+		// A link to a file is judged as its plain read (substrate-1:GAP-0706
+		// part 3): its target is a read effect of the call here too.
+		candidates = append(slices.Clone(facts.Paths), links...)
+	}
+	for _, candidate := range candidates {
 		effect, ok := pathEffectTwin(candidate.Access)
 		spelled := filepath.ToSlash(candidate.Resolved)
 		if !ok || !splitGapPlainPath(spelled) {
@@ -258,10 +264,11 @@ const splitGapOwnTwinNeutral = "split-gap-twin.txt"
 // files it changes. The twin is that prefix on the files of one folder, in
 // their resolved spelling, and its neutral the prefix on an ordinary file
 // of that folder. The change is a finding of a file only when the twin is
-// one and its neutral is not: a world-writable mode outside the folder the
-// command runs in (CMD-CHMOD-WORLD on chmod 777 /tmp/x) is one of any file,
-// while chown of a credentials file or chmod 644 of a key is one of that
-// file, and chmod +x of a project's git hook is none (substrate-1:GAP-0703).
+// one and its neutral is not: chown of a credentials file or chmod 644 of a
+// key is one of that file (the unknown tier), and chmod +x of a project's
+// git hook is none (substrate-1:GAP-0703). A world-writable mode
+// (CMD-CHMOD-WORLD on chmod 777 or 666) is one of any file: the findings
+// the twin and its neutral share are the call's (substrate-1:GAP-1078).
 // Every such command of the call is judged, many of one shape in one twin
 // (substrate-1:GAP-0712). It is "" for a command whose words are not all
 // known.
@@ -399,7 +406,25 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 		if unknown || !slices.ContainsFunc(childFindings, splitGapEnforcedFinding) {
 			continue
 		}
-		unknown = twin.neutral == "" || !slices.ContainsFunc(judge(twin.neutral), splitGapEnforcedFinding)
+		if twin.neutral == "" {
+			unknown = true
+			continue
+		}
+		neutral := judge(twin.neutral)
+		if !slices.ContainsFunc(neutral, splitGapEnforcedFinding) {
+			unknown = true
+			continue
+		}
+		// The change is a finding of any file of that folder, the file
+		// itself aside (a world-writable mode: CMD-CHMOD-WORLD on chmod 777
+		// or 666): the call's own command makes it, so the enforced findings
+		// the twin and its neutral share are the call's, as they are of its
+		// plain spelling. Before, such a twin added nothing, and the split
+		// gap made the world-writable chmod of a credentials file a clean
+		// allow where its plain spelling alerts (substrate-1:GAP-1078). A
+		// finding of the file alone (PATH-AWS-CREDS) still only decides the
+		// tier: the operand is a candidate (rel-1-0-10:GAP-0871).
+		findings = withSimpleCommandFindings(findings, splitGapSharedFindings(childFindings, neutral))
 	}
 	if !unknown && moverRead {
 		// rel's reading: an operand after a mover call, in a folder the call
@@ -416,6 +441,21 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 		record.unknown = unknown
 	}
 	return findings, record
+}
+
+// splitGapSharedFindings is the enforced findings of a twin whose rule its
+// neutral also finds.
+func splitGapSharedFindings(twin, neutral []RuleFinding) []RuleFinding {
+	var shared []RuleFinding
+	for _, finding := range twin {
+		key := trustedActionFindingKey(finding.RuleID)
+		if splitGapEnforcedFinding(finding) && slices.ContainsFunc(neutral, func(other RuleFinding) bool {
+			return splitGapEnforcedFinding(other) && trustedActionFindingKey(other.RuleID) == key
+		}) {
+			shared = append(shared, finding)
+		}
+	}
+	return shared
 }
 
 // splitGapEnforcedFinding is a finding of an effect twin that the pack

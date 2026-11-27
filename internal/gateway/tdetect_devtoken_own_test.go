@@ -16,7 +16,9 @@ import (
 // hook and on /inspect/tool, for a shell read (cat, sudo cat, base64) and a
 // native Read. The stronger-finding replacement of the native lane is for
 // another account's home (GAP-0835); it must not raise one's own files to
-// CRITICAL or make the managed default pack block them.
+// CRITICAL or make the managed default pack block them. The strict packs block
+// the read of each (substrate-1:GAP-0706, owner ruling 2026-11-19), at HIGH,
+// never CRITICAL.
 func TestOwnDeveloperTokenReadIsJudgedLikeOwnCloudCredentialsFiveTiers(t *testing.T) {
 	// The account's own home is spelled the way the host spells it: a POSIX
 	// path on Linux and macOS, a drive path (slash form, as an agent
@@ -70,7 +72,10 @@ func TestOwnDeveloperTokenReadIsJudgedLikeOwnCloudCredentialsFiveTiers(t *testin
 		for _, route := range []string{"hook-bash", "hook-sudo", "hook-b64", "hook-read", "inspect-exec", "inspect-read"} {
 			aws := got[route+":aws"]
 			where := func(kind string) string { return fmt.Sprintf("%s %s %s", p.name, route, kind) }
-			if aws.severity == "CRITICAL" || aws.action == "block" {
+			if p.pack == "strict" && (aws.severity == "CRITICAL" || aws.action != "block") {
+				t.Errorf("%s: %+v, want the strict block of an own credentials read, not CRITICAL", where("aws"), aws)
+			}
+			if p.pack != "strict" && (aws.severity == "CRITICAL" || aws.action == "block") {
 				t.Errorf("%s: %+v, want the alert tier of an own credentials read", where("aws"), aws)
 			}
 			if kube := got[route+":kube"]; kube != aws {

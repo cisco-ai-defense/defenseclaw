@@ -144,7 +144,14 @@ func TestRelativeHomeWritesAsTilde(t *testing.T) {
 	for _, row := range []struct{ cwd, command, want string }{
 		{home, "cp /tmp/x .aws/credentials", "cp /tmp/x ~/.aws/credentials"},
 		{home, "echo .aws/credentials > .aws/credentials", "echo ~/.aws/credentials > ~/.aws/credentials"},
-		{home, "cp /tmp/x '.aws/credentials'", "cp /tmp/x '~/.aws/credentials'"},
+		// A quoted spelling is respelled whole: a quoted ~ is no home
+		// (substrate-1:GAP-0700).
+		{home, "cp /tmp/x '.aws/credentials'", "cp /tmp/x ~/.aws/credentials"},
+		{home, `cp /tmp/x ".aws/credentials"`, "cp /tmp/x ~/.aws/credentials"},
+		{home, `cp /tmp/x .aws/"credentials"`, "cp /tmp/x ~/.aws/credentials"},
+		{home, `echo x > ".npmrc"`, "echo x > ~/.npmrc"},
+		{home, `echo ".npmrc" > .npmrc`, "echo ~/.npmrc > ~/.npmrc"},
+		{home, `cp /tmp/x ".aws/$f"`, `cp /tmp/x ".aws/$f"`},
 		{home, "dd if=/tmp/x of=.npmrc", "dd if=/tmp/x of=~/.npmrc"},
 		{home, "rm .netrc", "rm ~/.netrc"},
 		{home + "/.aws", "tee credentials </tmp/x", "tee ~/.aws/credentials </tmp/x"},
@@ -160,7 +167,7 @@ func TestRelativeHomeWritesAsTilde(t *testing.T) {
 		{home, "cd .aws && cp /tmp/x credentials", "cd .aws && cp /tmp/x credentials"},
 	} {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd, ActiveHome: home})
-		if got := relativeHomeWritesAsTilde(row.command, facts); got != row.want {
+		if got := relativeHomeWritesAsTilde(row.command, row.command, facts); got != row.want {
 			t.Errorf("%q in %s: scan text %q, want %q", row.command, row.cwd, got, row.want)
 		}
 	}
