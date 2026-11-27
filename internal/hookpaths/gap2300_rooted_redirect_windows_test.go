@@ -39,6 +39,18 @@ func TestGAP2300RootedRedirectUsesTheVolume(t *testing.T) {
 	if want := filepath.VolumeName(work) + `\tmp\list.txt`; unknown || len(directory) != 1 || filepath.Clean(directory[0].Path) != want {
 		t.Errorf("after cd: directory operands %+v, unknown=%v", directory, unknown)
 	}
+	// A cd to a rooted name with no drive enters that name on the volume,
+	// as the link walk places it, so a later relative write is keyed where
+	// its copy scope is (rel-1-0-10:GAP-2303).
+	directory, unknown = ShellDirectoryWriteOperands("cd /nonexistent-zz && true; echo x > y.txt", work, `C:\Users\synthetic`, nil, false, false)
+	var paths []string
+	for _, operand := range directory {
+		paths = append(paths, filepath.Clean(operand.Path))
+	}
+	if want := filepath.VolumeName(work) + `\nonexistent-zz\y.txt`; unknown || !slices.Contains(paths, want) ||
+		slices.Contains(paths, filepath.Join(work, "nonexistent-zz", "y.txt")) {
+		t.Errorf("after cd /nonexistent-zz: directory operands %q, unknown=%v, want %q", paths, unknown, want)
+	}
 	operands, _, _ := ShellWriteOperands("echo x > /tmp/list.txt", `\\server\share\repo`, `C:\Users\synthetic`)
 	if len(operands) != 1 || filepath.Clean(operands[0]) != `\\server\share\tmp\list.txt` {
 		t.Errorf("share cwd: operands %q", operands)
