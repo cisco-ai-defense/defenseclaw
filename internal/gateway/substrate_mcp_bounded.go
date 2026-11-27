@@ -26,8 +26,9 @@ import (
 // facts, so padding a denied command with a large value made a bridged
 // tools/call (and the methods judged like one, and the callout route) an
 // allow; the bridge carries up to mcp_bridge.message_max_bytes, 1 MiB by
-// default (substrate-1:GAP-1094). The shared reading is unchanged (the hook
-// path has the same bound); the substrate verdict judges bounded projections
+// default (substrate-1:GAP-1094). The shared reading is unchanged; the hook
+// routes judge the same projections (overBoundToolArgsFindings, GAP-1096),
+// and the substrate verdict judges bounded projections
 // of such arguments as well and keeps the strictest verdict, then floors an
 // allow at the unknown tier of the pack, as the hook routes floor a
 // truncated reading: an alert with the evaluation-limit finding in the
