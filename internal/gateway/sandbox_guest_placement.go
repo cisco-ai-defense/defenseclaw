@@ -1214,8 +1214,16 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 // as the laptop does, and an ACTION-COMPOUND-LIMIT the laptop does not name
 // (substrate-1 GAP-1158). A statement the guest walk leaves unplaced as
 // well (cd "$X") keeps the tier, in both readings.
+//
+// A call the actor's kit claims a proof for (a private-key read or a
+// protected write of its command) keeps the tier: the kit's claims only add
+// findings (substrate-1 GAP-0549), and the proof they add made the walk's
+// reading drop a rule the call without them names. cd a/b/ssh && cat
+// id_ed25519 is an ACTION-COMPOUND-LIMIT alert with no facts; with a forged
+// key-read claim it was a PATH-SSH-KEY block without that rule
+// (TestGAP0549ForgedKitClaimsNeverWeakenAVerdict).
 func guestWalkPlacesStatement(request trustedActionRequest, facts actionfacts.Facts, simple actionfacts.SimpleCommand) bool {
-	if path.IsAbs(request.Input.CWD) {
+	if path.IsAbs(request.Input.CWD) || request.guestKeyReadCommand != "" || request.guestProtectedWriteCommand != "" {
 		return false
 	}
 	guest, ok := sandboxGuestPlacedInput(request, facts)
