@@ -25,7 +25,7 @@ func TestGAP1107TokenOpenStartIsTheJoinedMatch(t *testing.T) {
 		"https://discordapp.com/api/" + "webhooks/", "ey" + "J", "postgres" + "://", "redis" + "://u", "Bea" + "rer ",
 		"bearer\t", "pass" + "word=", "PASSWD: ", "pwd2 := ", "passphrase\"=", "sec" + "ret: ", "api_" + "key is ",
 		"private-key=", "credentials(", "token,", "signing_key=>", "S" + "G.", "S" + "K", "np" + "m_", "h" + "f_",
-		"py" + "pi-", "4111 ", "1234-", "123-45-", "9", "0​", "5–",
+		"py" + "pi-", "4111 ", "1234-", "123-45-", "9", "0\u200b", "5–",
 	}
 	bodies := []string{
 		"A1b2C3", "0000", "zz", "_-", "+/=", ".", "!@#", "K", "ſ", "é", "�", "",
