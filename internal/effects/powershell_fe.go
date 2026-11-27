@@ -363,6 +363,11 @@ type psLower struct {
 	funcs    map[string]*psparse.ScriptBlockExpr
 	inlining []string
 	inlined  int
+	// aliases are the aliases Set-Alias / New-Alias set so far, by
+	// lower-case name: the lower-case name of the command each one runs, ""
+	// when the alias may or may not have been set (a built-in alias name
+	// changed without -Force, a conditional command), rel-1-0-10:GAP-2257.
+	aliases map[string]string
 }
 
 // psMaxInlinedCalls bounds the calls of script-defined functions one
@@ -390,19 +395,22 @@ func (lw *psLower) statement(st psparse.Statement, cond bool) {
 		// A function (or filter) defined here shadows a cmdlet of the same name for
 		// the rest of the script: the walker must not treat that name as the
 		// cmdlet (round 8 H, rv7-B48). Names are case-insensitive.
-		if v.Name != "" {
-			switch strings.ToLower(v.Keyword) {
+		// function global:g defines g (rel-1-0-10:GAP-2257).
+		fname := psFunctionName(v.Name)
+		keyword := strings.ToLower(v.Keyword)
+		if fname != "" {
+			switch keyword {
 			case "function", "filter", "workflow":
-				lw.out.Funcs = append(lw.out.Funcs, strings.ToLower(v.Name))
+				lw.out.Funcs = append(lw.out.Funcs, fname)
 			}
 		}
 		lw.statements(v.Conditions, cond)
-		if v.Name != "" && strings.EqualFold(v.Keyword, "function") && len(v.Bodies) == 1 && v.Bodies[0] != nil {
-			// A function body runs where the function is called, not here:
-			// its effects stay visible (conditional), but a Set-Location in
-			// it does not move the folder of the statements after the
-			// definition; a plain call of the function lowers the body there
-			// (inlineCall), rel-1-0-10:GAP-1156.
+		if fname != "" && (keyword == "function" || keyword == "filter") && len(v.Bodies) == 1 && v.Bodies[0] != nil {
+			// A function (or filter) body runs where the function is called,
+			// not here: its effects stay visible (conditional), but a
+			// Set-Location in it does not move the folder of the statements
+			// after the definition; a call of the function lowers the body
+			// there (inlineCall), rel-1-0-10:GAP-1156, GAP-2257.
 			sub := &Script{Dialect: lw.out.Dialect}
 			outer := lw.out
 			lw.out = sub
@@ -412,7 +420,7 @@ func (lw *psLower) statement(st psparse.Statement, cond bool) {
 			if lw.funcs == nil {
 				lw.funcs = map[string]*psparse.ScriptBlockExpr{}
 			}
-			lw.funcs[strings.ToLower(v.Name)] = v.Bodies[0]
+			lw.funcs[fname] = v.Bodies[0]
 			return
 		}
 		for _, b := range v.Bodies {
@@ -438,14 +446,20 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 		for idx, el := range seg.Elements {
 			switch e := el.(type) {
 			case *psparse.Command:
-				if idx == 0 && len(seg.Elements) == 1 && len(seg.Redirs) == 0 && lw.inlineCall(e, segCond) {
+				if lw.inlineCall(e, segCond) {
+					// A redirection of the segment takes the output of the
+					// inlined body: it gets a command of its own below.
+					lastCmd = nil
 					continue
 				}
+				lw.noteAlias(e, segCond)
 				c := lw.command(e, segCond, idx > 0)
-				if _, literal := psparse.LiteralString(e.Name); !literal && len(lw.funcs) > 0 {
+				if name, literal := psparse.LiteralString(e.Name); !literal && len(lw.funcs) > 0 {
 					if _, block := e.Name.(*psparse.ScriptBlockExpr); !block {
 						c.MayCallFunc = true
 					}
+				} else if literal && lw.mayCallFunc(name) {
+					c.MayCallFunc = true
 				}
 				lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: segCond})
 				lastCmd = c
@@ -472,30 +486,213 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 	}
 }
 
-// inlineCall lowers a plain call of a function this script defined (the
-// bare name, no arguments, no redirection, not piped) as its body, in place
-// and under the call's condition: PowerShell runs the body in the session,
-// so its Set-Location moves the caller's folder (rel-1-0-10:GAP-1156:
-// function g { cd .defenseclaw }; g; Set-Content config.yaml). A recursive
-// call, or one past the bounds, is not inlined.
+// inlineCall lowers a call of a function this script defined as its body,
+// in place and under the call's condition: PowerShell runs the body in the
+// session, so its Set-Location moves the caller's folder (rel-1-0-10:
+// GAP-1156: function g { cd .defenseclaw }; g; Set-Content config.yaml).
+// The body runs whatever the call form (GAP-2257): with arguments (their
+// commands run first; a parameter the body reads stays unknown), piped or
+// fed by a pipe, redirected (the redirection gets a command of its own),
+// with & or dot-sourced, or through an alias the script set. A recursive
+// call, one past the bounds, and a name PowerShell resolves to a built-in
+// alias first are not inlined.
 func (lw *psLower) inlineCall(c *psparse.Command, cond bool) bool {
-	if c.InvokeOp != "" && c.InvokeOp != "&" || len(c.Elements) != 0 || len(c.Redirs) != 0 || c.StopParsing != "" {
+	if c.InvokeOp != "" && c.InvokeOp != "&" && c.InvokeOp != "." {
 		return false
 	}
-	name, ok := psparse.LiteralString(c.Name)
+	name, ok := lw.calledFunction(c)
 	if !ok {
 		return false
 	}
-	name = strings.ToLower(name)
 	body := lw.funcs[name]
 	if body == nil || lw.inlined >= psMaxInlinedCalls || len(lw.inlining) >= psMaxInlineDepth || slices.Contains(lw.inlining, name) {
 		return false
+	}
+	for _, el := range c.Elements {
+		switch e := el.(type) {
+		case *psparse.Parameter:
+			if e.HasColon && e.Colon != nil {
+				lw.exprCommands(e.Colon, cond)
+			}
+		case *psparse.Arg:
+			lw.exprCommands(e.Value, cond)
+		case psparse.Expr:
+			lw.exprCommands(e, cond)
+		}
 	}
 	lw.inlined++
 	lw.inlining = append(lw.inlining, name)
 	lw.statements(body.Statements, cond)
 	lw.inlining = lw.inlining[:len(lw.inlining)-1]
+	if len(c.Redirs) > 0 {
+		rc := &Cmd{Cond: cond}
+		for _, r := range c.Redirs {
+			lw.addRedir(rc, r)
+		}
+		lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{rc}, Cond: cond})
+	}
 	return true
+}
+
+// calledFunction is the lower-case name of the script-defined function a
+// command with a literal name runs: through an alias the script set first
+// (an alias wins over a function), else the name itself unless it is a
+// built-in alias. ok is false when the command runs no known function.
+func (lw *psLower) calledFunction(c *psparse.Command) (string, bool) {
+	name, ok := psparse.LiteralString(c.Name)
+	if !ok {
+		return "", false
+	}
+	name = strings.ToLower(name)
+	if target, set := lw.aliases[name]; set {
+		return target, target != ""
+	}
+	if psBuiltinAliases[name] {
+		return "", false
+	}
+	return name, true
+}
+
+// mayCallFunc reports a literal command name that is an alias the script set
+// for one of its functions, or may have set: a call of it that was not
+// inlined leaves the folder unknown.
+func (lw *psLower) mayCallFunc(name string) bool {
+	target, set := lw.aliases[strings.ToLower(name)]
+	return set && (target == "" || lw.funcs[target] != nil)
+}
+
+// noteAlias records the alias a Set-Alias / New-Alias (sal, nal) command
+// with literal -Name and -Value sets (rel-1-0-10:GAP-2257). A built-in alias
+// name changed without -Force may stay the built-in (a read-only one), and a
+// conditional command may not run: both record the alias as unknown.
+// -WhatIf sets nothing.
+func (lw *psLower) noteAlias(c *psparse.Command, cond bool) {
+	cmd, ok := psparse.LiteralString(c.Name)
+	if !ok {
+		return
+	}
+	switch strings.ToLower(cmd) {
+	case "set-alias", "new-alias", "sal", "nal":
+	default:
+		return
+	}
+	var name, value string
+	var positional []string
+	force, literal := false, true
+	take := func(e psparse.Expr) string {
+		v, ok := psparse.LiteralString(e)
+		if !ok {
+			literal = false
+		}
+		return v
+	}
+	for i := 0; i < len(c.Elements); i++ {
+		switch e := c.Elements[i].(type) {
+		case *psparse.Parameter:
+			p := strings.ToLower(e.Name)
+			switch {
+			case p == "":
+				literal = false
+			case strings.HasPrefix("force", p):
+				force = true
+			case len(p) >= 2 && strings.HasPrefix("whatif", p):
+				return
+			case strings.HasPrefix("passthru", p), len(p) >= 2 && strings.HasPrefix("confirm", p):
+			case strings.HasPrefix("name", p), strings.HasPrefix("value", p),
+				strings.HasPrefix("description", p), strings.HasPrefix("option", p), strings.HasPrefix("scope", p):
+				var v string
+				switch {
+				case e.HasColon && e.Colon != nil:
+					v = take(e.Colon)
+				case i+1 < len(c.Elements):
+					i++
+					if a, ok := c.Elements[i].(*psparse.Arg); ok {
+						v = take(a.Value)
+					} else if x, ok := c.Elements[i].(psparse.Expr); ok {
+						v = take(x)
+					} else {
+						literal = false
+					}
+				default:
+					literal = false
+				}
+				if strings.HasPrefix("name", p) {
+					name = v
+				} else if strings.HasPrefix("value", p) {
+					value = v
+				}
+			default:
+				literal = false
+			}
+		case *psparse.Arg:
+			positional = append(positional, take(e.Value))
+		case psparse.Expr:
+			positional = append(positional, take(e))
+		}
+	}
+	for _, v := range positional {
+		switch {
+		case name == "":
+			name = v
+		case value == "":
+			value = v
+		}
+	}
+	if !literal || name == "" || value == "" {
+		return
+	}
+	name = strings.ToLower(name)
+	if lw.aliases == nil {
+		lw.aliases = map[string]string{}
+	}
+	if cond || psBuiltinAliases[name] && !force {
+		lw.aliases[name] = ""
+		return
+	}
+	lw.aliases[name] = strings.ToLower(value)
+}
+
+// psFunctionName is the lower-case name a function definition defines: the
+// name without a global:, script:, local: or private: scope (or function:
+// drive) qualifier.
+func psFunctionName(name string) string {
+	name = strings.ToLower(name)
+	for _, q := range []string{"global:", "script:", "local:", "private:", "function:"} {
+		if rest, ok := strings.CutPrefix(name, q); ok {
+			return rest
+		}
+	}
+	return name
+}
+
+// psBuiltinAliases are the aliases PowerShell 7 and Windows PowerShell 5.1
+// define in a new session. An alias is resolved before a function of the
+// same name, so a call of one of these names runs the built-in command, not
+// a function the script defines (function cd { }; cd x runs Set-Location).
+var psBuiltinAliases = map[string]bool{
+	"?": true, "%": true, "ac": true, "asnp": true, "cat": true, "cd": true, "cfs": true, "chdir": true,
+	"clc": true, "clear": true, "clhy": true, "cli": true, "clp": true, "cls": true, "clv": true,
+	"cnsn": true, "compare": true, "copy": true, "cp": true, "cpi": true, "cpp": true, "curl": true,
+	"cvpa": true, "dbp": true, "del": true, "diff": true, "dir": true, "dnsn": true, "ebp": true,
+	"echo": true, "epal": true, "epcsv": true, "epsn": true, "erase": true, "etsn": true, "exsn": true,
+	"fc": true, "fhx": true, "fl": true, "foreach": true, "ft": true, "fw": true, "gal": true,
+	"gbp": true, "gc": true, "gcb": true, "gci": true, "gcm": true, "gcs": true, "gdr": true,
+	"gerr": true, "ghy": true, "gi": true, "gin": true, "gjb": true, "gl": true, "gm": true,
+	"gmo": true, "gp": true, "gps": true, "gpv": true, "group": true, "gsn": true, "gsnp": true,
+	"gsv": true, "gtz": true, "gu": true, "gv": true, "gwmi": true, "h": true, "history": true,
+	"icm": true, "iex": true, "ihy": true, "ii": true, "ipal": true, "ipcsv": true, "ipmo": true,
+	"ipsn": true, "irm": true, "ise": true, "iwmi": true, "iwr": true, "kill": true, "lp": true,
+	"ls": true, "man": true, "md": true, "measure": true, "mi": true, "mount": true, "move": true,
+	"mp": true, "mv": true, "nal": true, "ndr": true, "ni": true, "nmo": true, "npssc": true,
+	"nsn": true, "nv": true, "ogv": true, "oh": true, "popd": true, "ps": true, "pushd": true,
+	"pwd": true, "r": true, "rbp": true, "rcjb": true, "rcsn": true, "rd": true, "rdr": true,
+	"ren": true, "ri": true, "rjb": true, "rm": true, "rmdir": true, "rmo": true, "rni": true,
+	"rnp": true, "rp": true, "rsn": true, "rsnp": true, "rujb": true, "rv": true, "rvpa": true,
+	"rwmi": true, "sajb": true, "sal": true, "saps": true, "sasv": true, "sbp": true, "sc": true,
+	"scb": true, "select": true, "set": true, "shcm": true, "si": true, "sl": true, "sleep": true,
+	"sls": true, "sort": true, "sp": true, "spjb": true, "spps": true, "spsv": true, "start": true,
+	"stz": true, "sujb": true, "sv": true, "swmi": true, "tee": true, "trcm": true, "type": true,
+	"wget": true, "where": true, "wjb": true, "write": true,
 }
 
 func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {

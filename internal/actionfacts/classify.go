@@ -280,7 +280,18 @@ func classifyPOSIXNoExecCandidate(
 }
 
 func classifyCommand(out *parseOutput, command *CommandFact) {
-	if command == nil || command.Executable == "" {
+	if command == nil {
+		return
+	}
+	if command.Executable == "" {
+		// A PowerShell pipeline element that is an expression ("k" >> f,
+		// ("k") > f) or a dynamic command name still writes its output to
+		// its redirection targets: they are the element's paths, read like
+		// those of a command (an unresolved folder marks them too), and the
+		// parse stays partial for the element itself (rel-1-0-10:GAP-2259).
+		if command.Dialect == DialectPowerShell {
+			classifyRedirects(out, command)
+		}
 		return
 	}
 	if len(command.Argv) == 0 || command.Argv[0] == "" {
