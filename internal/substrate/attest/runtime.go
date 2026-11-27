@@ -891,7 +891,7 @@ func serverFiles(all []AttachedFile) []AttachedFile {
 	var out []AttachedFile
 	for _, f := range all {
 		switch f.Role {
-		case RoleMCPServer, RoleMCPConfig, RoleMCPModuleAbsent, RoleFetchChecked, RoleFetchLocal, RoleFetchConfig, RoleFetchNames, RoleCommandPath, RoleCommandPathHit:
+		case RoleMCPServer, RoleMCPConfig, RoleMCPModuleAbsent, RoleFetchChecked, RoleFetchLocal, RoleFetchConfig, RoleFetchNames, RoleFetchBins, RoleCommandPath, RoleCommandPathHit:
 			out = append(out, f)
 		}
 	}

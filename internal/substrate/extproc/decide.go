@@ -43,6 +43,11 @@ const (
 	CategoryBodyUninspected = "body_uninspectable"
 	CategoryCalloutError    = "callout_error"
 	CategoryInternalHost    = "defenseclaw_internal"
+	// CategoryPushRedirect is a git push of an actor that holds a push
+	// grant to a repository other than the approved one, and
+	// CategoryPushUnchecked one whose grant check got no answer (GAP-1073).
+	CategoryPushRedirect  = "push_redirect"
+	CategoryPushUnchecked = "push_unchecked"
 )
 
 // Decision sources the callout adds to egress.Source.
@@ -158,7 +163,10 @@ type Options struct {
 	ChainChecker ChainChecker
 	Judge        ToolJudge
 	Events       EventSink
-	Now          func() time.Time
+	// PushGrants checks git pushes against the open pull --push-branch
+	// grants on the leader (GAP-1073); nil: no grants are enforced.
+	PushGrants PushGrantChecker
+	Now        func() time.Time
 }
 
 // Engine decides requests. It is safe for concurrent use.
@@ -171,6 +179,7 @@ type Engine struct {
 	checker    ChainChecker
 	judge      ToolJudge
 	events     EventSink
+	pushGrants PushGrantChecker
 	red        *Redactor
 	secrets    *secretValues
 	dcHosts    *hostMatcher
@@ -194,7 +203,7 @@ func NewEngine(o Options) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{cfg: cfg, policies: o.Policies, asks: o.Asks, checker: o.ChainChecker, judge: o.Judge,
-		events: o.Events, now: o.Now, mcpNames: map[string]string{}}
+		events: o.Events, pushGrants: o.PushGrants, now: o.Now, mcpNames: map[string]string{}}
 	if e.now == nil {
 		e.now = time.Now
 	}
@@ -446,6 +455,12 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 	if !d.Allowed {
 		v = deny(v, string(d.Category), string(d.Source), d.Rule, d.Reason)
 		v.Feed, v.FeedVersion, v.AdminRule = d.Feed, d.FeedVersion, egress.AdminRule(d.Category)
+		return v
+	}
+	// A git push while the actor holds a push grant goes only to the
+	// approved repository (GAP-1073); with no grant nothing changes.
+	var refused bool
+	if v, refused = e.pushGrantStage(ctx, v, req); refused {
 		return v
 	}
 

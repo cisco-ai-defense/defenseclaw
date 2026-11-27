@@ -46,11 +46,34 @@ type PushDecision struct {
 	Summary   string `json:"summary,omitempty"`
 	Profile   string `json:"profile,omitempty"`
 	DecidedBy string `json:"decided_by,omitempty"`
+	// Grant names the egress push grant an allow opened (GAP-1073):
+	// while it is open, egress takes git pushes of the actor only to the
+	// approved repository. Empty from a gateway that predates grants;
+	// GrantError says why a current one could not open it.
+	Grant      string `json:"grant,omitempty"`
+	GrantError string `json:"grant_error,omitempty"`
 }
 
-// PushIntent asks POST /actors/{atespace}/{name}/push.
+// PushGrantClosed is the gateway's answer to closing a grant: Closed is
+// false for a grant that expired or was lost; Pushes counts the pushes to
+// the approved repository egress checked under it.
+type PushGrantClosed struct {
+	Closed bool `json:"closed"`
+	Pushes int  `json:"pushes"`
+}
+
+// PushIntent asks POST /actors/{atespace}/{name}/push?grant=1: an allow
+// opens an egress push grant (a query parameter, so a gateway that
+// predates grants answers as before).
 func (c *Client) PushIntent(ctx context.Context, atespace, name string, in PushRequest) (PushDecision, error) {
 	var out PushDecision
-	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/push", nil, in, &out)
+	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/push", url.Values{"grant": {"1"}}, in, &out)
+	return out, err
+}
+
+// PushGrantClose is DELETE /actors/{atespace}/{name}/push/{grant}.
+func (c *Client) PushGrantClose(ctx context.Context, atespace, name, grant string) (PushGrantClosed, error) {
+	var out PushGrantClosed
+	err := c.do(ctx, http.MethodDelete, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/push/"+url.PathEscape(grant), nil, nil, &out)
 	return out, err
 }

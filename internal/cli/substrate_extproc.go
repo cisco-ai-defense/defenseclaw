@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/extproc"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/pushgrant"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
@@ -190,6 +191,9 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		}
 		opts.ChainChecker = substrateChainChecker{client: &chainstate.Client{Leader: lc}}
 		opts.UIDs = substrateActorDirectory{regs: &registry.Remote{Client: lc}}
+		// GAP-1073: a git push while pull --push-branch holds a grant goes
+		// only to the approved repository.
+		opts.PushGrants = &pushgrant.Client{Leader: lc}
 		// Each decision also reaches the OTLP destinations as log.egress.*,
 		// through the leader and a gateway replica (GAP-0453).
 		relay := &telemetryrelay.Poster{Leader: lc, Method: telemetryrelay.MethodPostEgress}

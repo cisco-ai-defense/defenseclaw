@@ -22,6 +22,9 @@ const (
 	// RoleCommandPathHit is the PATH entry of a bare command before links
 	// are followed, when it differs from RoleCommandPath (GAP-0632).
 	RoleCommandPathHit = "mcp_command_path_hit"
+	// RoleFetchBins lists the programs the packages of the actor's npx
+	// cache declare, "<package>\t<program>" per line (GAP-0636).
+	RoleFetchBins = "mcp_fetch_bins"
 )
 
 // fetchFamily is the package ecosystem of a fetcher.
@@ -207,6 +210,7 @@ func fetchFolderClean(family, project string, pkgs []string, command string, fil
 	for _, p := range pkgs {
 		names[p], names[specName(family, p)] = true, true
 	}
+	declared := declaredBins(family, pkgs, files)
 	for _, f := range files {
 		switch f.Role {
 		case RoleFetchChecked:
@@ -237,7 +241,7 @@ func fetchFolderClean(family, project string, pkgs []string, command string, fil
 				// there can stand in for the fetched package's program or
 				// for the runtime its script starts. The project's other
 				// tools (tsc, eslint) change nothing.
-				if b, ok := strings.CutPrefix(n, ".bin/"); ok && binShadows(b, names, pkgs, family) {
+				if b, ok := strings.CutPrefix(n, ".bin/"); ok && binShadows(b, names, pkgs, family, declared) {
 					return false
 				}
 			}
@@ -253,19 +257,17 @@ var fetchRuntimes = map[string]bool{"node": true, "nodejs": true, "bun": true, "
 
 // binShadows reports a node_modules/.bin program that npx could run in
 // place of the fetched package's program or of the runtime it starts: a
-// name of the server, a runtime, or a program name the package commonly
-// declares (binNamesOf). Whole names only, compared without case and
-// without the Windows shim suffixes: a vendor's own CLI beside its MCP
+// name of the server, a runtime, a program the package declares in the
+// actor's npx cache (declared, GAP-0636), or a program name the package
+// commonly declares (binNamesOf). Whole names only, compared without case
+// and without the Windows shim suffixes: a vendor's own CLI beside its MCP
 // server (.bin/playwright beside @playwright/mcp) is not one of them.
-func binShadows(bin string, names map[string]bool, pkgs []string, family string) bool {
-	b := strings.ToLower(bin)
-	for _, ext := range []string{".cmd", ".ps1", ".exe", ".bat"} {
-		b = strings.TrimSuffix(b, ext)
-	}
+func binShadows(bin string, names map[string]bool, pkgs []string, family string, declared map[string]bool) bool {
+	b := shimBase(bin)
 	if b == "" {
 		return false
 	}
-	if fetchRuntimes[b] {
+	if fetchRuntimes[b] || declared[b] {
 		return true
 	}
 	for n := range names {
@@ -279,6 +281,51 @@ func binShadows(bin string, names map[string]bool, pkgs []string, family string)
 		}
 	}
 	return false
+}
+
+// shimBase is a program name without case and without the Windows shim
+// suffixes npm writes beside it.
+func shimBase(bin string) string {
+	b := strings.ToLower(bin)
+	for _, ext := range []string{".cmd", ".ps1", ".exe", ".bat"} {
+		b = strings.TrimSuffix(b, ext)
+	}
+	return b
+}
+
+// declaredBins are the programs the fetched packages declare, as the kit
+// read them from the actor's npx cache (RoleFetchBins; every cached
+// version of a package counts). They add to the guess of binNamesOf and
+// never replace it: a package the cache does not hold (a first run, an
+// older kit, a cache the kit did not find, a cut list) keeps the guess, so
+// the list can only count more of the folder (GAP-0636).
+func declaredBins(family string, pkgs []string, files []AttachedFile) map[string]bool {
+	if family != "npm" {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, p := range pkgs {
+		want[strings.ToLower(specName(family, p))] = true
+	}
+	var out map[string]bool
+	for _, f := range files {
+		if f.Role != RoleFetchBins {
+			continue
+		}
+		for _, l := range strings.Split(string(f.Content), "\n") {
+			pkg, bin, ok := strings.Cut(l, "\t")
+			if !ok || !want[strings.ToLower(pkg)] {
+				continue
+			}
+			if b := shimBase(bin); b != "" {
+				if out == nil {
+					out = map[string]bool{}
+				}
+				out[b] = true
+			}
+		}
+	}
+	return out
 }
 
 // binNamesOf lists the program names a registry package commonly declares:
