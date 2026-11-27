@@ -328,7 +328,7 @@ func (t *ruleScanText) holdsLiteral(literal string) bool {
 	if known {
 		return held
 	}
-	held = !(grams != nil && grams.misses(literal)) && strings.Contains(folded, literal)
+	held = (grams == nil || !grams.misses(literal)) && strings.Contains(folded, literal)
 	t.mu.Lock()
 	if t.holds == nil {
 		t.holds = make(map[string]bool)
