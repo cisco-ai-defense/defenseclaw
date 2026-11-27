@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -148,11 +149,39 @@ exit 0
     return result.stdout
 
 
+def _short_base(tmp_path_factory) -> Path:
+    # Windows PowerShell 5.1 stops at MAX_PATH (260), and the longest archived
+    # receipt (a GC name, 112 characters) sits below backups\connector-
+    # recovery-<32 hex>, so the fixture folder may take 86 characters at most.
+    # The runner temp folder alone can be that long (pytest-of-<account> and a
+    # state folder of the harness), and the move then failed with "Could not
+    # find a part of the path" whatever the installer does (GAP-2173). On
+    # Windows the fixture lives in a short folder of the system drive when
+    # the account can create one there, and in the runner temp folder when it
+    # cannot.
+    if os.name == "nt":
+        root = Path(os.environ.get("SystemDrive", "C:") + "\\")
+        for _ in range(5):
+            candidate = root / ("dcrf-" + os.urandom(3).hex())
+            try:
+                candidate.mkdir()
+            except OSError:
+                break
+            return candidate
+    return tmp_path_factory.mktemp("cas")
+
+
 @pytest.fixture
 def recovery_dirs(tmp_path_factory):
     # Short names also exercise real GC receipt names on Windows PowerShell
     # 5.1 without making the test's own path exceed MAX_PATH.
-    base = tmp_path_factory.mktemp("cas")
+    base = _short_base(tmp_path_factory)
+    yield from _recovery_dirs(base)
+    if base.name.startswith("dcrf-"):
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _recovery_dirs(base: Path):
     data = base / "d"
     failed = data / ".failed-x"
     (failed / "data").mkdir(parents=True)
@@ -164,7 +193,7 @@ def recovery_dirs(tmp_path_factory):
     (external / ".tmp-cas-v2-old-external").write_bytes(b"external old config")
     active = data / (".defenseclaw-cas-v2-" + "a" * 24 + ".intent")
     active.write_bytes(b"restored active receipt")
-    return data, failed, external, active
+    yield data, failed, external, active
 
 
 def _assert_active_unchanged(external: Path, active: Path) -> None:

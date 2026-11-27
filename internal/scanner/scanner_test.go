@@ -64,7 +64,9 @@ func TestSkillScanner_ScanEnv_ConfigOnly(t *testing.T) {
 	found := map[string][]string{}
 	for _, e := range ss.scanEnv() {
 		if name, value, ok := strings.Cut(e, "="); ok {
-			found[name] = append(found[name], value)
+			// Windows keeps the system variable as "Path": names compare
+			// without case there (GAP-2192).
+			found[strings.ToUpper(name)] = append(found[strings.ToUpper(name)], value)
 		}
 	}
 	if got := found["SKILL_SCANNER_LLM_MODEL"]; len(got) != 1 || got[0] != "gpt-4o" {
