@@ -40,10 +40,13 @@ func TestGAP2281CodexRenamedCmdDirectOwnershipParity(t *testing.T) {
 		t.Fatal("guarded form cannot carry the renamed guard")
 	}
 	owned := map[string]string{
-		"current launcher":      render(filepath.Join(launcherDir, windowsHookBinaryName), arguments),
-		"renamed launcher":      render(renamed, arguments),
-		"renamed guard":         guarded,
-		"renamed, last binding": render(renamed, nativeHookBridgeArguments("codex", contracts[len(contracts)-1].Events[len(contracts[len(contracts)-1].Events)-1], contracts[len(contracts)-1].ContractID, nil)),
+		"current launcher": render(filepath.Join(launcherDir, windowsHookBinaryName), arguments),
+		"renamed launcher": render(renamed, arguments),
+		"renamed guard":    guarded,
+		// Either exact argv on a defenseclaw-* program in our folder is ours:
+		// a name edited in place does not say which of the two it was.
+		"guard argv on renamed launcher": render(renamed, append([]string{"launcher-guard-sibling"}, arguments...)),
+		"renamed, last binding":          render(renamed, nativeHookBridgeArguments("codex", contracts[len(contracts)-1].Events[len(contracts[len(contracts)-1].Events)-1], contracts[len(contracts)-1].ContractID, nil)),
 	}
 	foreignDir := filepath.Join(dir, "OtherProduct")
 	direct := render(renamed, arguments)
@@ -56,7 +59,8 @@ func TestGAP2281CodexRenamedCmdDirectOwnershipParity(t *testing.T) {
 		"unknown contract":            render(renamed, nativeHookBridgeArguments("codex", event, "not-a-contract", nil)),
 		"no contract":                 render(renamed, nativeHookBridgeArguments("codex", event, "", nil)),
 		"extra argument":              render(renamed, append(append([]string{}, arguments...), "--extra")),
-		"guard argv on launcher":      render(renamed, append([]string{"launcher-guard-sibling"}, arguments...)),
+		"guard argv, foreign folder":  render(filepath.Join(foreignDir, windowsHookGuardBinaryName), append([]string{"launcher-guard-sibling"}, arguments...)),
+		"guard argv, extra argument":  render(renamedGuard, append(append([]string{"launcher-guard-sibling"}, arguments...), "--extra")),
 		"trailing space":              direct + " ",
 		"no /d":                       strings.Replace(direct, " /d ", " ", 1),
 		"other cmd.exe":               strings.Replace(direct, windowsSystemCmdExe(), `C:\Tools\cmd.exe`, 1),

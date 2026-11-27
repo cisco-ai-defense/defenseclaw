@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -15,11 +16,21 @@ import (
 // refused both since GAP-0322; the Windows launcher guard handler is the same
 // enforcement point, and a shell setting changes how Claude Code starts it.
 func TestGAP2278WindowsMatrixVerifyRefusesShellOrConditionOnPreToolUseGuard(t *testing.T) {
-	command, args, _ := gap0322ClaudeRegistrationFixture(t)
-	launcher := args[4]
-	dataDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(launcher))), ".defenseclaw")
+	// The registration of a Windows account: the native launcher behind the
+	// cmd.exe guard. The verify reads the registration only; the launcher
+	// never runs, so a placeholder file stands in for it.
+	account := t.TempDir()
+	dataDir := filepath.Join(account, ".defenseclaw")
+	launcher := filepath.Join(account, ".local", "bin", windowsHookBinaryName)
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("launcher placeholder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	opts := SetupOpts{DataDir: dataDir, HookExecutable: launcher}
 	hooksDir := filepath.Join(dataDir, "hooks")
+	command, args := claudeCodeHookInvocation(opts, filepath.Join(hooksDir, "claude-code-hook.sh"))
 	if err := ensureClaudeChain(launcher); err != nil {
 		t.Fatalf("install the guard chain: %v", err)
 	}
