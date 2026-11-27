@@ -1192,6 +1192,41 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 	return findings
 }
 
+// guestWalkPlacesStatement reports a statement that the walk of a
+// copy-mode sandbox call placed nowhere only because that reading has no
+// folder: the walk of the call placed in the guest working directory
+// (sandboxGuestPlacedInput) reads the whole call, reads every statement of
+// the same text in a folder it gives, and the guest placement judges each
+// of them there (guestPlacementSkips), as the laptop walk places it in its
+// own folder. Such a statement takes no unknown tier for the folder it may
+// run in: cd .cache; cd ../.ssh followed by a key read named PATH-SSH-KEY,
+// as the laptop does, and an ACTION-COMPOUND-LIMIT the laptop does not name
+// (substrate-1 GAP-1158). A statement the guest walk leaves unplaced as
+// well (cd "$X") keeps the tier, in both readings.
+func guestWalkPlacesStatement(request trustedActionRequest, facts actionfacts.Facts, simple actionfacts.SimpleCommand) bool {
+	if path.IsAbs(request.Input.CWD) {
+		return false
+	}
+	guest, ok := sandboxGuestPlacedInput(request, facts)
+	if !ok {
+		return false
+	}
+	placed := false
+	for _, statement := range request.guestMemo.simpleCommands(guest, request.guestMemo.analyze(guest)) {
+		if statement.EvaluationFailure != "" {
+			return false
+		}
+		if statement.Text != simple.Text {
+			continue
+		}
+		if statement.UnresolvedFolder || guestPlacementSkips(statement) {
+			return false
+		}
+		placed = true
+	}
+	return placed
+}
+
 // guestPlacementSkips reports a simple command the guest placement does not
 // read: one with no complete view, an opaque assignment, literal output, or
 // a guessed login.

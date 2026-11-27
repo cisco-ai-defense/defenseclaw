@@ -1731,7 +1731,7 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
-				if simple.UnresolvedFolder {
+				if simple.UnresolvedFolder && !guestWalkPlacesStatement(request, facts, simple) {
 					// The walk does not know the folder this statement runs
 					// in (cd "$X", cd "$(...)"): the unknown tier when an
 					// operand may be a named protected file there
