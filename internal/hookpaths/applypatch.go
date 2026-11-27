@@ -865,10 +865,24 @@ func patchTargetPaths(path, cwd, home string, resolve patchResolution) ([]string
 		return nil, false
 	}
 	if !filepath.IsAbs(literal) {
-		if !filepath.IsAbs(cwd) || runtime.GOOS == "windows" && filepath.VolumeName(literal) != "" {
+		if !filepath.IsAbs(cwd) {
 			return nil, false
 		}
-		if runtime.GOOS == "windows" && (strings.HasPrefix(literal, "/") || strings.HasPrefix(literal, "\\")) {
+		if runtime.GOOS == "windows" && filepath.VolumeName(literal) != "" {
+			// A drive-relative name (C:name) names a file of the current
+			// folder of its drive: the working folder when that folder is
+			// on the same drive, as the path facts place it
+			// (actionfacts.PatchDriveRelativePlaced, rel-1-0-10:GAP-1078).
+			// The Copilot CLI check of a write call reads these targets, so
+			// an unplaced name there was an unparsed call even for a project
+			// file (rel-1-0-10:GAP-2283). Another drive's current folder and
+			// a bare C: are not known.
+			placed, ok := actionfacts.PatchDriveRelativePlaced(literal, cwd)
+			if !ok {
+				return nil, false
+			}
+			literal = placed
+		} else if runtime.GOOS == "windows" && (strings.HasPrefix(literal, "/") || strings.HasPrefix(literal, "\\")) {
 			// A rooted path uses the current drive or UNC share on Windows.
 			literal = filepath.VolumeName(cwd) + literal
 		} else {

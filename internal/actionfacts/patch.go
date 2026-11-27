@@ -278,6 +278,13 @@ func patchDriveRelativePlaced(name, cwd string) (string, bool) {
 	return strings.TrimRight(cwd, `/\`) + `\` + name[2:], true
 }
 
+// PatchDriveRelativePlaced is patchDriveRelativePlaced for the hookpaths
+// write target readers, so a drive-relative header names the same file for
+// every reader of the envelope (rel-1-0-10:GAP-2283).
+func PatchDriveRelativePlaced(name, cwd string) (string, bool) {
+	return patchDriveRelativePlaced(name, cwd)
+}
+
 // patchNamePlaced reports a header name a reader places: one
 // isAcceptedPatchPath accepts and, in the text a shell shows of a
 // here-document it expands (shellView), one the shell does not change (no
