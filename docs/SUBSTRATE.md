@@ -109,7 +109,7 @@ Leader failover moves the lease and reattaches the volume (about 30 seconds). St
 |---|---|
 | One gateway replica down | Nothing visible |
 | Leader down | Stateless checks continue; stateful steps follow the fail mode until the new leader is up; egress that can carry data out (a body, or any method but GET and HEAD) is refused in every mode while the chain can't be checked, and for 15 s after a new leader answers its first check, at most 30 s after it became the leader (GAP-0601) |
-| Leader down, `defenseclaw substrate list` or `status` | The agent list and status read the registrations through the leader. They retry for about 8 s, which covers a normal leader change, then answer "try again in a minute" at once instead of waiting for the CLI's 30 s timeout. The same call works again when the new leader answers |
+| Leader down, any per-actor call (`defenseclaw substrate list`, `status`, approvals, asks, recover, secrets, delete) | The call reads the registration through the leader. It retries for about 8 s, which covers a planned handover; an unplanned leader loss takes about 30 s to fail over (above), so the call answers "try again in a minute" after 8 s instead of waiting for the CLI's 30 s timeout. The same call works again when the new leader answers |
 | All replicas down | Hooks follow D8; model calls fail with a clear message; policies stay |
 | Controller down | Existing actors keep their policy; new actors have no network; idle suspend pauses |
 | Callout down | Closed in managed mode, configurable in open source; `doctor` red |

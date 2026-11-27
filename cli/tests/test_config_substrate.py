@@ -294,3 +294,47 @@ class TestProfileMatchSubstrate(unittest.TestCase):
             cfg.save()
             saved = yaml.safe_load(Path(path).read_text())["guardrail"]["profile_assignments"][0]["match"]
             self.assertEqual(saved, {"substrate": {"atespaces": ["ci-runs"], "templates": ["ci-runs/claude"]}})
+
+
+class TestRetiredActorCertOID(unittest.TestCase):
+    """GAP-0723: substrate.identity.actor_cert_oid is retired. Nothing reads
+    it, so no value is validated; a config that sets it loads and says it is
+    retired, as the Go loader does."""
+
+    def _config_with(self, tmpdir: str, value: str | None) -> str:
+        identity = {"issuer": "https://idp.ate-system.svc"}
+        if value is not None:
+            identity["actor_cert_oid"] = value
+        path = os.path.join(tmpdir, "config.yaml")
+        with open(path, "w") as f:
+            yaml.safe_dump({"config_version": 9, "data_dir": tmpdir, "substrate": {"identity": identity}}, f)
+        return path
+
+    def test_any_value_loads_validates_and_saves(self):
+        for value in ("not-an-oid", "1.3.6.1.4.1.11129.2.12.2", ""):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmpdir:
+                path = self._config_with(tmpdir, value)
+                load_validate_v8(Path(path).read_bytes(), source_name=path)
+                with patch("defenseclaw.config.default_data_path") as mock_dp:
+                    mock_dp.return_value = Path(tmpdir)
+                    cfg = load()
+                self.assertEqual(cfg.substrate.identity.actor_cert_oid, value)
+                cfg.gateway.api_port = 19000
+                cfg.save()  # validates the merged document against the v8 schema
+
+    def test_a_set_key_warns_that_it_is_retired(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch("defenseclaw.config.default_data_path") as mock_dp:
+            mock_dp.return_value = Path(tmpdir)
+            self._config_with(tmpdir, "not-an-oid")
+            with self.assertLogs("defenseclaw.config", level="WARNING") as logs:
+                load()
+            text = "\n".join(logs.output)
+            self.assertIn("substrate.identity.actor_cert_oid is retired and ignored", text)
+            self.assertIn("1.0.14", text)
+
+    def test_an_unset_key_does_not_warn(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch("defenseclaw.config.default_data_path") as mock_dp:
+            mock_dp.return_value = Path(tmpdir)
+            self._config_with(tmpdir, None)
+            with self.assertNoLogs("defenseclaw.config", level="WARNING"):
+                load()

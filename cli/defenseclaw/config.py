@@ -8330,6 +8330,13 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     raw = _mapping(raw)
     api = _mapping(raw.get("api"))
     ident = _mapping(raw.get("identity"))
+    if str(ident.get("actor_cert_oid", "") or ""):
+        # Retired (GAP-0723): nothing reads it and no value is checked, the
+        # same warning as the Go loader (warnRetiredSubstrateKeys).
+        _log.warning(
+            "substrate.identity.actor_cert_oid is retired and ignored; remove it from config.yaml "
+            "(it stops loading in 1.0.14)"
+        )
     oidc = _mapping(ident.get("oidc"))
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))

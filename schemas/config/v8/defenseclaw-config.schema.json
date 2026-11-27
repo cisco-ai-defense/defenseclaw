@@ -7891,8 +7891,7 @@
             },
             "actor_cert_oid": {
               "type": "string",
-              "pattern": "^[0-2](\\.(0|[1-9][0-9]*))+$",
-              "default": "1.3.6.1.4.1.11129.2.12.2"
+              "description": "Retired and ignored: nothing reads this key and no value is checked. A config that still sets it loads with a warning. Remove it; it stops loading in 1.0.14."
             },
             "keys_url": {
               "type": "string",
