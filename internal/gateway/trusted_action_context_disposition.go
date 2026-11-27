@@ -240,6 +240,14 @@ var trustedActionStrictCredentialNotStore = []string{"PATH-ENV-FILE", "PATH-HIST
 // no glob operand, no read of no byte (substrate-1:GAP-0706). The copy
 // programs read it as cat does (TestCredentialFileCopyIsJudgedLikeItsRead).
 func trustedActionStrictCredentialContentRead(facts actionfacts.Facts, finding RuleFinding) bool {
+	if finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY" {
+		// A private key read has its own proof below (the active key, the
+		// key reached through a linked folder): judged here first, it was
+		// capped at HIGH and skipped that proof, and the strict block of
+		// cd -P <link to ~/.ssh> && cat id_ed25519 became an alert
+		// (substrate-1:GAP-1165).
+		return false
+	}
 	if !slices.Contains(finding.Tags, "credential") || slices.Contains(finding.Tags, "detection-only") ||
 		slices.Contains(finding.Tags, "system-file") ||
 		slices.Contains(trustedActionStrictCredentialNotStore, finding.RuleID) {
