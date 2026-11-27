@@ -20,7 +20,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // TestGAP2057PrivateKeyFileToolWriteKeepsTheShellWriteCell pins the Claude
@@ -61,6 +64,20 @@ func TestGAP2057PrivateKeyFileToolWriteKeepsTheShellWriteCell(t *testing.T) {
 			if shellAction == "allow" || !gap0589HasRule(shellFindings, "PATH-SSH-DIR") {
 				t.Fatalf("%s shell write of ~/%s: %s %v, want PATH-SSH-DIR", tier.name, rel, shellAction, shellFindings)
 			}
+			// The documented cell (protected-files.mdx, Limits): a HIGH
+			// alert, a block only in the strict tiers (owner tiering of the
+			// SSH key family; block-in-default stays an owner question).
+			want := gap2057DocumentedAction(tier.tier)
+			if shellAction != want || shellSeverity != "HIGH" && want == "alert" {
+				t.Errorf("%s shell write of ~/%s: %s %s, want the documented %s", tier.name, rel, shellAction, shellSeverity, want)
+			}
+			for _, verb := range []string{"mv", "ln -sf"} {
+				command := verb + " " + filepath.Join(proj, "k") + " ~/" + rel
+				action, severity, findings := decide(api, "Bash", map[string]interface{}{"command": command})
+				if action != want || severity != "HIGH" && want == "alert" {
+					t.Errorf("%s %s onto ~/%s: %s %s %v, want the documented %s", tier.name, verb, rel, action, severity, findings, want)
+				}
+			}
 			for tool, input := range map[string]map[string]interface{}{
 				"Write": {"file_path": abs, "content": "k\n"},
 				"Edit":  {"file_path": abs, "old_string": "x", "new_string": "k"},
@@ -75,6 +92,46 @@ func TestGAP2057PrivateKeyFileToolWriteKeepsTheShellWriteCell(t *testing.T) {
 		example := filepath.Join(proj, "keys/id_ed25519.pub.example")
 		if action, _, findings := decide(api, "Write", map[string]interface{}{"file_path": example, "content": "k\n"}); action != "allow" {
 			t.Errorf("%s Write of a project id_ed25519.pub.example: %s %v, want allow", tier.name, action, findings)
+		}
+	}
+}
+
+// gap2057DocumentedAction is the action the protected-files page gives a
+// write to a private-key name: block in the strict tiers, else alert.
+func gap2057DocumentedAction(tier bounded.Tier) string {
+	if tier == bounded.TierStrict {
+		return "block"
+	}
+	return "alert"
+}
+
+// TestGAP2057ProtectedFilesDocsNamePrivateKeyWrites: the protected-files
+// page says what a write to a private-key name in .ssh gets, the cell
+// TestGAP2057PrivateKeyFileToolWriteKeepsTheShellWriteCell pins: the watch
+// does not cover these files, the hook raises a HIGH alert and blocks only
+// in the strict packs (rel-1-0-10:GAP-2057: the docs listed only
+// authorized_keys for .ssh and said nothing of these names).
+func TestGAP2057ProtectedFilesDocsNamePrivateKeyWrites(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "guardrail", "protected-files.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, limits, ok := strings.Cut(string(data), "\n## Limits\n")
+	if !ok {
+		t.Fatal("protected-files.mdx has no Limits section")
+	}
+	var line string
+	for _, item := range strings.Split(limits, "\n- ") {
+		if strings.Contains(item, "private-key") {
+			line = strings.Join(strings.Fields(item), " ")
+		}
+	}
+	if line == "" {
+		t.Fatal("protected-files.mdx Limits names no private-key write")
+	}
+	for _, want := range append(actionPrivateKeyNamesForTest(), ".pub", "HIGH alert", "strict", "ssh-keygen") {
+		if !strings.Contains(line, want) {
+			t.Errorf("protected-files.mdx private-key limit does not say %q: %s", want, line)
 		}
 	}
 }
