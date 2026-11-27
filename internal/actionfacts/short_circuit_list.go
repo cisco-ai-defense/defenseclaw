@@ -966,8 +966,20 @@ func sequenceScopeOnlyFunctionBodies(scope string) bool {
 // the words after the function name. It declines a call with assignments,
 // and an argument with a substitution (already walked with the call) or a
 // positional or special parameter (it reads another value in the body).
+//
+// It reads only a folder change (cd, pushd, popd: f cd X moves the shell as
+// cd X, substrate-1:GAP-0713); any other command keeps the reading of the
+// body it had. Flattened, run sh -c 'if false; then printf c >>
+// ~/.defenseclaw/config.yaml; fi' after run() { "$@"; } became the plain sh
+// -c call, whose dead branch the plain reading judges, and the ordinary
+// row of TestGAP0456WrappedStateWriteVerdictParity blocked where rel allows.
 func sequenceRunnerCallArgs(call *syntax.CallExpr, body *syntax.Stmt) ([]*syntax.Word, bool) {
 	if len(call.Assigns) != 0 || len(call.Args) < 2 || !workFolderArgRunner(body) {
+		return nil, false
+	}
+	switch call.Args[1].Lit() {
+	case "cd", "pushd", "popd":
+	default:
 		return nil, false
 	}
 	args := call.Args[1:]
