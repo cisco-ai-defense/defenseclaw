@@ -118,7 +118,7 @@ enterprise packages, under **Requirements** on the
 [Linux](/docs/enterprise/linux) and
 [macOS](/docs/enterprise/macos) pages.
 
-On Windows, `defenseclaw-hook.exe` is larger when the OpenClaw extension bundle is built into it: about 44 MiB with the bundle against about 41 MiB without it, and the file in the 1.0.10 release is about 53 MiB. Allow for a hook of that size when you plan disk space, a package share or a download limit.
+On Windows, `defenseclaw-hook.exe` is about 53 MiB in the 1.0.10 release, because the OpenClaw extension bundle is built into it. Allow for a hook of that size when you plan disk space, a package share or a download limit.
 
 Agents that connect through the guardrail proxy aren't part of this matrix.
 Their pages are listed under [Connectors](/docs/connectors).
@@ -232,7 +232,7 @@ How many Claude Code tool calls a second one host can check depends on the opera
 
 **Known limit:** 1.0.10 does not reach 100 tool calls a second on one host. The target applies to Linux with 8 or more vCPU, and a managed RHEL 9 host on 8 vCPU reaches 50. Raising the rate is planned for a later release. The rate grows with the free CPU cores of the host. These rows are not limits for other instance types: check a different instance type with your own agents and the counts below.
 
-**Known limit:** sustained bursts above about 100 hook calls a second for one user can be slow or dropped on a small host. The hook then follows its configured fail mode ([Fail modes](/docs/reference/fail-modes)).
+**Known limit:** a sustained burst of hook calls for one user above the rates in this table is answered late, even on a host with free CPU: about 80 calls a second on a 4 vCPU Linux host and about 30 on Windows ([Hook floods on Windows](#hook-floods-on-windows)). A call past its answer budget follows the configured fail mode ([Fail modes](/docs/reference/fail-modes)). Each hook call adds about 20 KB to the local audit store.
 
 One interactive agent makes a few tool calls a second at most, so these rates matter for many agents, or agent loops and scripts, on one host. Past its rate a host answers late: a managed hook then blocks the call and says that DefenseClaw is at capacity, not that a policy blocked it; a per-user hook in the default fail mode lets the call run unchecked after its answer budget and records it.
 
