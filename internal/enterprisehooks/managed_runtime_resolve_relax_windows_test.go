@@ -137,6 +137,7 @@ func setWindowsRelaxTestDACL(t *testing.T, path, sddl string) {
 // resolver now waits out that exact shape and resolves the selected
 // generation once the guardian has put the canonical DACL back.
 func TestWindowsManagedRuntimeResolveWaitsOutGuardianSetupRelax(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, tc := range []struct {
 		name string
 		pick func(windowsRelaxResolveFixture) []string

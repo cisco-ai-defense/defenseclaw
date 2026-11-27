@@ -18,6 +18,7 @@ import (
 )
 
 func TestCodexBOMRequirementsPresent(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := publishTestOptions(t)
 	if _, err := Publish(opts, []string{"codex"}); err != nil {
 		t.Fatal(err)
@@ -43,6 +44,7 @@ func TestCodexBOMRequirementsPresent(t *testing.T) {
 }
 
 func TestMachinePolicyPresentTracksOwnedEntries(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := publishTestOptions(t)
 	installTestOpenCodePlugin(t, &opts)
 	connectors := []string{"claudecode", "codex", "copilot", "cursor", "devin", "opencode"}

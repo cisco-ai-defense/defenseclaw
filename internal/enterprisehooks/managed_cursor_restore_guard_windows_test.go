@@ -89,6 +89,7 @@ func requireWindowsCursorInactiveForTest(t *testing.T, paths windowsCursorPaths)
 // snapshot. A save after the restore's write completes it when the save has
 // no DefenseClaw entry (kept byte for byte), and is cleaned when it has some.
 func TestWindowsCursorInactiveRestoreCompletesOverANewerSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	rows := []struct {
 		name  string
 		save  func(t *testing.T, paths windowsCursorPaths, installed []byte) []byte
@@ -177,6 +178,7 @@ func TestWindowsCursorInactiveRestoreCompletesOverANewerSave(t *testing.T) {
 // save after the restore's write that drops DefenseClaw's entries is kept,
 // with the closed registration merged back in.
 func TestWindowsCursorActiveRestoreMergesItsRegistrationIntoANewerSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	opts, snapshot := tearDownWindowsCursorEmptyGuardForRestoreTest(t, paths)
 	landed := saveAfterWindowsCursorHooksWriteForTest(t, paths.Hooks, func() {
@@ -200,6 +202,7 @@ func TestWindowsCursorActiveRestoreMergesItsRegistrationIntoANewerSave(t *testin
 // too (loop round 2 review: it is the administrator's), and once the save
 // completes the repair rebuilds the complete guard into it.
 func TestWindowsCursorRestoreRollbackToAnActiveGuardRestoresItsRegistration(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	t.Run("save that keeps the registration", func(t *testing.T) {
 		paths := withWindowsCursorStandaloneSeamsForTest(t)
 		writeWindowsCursorAdminHooksForRestoreTest(t, paths)

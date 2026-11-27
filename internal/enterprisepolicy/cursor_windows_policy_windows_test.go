@@ -20,6 +20,7 @@ import (
 // users. Policy verify must treat its absence as a protection failure and
 // give the administrator a recovery command for every affected connector.
 func TestWindowsPolicyVerifyReportsMissingConfiguredMachineHooks(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, test := range []struct {
 		name      string
 		connector string
@@ -83,6 +84,7 @@ func TestWindowsPolicyVerifyReportsMissingConfiguredMachineHooks(t *testing.T) {
 // Cursor accounts is DefenseClaw's canonical adapter for policy verify too;
 // any other content still conflicts.
 func TestWindowsCursorPolicyVerifyAcceptsThePerTargetAdapter(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	if _, err := (cursorTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)
@@ -120,6 +122,7 @@ func TestWindowsCursorPolicyVerifyAcceptsThePerTargetAdapter(t *testing.T) {
 // still counts as DefenseClaw's registration (presence, no flap conflict) and
 // the next reconcile rewrites it without that event; removal strips it too.
 func TestWindowsCursorReconcileRepairsPreRetirementAfterAgentThought(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	if _, err := (cursorTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)

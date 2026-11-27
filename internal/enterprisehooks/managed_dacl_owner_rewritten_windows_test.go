@@ -77,6 +77,7 @@ const (
 // a directory link) removes it. Both are the shapes GAP-0303 found on the
 // account's generation files.
 func TestWindowsOwnerWriteDropsOwnerRightsAndTheBundleCheckAcceptsTheResult(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	dir := t.TempDir()
 	cases := map[string]func(t *testing.T, path string){
@@ -240,6 +241,7 @@ func TestWindowsManagedRuntimeCleanupCanonicalFileAcceptsOnlyTheOwnerRewrittenSh
 // they stay, collected when they are unselected, and an uninstall retire
 // removes the selected one (GAP-0303: every step refused before).
 func TestWindowsManagedRuntimeGenerationGCAfterAnOwnerWrite(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	base := t.TempDir()
 	dataDir := filepath.Join(base, ".defenseclaw")
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -433,6 +435,7 @@ func newOwnerRewrittenTestDataDir(t *testing.T, target *windows.SID) (string, st
 // The hooks folder after an owner write keeps a read-only grant of another
 // product (Codex sandbox group) through the restore.
 func TestWindowsOwnerRewrittenManagedFolderIsAcceptedAndRestored(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	_, hookDir := newOwnerRewrittenTestDataDir(t, target)
 	extended, err := winpath.Extended(hookDir)
@@ -505,6 +508,7 @@ func TestWindowsOwnerRewrittenManagedFolderIsAcceptedAndRestored(t *testing.T) {
 // What Setup runs with its own gateway before an older helper collects or
 // purges the state of an account (teardown-managed-hooks restore-owner-rights).
 func TestRestoreWindowsManagedUserStateOwnerRightsAfterAnOwnerWriteOfTheTree(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	dataDir, hookDir := newOwnerRewrittenTestDataDir(t, target)
 	bundle := filepath.Join(hookDir, ".managed-runtime-codex-"+strings.Repeat("a", 32)+".json")
@@ -557,6 +561,7 @@ func TestRestoreWindowsManagedUserStateOwnerRightsAfterAnOwnerWriteOfTheTree(t *
 // A user can rename the managed folder and substitute a junction between a
 // path check and enumeration. The restore must never reach the external file.
 func TestRestoreWindowsManagedUserStateOwnerRightsRefusesJunctionSwap(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	dataDir, _ := newOwnerRewrittenTestDataDir(t, target)
 	outside := t.TempDir()
@@ -587,6 +592,7 @@ func TestRestoreWindowsManagedUserStateOwnerRightsRefusesJunctionSwap(t *testing
 // by Administrators or by another account it is refused by the bundle trust
 // check and left alone by the restore.
 func TestWindowsOwnerRewrittenShapeRefusesAnotherOwner(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {

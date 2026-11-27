@@ -28,6 +28,7 @@ import (
 )
 
 func TestRelaxStandalonePerUserDirectoryRestoresOwnerPrivateShape(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home := t.TempDir()
 	dir := filepath.Join(home, ".defenseclaw", "connector_backups", "amp")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -115,6 +116,7 @@ func TestRelaxStandalonePerUserDirectoryLeavesForeignOwnedDirectories(t *testing
 // reconcile take minutes, so a lifecycle stopped the guardian halfway and left
 // the user's hooks directory owner-private.
 func TestRelaxStandalonePerUserDirectoryLeavesDescendantACLs(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home := t.TempDir()
 	dir := filepath.Join(home, "AppData", "Local", "hermes")
 	nested := filepath.Join(dir, "hermes-agent", "venv")

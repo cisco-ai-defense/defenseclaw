@@ -106,6 +106,7 @@ func requireWindowsCursorHooksReadableForTest(t *testing.T, path string) {
 }
 
 func TestWindowsCursorMachineGuardKeepsHooksReadableByUsers(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	setupOpts := connector.SetupOpts{APIAddr: "127.0.0.1:18970", HookExecutable: windowsCursorSharedHooksTestHook}
 	adminOnly := func(t *testing.T, paths windowsCursorPaths) {
 		protectWindowsCursorHooksForAdminsForTest(t, paths.Hooks)
@@ -264,6 +265,7 @@ func TestWindowsCursorMachineGuardKeepsHooksReadableByUsers(t *testing.T) {
 // Elevated verification reads hooks.json as an administrator; it must still
 // refuse an active guard ordinary users cannot read.
 func TestVerifyWindowsCursorMachineGuardRefusesHooksUsersCannotRead(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, test := range []struct {
 		name  string
 		apply func(t *testing.T, path string)
@@ -290,6 +292,7 @@ func TestVerifyWindowsCursorMachineGuardRefusesHooksUsersCannotRead(t *testing.T
 // access list back exactly. Without the guard the file is not DefenseClaw's
 // to change.
 func TestWindowsCursorTeardownGivesBackTheAdministratorsAccessList(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	writeWindowsCursorAdminHooksForRestoreTest(t, paths)
 	protectWindowsCursorHooksForAdminsForTest(t, paths.Hooks)

@@ -609,6 +609,7 @@ func windowsManagedRuntimeVersion(t *testing.T, fixture windowsManagedInstallFix
 }
 
 func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
 		"allowManagedHooksOnly": true,
 		"companyAnnouncements":  []interface{}{"managed by test"},
@@ -707,6 +708,7 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 }
 
 func TestInstallWindowsClaudeHonorsManagedFailModeOpen(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	// Secure Client (#1163).
 	setStandaloneProfileForTest(t, false)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
@@ -732,6 +734,7 @@ func TestInstallWindowsClaudeHonorsManagedFailModeOpen(t *testing.T) {
 }
 
 func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(
 		t,
 		map[string]interface{}{"allowManagedHooksOnly": true},
@@ -846,6 +849,7 @@ func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *te
 }
 
 func TestInstallWindowsClaudeRepairsReleasedSparseOversizedToken(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	stubWindowsAuthorizedRepairIdentityChecks(t)
 	fixture := newWindowsManagedInstallFixture(
 		t,
@@ -1001,6 +1005,7 @@ func TestInstallWindowsClaudeRepairsReleasedSparseOversizedToken(t *testing.T) {
 }
 
 func TestInstallWindowsClaudeAutoHealsDeletedManagedPolicyFromExactState(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(
 		t,
 		map[string]interface{}{"allowManagedHooksOnly": true},
@@ -1050,6 +1055,7 @@ func TestInstallWindowsClaudeAutoHealsDeletedManagedPolicyFromExactState(t *test
 }
 
 func TestEnsureWindowsClaudeRestoresDeletedPolicyForEnrolledTargets(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(
 		t,
 		map[string]interface{}{"allowManagedHooksOnly": true},
@@ -1096,6 +1102,7 @@ func TestEnsureWindowsClaudeRestoresDeletedPolicyForEnrolledTargets(t *testing.T
 }
 
 func TestInstallWindowsClaudeDeletedPolicyRejectsMismatchedState(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	tests := []struct {
 		name                 string
 		mutate               func(*windowsClaudeManagedPolicyState, windowsManagedInstallFixture)
@@ -1210,6 +1217,7 @@ func TestInstallWindowsClaudeDeletedPolicyRejectsMismatchedState(t *testing.T) {
 }
 
 func TestWindowsClaudeManagedLifecycleOwnershipSurvivesRuntimeDamage(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -1265,6 +1273,7 @@ func TestWindowsClaudeManagedLifecycleOwnershipSurvivesRuntimeDamage(t *testing.
 }
 
 func TestWindowsClaudeManagedRuntimeVerificationBindsHookAndContractIdentity(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -1313,6 +1322,7 @@ func TestWindowsClaudeManagedRuntimeVerificationBindsHookAndContractIdentity(t *
 }
 
 func TestWindowsClaudeManagedRuntimeVerificationRejectsMissingGateway(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
 		t.Fatal(err)
@@ -1690,6 +1700,7 @@ func TestInstallWindowsGenericRepairsAuthorizedSparseOversizedConfig(t *testing.
 }
 
 func TestInstallWindowsClaudePreservesProfileRootDACL(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixtureWithHomeSetup(
 		t,
 		map[string]interface{}{"allowManagedHooksOnly": true},
@@ -1727,6 +1738,7 @@ func TestInstallWindowsClaudeRejectsReparseDataDir(t *testing.T) {
 }
 
 func TestInstallWindowsClaudeRepairsAuthorizedTargetOwnedReparseDataDir(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	stubWindowsAuthorizedRepairIdentityChecks(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
@@ -1771,6 +1783,7 @@ func TestInstallWindowsClaudeRepairsAuthorizedTargetOwnedReparseDataDir(t *testi
 }
 
 func TestInstallWindowsClaudeRepairsAuthorizedRegularFileAtDataDir(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	stubWindowsAuthorizedRepairIdentityChecks(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
@@ -1979,6 +1992,7 @@ func TestWindowsAuthorizedRepairReplacesManagedLockObstructions(t *testing.T) {
 }
 
 func TestVerifyWindowsClaudeIsReadOnlyAndDoesNotImpersonate(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2001,6 +2015,7 @@ func TestVerifyWindowsClaudeIsReadOnlyAndDoesNotImpersonate(t *testing.T) {
 }
 
 func TestVerifyWindowsClaudeRejectsAndInstallRepairsTamperedSharedHook(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2044,6 +2059,7 @@ func TestVerifyWindowsClaudeRejectsAndInstallRepairsTamperedSharedHook(t *testin
 }
 
 func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingContract(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2121,9 +2137,9 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 }
 
 // Shared-hook descriptor drift (here an Everyone write grant) is repaired by
-// an elevated verifier and accepted with a log by an unprivileged one; the
-// script bytes stay bound by the contract digest either way.
+// the verifier; the script bytes stay bound by the contract digest either way.
 func TestVerifyWindowsClaudeRepairsNoncanonicalSharedHookProtection(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2140,6 +2156,7 @@ func TestVerifyWindowsClaudeRepairsNoncanonicalSharedHookProtection(t *testing.T
 // Structure is still reported: a hard-linked shared hook is never adopted,
 // whatever its descriptor.
 func TestVerifyWindowsClaudeRejectsHardLinkedSharedHook(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2159,11 +2176,11 @@ func TestVerifyWindowsClaudeRejectsHardLinkedSharedHook(t *testing.T) {
 }
 
 // Contract-lock descriptor drift (here an Everyone write grant) is permission
-// drift: an elevated verifier re-stamps the canonical protection on the held
-// file and an unprivileged one accepts and logs it. The contract bytes stay
-// bound by their digests either way; a hard-linked shared hook is still
-// refused (TestVerifyWindowsClaudeRejectsHardLinkedSharedHook).
+// drift: the verifier re-stamps the canonical protection on the held file. The
+// contract bytes stay bound by their digests either way; a hard-linked shared
+// hook is still refused (TestVerifyWindowsClaudeRejectsHardLinkedSharedHook).
 func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2178,9 +2195,6 @@ func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *t
 		fixture.targetSID.String(),
 	); err != nil {
 		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want repair or accepted drift", err)
-	}
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		return
 	}
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
@@ -2203,6 +2217,7 @@ func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *t
 // foreign author placing content at this exact path (filename literally
 // contains "defenseclaw") is opting into our ownership boundary.
 func TestInstallWindowsClaudeReclaimsOrphanManagedPolicy(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	foreign := []byte("{\"hooks\":{\"PreToolUse\":[]}}\n")
 	if err := os.WriteFile(fixture.policyPath, foreign, 0o600); err != nil {
@@ -2232,6 +2247,7 @@ func TestInstallWindowsClaudeReclaimsOrphanManagedPolicy(t *testing.T) {
 // treating every reverse orphan as fresh state would erase the evidence before
 // its digest, service identity, and target enrollment were checked.
 func TestInstallWindowsClaudeRejectsInvalidReverseOrphanManagedState(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	statePath := filepath.Join(filepath.Dir(fixture.policyPath), ".defenseclaw-managed-hooks.state")
 	staleState := []byte("{\"schema_version\":2,\"policy_sha256\":\"sha256:deadbeef\"}\n")
@@ -2262,6 +2278,7 @@ func TestInstallWindowsClaudeRejectsInvalidReverseOrphanManagedState(t *testing.
 // this, and Setup /repair before its snapshot), and the install path then
 // accepts it again; a drop-in that matches its record is left alone.
 func TestWindowsClaudeManagedPolicyDriftIsPutBack(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2298,6 +2315,7 @@ func TestWindowsClaudeManagedPolicyDriftIsPutBack(t *testing.T) {
 }
 
 func TestInstallWindowsClaudeRefusesAdministratorPolicyEdit(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2321,6 +2339,7 @@ func TestInstallWindowsClaudeRefusesAdministratorPolicyEdit(t *testing.T) {
 }
 
 func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	hookDir := filepath.Join(fixture.home, ".defenseclaw", "hooks")
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
@@ -2364,6 +2383,7 @@ func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
 }
 
 func TestInstallWindowsClaudeRollsBackArtifactsAndRetainsSelectorLock(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	policyDir := filepath.Dir(fixture.policyPath)
 	policyRoot := filepath.Dir(policyDir)
@@ -2417,6 +2437,7 @@ func TestInstallWindowsClaudeRollsBackArtifactsAndRetainsSelectorLock(t *testing
 }
 
 func TestInstallWindowsClaudeRollbackRestoresAbsentHookDirectory(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	dataDir := filepath.Join(fixture.home, ".defenseclaw")
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -2577,9 +2598,7 @@ func TestValidateWindowsManagedPolicyDirectoryProtectionRejectsUnprotectedLeaf(t
 // An administrator-owned lock whose DACL drifted (here an Everyone write
 // grant) is re-stamped before the transaction opens it.
 func TestWindowsClaudeManagedPolicyTransactionRepairsDriftedLock(t *testing.T) {
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("repairing an Administrators-owned lock needs an elevated token")
-	}
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
 	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
@@ -2770,6 +2789,7 @@ func TestRejectWindowsClaudeRegistryPolicyWriteACEs(t *testing.T) {
 }
 
 func TestInstallWindowsClaudeRejectsHigherPriorityAndDisabledPolicy(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	t.Run("higher priority MDM", func(t *testing.T) {
 		fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 		windowsClaudeHigherPolicyCheck = func(connector.SetupOpts) error { return errors.New("HKLM policy wins") }
@@ -2800,6 +2820,7 @@ func TestInstallWindowsClaudeRejectsHigherPriorityAndDisabledPolicy(t *testing.T
 }
 
 func TestRemoveWindowsClaudeManagedPolicyRemovesLastOwnedTarget(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2823,6 +2844,7 @@ func TestRemoveWindowsClaudeManagedPolicyRemovesLastOwnedTarget(t *testing.T) {
 }
 
 func TestWindowsStandaloneClaudeEmptyEnrollmentKeepsMachinePolicy(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	previousStandalone := windowsEnterpriseStandaloneProcess
 	windowsEnterpriseStandaloneProcess = func() bool { return true }
@@ -2861,6 +2883,7 @@ func TestWindowsStandaloneClaudeEmptyEnrollmentKeepsMachinePolicy(t *testing.T) 
 }
 
 func TestWindowsClaudeClosedRegistrationRequiresActiveHookExecutable(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
 		t.Fatal(err)
@@ -2877,6 +2900,7 @@ func TestWindowsClaudeClosedRegistrationRequiresActiveHookExecutable(t *testing.
 }
 
 func TestRemoveWindowsClaudeManagedPolicyRefusesTamperedPolicy(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2899,6 +2923,7 @@ func TestRemoveWindowsClaudeManagedPolicyRefusesTamperedPolicy(t *testing.T) {
 }
 
 func TestRemoveWindowsClaudeManagedPolicyAllowsSIDOnlyForAbsentProfile(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2914,6 +2939,7 @@ func TestRemoveWindowsClaudeManagedPolicyAllowsSIDOnlyForAbsentProfile(t *testin
 }
 
 func TestRemoveWindowsClaudeManagedPolicyKeepsPolicyForOtherTargets(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -3372,6 +3398,7 @@ func TestValidateWindowsEnterpriseHomeNamesAVanishedProfile(t *testing.T) {
 // drop-in from that record, for an empty enrollment as for an enrolled one,
 // and leaves the record and its targets as they were.
 func TestWindowsClaudeMachineGuardArtifactRepairTable(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	damages := []struct {
 		name  string
 		apply func(path string, original []byte) error

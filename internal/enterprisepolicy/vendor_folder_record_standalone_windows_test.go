@@ -277,6 +277,7 @@ func requireDefenseClawEntryGone(t *testing.T, file string) {
 // from the recorded file, which is still the one DefenseClaw wrote, drops
 // the record, leaves the folder as it was and names it.
 func TestStandaloneRecordedVendorFolderAStandardUserCanReplaceFailsClosed(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pinReclaimStandalone(t, true)
@@ -378,6 +379,7 @@ func TestStandaloneRecordedVendorFolderUsersMayOnlyAddIsLeftAndPublished(t *test
 // fails closed with the one message, the folder stays as it was, Verify
 // reports the connector not covered, and the uninstall still goes on.
 func TestStandaloneRecordedVendorFolderUsersMayAddFailsClosedWhenTheVendorLoadsMoreThanOneFile(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		if !tc.siblings {
 			continue
@@ -455,6 +457,7 @@ func TestStandaloneRecordedVendorFolderUsersMayAddFailsClosedWhenTheVendorLoadsM
 // hook entries now name binaries that are gone and how to take them out. The
 // record still goes and the folder is named.
 func TestStandaloneRecordedVendorFolderRemovalLeavesAFileItCannotTrust(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		for _, variant := range []string{"changed after DefenseClaw wrote it", "another account can change it"} {
 			t.Run(tc.name+" ("+variant+")", func(t *testing.T) {
@@ -528,6 +531,7 @@ func TestStandaloneRecordedVendorFolderRemovalLeavesAFileItCannotTrust(t *testin
 // so the repair re-stamps it; a recorded file in it that another account
 // can change is replaced, never trusted as found.
 func TestStandaloneVendorFolderDefenseClawCreatedIsRestamped(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pinReclaimStandalone(t, true)
@@ -584,6 +588,7 @@ func TestStandaloneVendorFolderDefenseClawCreatedIsRestamped(t *testing.T) {
 // with no ownership record, one whose record a standard user can rewrite
 // (planted, ignored), and Secure Client.
 func TestVendorFolderWithoutAnAdministratorRecordKeepsTheTakeover(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		for _, variant := range []string{"no record", "users-writable record", "secure client"} {
 			t.Run(tc.name+" ("+variant+")", func(t *testing.T) {
@@ -634,6 +639,7 @@ func TestVendorFolderWithoutAnAdministratorRecordKeepsTheTakeover(t *testing.T) 
 // PublishWindowsSecureClientCopilot, OpenCode and the rest through the same
 // publish.
 func TestSecureClientKeepsTheTakeoverOfAnAddOnlyVendorFolder(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		if !tc.siblings {
 			continue

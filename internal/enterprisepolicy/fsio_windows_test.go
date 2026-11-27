@@ -173,6 +173,7 @@ func requireProtected(t *testing.T, path string) {
 }
 
 func TestWindowsPublicDirDenyReadIsDrift(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	dir := filepath.Join(windowsTestOptions(t).WindowsProgramData, "public-summary")
 	if err := createProtectedDir(dir); err != nil {
 		t.Fatal(err)
@@ -200,6 +201,7 @@ func TestWindowsPublicDirDenyReadIsDrift(t *testing.T) {
 // public folder writable for the tokens its condition matches. It is drift,
 // and repair removes it.
 func TestWindowsPublicDirCallbackAllowIsDrift(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	dir := filepath.Join(windowsTestOptions(t).WindowsProgramData, "public-summary-callback")
 	if err := createProtectedDir(dir); err != nil {
 		t.Fatal(err)
@@ -227,6 +229,7 @@ func TestWindowsPublicDirCallbackAllowIsDrift(t *testing.T) {
 // protected DACL in one call; an object that is already there when a
 // missing component is created is refused, never adopted.
 func TestWindowsPolicyDirsAreCreatedProtectedAndNeverAdopted(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	dir := filepath.Join(opts.WindowsProgramData, "GitHub", "Copilot", "policy.d")
 	created, err := ensurePolicyDir(opts, dir)
@@ -253,6 +256,7 @@ func TestWindowsPolicyDirsAreCreatedProtectedAndNeverAdopted(t *testing.T) {
 // blocks Copilot's machine policy: reconcile takes the directory back by
 // handle, without touching what is inside it, and publishes the drop-in.
 func TestWindowsCopilotTakesBackAUserCreatedVendorDir(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	github := filepath.Join(opts.WindowsProgramData, "GitHub")
 	userCreatedDir(t, github)
@@ -282,6 +286,7 @@ func TestWindowsCopilotTakesBackAUserCreatedVendorDir(t *testing.T) {
 // A policy file inside policy.d that an unprivileged principal controls is
 // reported: Copilot's handling of such files is only verified on unix.
 func TestWindowsCopilotUntrustedForeignPolicyFileIsAConflict(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	if _, err := (copilotTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)
@@ -311,6 +316,7 @@ func TestWindowsCopilotUntrustedForeignPolicyFileIsAConflict(t *testing.T) {
 // A 90-defenseclaw.json an unprivileged principal planted in a trusted
 // policy.d is replaced, not left to fail every reconcile.
 func TestWindowsCopilotReplacesAnUntrustedDefenseClawDropIn(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	dir := filepath.Join(opts.WindowsProgramData, "GitHub", "Copilot", "policy.d")
 	if _, err := ensurePolicyDir(opts, dir); err != nil {
@@ -341,6 +347,7 @@ func TestWindowsCopilotReplacesAnUntrustedDefenseClawDropIn(t *testing.T) {
 // A reparse point an administrator put at a vendor path is neither taken
 // over nor removed: it is the administrator's to fix.
 func TestWindowsReclaimRefusesAnAdministratorsReparsePoint(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	target := filepath.Join(filepath.Dir(opts.WindowsProgramData), "elsewhere")
 	userCreatedDir(t, target)
@@ -365,6 +372,7 @@ func TestWindowsReclaimRefusesAnAdministratorsReparsePoint(t *testing.T) {
 // that, but it lets a standard user add Copilot policy files that apply to
 // every user: verify reports it and reconcile takes the directory back.
 func TestWindowsCopilotPolicyDirUsersCanAddToIsTakenBack(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	github := filepath.Join(opts.WindowsProgramData, "GitHub")
 	copilot := filepath.Join(github, "Copilot")
@@ -521,6 +529,7 @@ func displacedEntries(t *testing.T, dir string) []string {
 // protected in its place, and publishes the drop-in. Removal later deletes
 // the directory it created.
 func TestWindowsCopilotReplacesObjectsPlantedAtVendorPathParts(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, part := range []string{"GitHub", `GitHub\Copilot`, `GitHub\Copilot\policy.d`} {
 		for _, kind := range []string{"file", "junction"} {
 			t.Run(part+"/"+kind, func(t *testing.T) {
@@ -586,6 +595,7 @@ func TestWindowsCopilotReplacesObjectsPlantedAtVendorPathParts(t *testing.T) {
 // non-empty directory holds is moved aside intact under a name Copilot
 // does not load.
 func TestWindowsCopilotClearsObjectsPlantedAtTheDropInName(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, kind := range []string{"directory", "empty directory", "junction"} {
 		t.Run(kind, func(t *testing.T) {
 			opts := windowsTestOptions(t)
@@ -635,6 +645,7 @@ func TestWindowsCopilotClearsObjectsPlantedAtTheDropInName(t *testing.T) {
 // the directory back is moved aside and taken from its owner, so it can no
 // longer run as a machine-wide hook; an administrator's policy file stays.
 func TestWindowsCopilotMovesAsidePolicyFilesAUserPlanted(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	github := filepath.Join(opts.WindowsProgramData, "GitHub")
 	copilot := filepath.Join(github, "Copilot")
@@ -686,6 +697,7 @@ func TestWindowsCopilotMovesAsidePolicyFilesAUserPlanted(t *testing.T) {
 // is cleared again, a bounded number of times; a user who keeps winning
 // that race fails the reconcile rather than being adopted.
 func TestWindowsCopilotClearsAnObjectPlantedAgainDuringReplacement(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, replants := range []int{1, plantedAttempts} {
 		t.Run(fmt.Sprint(replants), func(t *testing.T) {
 			opts := windowsTestOptions(t)
@@ -725,6 +737,7 @@ func TestWindowsCopilotClearsAnObjectPlantedAgainDuringReplacement(t *testing.T)
 // account. Reconcile moves it aside, as for Copilot, and publishes
 // DefenseClaw's managed config in its place.
 func TestWindowsOpenCodeMovesAsideAConfigAUserPlanted(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, name := range []string{"opencode.json", "opencode.jsonc"} {
 		t.Run(name, func(t *testing.T) {
 			opts := windowsOpenCodeTestOptions(t)
@@ -776,6 +789,7 @@ func TestWindowsOpenCodeMovesAsideAConfigAUserPlanted(t *testing.T) {
 // holds it: a folder a standard account made is reported, then taken back
 // with what that account put there moved aside.
 func TestPublishWindowsGoOwnedHoldsTheAmpMachineFolder(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	dir := filepath.Join(opts.WindowsProgramData, "ampcode")
 	userCreatedDir(t, dir)
@@ -800,6 +814,7 @@ func TestPublishWindowsGoOwnedHoldsTheAmpMachineFolder(t *testing.T) {
 }
 
 func TestWindowsAmpMachineFolderRemovalUsesWriterOwnership(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	t.Run("Setup-created empty folder", func(t *testing.T) {
 		opts := windowsTestOptions(t)
 		dir := windowsAmpMachineDir(opts)
@@ -889,6 +904,7 @@ func TestWindowsAmpMachineFolderRemovalUsesWriterOwnership(t *testing.T) {
 // and its OpenAI parent are taken back and her file is moved aside to a
 // hidden name, as for the Copilot and OpenCode folders (GAP-0565).
 func TestWindowsTakeBackVendorPolicyFolderTakesBackAUserCreatedCodexFolder(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	openAI := filepath.Join(opts.WindowsProgramData, "OpenAI")
 	codex := filepath.Join(openAI, "Codex")
@@ -920,6 +936,7 @@ func TestWindowsTakeBackVendorPolicyFolderTakesBackAUserCreatedCodexFolder(t *te
 // GAP-0898: the uninstall takes back a Copilot policy.d a standard user
 // created first, as the install does, instead of failing on its owner.
 func TestWindowsCopilotRemovalTakesBackAUserCreatedPolicyDir(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	github := filepath.Join(opts.WindowsProgramData, "GitHub")
 	dir := filepath.Join(github, "Copilot", "policy.d")

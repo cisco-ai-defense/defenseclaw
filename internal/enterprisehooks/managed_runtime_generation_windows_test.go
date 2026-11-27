@@ -924,6 +924,7 @@ func TestWindowsManagedRuntimeResolverAcceptsTheRunningGuardiansLongSetupRelax(t
 // /repair failed 1603. The retire waits that exact shape out and then
 // restores the canonical DACL; another shape stays refused.
 func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previousWait := windowsManagedRuntimeSetupRelaxWait
 	windowsManagedRuntimeSetupRelaxWait = 100 * time.Millisecond
 	t.Cleanup(func() { windowsManagedRuntimeSetupRelaxWait = previousWait })
@@ -996,6 +997,7 @@ func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *
 // refuses the same bundle and repairs nothing; any other shape stays
 // untrusted and is left to that retire.
 func TestWindowsManagedRuntimeClassifyRefusesABundleInASetupRelaxedRoot(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	setDACL := func(t *testing.T, path, sddl string) {
 		t.Helper()
 		sd, err := windows.SecurityDescriptorFromString(sddl)
@@ -1476,6 +1478,7 @@ func TestWindowsManagedRuntimeGCOpenRetryIsBounded(t *testing.T) {
 // bundles are collected, nothing behind the link is read or changed, and a
 // collection that is not the uninstall's still leaves them alone.
 func TestWindowsManagedRuntimeGenerationRetiredCollectionGoesOnBehindAKeptSelectorLink(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	base := t.TempDir()
 	dataDir := filepath.Join(base, ".defenseclaw")
 	hookDir := filepath.Join(dataDir, "hooks")

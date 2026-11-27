@@ -19,6 +19,7 @@ import (
 // exact SYSTEM and Administrators only protection; a record without it is
 // refused, and an unchanged record is not rewritten.
 func TestWindowsProtectedRecordsRoundTripUnderTheManifestContract(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	manifest := filepath.Join(dir, "targets.yaml")
 	if agents, err := ReadWindowsUnprotectedAgents(manifest); !os.IsNotExist(err) || len(agents) != 0 {
@@ -61,6 +62,7 @@ func TestWindowsProtectedRecordsRoundTripUnderTheManifestContract(t *testing.T) 
 }
 
 func TestWindowsStaleUnprotectedAgentsRecordRejectedAndRefreshed(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	manifest := filepath.Join(dir, "targets.yaml")
 	if _, err := WriteWindowsUnprotectedAgents(manifest, nil); err != nil {
@@ -87,6 +89,7 @@ func TestWindowsStaleUnprotectedAgentsRecordRejectedAndRefreshed(t *testing.T) {
 // (a refusal=missing entry must keep failing verify), and a malformed stale
 // record is a parse error, never a pending scan.
 func TestWindowsStaleUnprotectedAgentsRecordKeepsItsAgentsAndMalformedFails(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	manifest := filepath.Join(dir, "targets.yaml")
 	agents := []UnprotectedAgent{{User: "alice", SID: testLocalUserSID, Connector: "cursor", Version: "4.1.0",

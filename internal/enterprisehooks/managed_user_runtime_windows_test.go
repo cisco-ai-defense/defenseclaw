@@ -115,6 +115,7 @@ func gap45AllowMutation(t *testing.T) {
 // the account's folder, managed DACL and all, and then the emptied folder,
 // so a later per-user install starts from nothing (GAP-0045).
 func TestRemoveWindowsManagedUserRuntimeRemovesTheFieldLeftover(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	gap45AllowMutation(t)
 	sid := currentWindowsTestSID(t)
 	home, dataDir := gap45FieldLeftover(t, sid)
@@ -140,6 +141,7 @@ func TestRemoveWindowsManagedUserRuntimeRemovesTheFieldLeftover(t *testing.T) {
 // kept, the emptied connector_backups folders go, and what stays returns
 // to the owner-private DACL a per-user install can manage.
 func TestRemoveWindowsManagedUserRuntimeKeepsWhatItDidNotWrite(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	gap45AllowMutation(t)
 	sid := currentWindowsTestSID(t)
 	home, dataDir := gap45FieldLeftover(t, sid)
@@ -193,6 +195,7 @@ func TestRemoveWindowsManagedUserRuntimeKeepsWhatItDidNotWrite(t *testing.T) {
 // A per-user install's folder is left exactly as found, and so is anything
 // a link or junction names.
 func TestRemoveWindowsManagedUserRuntimeLeavesPerUserInstallsAndLinks(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	gap45AllowMutation(t)
 	sid := currentWindowsTestSID(t)
 
@@ -234,6 +237,7 @@ func TestRemoveWindowsManagedUserRuntimeLeavesPerUserInstallsAndLinks(t *testing
 
 // Only LocalSystem changes another account's folder.
 func TestRemoveWindowsManagedUserRuntimeRequiresLocalSystem(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	sid := currentWindowsTestSID(t)
 	home, dataDir := gap45FieldLeftover(t, sid)
 	previous := windowsEnterpriseMutationIdentityCheck

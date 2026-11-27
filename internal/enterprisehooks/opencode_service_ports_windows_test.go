@@ -226,6 +226,7 @@ func TestManagedWindowsOpenCodeClearWaitsForReconcileLock(t *testing.T) {
 // changes nothing: the guardian pass and the administrator clear take
 // the lock inside the protected record folder.
 func TestManagedWindowsOpenCodeLockIgnoresPredictableGlobalNames(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
 	const squatted = `Global\Cisco.DefenseClaw.EnterpriseHooks.OpenCodePorts`
@@ -260,6 +261,7 @@ func TestManagedWindowsOpenCodeLockIgnoresPredictableGlobalNames(t *testing.T) {
 // token, Users and Everyone left on) can neither create the lock file nor
 // open or hold an existing one.
 func TestManagedWindowsOpenCodeLockStandardUserCannotCreateOrHold(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
 	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)
@@ -307,6 +309,7 @@ func TestManagedWindowsOpenCodeLockStandardUserCannotCreateOrHold(t *testing.T) 
 // A lock file that is not administrator-only (planted or drifted) is refused
 // rather than trusted.
 func TestManagedWindowsOpenCodeLockRefusesWidenedLockFile(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
 	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)
@@ -352,6 +355,7 @@ func lockFileOwnerForTest(t *testing.T, lockPath string) *windows.SID {
 // administrator owner keeps the protected DACL out of an ordinary account's
 // reach. The benign twin: the file is reused on the next pass.
 func TestManagedWindowsOpenCodeLockFileIsAdministratorOwned(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
 	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)
@@ -379,6 +383,7 @@ func TestManagedWindowsOpenCodeLockFileIsAdministratorOwned(t *testing.T) {
 // rewrite the DACL and hold the lock. It is refused, for the guardian pass,
 // for the administrator clear (same function), and on every retry.
 func TestManagedWindowsOpenCodeLockRefusesLockFileOwnedByAnotherAccount(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
 	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)

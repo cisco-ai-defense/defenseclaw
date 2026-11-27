@@ -32,6 +32,7 @@ import (
 // stayed pending and every recovery refused again. Cleanup now
 // accepts a republished manifest that keeps exactly the planned roots.
 func TestWindowsManagedRuntimeCleanupAcceptsRepublishedRowsOfThePlannedRoots(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -96,6 +97,7 @@ func TestWindowsManagedRuntimeCleanupAcceptsRepublishedRowsOfThePlannedRoots(t *
 // service stopped and no Setup could recover it (GAP-1293). The vanished
 // profile has nothing to clean and is reported as its absent baseline.
 func TestWindowsManagedRuntimeCleanupTreatsAVanishedProfileAsClean(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)

@@ -21,6 +21,7 @@ import (
 )
 
 func TestWindowsManagedRuntimeMissingChildProbeUsesValidSynchronousOpen(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	targetInfo, err := resolveWindowsManagedRuntimeTarget(home, target.String(), filepath.Join(home, ".defenseclaw"))
@@ -142,6 +143,7 @@ func windowsManagedRuntimeTestDescriptorWithControl(
 }
 
 func TestWindowsManagedRuntimeStagesJournalsAndPublishesExactTargetRoot(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -218,6 +220,7 @@ func TestWindowsManagedRuntimeStagesJournalsAndPublishesExactTargetRoot(t *testi
 }
 
 func TestWindowsManagedRuntimePublishesForeignTargetWithRestorePrivilege(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	processTarget := currentWindowsTestSID(t)
 	foreignTarget, err := windows.StringToSid("S-1-5-21-1947302811-2864019257-3719054423-1001")
 	if err != nil {
@@ -260,6 +263,7 @@ func TestWindowsManagedRuntimePublishesForeignTargetWithRestorePrivilege(t *test
 }
 
 func TestWindowsManagedRuntimeFinalizeRecoversMarkerOwnerAfterHandleRename(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -330,6 +334,7 @@ func TestWindowsManagedRuntimeFinalizeRecoversMarkerOwnerAfterHandleRename(t *te
 }
 
 func TestWindowsManagedRuntimeFinalizeNeverReplacesCollision(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -367,6 +372,7 @@ func TestWindowsManagedRuntimeFinalizeNeverReplacesCollision(t *testing.T) {
 }
 
 func TestWindowsManagedRuntimeCleanupRejectsUnexpectedContent(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -402,6 +408,7 @@ func TestWindowsManagedRuntimeCleanupRejectsUnexpectedContent(t *testing.T) {
 }
 
 func TestWindowsManagedRuntimeCleanupValidatesCanonicalBaselineWithoutDeletingIt(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -443,6 +450,7 @@ func TestWindowsManagedRuntimeCleanupValidatesCanonicalBaselineWithoutDeletingIt
 }
 
 func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	target := currentWindowsTestSID(t)
@@ -504,6 +512,7 @@ func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testin
 // before anything changes.
 // GAP-1434: an explicit standalone install plan refuses it the same way.
 func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	windowsEnterpriseStandaloneProcess = func() bool { return true }
@@ -544,6 +553,7 @@ func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T
 // over instead of failing for every account. A Secure Client plan re-stamps
 // it as it does any drifted retained root (26.8.4).
 func TestWindowsManagedRuntimeStandaloneInstallTakesOverAnAccountCreatedFolder(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	target := currentWindowsTestSID(t)
@@ -590,6 +600,7 @@ func TestWindowsManagedRuntimeStandaloneInstallTakesOverAnAccountCreatedFolder(t
 }
 
 func TestWindowsManagedRuntimeCleanupRejectsCanonicalBaselineDACLDrift(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -630,6 +641,7 @@ func TestWindowsManagedRuntimeCleanupRejectsCanonicalBaselineDACLDrift(t *testin
 }
 
 func TestWindowsManagedRuntimeCleanupReportsPartialMultiRootFailureConservatively(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	currentTarget := currentWindowsTestSID(t)
 	foreignTarget, err := windows.StringToSid("S-1-5-21-1947302811-2864019257-3719054423-1002")
 	if err != nil {
@@ -689,6 +701,7 @@ func TestWindowsManagedRuntimeCleanupReportsPartialMultiRootFailureConservativel
 }
 
 func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -790,6 +803,7 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 }
 
 func TestWindowsManagedRuntimeCleanupRefusesPinnedWriterBeforeMutation(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -872,6 +886,7 @@ func TestWindowsManagedRuntimeCleanupRefusesPinnedWriterBeforeMutation(t *testin
 }
 
 func TestWindowsManagedRuntimeCleanupQuarantineBlocksPostPreflightPathMutation(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	if target.IsWellKnown(windows.WinLocalSystemSid) {
 		t.Skip("LocalSystem remains trusted by the quarantine DACL")
@@ -975,6 +990,7 @@ func TestWindowsManagedRuntimeCleanupQuarantineBlocksPostPreflightPathMutation(t
 }
 
 func TestWindowsManagedRuntimeFailedCleanupOmitsUnverifiedLiveState(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -1096,6 +1112,7 @@ func TestWindowsManagedRuntimeFailedCleanupOmitsUnverifiedLiveState(t *testing.T
 }
 
 func TestWindowsManagedRuntimeCleanupRejectsHardlinkedReservedFile(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -1140,6 +1157,7 @@ func TestWindowsManagedRuntimeCleanupRejectsHardlinkedReservedFile(t *testing.T)
 }
 
 func TestWindowsManagedRuntimeMarkerStageDeniesRestrictedTargetSecurityAccess(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	processUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || processUser == nil || processUser.User.Sid == nil {
 		t.Fatalf("resolve process user: %v", err)
@@ -1248,6 +1266,7 @@ func TestWindowsManagedRuntimeMarkerStageDeniesRestrictedTargetSecurityAccess(t 
 }
 
 func TestWindowsManagedRuntimeCleanupAuthenticatesUnjournaledMarkerStage(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -1697,6 +1716,7 @@ func withWindowsStandaloneProcess(t *testing.T) {
 // .defenseclaw.rollback-<random> with nothing deleted, and the rollback
 // finishes instead of staying pending (WIN-R1-20).
 func TestWindowsManagedRuntimeStandaloneCleanupKeepsRefusedRootAside(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	withWindowsStandaloneProcess(t)
 	target := currentWindowsTestSID(t)
 	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)

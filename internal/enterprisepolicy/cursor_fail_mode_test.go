@@ -13,6 +13,7 @@ import (
 // config resolves Cursor open (CursorFailOpen), and verify holds the file to
 // that value.
 func TestCursorMachinePolicyFollowsTheFailMode(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.CursorFailOpen = true
 	path, _ := CursorEnterpriseHooksPath(opts)

@@ -105,6 +105,7 @@ func tearDownWindowsCursorEmptyGuardForRestoreTest(t *testing.T, paths windowsCu
 // the restore validated hooks.json and before it writes it is kept, with the
 // closed registration merged in.
 func TestWindowsCursorTeardownRestoreKeepsAConcurrentHooksSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	opts, snapshot := tearDownWindowsCursorEmptyGuardForRestoreTest(t, paths)
 	saveBeforeWindowsCursorHooksWriteForTest(t, paths.Hooks, func() {
@@ -126,6 +127,7 @@ func TestWindowsCursorTeardownRestoreKeepsAConcurrentHooksSave(t *testing.T) {
 // snapshot. A save after the restore validated hooks.json and before it
 // writes it is kept, without DefenseClaw's entries.
 func TestWindowsCursorLifecycleRestoreKeepsAConcurrentHooksSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	writeWindowsCursorAdminHooksForRestoreTest(t, paths)
 	prior := WindowsCursorManagedPolicyTeardownOptions{}
@@ -156,6 +158,7 @@ func TestWindowsCursorLifecycleRestoreKeepsAConcurrentHooksSave(t *testing.T) {
 // active guard merges that guard's registration into the save, so Cursor
 // calls never run outside the machine guard.
 func TestWindowsCursorRestoreRollbackKeepsANewerHooksSave(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	t.Run("failed install rollback", func(t *testing.T) {
 		paths := withWindowsCursorStandaloneSeamsForTest(t)
 		writeWindowsCursorAdminHooksForRestoreTest(t, paths)

@@ -59,6 +59,7 @@ func TestWindowsManagedRuntimeBundleFollowsTheAdministratorOutsideSecureClient(t
 }
 
 func TestWindowsManagedInstallDefaultsOpenAndClaudeVersionCanBeMissing(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	// Secure Client (#1163).
 	useWindowsSecureClientForTest(t)
 	t.Run("codex default", func(t *testing.T) {
