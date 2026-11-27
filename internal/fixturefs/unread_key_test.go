@@ -34,7 +34,9 @@ func TestUnreadKeyStrategyPerPlatform(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			src := string(raw)
+			// A Windows checkout may carry CRLF line ends; the constraint line is
+			// the same text either way.
+			src := strings.ReplaceAll(string(raw), "\r\n", "\n")
 			if !strings.Contains(src, c.constraint+"\n") {
 				t.Fatalf("%s: build constraint %q is gone; the platforms that use this key changed", c.file, c.constraint)
 			}
