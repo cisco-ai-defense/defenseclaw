@@ -86,10 +86,12 @@ func tsecretCheckReads(t *testing.T, tag, dir string, rows []tsecretReadRow) {
 
 // TestGAP1639CredentialReadFormsTheAnalyzerSees: a loop variable whose value
 // is a credentials file, an interpreter's inline code that reads the files
-// its arguments name, a script given the file, an interpreter option value
-// before -c and a find -exec reader are each a read of the file and join a
-// later upload, like a plain cat of it (rel-1-0-10:GAP-1639). The same
-// shapes over a plain file read no credentials file.
+// its arguments name, an interpreter option value before -c and a find
+// -exec reader are each a read of the file and join a later upload, like a
+// plain cat of it (rel-1-0-10:GAP-1639, fixed by substrate-1:GAP-0349). The
+// same shapes over a plain file read no credentials file. A script's own
+// arguments stay no read (rel-1-0-10:GAP-1030 pins them): the analyzer does
+// not read the script.
 func TestGAP1639CredentialReadFormsTheAnalyzerSees(t *testing.T) {
 	env := tsecretEnvName()
 	dir := tsecretFolder(t, nil)
@@ -103,7 +105,6 @@ func TestGAP1639CredentialReadFormsTheAnalyzerSees(t *testing.T) {
 		{"ruby-e-argf", "ruby -e 'puts ARGF.read' " + env, true},
 		{"ruby-e-argv", "ruby -e 'puts File.read(ARGV[0])' " + env, true},
 		{"python-c-argv", py + ` -c "import sys; print(open(sys.argv[1]).read())" ` + env, true},
-		{"python-script", py + " show.py " + env, true},
 		{"python-W-c", py + ` -W ignore -c "print(` + openEnv + `)"`, true},
 		{"find-exec", "find . -name '*" + env + "' -exec " + cat + ` {} \;`, true},
 		{"find-exec-plus", "find . -name '" + env + "' -exec " + cat + " {} +", true},
