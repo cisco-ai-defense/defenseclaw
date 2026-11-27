@@ -146,7 +146,7 @@ type Record struct {
 	Usage     Usage
 	Cost      Cost
 	Status    int
-	Outcome   string // completed | failed | cancelled
+	Outcome   string // completed | failed | cancelled (ErrorType cancelled or blocked)
 	ErrorType string
 	TTFB      time.Duration
 	Total     time.Duration
@@ -195,6 +195,14 @@ type Recorder interface {
 // does it for requests it no longer needs). The upstream did not fail, so the
 // record is cancelled, not failed (GAP-0631).
 var ErrClientGone = errors.New("client closed the connection")
+
+// ErrStreamBlocked is the error of a call whose stream the gateway ended
+// itself (a guardrail block) after the provider began answering: the
+// provider billed the output it generated up to the cut, which no usage the
+// agent got counts. The record is cancelled with error type blocked, and a
+// call without the provider's final usage is of unknown cost
+// (substrate-1:GAP-1119).
+var ErrStreamBlocked = errors.New("the gateway ended the stream (guardrail block)")
 
 type Call interface {
 	UpstreamHeader(status int, h http.Header)
