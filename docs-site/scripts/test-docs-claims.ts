@@ -2020,6 +2020,9 @@ const r105Rows: DocRow[] = [
   { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/lifecycle.mdx", section: "What uninstall keeps", has: ["`retained-state.json`, the root-only record of the state folders the uninstall kept", "a root-only `.defenseclaw-retained` marker"] },
   { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/linux.mdx", section: "Remove", has: ["`/var/lib/defenseclaw-enterprise/retained-state.json`", "`/var/lib/defenseclaw/.defenseclaw-retained`"] },
   { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/macos.mdx", section: "Remove", has: ["`/opt/cisco/defenseclaw/lifecycle/retained-state.json`", "`/opt/cisco/defenseclaw/runtime/.defenseclaw-retained`"] },
+  // Perl hook-file write readings (substrate-1 GAP-1139, GAP-1146, GAP-1147) and a skill added during a folder move (rel-1-0-10 GAP-2039): the pages state these limits.
+  { gap: "substrate-1 GAP-1139, GAP-1146, GAP-1147", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["DefenseClaw reads the inline Perl program only; a file the program loads with `require` or `do` can change values the hook cannot see, so an open of a hook file whose mode depends on such a file is reported as an unproven write.", "Subroutine and constant definitions made inside a string `eval` are not evaluated; an affected open of a hook file is reported as an unproven write.", "A Perl open mode changed by anything other than a plain assignment is not computed; the open of a hook file is reported as an unproven write."] },
+  { gap: "rel-1-0-10 GAP-2039", page: "ai-discovery.mdx", section: "Skill inventory", has: ["A skill added at the same moment its folder is moved or re-linked can appear one scan later than other skills."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
