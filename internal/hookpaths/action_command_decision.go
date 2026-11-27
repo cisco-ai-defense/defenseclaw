@@ -703,12 +703,14 @@ func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Di
 	// put its directory in dirs.
 	certain := actionCertainDirectoryCalls(file, home)
 	cdAt := make(map[*syntax.CallExpr]int)
-	readAt := func(call *syntax.CallExpr, words []string) bool {
-		candidates := dirs
+	candidatesOf := func(call *syntax.CallExpr) []string {
 		if at, ok := cdAt[certain[call]]; ok {
-			candidates = dirs[at:]
+			return dirs[at:]
 		}
-		for _, dir := range candidates {
+		return dirs
+	}
+	readAt := func(call *syntax.CallExpr, words []string) bool {
+		for _, dir := range candidatesOf(call) {
 			if actionPrivateKeyReadWords(words, dir, home, mode, 0) {
 				return true
 			}
@@ -770,8 +772,27 @@ func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Di
 				case len(words) == 1:
 					dirs = append(dirs, home)
 				case len(words) == 2 && words[1] != "" && words[1] != "-":
-					cdAt[call] = len(dirs)
-					dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+					if filepath.IsAbs(words[1]) {
+						cdAt[call] = len(dirs)
+						dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+						break
+					}
+					// A relative operand names a folder under the folder
+					// the cd ran in, which is any of its own candidates
+					// (GAP-1155). A call certain of this cd reads only in
+					// those folders, when all of them fit.
+					var entered []string
+					for _, dir := range candidatesOf(call) {
+						if next := OperandPath(words[1], dir); !slices.Contains(entered, next) {
+							entered = append(entered, next)
+						}
+					}
+					if len(dirs)+len(entered) <= 8 {
+						cdAt[call] = len(dirs)
+						dirs = append(dirs, entered...)
+					} else {
+						dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+					}
 				}
 			}
 			return !found

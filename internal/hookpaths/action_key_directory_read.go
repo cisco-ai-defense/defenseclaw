@@ -246,11 +246,14 @@ func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string,
 }
 
 // actionCertainDirectoryCalls maps each call that runs only after a cd or
-// pushd to one absolute directory succeeded to that cd call: in cd /proj &&
-// grep -rn TODO . the grep runs in /proj and in no directory an earlier cd
-// named (GAP-2421). Only the statement just before && counts, so a relative
-// directory (CDPATH), cd -, a directory set by another program (source,
-// eval, a function) and a cd in a subshell or group keep every candidate.
+// pushd to one directory succeeded to that cd call: in cd /proj && grep -rn
+// TODO . the grep runs in /proj and in no directory an earlier cd named
+// (GAP-2421), and in cd sub && cat notes the cat runs in sub, not in the
+// start folder (GAP-1155; the reader joins a relative operand to each
+// candidate the cd itself had). Only the statement just before && counts, so
+// cd -, a directory set by another program (source, eval, a function) and a
+// cd in a subshell or group keep every candidate, and so does a relative
+// operand CDPATH or cdable_vars may send elsewhere (actionCdSearchMayApply).
 // A right side that may change the directory again (cd -, popd, cd ~-,
 // cd "$OLDPWD", a nested shell that does so) keeps every candidate for all
 // its calls (RV26-1), and a command with a function, an alias, a trap, eval
@@ -278,6 +281,9 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 	if opaque {
 		return certain
 	}
+	// searchMayApply: 0 not asked yet, 1 a bare relative operand may be
+	// searched (actionCdSearchMayApply), 2 it may not.
+	searchMayApply := 0
 	// syntax.Walk visits an outer && before the ones inside its right side,
 	// so the innermost cd a call depends on is the one kept.
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -300,8 +306,19 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 		}
 		program, programStatic := StaticWord(cd.Args[0], home)
 		target, targetStatic := StaticWord(cd.Args[1], home)
-		if !programStatic || !targetStatic || program != "cd" && program != "pushd" || !filepath.IsAbs(target) {
+		if !programStatic || !targetStatic || program != "cd" && program != "pushd" || target == "" || target == "-" {
 			return true
+		}
+		if !filepath.IsAbs(target) && !actionCdOperandUnsearched(target) {
+			if searchMayApply == 0 {
+				searchMayApply = 2
+				if actionCdSearchMayApply(file, home) {
+					searchMayApply = 1
+				}
+			}
+			if searchMayApply == 1 {
+				return true
+			}
 		}
 		if actionMayChangeDirectory(binary.Y, home) {
 			return true
@@ -315,6 +332,65 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 		return true
 	})
 	return certain
+}
+
+// actionCdOperandUnsearched reports a cd operand the shell uses without a
+// CDPATH search (POSIX cd step 5): one that starts with a slash (/c/proj on
+// Git Bash, which filepath.IsAbs does not call absolute on Windows) or whose
+// first component is . or ...
+func actionCdOperandUnsearched(target string) bool {
+	return strings.HasPrefix(target, "/") || target == "." || target == ".." ||
+		strings.HasPrefix(target, "./") || strings.HasPrefix(target, "../")
+}
+
+// actionCdSearchMayApply reports a command in which a bare relative cd
+// operand (cd sub) may not be the folder it names under the current one:
+// the command names CDPATH (cdpath in zsh) or cdable_vars anywhere, quoting
+// and brace punctuation removed, or it sets a variable whose name the hook
+// cannot read (export "$n"=..., printf -v, read, declare, an arithmetic
+// assignment, an indirect expansion), which may be CDPATH (GAP-1155). A
+// CDPATH or shell option set outside the command is not seen.
+func actionCdSearchMayApply(file *syntax.File, home string) bool {
+	joined := strings.NewReplacer(`'`, "", `"`, "", `\`, "", "{", "", "}", "", ",", "", "`", "")
+	names := func(text string) bool {
+		text = strings.ToLower(joined.Replace(text))
+		return strings.Contains(text, "cdpath") || strings.Contains(text, "cdable")
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Lit:
+			found = names(node.Value)
+		case *syntax.SglQuoted:
+			found = names(node.Value)
+		case *syntax.Word:
+			found = names(actionWordLiteralText(node))
+		case *syntax.ParamExp:
+			found = node.Param != nil && names(node.Param.Value) || node.Excl || node.Names != 0
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause:
+			found = true
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				break
+			}
+			if program, static := StaticWord(node.Args[0], home); static && actionVariableSetters[programBase(program)] {
+				for _, arg := range node.Args[1:] {
+					if _, static := StaticWord(arg, home); !static {
+						found = true
+					}
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// actionVariableSetters are the builtins that set a shell variable named by
+// an operand (actionCdSearchMayApply).
+var actionVariableSetters = map[string]bool{
+	"export": true, "declare": true, "typeset": true, "local": true, "readonly": true, "read": true,
+	"printf": true, "mapfile": true, "readarray": true, "getopts": true, "let": true, "unset": true,
 }
 
 // actionMayChangeDirectory reports a command that names a directory change
