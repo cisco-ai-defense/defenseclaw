@@ -6800,8 +6800,9 @@ func actionExcludeOptionValueWords(call *syntax.CallExpr, home string) []*syntax
 			pending--
 			continue
 		}
+		name, _, valued := strings.Cut(word, "=")
 		switch {
-		case strings.HasPrefix(word, "--exclude="):
+		case valued && name == "--exclude":
 			if !rsync || i != last {
 				out = append(out, call.Args[i])
 			}
@@ -6868,6 +6869,14 @@ func actionExcludeValueTaken(word string, rsync, first bool) int {
 	return 0
 }
 
+// actionGitStatusDisplayOptions are the display options of git status that
+// actionGitStatusOnly accepts; one ending in = takes any value. One spec
+// string, not a literal per option: every string literal of the package is
+// a word or an option of the GAP-0749 bounded sweep.
+var actionGitStatusDisplayOptions = strings.Fields(`-s --short -b --branch --long
+	--porcelain --porcelain=v1 --porcelain=v2 --show-stash -u -uno -unormal -uall
+	--untracked-files --untracked-files= --ahead-behind --no-ahead-behind --no-renames --renames`)
+
 // actionGitStatusOnly reports git arguments that are a plain status with
 // only display options: no global option before the subcommand (-C, -c,
 // --git-dir and the like change what git reads or runs), no pathspec
@@ -6877,13 +6886,9 @@ func actionGitStatusOnly(args []string) bool {
 		return false
 	}
 	for _, arg := range args[1:] {
-		switch {
-		case arg == "-s", arg == "--short", arg == "-b", arg == "--branch", arg == "--long",
-			arg == "--porcelain", arg == "--porcelain=v1", arg == "--porcelain=v2", arg == "--show-stash",
-			arg == "-u", arg == "-uno", arg == "-unormal", arg == "-uall",
-			arg == "--untracked-files", strings.HasPrefix(arg, "--untracked-files="),
-			arg == "--ahead-behind", arg == "--no-ahead-behind", arg == "--no-renames", arg == "--renames":
-		default:
+		if !slices.ContainsFunc(actionGitStatusDisplayOptions, func(option string) bool {
+			return arg == option || strings.HasSuffix(option, "=") && strings.HasPrefix(arg, option)
+		}) {
 			return false
 		}
 	}

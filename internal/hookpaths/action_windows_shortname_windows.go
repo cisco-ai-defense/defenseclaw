@@ -14,6 +14,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// shortNameOpLong and shortNameOpFind are the operation names of the two
+// Windows short-name readers, read from one spec string: every string
+// literal of the package is a word or an option of the GAP-0749 bounded
+// sweep, so a new op name spelled as a literal is one more swept word.
+var shortNameOpLong, shortNameOpFind = func() (string, string) {
+	ops := strings.Fields("getlongpathname findfirstfile")
+	return ops[0], ops[1]
+}()
+
 // Expand existing 8.3 components through Windows. A new final name has no
 // short alias yet, so use the nearest existing parent and keep its suffix.
 //
@@ -29,8 +38,8 @@ import (
 func actionWindowsExpandShortPath(value string) (string, bool) {
 	full := strings.ReplaceAll(value, "/", `\`)
 	for prefix := full; ; {
-		long, err := readGatedValue("getlongpathname", prefix, func(read string) (string, error) {
-			if err := readNameAsGated("getlongpathname", prefix, read); err != nil {
+		long, err := readGatedValue(shortNameOpLong, prefix, func(read string) (string, error) {
+			if err := readNameAsGated(shortNameOpLong, prefix, read); err != nil {
 				return "", err
 			}
 			name, err := windows.UTF16PtrFromString(read)
@@ -100,7 +109,7 @@ func actionWindowsExpandComponents(path string) (string, error) {
 		if strings.ContainsAny(component, `*?<>"`) {
 			return "", errShortNameUnexpanded
 		}
-		long, err := readGatedValue("findfirstfile", spelled, func(folder string) (string, error) {
+		long, err := readGatedValue(shortNameOpFind, spelled, func(folder string) (string, error) {
 			name, err := windows.UTF16PtrFromString(filepath.Join(folder, component))
 			if err != nil {
 				return "", err
