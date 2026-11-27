@@ -3524,10 +3524,13 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 			}
 			child = parsed.childIndex
 			if !slices.Contains(words[1:child], "--skip-chdir") {
-				if filepath.IsAbs(parsed.root) {
-					folder = filepath.Clean(parsed.root)
+				// A chroot root is a POSIX path: read with the rules of the
+				// cd walk, not the native ones of the gateway host
+				// (rel-1-0-10:GAP-1881).
+				if simplePathAbs(parsed.root) {
+					folder = simplePathClean(parsed.root)
 				} else if folder != "" && !standInReached(folder, standIn) {
-					folder = filepath.Join(folder, parsed.root)
+					folder = simplePathJoin(folder, parsed.root)
 				} else {
 					return "", true, true
 				}
@@ -3543,10 +3546,10 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 				return "", true, true
 			}
 			if parsed.workDir != "" {
-				if filepath.IsAbs(parsed.workDir) {
-					folder = filepath.Clean(parsed.workDir)
+				if simplePathAbs(parsed.workDir) {
+					folder = simplePathClean(parsed.workDir)
 				} else if folder != "" && !standInReached(folder, standIn) {
-					folder = filepath.Join(folder, parsed.workDir)
+					folder = simplePathJoin(folder, parsed.workDir)
 				} else {
 					return "", true, true
 				}
@@ -4608,10 +4611,7 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if state.cwd == "" {
 		return "", true
 	}
-	if simplePOSIXAbs(state.cwd) {
-		return path.Join(state.cwd, dir), true
-	}
-	return filepath.Clean(filepath.Join(state.cwd, dir)), true
+	return simplePathJoin(state.cwd, dir), true
 }
 
 // simplePathAbs reports whether a shell directory or operand is absolute.
@@ -4630,6 +4630,16 @@ func simplePathClean(value string) string {
 		return path.Clean(value)
 	}
 	return filepath.Clean(value)
+}
+
+// simplePathJoin joins a relative operand to a folder with the rules of
+// the folder: POSIX rules for a "/" folder (filepath.Join would turn
+// /srv/root into \srv\root on Windows), native rules for any other.
+func simplePathJoin(folder, operand string) string {
+	if simplePOSIXAbs(folder) {
+		return path.Join(folder, operand)
+	}
+	return filepath.Join(folder, operand)
 }
 
 // simplePOSIXAbs reports a "/" path that is not a "//host/share" one, which

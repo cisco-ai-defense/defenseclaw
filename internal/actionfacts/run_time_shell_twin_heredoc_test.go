@@ -32,7 +32,7 @@ func TestRunTimeShellTwinReadsAHeredocAShellRuns(t *testing.T) {
 		{"bash -c \"$(cat <<EOF\nmake clean\nEOF\n)\"", "bash -c {t}"},
 		{"eval \"$(cat <<'EOF'\nmake clean\nEOF\n)\"", "bash -c {t}"},
 		{"sh <(cat <<EOF\nmake clean\nEOF\n)", "bash -c {q}"},
-		{"source <(cat <<EOF\nmake clean\nEOF\n)", "bash -c {q}"},
+		{"source <(cat <<EOF\nmake clean\nEOF\n)", "{ make clean\n}"},
 		// An unquoted body that expands only parameters is read as written.
 		{"cat <<EOF | sh\nrm -rf $HOME/tmp\nEOF", "cat <<EOF | bash -c " + posixSingleQuoted("rm -rf $HOME/tmp\n") + "\nrm -rf $HOME/tmp\nEOF"},
 	}

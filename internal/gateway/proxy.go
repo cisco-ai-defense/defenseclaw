@@ -5967,12 +5967,13 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() {
 		return nil
 	}
-	tool, args, partial := action.Input.Tool, action.Input.Args, false
+	tool, args := action.Input.Tool, action.Input.Args
+	var shown json.RawMessage
 	if !codeGuardWriteTool(tool) {
-		// A shell here-document patch (rel-1-0-10:GAP-1635), as the hook
-		// routes read it (codeGuardWriteRequest).
+		// A shell here-document patch or file write (rel-1-0-10:GAP-1635,
+		// GAP-1640), as the hook routes read it (codeGuardWriteRequest).
 		var ok bool
-		if args, partial, ok = codeGuardShellPatchArgs(action.Input); !ok {
+		if args, shown, ok = codeGuardShellPatchArgs(action.Input); !ok {
 			return nil
 		}
 		tool = "apply_patch"
@@ -5981,9 +5982,7 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if cfg := proxyDecisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	scan := codeGuardScanWriteArgs(rulesDir, tool, args)
-	scan.complete = scan.complete && !partial
-	return codeGuardRuleFindings(scan, true, action.EnforcementCapable)
+	return codeGuardRuleFindings(codeGuardScanShellView(rulesDir, tool, args, shown), true, action.EnforcementCapable)
 }
 
 // proxyBareReading is a tool call as the proxy read it before it was built
