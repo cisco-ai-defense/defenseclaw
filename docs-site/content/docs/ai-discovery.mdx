@@ -1120,6 +1120,10 @@ whenever it sends the endpoint inventory: on a Secure Client endpoint, and on
 a per-user or standalone enterprise install with `ai_discovery` on. The
 advertised tools come from the watcher's MCP admission scans, so with
 `gateway.watcher.enabled` off a server lists only the tools of earlier scans.
+While the watcher runs, a server it has not listed yet makes the advertised
+tool collection partial for up to 15 minutes after the server or the watcher
+appears. With the watcher off, a server that was never scanned is sent with no
+advertised tools in a complete collection.
 Parent identities refresh with inventory publication. An observed call alone
 does not mark a listing complete.
 The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing,
