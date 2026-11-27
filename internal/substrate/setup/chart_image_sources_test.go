@@ -125,3 +125,47 @@ func renderedImages(objs []k8sObject) []string {
 	}
 	return out
 }
+
+// substrate-1:GAP-1133: the kind E2E turns the skill scanner sidecar on, so
+// nothing exercised the chart as shipped. E2E_SKILL_SCANNER=off installs the
+// chart without that setting and checks the gateway pod has no scanner
+// container. The default render must really be that chart: no scanner image.
+func TestKindE2ECoversTheChartDefaultWithTheSkillScannerOff(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	read := func(rel string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.ReplaceAll(string(b), "\r\n", "\n")
+	}
+	runner, cases := read("test/substrate-e2e/run.sh"), read("test/substrate-e2e/defenseclaw.sh")
+	for _, want := range []string{
+		`: "${E2E_SKILL_SCANNER:=on}"`,
+	} {
+		if !strings.Contains(runner, want) {
+			t.Errorf("test/substrate-e2e/run.sh lacks %q", want)
+		}
+	}
+	for _, want := range []string{
+		`"$E2E_SKILL_SCANNER" = off`,
+		"the default chart runs no skill scanner sidecar",
+		`*" skill-scanner "*) fail`,
+	} {
+		if !strings.Contains(cases, want) {
+			t.Errorf("test/substrate-e2e/defenseclaw.sh lacks the default-chart case (%q)", want)
+		}
+	}
+	if !strings.Contains(read(".github/workflows/substrate-kind-e2e.yml"), "E2E_SKILL_SCANNER: ${{ inputs.skill_scanner || 'on' }}") {
+		t.Error("the Substrate Kind E2E workflow does not pass E2E_SKILL_SCANNER through")
+	}
+	t.Run("default render", func(t *testing.T) {
+		helm := helmBinary(t)
+		for _, image := range renderedImages(decodeObjects(t, renderChart(t, helm, "default"))) {
+			if strings.Contains(image, "defenseclaw-scanner") {
+				t.Fatalf("the default render runs the skill scanner image %s: the E2E default-chart case would not be the default", image)
+			}
+		}
+	})
+}
