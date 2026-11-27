@@ -945,12 +945,20 @@ func sedBSDInPlace(words []string) (files []string, suffix string, inPlace bool)
 }
 
 func literalInterpreterWrites(code, language, cwd, home string) []string {
+	return literalInterpreterWritesDepth(code, language, cwd, home, 0)
+}
+
+// literalInterpreterWritesDepth is literalInterpreterWrites for code a shell
+// at reader depth depth runs: a Perl pipe command is read one level below it,
+// so alternating Perl and shell layers share the shell reader's depth bound
+// (rel-1-0-10:GAP-2229).
+func literalInterpreterWritesDepth(code, language, cwd, home string, depth int) []string {
 	if len(code) > 16<<10 {
 		return nil
 	}
 	paths := literalInterpreterWritesBase(code, language, cwd, home)
 	if language == "perl" {
-		paths = append(paths, perlProvenWrites(code, cwd, home)...)
+		paths = append(paths, perlProvenWrites(code, cwd, home, depth)...)
 	}
 	return paths
 }

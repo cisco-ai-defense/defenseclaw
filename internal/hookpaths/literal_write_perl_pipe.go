@@ -7,8 +7,9 @@ import "strings"
 
 // perlPipeWrites passes only syntactically fixed pipe commands to the shared
 // shell reader. List-form arguments are quoted as distinct shell words so a
-// metacharacter inside an argument cannot become shell syntax.
-func perlPipeWrites(tokens []perlToken, calls []perlCall, skip map[int]bool, cwd, home string) []string {
+// metacharacter inside an argument cannot become shell syntax. depth is the
+// shell reader depth of the shell that runs the Perl.
+func perlPipeWrites(tokens []perlToken, calls []perlCall, skip map[int]bool, cwd, home string, depth int) []string {
 	var paths []string
 	for _, call := range calls {
 		if call.name != "open" || skip[call.start] || call.argc < 2 {
@@ -29,7 +30,7 @@ func perlPipeWrites(tokens []perlToken, calls []perlCall, skip map[int]bool, cwd
 				continue
 			}
 			if command != "" {
-				paths = append(paths, perlShellWrites(command, cwd, home)...)
+				paths = append(paths, perlShellWrites(command, cwd, home, depth)...)
 			}
 			continue
 		}
@@ -40,7 +41,7 @@ func perlPipeWrites(tokens []perlToken, calls []perlCall, skip map[int]bool, cwd
 		if call.argc == 3 {
 			command, fixed := perlArgumentLiteral(tokens, call.args[2])
 			if fixed && command != "" {
-				paths = append(paths, perlShellWrites(command, cwd, home)...)
+				paths = append(paths, perlShellWrites(command, cwd, home, depth)...)
 			}
 			continue
 		}
@@ -54,7 +55,7 @@ func perlPipeWrites(tokens []perlToken, calls []perlCall, skip map[int]bool, cwd
 			words = append(words, perlShellQuote(word))
 		}
 		if len(words) != 0 {
-			paths = append(paths, perlShellWrites(strings.Join(words, " "), cwd, home)...)
+			paths = append(paths, perlShellWrites(strings.Join(words, " "), cwd, home, depth)...)
 		}
 	}
 	return paths
@@ -64,8 +65,12 @@ func perlShellQuote(word string) string {
 	return "'" + strings.ReplaceAll(word, "'", "'\"'\"'") + "'"
 }
 
-func perlShellWrites(command, cwd, home string) []string {
-	paths := literalWriteOperandsDepth(command, cwd, home, 1)
+// perlShellWrites reads a pipe command one level below the shell that runs
+// the Perl, so the shell reader's depth bound also bounds alternating Perl
+// and shell layers; each pipe used to start again at depth 1
+// (rel-1-0-10:GAP-2229).
+func perlShellWrites(command, cwd, home string, depth int) []string {
+	paths := literalWriteOperandsDepth(command, cwd, home, depth+1)
 	if redirects, parsed, _ := ShellWriteOperands(command, cwd, home); parsed {
 		paths = append(paths, redirects...)
 	}

@@ -575,7 +575,8 @@ func perlFixedPath(tokens []perlToken, start, end int) (string, bool) {
 
 // perlProvenWrites adds only paths supported by a complete Perl parse and a
 // positive write rule. An incomplete program contributes no new operands.
-func perlProvenWrites(code, cwd, home string) []string {
+// depth is the shell reader depth of the shell that runs the Perl.
+func perlProvenWrites(code, cwd, home string, depth int) []string {
 	if !strings.ContainsAny(code, "'\"") ||
 		!strings.Contains(code, "open") && !strings.Contains(code, "unlink") &&
 			!strings.Contains(code, "rename") && !strings.Contains(code, "link") &&
@@ -595,7 +596,7 @@ func perlProvenWrites(code, cwd, home string) []string {
 	paths := perlResolveDirectWrites(tokens, calls, override.skip)
 	paths = append(paths, override.paths...)
 	paths = append(paths, perlSysopenWrites(tokens, calls, perlNamedDefinitions(tokens), override.skip)...)
-	return append(paths, perlPipeWrites(tokens, calls, override.skip, cwd, home)...)
+	return append(paths, perlPipeWrites(tokens, calls, override.skip, cwd, home, depth)...)
 }
 
 func perlQuoteLikeExcluded(previous string) bool {
