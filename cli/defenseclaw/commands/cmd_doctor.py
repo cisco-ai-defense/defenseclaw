@@ -8107,6 +8107,53 @@ def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
     _emit("warn", "Hook capacity", detail, r=r)
 
 
+def _check_host_records(cfg, health: dict | None, r: _DoctorResult) -> None:
+    """The Host records row of a managed gateway (GAP-2042).
+
+    The managed gateway gives its administrator the count in /health, and
+    in its authenticated /status (read once per Doctor run). No row on a
+    per-user gateway, Secure Client or an older gateway.
+    """
+    records = health.get("host_records") if isinstance(health, dict) else None
+    if not isinstance(records, dict):
+        document, _problem, _checked = _authenticated_gateway_status_document(cfg)
+        records = document.get("host_records") if isinstance(document, dict) else None
+    _emit_host_records_row(records, r)
+
+
+def _emit_host_records_row(records, r: _DoctorResult) -> None:
+    """Host records: the managed hook's decisions taken without the gateway.
+
+    A managed hook that cannot get a gateway answer decides by its fail mode
+    and writes one record to the host log (journal, unified log or the
+    Windows Application event log). Those decisions are not in the audit
+    log. Blocks in the window while the gateway reports healthy now are the
+    case to look at: calls were blocked with no policy answer. The records are counted
+    only; any local account can write the same tag, so they are not proof.
+    """
+    from defenseclaw.commands.cmd_status import _host_records_status, _host_records_summary
+
+    status = _host_records_status({"host_records": records})
+    if status is None:
+        return
+    if not status["readable"]:
+        reason = status["reason"] or "unknown"
+        _emit("skip", "Host records", f"the host log was not read: {reason}", r=r)
+        return
+    detail = _host_records_summary(status)
+    if status["last_read"]:
+        detail += f" (last read {status['last_read']})"
+    if status["blocks"]:
+        detail += (
+            f". {status['blocks']} blocks in the last {status['window_hours']} h; the gateway reports healthy now. "
+            "A managed hook blocked those calls without a gateway answer; the decisions are in the host log, "
+            "not in the audit log"
+        )
+        _emit("warn", "Host records", detail, r=r)
+        return
+    _emit("pass", "Host records", detail, r=r)
+
+
 def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
     """Managed Windows route-only: the hook guardian peer SID broker.
 
@@ -17523,6 +17570,7 @@ def doctor(
         _check_agent_identity_ledger(sidecar_health, r)
         _check_live_audit_store(sidecar_health, r)
         _check_hook_capacity(cfg, sidecar_health, r)
+        _check_host_records(cfg, sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)

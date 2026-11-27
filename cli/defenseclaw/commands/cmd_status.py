@@ -523,6 +523,7 @@ def status(app: AppContext, as_json: bool) -> None:
             )
         _print_policy(health)
         _print_hook_capacity(health)
+        _print_host_records(health)
         _print_watch_root_coverage(health)
         _print_audit_log_health(cfg, health)
         _print_retention_cap_warning(health)
@@ -1333,6 +1334,11 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
         # The hook load of the last hour (S8 DESIGN 18): only the
         # authenticated /status of a per-user gateway carries it.
         health = {**health, "hook_capacity": capacity}
+    records = document.get("host_records")
+    if isinstance(records, dict) and "host_records" not in health:
+        # The managed hook's host records (GAP-2042), for an account that
+        # reads the managed /status with the gateway credential.
+        health = {**health, "host_records": records}
     # The verified runtime PID, for the Sidecar row (GAP-1789).
     return {**health, "pid": trust.pid} if "pid" not in health else health
 
@@ -1469,6 +1475,65 @@ def _hook_capacity_clauses(denies: int, late: int, shed: int) -> list[str]:
     if shed:
         clauses.append(_hook_capacity_shed_clause(shed))
     return clauses
+
+
+def _host_records_status(health: dict | None) -> dict | None:
+    """The managed hook's host record count of the gateway, or None (GAP-2042).
+
+    A managed hook that decides without the gateway (fail open or closed, a
+    call shed past its retry budget, an integrity boundary) writes one record
+    to the host log (journal, unified log or Application event log); those
+    decisions are not in the audit log. A managed gateway counts the records
+    of the last 24 h. Absent on per-user gateways, Secure Client, older
+    gateways and for an ordinary account of a managed host.
+    """
+    records = (health or {}).get("host_records")
+    if not isinstance(records, dict):
+        return None
+
+    def count(key: str) -> int:
+        value = records.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    return {
+        "readable": records.get("readable") is True,
+        "reason": str(records.get("reason") or "")[:200],
+        "window_hours": count("window_hours") or 24,
+        "records": count("records"),
+        "blocks": count("blocks"),
+        "allows": count("allows"),
+        "dropped": count("dropped"),
+        "read_limit_reached": records.get("read_limit_reached") is True,
+        "read_max": count("read_max") or 500,
+        "last_read": str(records.get("last_read") or "")[:40],
+    }
+
+
+def _host_records_summary(records: dict) -> str:
+    """'N in 24 h, B blocks, D dropped' of a _host_records_status value."""
+    text = (
+        f"{records['records']} in {records['window_hours']} h, {records['blocks']} blocks, {records['dropped']} dropped"
+    )
+    if records["read_limit_reached"]:
+        text += f" (newest {records['read_max']} read)"
+    return text
+
+
+def _print_host_records(health: dict | None) -> None:
+    """One row only when the managed hook wrote records in the window (GAP-2042)."""
+    records = _host_records_status(health)
+    if records is None or not records["readable"] or not (records["records"] or records["dropped"]):
+        return
+    value = _host_records_summary(records)
+    if records["blocks"]:
+        _status_row(
+            "Host records",
+            ux._style(
+                value + "; a managed hook blocked calls without a gateway answer, see defenseclaw doctor", fg="yellow"
+            ),
+        )
+        return
+    _status_row("Host records", value)
 
 
 def _print_hook_capacity(health: dict | None) -> None:
@@ -2842,6 +2907,8 @@ def _status_payload(app) -> dict:
         payload["policy"] = policy
     if (capacity := _hook_capacity_status(health)) is not None:
         payload["hook_capacity"] = capacity
+    if (records := _host_records_status(health)) is not None:
+        payload["host_records"] = records
     payload["connectors"] = _connector_roster(cfg, health=health)
     if any(row.get("name") == "openclaw" and row.get("enabled") for row in payload["connectors"]):
         from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
