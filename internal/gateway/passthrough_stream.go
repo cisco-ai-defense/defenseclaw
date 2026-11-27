@@ -505,7 +505,13 @@ func (s *passthroughStream) run() {
 	runHeldHit := false
 	runHeldBound := func(release bool) bool {
 		if runHeldHit {
+			// Not decided again, but a run given up still gets the full
+			// check of the text read so far before it goes out, as at the
+			// parent (CHK-RF-1478B N1).
 			if release {
+				if !scanText(true) {
+					return false
+				}
 				accumulated.ReleaseOpenSecret()
 				secretOpen, secretKey = false, false
 			}
