@@ -2499,7 +2499,7 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	if slices.ContainsFunc(loops, func(loop span) bool { return loop.once }) &&
 		!slices.ContainsFunc(bodies, func(body span) bool { return body.name == "break" || body.name == "continue" }) &&
 		!slices.Contains(programs, "alias") && !slices.Contains(programs, "enable") && (len(bodies) == 0 || !guestFuncMayContinue(file)) &&
-		!slices.ContainsFunc(callNodes, guestCallRunsText) {
+		!slices.ContainsFunc(callNodes, func(call *syntax.CallExpr) bool { return guestCallRunsText(call, home) }) {
 		loops = slices.DeleteFunc(loops, func(loop span) bool { return loop.once })
 	}
 	if len(loops) == 0 && len(bodies) == 0 {
@@ -2790,11 +2790,14 @@ func guestLoopMayContinue(call *syntax.CallExpr) bool {
 
 // guestCallRunsText reports a call of eval, source or ., also run through
 // builtin or command and their options: the text it runs may define a
-// function (substrate-1 GAP-0998, CHK-P49U).
-func guestCallRunsText(call *syntax.CallExpr) bool {
+// function (substrate-1 GAP-0998, CHK-P49U). Each word is read as bash reads
+// it (hookpaths.StaticWord), so a quoted or backslash runner word is one
+// too (CHK-0998C); a word with an expansion is no runner, as a dynamic
+// program word before the loop keeps the loop once (SEC10-K K12).
+func guestCallRunsText(call *syntax.CallExpr, home string) bool {
 	wrapped := false
 	for _, word := range call.Args {
-		lit := word.Lit()
+		lit, _ := hookpaths.StaticWord(word, home)
 		switch {
 		case lit == "builtin" || lit == "command":
 			wrapped = true
