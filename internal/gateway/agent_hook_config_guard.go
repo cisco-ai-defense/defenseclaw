@@ -1638,8 +1638,8 @@ func sandboxAgentHookConfigInlineWrite(command, cwd, home string) string {
 		return ""
 	}
 	names := sandboxAgentHookConfigNames(cwd, home)
-	if reached := hookpaths.RegistrationWriteReached(command, cwd, home, names); len(reached) > 0 {
-		return reached[0]
+	if reached := hookpaths.RegistrationFirstWriteReached(command, cwd, home, names); reached != "" {
+		return reached
 	}
 	handed, _ := hookpaths.InlineHandedPaths(command, cwd, home)
 	for _, word := range handed {
