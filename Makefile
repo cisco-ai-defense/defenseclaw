@@ -98,7 +98,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
 
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov tui-test gateway-test go-test-cov \
+        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov tui-test gateway-test connector-test go-test-cov \
         packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-test-scripts macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
@@ -908,6 +908,28 @@ gateway-test: sync-openclaw-extension
 	$(GO_SHARD_RUN) --package-dir internal/gateway -- \
 		go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) -v ./internal/gateway
 	go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) ./test/... -v
+
+# connector-test runs internal/gateway/connector as GO_TEST_SHARDS parallel
+# shards (scripts/go_test_shards.py, balanced like CI, every test exactly once),
+# without -race. The package is about 9,000 test cases, most of them a rendered
+# shell hook run in bash, and takes about 19 minutes (25 before GAP-2279) as one
+# test binary on a quiet 64-CPU box and over 40 minutes on a loaded one. The
+# hook tests run the real gateway binary: it is built once here and shared,
+# linked to read an empty account home of its own (as the CI shard steps do),
+# instead of once per shard. Each shard runs with GOMAXPROCS = the CPUs divided
+# by the shard count (at least 2), so the shards together run no more hooks and
+# parallel tests at once than one process would: a hook has a 3 s restart window
+# and a 4 s answer window, and 8 shards of 64 parallel tests each on one box
+# made a hook miss its window.
+CONNECTOR_TEST_GATEWAY_DIR := $(abspath $(DIST_DIR))/connector-test-gateway
+connector-test: sync-openclaw-extension
+	rm -rf $(CONNECTOR_TEST_GATEWAY_DIR)
+	mkdir -p $(CONNECTOR_TEST_GATEWAY_DIR)/account-home
+	go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/hookcli.outageAccountHomeBake=$(CONNECTOR_TEST_GATEWAY_DIR)/account-home" \
+		-o $(CONNECTOR_TEST_GATEWAY_DIR)/defenseclaw ./cmd/defenseclaw
+	cpus=$$(getconf _NPROCESSORS_ONLN); per=$$(( (cpus + $(GO_TEST_SHARDS) - 1) / $(GO_TEST_SHARDS) )); [ "$$per" -ge 2 ] || per=2; \
+	DC_TEST_NATIVE_GATEWAY=$(CONNECTOR_TEST_GATEWAY_DIR)/defenseclaw GOMAXPROCS=$$per $(GO_SHARD_RUN) --package-dir internal/gateway/connector -- \
+		go test -count=1 -timeout $(GO_TEST_TIMEOUT) -v ./internal/gateway/connector
 
 # packaging-macos-test runs the pure-bash unit tests for the macOS installer
 # scripts under packaging/macos/. They don't touch /Library, sudo, or
