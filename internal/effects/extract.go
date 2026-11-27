@@ -1916,11 +1916,15 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 	}
 	unaccounted := wrapperUA || declUA || bsdReject || entry.BuiltinUnknown || envUA
-	// homeOnly: the one unaccounted input is a HOME other than the caller's
-	// (sudo, doas, runuser, su, env -i, a HOME= prefix). It gives the program
-	// its own config files to read; it does not change the paths the call
-	// names, which the caller's shell already expanded (GAP-1478).
-	homeOnly := envUA && envName == "HOME" && !wrapperUA && !declUA && !bsdReject && !entry.BuiltinUnknown
+	// envOnly: the one unaccounted input is an env input the allow list does
+	// not account for: a NAME= prefix, env or sudo NAME=, an export, a changed
+	// PATH, or a HOME other than the caller's (sudo, doas, runuser, su,
+	// env -i). It may give the program config of its own to read, or make the
+	// word name another program; it does not change the paths the call names,
+	// which the caller's shell already expanded, so the write the call names on
+	// an exact protected member stays that write (GAP-1478). A shell startup
+	// flag alone leaves envName empty and is not one.
+	envOnly := envUA && envName != "" && !wrapperUA && !declUA && !bsdReject && !entry.BuiltinUnknown
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
@@ -1936,9 +1940,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 		for i := cmdStart; i < end; i++ {
 			e := &w.res.Effects[i]
-			if homeOnly && len(e.Reasons) == 0 && e.RoleState == RoleStateKnown && e.TargetState == TargetStateKnown &&
+			if envOnly && len(e.Reasons) == 0 && e.RoleState == RoleStateKnown && e.TargetState == TargetStateKnown &&
 				e.Target.Type == TargetPath {
-				e.addReason(ReasonHomeInput, ScopeRole)
+				e.addReason(ReasonEnvInput, ScopeRole)
 			}
 			e.addReason(ReasonUnknownFlag, ScopeRole)
 		}

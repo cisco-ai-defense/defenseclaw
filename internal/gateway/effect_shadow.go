@@ -518,10 +518,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		// preserves the registered entries is no hook mutation; the legacy
 		// readers still grade the call. Deletes, truncations and opaque data
 		// keep their effect grade (GAP-1478).
-		// A HomeInput write keeps its known member only to be decided by its
+		// An EnvInput write keeps its known member only to be decided by its
 		// proof (GAP-1478); it was never a preserved write before.
 		if fullyAccounted && len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 &&
-			!effectrules.HomeInput(f) {
+			!effectrules.EnvInput(f) {
 			preserved := false
 			if env.preservedHookConfigPaths != nil {
 				_, preserved = env.preservedHookConfigPaths[effectHookConfigTargetKey(t.GetPath())]
@@ -563,9 +563,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if fullyAccounted {
 			mutationProofs = knownProtectedMutationProofs(f, flavor)
 		}
-		// A named mutation that is known but for the HOME of its program
-		// (effectNamedRoleKnown: sudo rsync --log-file=MEMBER) is decided by
-		// its proof like the unwrapped spelling, not by reach (GAP-1478).
+		// A named mutation that is known but for an env input of its program
+		// (effectNamedRoleKnown: sudo rsync --log-file=MEMBER, FOO=1 rsync
+		// --log-file=MEMBER) is decided by its proof like the unwrapped
+		// spelling, not by reach (GAP-1478).
 		r := ""
 		if !unknownEffect || len(mutationProofs) == 0 {
 			r = factReach(f, known, unknownEffect, env, flavor)
@@ -593,15 +594,14 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			c.known = true
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		}
-		if fullyAccounted {
-			for _, proof := range mutationProofs {
-				c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
-				c.known, c.knownMutation = true, true
-				// The authorized-keys ruling blocks in every pack.
-				if proof.Target == decide.TargetAuthorizedKeys {
-					c.restricted, c.restrictedRuling = true, true
-					c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
-				}
+		// mutationProofs is only set when fullyAccounted (above).
+		for _, proof := range mutationProofs {
+			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+			c.known, c.knownMutation = true, true
+			// The authorized-keys ruling blocks in every pack.
+			if proof.Target == decide.TargetAuthorizedKeys {
+				c.restricted, c.restrictedRuling = true, true
+				c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
 			}
 		}
 		if c.program == "" && c.kind == "" {
@@ -1152,18 +1152,18 @@ func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (dec
 }
 
 // effectNamedRoleKnown reports an effect whose role the call words decide:
-// fully known, or known but for a HOME change in front of its program
-// (effectrules.HomeInput: sudo, doas, env -i, a HOME= prefix). The program
-// run with another HOME may read config files of its own, which is why the
-// effect is not fully known, but the write, append or delete the call names
-// on a member is still that mutation (rel-1-0-10:GAP-1478: sudo rsync
-// --log-file on the audit db was allowed while the unwrapped spelling
-// alerted).
+// fully known, or known but for an unaccounted env input of its program
+// (effectrules.EnvInput: a NAME= prefix, env or sudo NAME=, an export, PATH,
+// or a HOME change: sudo, doas, env -i). The program run with that input may
+// read config of its own, which is why the effect is not fully known, but the
+// write, append or delete the call names on a member is still that mutation
+// (rel-1-0-10:GAP-1478: sudo rsync --log-file and FOO=1 rsync --log-file on
+// the audit db were allowed while the unwrapped spelling alerted).
 func effectNamedRoleKnown(f *semanticpb.EffectFact) bool {
 	if f.GetRoleState() == "known" {
 		return len(f.GetReasons()) == 0
 	}
-	return effectrules.HomeInput(f)
+	return effectrules.EnvInput(f)
 }
 
 // knownProtectedMutationProofs are the decision proofs of one Known write,

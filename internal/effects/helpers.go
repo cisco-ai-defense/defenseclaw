@@ -150,7 +150,15 @@ func (p *wrapperParse) options(words []Word, i int) int {
 			if v[:eq] == "CDPATH" {
 				p.w.cdpathMaybeSet = true
 			}
-			p.w.spec.set(v[:eq], v[eq+1:], true)
+			if row.kind == wrapIdentity {
+				// sudo NAME=val: the security policy decides whether the child
+				// gets val (env_reset, env_check, SETENV) or the target user's
+				// value, so the name is set to a value we cannot see, as for
+				// env NAME=$V (rel-1-0-10:GAP-1478).
+				p.w.spec.set(v[:eq], "", false)
+			} else {
+				p.w.spec.set(v[:eq], v[eq+1:], true)
+			}
 			i++
 			continue
 		}
