@@ -36,12 +36,13 @@ func actionInterpreterReadsPrivateKey(code, language string) bool {
 	if !named {
 		return false
 	}
+	scan := newLiteralCodeScanner(code, language)
 	for _, location := range actionInterpreterReader.FindAllStringIndex(code, -1) {
 		if language == "python" {
 			if pythonExecutableCodePosition(code, location[0]) {
 				return true
 			}
-		} else if literalCodePosition(code, location[0], language) {
+		} else if scan.at(location[0]) {
 			return true
 		}
 	}
