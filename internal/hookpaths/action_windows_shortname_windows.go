@@ -5,9 +5,11 @@ package hookpaths
 
 import (
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"golang.org/x/sys/windows"
 )
@@ -120,4 +122,15 @@ func actionWindowsExpandComponents(path string) (string, error) {
 		spelled = filepath.Join(spelled, long)
 	}
 	return spelled, nil
+}
+
+// readNameAsGated is the rule of a reader that must read a name as spelled
+// (it refuses links, or it spells the name back): it reads only when the
+// path the gate read (path, mapped) is the name itself, so the read is the
+// gate's read under its hold. Otherwise it refuses (errNameReadThroughLink).
+func readNameAsGated(op, name, path string) error {
+	if path != fixturefs.Map(name) {
+		return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+	}
+	return nil
 }

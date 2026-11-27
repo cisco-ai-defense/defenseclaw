@@ -1073,17 +1073,6 @@ func readNameAsSafefile(op, name, path string) error {
 // name would be looked up again through the link as it is now.
 var errNameReadThroughLink = errors.New("hookpaths: the name passes a link the share gate resolved")
 
-// readNameAsGated is the rule of a reader that must read a name as spelled
-// (it refuses links, or it spells the name back): it reads only when the
-// path the gate read (path, mapped) is the name itself, so the read is the
-// gate's read under its hold. Otherwise it refuses (errNameReadThroughLink).
-func readNameAsGated(op, name, path string) error {
-	if path != fixturefs.Map(name) {
-		return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
-	}
-	return nil
-}
-
 // LstatPinned is pathidentity.LstatPinned for a path a hook call names,
 // read as pathLstat reads it.
 func LstatPinned(name string) (os.FileInfo, error) {

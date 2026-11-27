@@ -267,7 +267,7 @@ func ntSplitRoot(nt string) (root, rest string, ok bool) {
 		}
 		end += next + 1
 	}
-	if parts == 1 && !(end == 3 && body[1] == ':') && !strings.HasPrefix(body, "Volume{") {
+	if parts == 1 && (end != 3 || body[1] != ':') && !strings.HasPrefix(body, "Volume{") {
 		return "", "", false
 	}
 	return `\??\` + body[:end], body[end:], true

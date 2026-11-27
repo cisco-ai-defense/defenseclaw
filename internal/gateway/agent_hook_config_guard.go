@@ -2502,8 +2502,8 @@ func agentHookConfigShellStdinSplice(command, home string) string {
 		// The statement as its line shows it: its words and redirections,
 		// not the documents after the line (the parser ends a statement
 		// past its documents).
-		stmtStart, stmtEnd, okStmt := span(stmt)
-		stmtEnd = int(call.End().Offset())
+		stmtStart, _, okStmt := span(stmt)
+		stmtEnd := int(call.End().Offset())
 		for _, redirect := range stmt.Redirs {
 			if redirect.Word != nil {
 				stmtEnd = max(stmtEnd, int(redirect.Word.End().Offset()))
