@@ -8078,7 +8078,11 @@ func trustedRuleScanText(request trustedActionRequest, facts actionfacts.Facts) 
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
 	text = neutralizeTrustedSecretStoreValue(request.Input, text)
-	return relativeHomeWritesAsTilde(activeHomeAsTilde(text, request.Input.ActiveHome), facts)
+	command := request.Input.Command
+	if command == "" {
+		command, _ = trustedBashCommandInput(request.Input)
+	}
+	return relativeHomeWritesAsTilde(activeHomeAsTilde(text, request.Input.ActiveHome), command, facts)
 }
 
 // dispatchTrustedFallback judges a call with the legacy scan and the
