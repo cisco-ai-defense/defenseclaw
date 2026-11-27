@@ -2670,6 +2670,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
 		}
+		written := path
 		path = OperandPath(path, cwd)
 		if old, present := targets[path]; present {
 			if safeRedirect {
@@ -2815,6 +2816,39 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			if cost := len(jsonString(key)) + 1 + len(jsonString("1")) + 1; size+cost <= maxEncodedTargets {
 				targets[key] = "1"
 				size += cost
+			}
+		}
+		// OperandPath applies a dot-dot step only where this process reads
+		// the folder in front of it as a plain directory
+		// (rel-1-0-10:GAP-1648). A managed gateway that cannot read the
+		// user's home keeps the same operand raw and asks by that spelling,
+		// so the answer is listed under the uncleaned spelling as well: the
+		// step was applied because the kernel climbs to the same folder, so
+		// both name the same file. Listed by the clean spelling alone, a
+		// managed gateway found no answer for a write through
+		// ordinary/../link or ../project/link and allowed what the
+		// per-user gateway blocks (rel-1-0-10:GAP-2294).
+		if raw := operandRawSpelling(written, cwd); raw != path && hasDotDotStep(filepath.ToSlash(raw)) && len(raw) <= MaxWriteTargetPathBytes {
+			if _, present := targets[raw]; !present {
+				cost := len(jsonString(raw)) + 1 + len(jsonString(resolved)) + 1
+				if linkText != "" {
+					cost += len(jsonString(LinkTextFactPrefix+raw)) + 1 + len(jsonString(linkText)) + 1
+				}
+				if entryOnly {
+					cost += len(jsonString(ReplacedLinkFactPrefix+raw)) + 1 + len(jsonString("1")) + 1
+				}
+				if len(targets)-1 >= MaxWriteTargets || size+cost > maxEncodedTargets {
+					truncated, overBudget = true, true
+				} else {
+					size += cost
+					targets[raw] = resolved
+					if linkText != "" {
+						targets[LinkTextFactPrefix+raw] = linkText
+					}
+					if entryOnly {
+						targets[ReplacedLinkFactPrefix+raw] = "1"
+					}
+				}
 			}
 		}
 		if resolved != "" && !entryOnly {
@@ -3894,12 +3928,29 @@ func Decode(value string) (map[string]string, bool) {
 	return targets, true
 }
 
-// rawDotDotOperand keeps the shell spelling when a link can precede "..".
+// RawDotDotOperand keeps the shell spelling when a link can precede "..":
+// the operand when it is absolute, else the operand joined to cwd with one
+// separator, uncleaned. It is the key the hook client lists its walk under
+// and a managed gateway asks by, so it reads no file: OperandPath applies a
+// dot-dot step where this process reads the folder in front of it as a
+// plain directory (rel-1-0-10:GAP-1648), and a client that reads the home
+// would key a clean spelling that a gateway that cannot read it never asks
+// for (rel-1-0-10:GAP-2294).
 func RawDotDotOperand(value, cwd string) (string, bool) {
 	if !strings.Contains(filepath.ToSlash(value), "/../") || strings.ContainsAny(value, "*?[]$`~") || !filepath.IsAbs(cwd) {
 		return "", false
 	}
-	return OperandPath(value, cwd), true
+	return operandRawSpelling(value, cwd), true
+}
+
+// operandRawSpelling is an operand with every dot-dot step kept: the operand
+// when it is absolute or cwd is not, else the operand joined to cwd with one
+// separator, uncleaned.
+func operandRawSpelling(name, cwd string) string {
+	if filepath.IsAbs(name) || !filepath.IsAbs(cwd) {
+		return name
+	}
+	return cwd + string(filepath.Separator) + name
 }
 
 // pathFactIsNativeWrite reports whether a path fact is the target of a write
