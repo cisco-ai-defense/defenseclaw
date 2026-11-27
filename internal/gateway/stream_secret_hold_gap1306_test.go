@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -15,7 +16,9 @@ import (
 // bytes out before the check that reads it whole. Now only the pieces before
 // the one with the open run's first byte go out; the run stays held, and the
 // next text decides it. The run is at most streamSecretMaxToken bytes, so
-// the bound still makes progress, with no verdict (GAP-1265).
+// the bound still makes progress. The bound itself takes the TRUNCATED
+// verdict of the unknown tier once per call (rel-1-0-10:GAP-1767, LEAD
+// ruling 2026-11-26 21:00Z): a cap hit never goes out with no verdict.
 
 // gap1306Half is the text of one held piece: two of them pass
 // streamSecretMaxHeld, one does not.
@@ -44,25 +47,44 @@ func gap1306Rows(t *testing.T, tier, pack string, managed bool) []gap1265Row {
 // TestGAP1306HeldBoundKeepsTheOpenRun: in every tier, on the /llm,
 // passthrough and raw forward routes, a card number whose first digits end
 // the piece that passes streamSecretMaxHeld is held whole until its verdict
-// (red before the fix: those digits went out with the whole hold), and the
-// benign stream of the same shape reaches the client whole, with no block and
-// no TRUNCATED alert.
+// (red before the fix: those digits went out with the whole hold). The cap
+// hit takes the TRUNCATED verdict once per row (GAP-1767): a tier that
+// blocks an unknown cuts the stream there with none of the card out; the
+// others alert once, block the card once whole, and send the benign stream
+// of the same shape whole.
 func TestGAP1306HeldBoundKeepsTheOpenRun(t *testing.T) {
 	paths := append(gap1265Paths(t), gap0429PathsNamed(t, "passthrough/"+gap0429OpenAIChat.name)...)
 	for _, path := range paths {
 		t.Run(path.name, func(t *testing.T) {
 			var rows []gap1265Row
+			blocks := map[string]bool{}
 			for _, tier := range streamTailTiers {
 				if hookAnswerRaceBuild && !tier.blocks {
 					continue
 				}
+				blocks[tier.name] = tier.blocks
 				rows = append(rows, gap1306Rows(t, tier.name, tier.pack, tier.managed)...)
 			}
 			results, log := gap1265Serve(t, path, rows)
+			alerts := 0
 			for i, row := range rows {
-				gap1265Check(t, path.name, row, results[i])
+				res := results[i]
+				if !blocks[row.tier] {
+					alerts++
+					gap1265Check(t, path.name, row, res)
+					continue
+				}
+				name := path.name + "/" + row.tier + "/" + row.name
+				if row.secret.text != "" && (res.before > 0 || res.final > 0) {
+					t.Errorf("%s: the tier blocks an unknown, but %d (before the verdict) / %d (at the end) value bytes reached the client", name, res.before, res.final)
+				}
+				if res.got == strings.Join(row.pieces, "") {
+					t.Errorf("%s: the tier blocks an unknown, but the stream was not cut at the held bound", name)
+				}
 			}
-			gap1265NoTruncated(t, path.name, log)
+			if n := strings.Count(log, "STREAM-TRUNCATED"); n != alerts {
+				t.Errorf("%s: %d TRUNCATED alert(s) at the held bound, want %d (one per row of an alerting tier): %s", path.name, n, alerts, gap1265LogLine(log, "TRUNCATED"))
+			}
 		})
 	}
 }

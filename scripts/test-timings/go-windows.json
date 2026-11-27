@@ -506,7 +506,7 @@
    "TestGAP1257FileInfoChildAndRebound": 4.2,
    "TestGAP1258BenignDotNetRows": 3.6,
    "TestGAP1260TargetDirectoryHookRoute": 4.6,
-   "TestGAP1265NumericTableIsNotCutAtHeldBound": 31.1,
+   "TestGAP1265NumericTableOverHeldBoundIsTruncated": 31.1,
    "TestGAP1265OpenRunIdleIsNotTruncated": 19.6,
    "TestGAP1272BenignWildcardRows": 4.9,
    "TestGAP1272WildcardCmdletWrites": 28.1,

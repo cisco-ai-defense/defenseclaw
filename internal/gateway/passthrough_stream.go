@@ -497,6 +497,36 @@ func (s *passthroughStream) run() {
 		secretOpen, secretKey = false, false
 		return boundHit(c, why)
 	}
+	// runHeldBound decides the held bound behind an open token or digit run
+	// once per call (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z): past
+	// streamSecretMaxHeld the text read so far is checked and the unknown tier
+	// of the pack decides, so a reply that keeps a run open at every piece end
+	// (a numeric table, GAP-1265) gets the TRUNCATED verdict, never none.
+	// release: the pieces from the first byte of the run are over the bound
+	// themselves, so the run is given up and goes out once decided; otherwise
+	// the pieces before it go out and the run stays held for its own check
+	// (GAP-1306). A later pass of the same call is not decided again.
+	runHeldHit := false
+	runHeldBound := func(release bool) bool {
+		if runHeldHit {
+			// Not decided again, but a run given up still gets the full
+			// check of the text read so far before it goes out, as at the
+			// parent (CHK-RF-1478B N1).
+			if release {
+				if !scanText(true) {
+					return false
+				}
+				accumulated.ReleaseOpenSecret()
+				secretOpen, secretKey = false, false
+			}
+			return true
+		}
+		runHeldHit = true
+		if release {
+			return secretBound(bounded.Bytes, streamRunHeldWhy)
+		}
+		return scanText(true) && boundHit(bounded.Bytes, streamRunHeldWhy)
+	}
 	// maskParkedReasoning preserves an unresolved reasoning run without
 	// holding unrelated answer events behind it (GAP-2170). The existing
 	// lane-aware mask validator refuses an event it cannot rewrite safely.
@@ -543,12 +573,12 @@ func (s *passthroughStream) run() {
 		case queueBytes > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case queueBytes > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): the events
+			// Only a token or a digit run is open (GAP-1265): the bound
+			// decides it once (runHeldBound, GAP-1767), then the events
 			// before the one with the run's first byte go out once the
-			// check has read them, with no verdict, and the run stays held
-			// (GAP-1306). When the events from the run's first byte are
-			// over the bound themselves, the bound decides the run
-			// (TRUNCATED, GAP-1767), then all go. When only reasoning runs parked
+			// check has read them and the run stays held (GAP-1306). When
+			// the events from the run's first byte are over the bound
+			// themselves, the run goes out once decided. When only reasoning runs parked
 			// by the switch to the answer are open (o.answerParkedOnly,
 			// GAP-2170: parked until the message ends while the answer
 			// streams behind it), all go out as rel does, with no verdict: a
@@ -564,7 +594,12 @@ func (s *passthroughStream) run() {
 			runBytes := queueBytes - bufferedBytes(queue[:k])
 			if k > 0 && runBytes <= streamSecretMaxHeld {
 				heldCut = k
-				return false, true
+				// A parked run keeps the parent's release with no verdict
+				// (GAP-2170, GAP-2224).
+				if o.parkedOnly {
+					return false, true
+				}
+				return false, runHeldBound(false)
 			}
 			if o.answerParkedOnly {
 				return false, true
@@ -572,7 +607,7 @@ func (s *passthroughStream) run() {
 			if o.parkedOnly && runBytes-sumInts(queueUntexted[k:]) <= streamSecretMaxHeld {
 				return false, true
 			}
-			return false, secretBound(bounded.Bytes, streamRunHeldWhy)
+			return false, runHeldBound(true)
 		}
 		return true, true
 	}

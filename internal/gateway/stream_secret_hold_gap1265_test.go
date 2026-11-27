@@ -27,7 +27,9 @@ import (
 // a card number or a token the upstream pauses inside still never reaches
 // the client in part (the GAP-1091 and GAP-0429 protection). Past
 // streamSecretMaxHeld bytes held behind open runs (a long numeric table) the
-// held bytes go out after the check, with no verdict.
+// bound decides once per call: the TRUNCATED verdict of the unknown tier
+// (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z), then the held bytes
+// before the run go out after the check and the run stays held (GAP-1306).
 
 // gap1265Pause is longer than the idle bound of the hold.
 const gap1265Pause = streamHoldMaxPartialAge + 700*time.Millisecond
@@ -370,37 +372,44 @@ func gap1265Table() []string {
 		// the whole reply text, which costs more than linearly in its length,
 		// so the least text per frame is the cheapest table (a long piece of
 		// 8 KiB took 327 s under -race and cut the stream at the request
-		// deadline; 16-byte pieces took 155 s).
-		p := fmt.Sprintf(" k%d", i%97)
+		// deadline; 16-byte pieces took 155 s). The number starts at a word
+		// boundary, so it is an open digit run (streamPIIRules) at every
+		// piece end; a letter before it (" k42", rel-1-0-10:GAP-1767) opens
+		// no run, so the hold never reached the bound and the table tested
+		// nothing.
+		p := fmt.Sprintf(" %d", i%97)
 		pieces = append(pieces, p)
 		n += len(p) + 120 // a piece is a frame of at least 120 bytes on these routes
 	}
 	return pieces
 }
 
-// TestGAP1265NumericTableIsNotCutAtHeldBound: a long numeric table keeps a
-// digit run open at almost every piece end, so more than streamSecretMaxHeld
-// bytes wait behind open runs; that is no secret that could not be read, and
-// no tier cuts or alerts it (the /llm and passthrough routes; the raw forward
+// TestGAP1265NumericTableOverHeldBoundIsTruncated: a long numeric table keeps
+// a digit run open at almost every piece end, so more than
+// streamSecretMaxHeld bytes wait behind open runs. Under the GAP-1767 rule
+// (LEAD ruling 2026-11-26 21:00Z, the stricter behavior; rel ef865bb868 and
+// det111/t23e6-merge f6e151801a sent it with no verdict) that cap hit gets
+// the TRUNCATED verdict once per call, never none: the tiers that block an
+// unknown cut the stream, the others alert once and send the whole table
+// (gap1767CheckTable). The /llm and passthrough routes; the raw forward
 // checks the whole text at every frame, and 9k frames outlast the request
-// deadline, as for the long-prose rows of TestGAP0429BenignStreamsAreNotHeld).
-// Under -race the strict tiers run (the ones that cut).
-func TestGAP1265NumericTableIsNotCutAtHeldBound(t *testing.T) {
+// deadline (TestGAP1767NumericTableOverHeldBoundIsTruncated covers it with
+// larger pieces). Under -race the strict tiers run (the ones that cut).
+func TestGAP1265NumericTableOverHeldBoundIsTruncated(t *testing.T) {
 	table := gap1265Table()
 	for _, path := range gap0429PathsNamed(t, "llm", "passthrough/anthropic") {
 		t.Run(path.name, func(t *testing.T) {
 			var rows []gap1265Row
+			blocks := map[string]bool{}
 			for _, tier := range streamTailTiers {
 				if hookAnswerRaceBuild && !tier.blocks {
 					continue
 				}
+				blocks[tier.name] = tier.blocks
 				rows = append(rows, gap1265Row{name: "numeric-table", tier: tier.name, pack: tier.pack, managed: tier.managed, pieces: table})
 			}
 			results, log := gap1265Serve(t, path, rows)
-			for i, row := range rows {
-				gap1265Check(t, path.name, row, results[i])
-			}
-			gap1265NoTruncated(t, path.name, log)
+			gap1767CheckTable(t, path.name, rows, results, log, blocks)
 		})
 	}
 }

@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,76 @@ func TestGAP1767RunOverHeldBoundIsTruncated(t *testing.T) {
 					t.Errorf("%s: the tier blocks an unknown, but the stream was not cut at the bound", name)
 				}
 			}
+		})
+	}
+}
+
+// gap1767Table is a reply of large pieces that each end in a number, so a
+// digit run is open at every piece end and the hold passes
+// streamSecretMaxHeld behind runs that the next piece closes (the GAP-1306
+// path: the pieces before the run fit the bound). Few large pieces keep the
+// raw forward, which checks the whole text at every frame, under the
+// request deadline.
+func gap1767Table() []string {
+	filler := retestFiller(gap1767Filler)[:gap1767Filler]
+	var pieces []string
+	for i, n := 0, 0; n <= streamSecretMaxHeld+gap1767Filler; i++ {
+		p := " " + filler + fmt.Sprintf(" row %d", 10+i)
+		pieces = append(pieces, p)
+		n += len(p)
+	}
+	return append(pieces, " Total done.\n")
+}
+
+// gap1767CheckTable is the GAP-1767 rule on a benign reply whose hold passes
+// streamSecretMaxHeld behind open runs: one TRUNCATED alert per tier that
+// alerts on an unknown, with the whole reply sent; each tier that blocks an
+// unknown cuts the stream before its end.
+func gap1767CheckTable(t *testing.T, label string, rows []gap1265Row, results []gap1265Result, log string, blocks map[string]bool) {
+	t.Helper()
+	alerts := 0
+	for _, row := range rows {
+		if !blocks[row.tier] {
+			alerts++
+		}
+	}
+	if n := strings.Count(log, "STREAM-TRUNCATED"); n != alerts {
+		t.Errorf("%s: %d TRUNCATED alert(s) for a reply held over the bound, want %d (one per alerting tier): %s", label, n, alerts, gap1265LogLine(log, "TRUNCATED"))
+	}
+	for i, row := range rows {
+		res := results[i]
+		want := strings.Join(row.pieces, "")
+		name := label + "/" + row.tier + "/" + row.name
+		switch {
+		case !blocks[row.tier] && (res.got != want || res.blocked):
+			t.Errorf("%s: the tier alerts on an unknown, but the client got %d of %d bytes, blocked=%v", name, len(res.got), len(want), res.blocked)
+		case blocks[row.tier] && res.got == want:
+			t.Errorf("%s: the tier blocks an unknown, but the whole reply went out with no cut", name)
+		}
+	}
+}
+
+// TestGAP1767NumericTableOverHeldBoundIsTruncated: on the /llm, raw forward
+// and passthrough (OpenAI chat, Anthropic) routes, a reply held over
+// streamSecretMaxHeld behind open digit runs gets the bound's TRUNCATED
+// verdict once (LEAD ruling 2026-11-26 21:00Z on GAP-1767 and GAP-1265). Red
+// at f6e151801a: the pieces before the run went out with no verdict in every
+// tier (GAP-1306), so the cap hit reached the call with no bounded.Truncated.
+func TestGAP1767NumericTableOverHeldBoundIsTruncated(t *testing.T) {
+	table := gap1767Table()
+	for _, path := range gap0429PathsNamed(t, "llm", "raw-forward", "passthrough/"+gap0429OpenAIChat.name, "passthrough/anthropic") {
+		t.Run(path.name, func(t *testing.T) {
+			var rows []gap1265Row
+			blocks := map[string]bool{}
+			for _, tier := range streamTailTiers {
+				if hookAnswerRaceBuild && !tier.blocks {
+					continue
+				}
+				blocks[tier.name] = tier.blocks
+				rows = append(rows, gap1265Row{name: "numeric-table-large-pieces", tier: tier.name, pack: tier.pack, managed: tier.managed, pieces: table})
+			}
+			results, log := gap1265Serve(t, path, rows)
+			gap1767CheckTable(t, path.name, rows, results, log, blocks)
 		})
 	}
 }
