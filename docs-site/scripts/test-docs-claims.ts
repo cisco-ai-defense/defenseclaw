@@ -2023,6 +2023,9 @@ const r105Rows: DocRow[] = [
   // Perl hook-file write readings (substrate-1 GAP-1139, GAP-1146, GAP-1147) and a skill added during a folder move (rel-1-0-10 GAP-2039): the pages state these limits.
   { gap: "substrate-1 GAP-1139, GAP-1146, GAP-1147", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["DefenseClaw reads the inline Perl program only; a file the program loads with `require` or `do` can change values the hook cannot see, so an open of a hook file whose mode depends on such a file is reported as an unproven write.", "Subroutine and constant definitions made inside a string `eval` are not evaluated; an affected open of a hook file is reported as an unproven write.", "A Perl open mode changed by anything other than a plain assignment is not computed; the open of a hook file is reported as an unproven write."] },
   { gap: "rel-1-0-10 GAP-2039", page: "ai-discovery.mdx", section: "Skill inventory", has: ["A skill added at the same moment its folder is moved or re-linked can appear one scan later than other skills."] },
+  // Documented limits the owner approved (rel-1-0-10 GAP-0009, GAP-0011, GAP-2293): the support matrix states them.
+  { gap: "rel-1-0-10 GAP-0009, GAP-0011", page: "support-matrix.mdx", section: "Hook sizing", has: ["sustained bursts above about 100 hook calls a second for one user can be slow or dropped on a small host. The hook then follows its configured fail mode"] },
+  { gap: "rel-1-0-10 GAP-2293", page: "support-matrix.mdx", section: "Platforms", has: ["On Windows, `defenseclaw-hook.exe` is larger when the OpenClaw extension bundle is built into it: about 44 MiB with the bundle against about 41 MiB without it"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
