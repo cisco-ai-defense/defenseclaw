@@ -22,7 +22,7 @@ import (
 // physical path, or by a relative step) reached nothing while a find of the
 // same folder did. rel-1-0-10:GAP-2286: the reader read only a call whose
 // own program is the removal, so the removal a wrapper runs (sudo -D DIR,
-// env -C DIR, plain sudo or nice) reached nothing.
+// env -C DIR, chroot DIR, plain sudo or nice) reached nothing.
 func TestGAP2285GAP2286RemovalReachesTheRegisteredFolder(t *testing.T) {
 	root := t.TempDir()
 	real := filepath.Join(root, "real")
@@ -56,6 +56,8 @@ func TestGAP2285GAP2286RemovalReachesTheRegisteredFolder(t *testing.T) {
 			"sudo":         "sudo rm -rf ~/.claude",
 			"nice":         "nice rm -rf ~/.claude",
 			"sudo-user":    "sudo -u nobody -D " + home + " rm -rf .claude",
+			"chroot":       "chroot " + home + " rm -rf .claude",
+			"sudo-chroot":  "sudo chroot " + home + " rm -rf .claude",
 		}
 		for id, command := range reach {
 			if got := RegistrationWriteReached(command, proj, home, names); !slices.Contains(got, folder) {
@@ -69,6 +71,8 @@ func TestGAP2285GAP2286RemovalReachesTheRegisteredFolder(t *testing.T) {
 			"env-other":     "env -C /tmp rm -rf .claude",
 			"sudo-other":    "sudo -D /tmp rm -rf .claude",
 			"env-cache":     "env -C " + home + " rm -rf .cache",
+			"chroot-other":  "chroot /tmp rm -rf .claude",
+			"chroot-rooted": "chroot /tmp rm -rf ~/.claude",
 			"wrapped-echo":  "sudo -D " + home + " echo .claude",
 		}
 		for id, command := range benign {

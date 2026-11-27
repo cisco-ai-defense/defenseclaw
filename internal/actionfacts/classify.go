@@ -9214,6 +9214,22 @@ func parseChrootInvocation(argv []string) chrootInvocation {
 	return result
 }
 
+// ChrootRun reads a chroot call (argv as the program runs it): the new root,
+// the index of the child program and whether the child keeps the working
+// folder (--skip-chdir; otherwise it starts at the new root). ok is false
+// for a call the chroot grammar does not read completely, a preview
+// (--help, --version) and a call with no child.
+func ChrootRun(argv []string) (root string, child int, skipChdir, ok bool) {
+	parsed := parseChrootInvocation(argv)
+	if !parsed.complete || parsed.preview || parsed.childIndex <= 0 {
+		return "", 0, false, false
+	}
+	for _, arg := range argv[1:parsed.childIndex] {
+		skipChdir = skipChdir || arg == "--skip-chdir"
+	}
+	return parsed.root, parsed.childIndex, skipChdir, true
+}
+
 func classifyChroot(out *parseOutput, command *CommandFact) {
 	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
 		return

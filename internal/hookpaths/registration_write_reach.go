@@ -327,11 +327,12 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 		// A static prefix wrapper chain (sudo, env, nice, ...) runs its child
 		// with the caller's argv: the child is the removal read here, in the
 		// folder the chain runs it in, as a cd to that folder would place it
-		// (sudo -D/--chdir DIR, env -C DIR; rel-1-0-10:GAP-2286).
-		removal, removalCWD, removalBase, removalKnown := call.Args, currentCWD, base, known
+		// (sudo -D/--chdir DIR, env -C DIR, chroot ROOT; rel-1-0-10:GAP-2286).
+		// Under chroot an absolute operand names a path below the new root.
+		removal, removalCWD, removalRoot, removalBase, removalKnown := call.Args, currentCWD, "", base, known
 		if known && len(call.Args) > 2 && !slices.Contains(registrationRemovalPrograms, base) {
-			if child, folder, wrapped := registrationWrappedCall(call.Args, values, currentCWD, home); wrapped {
-				removal, removalCWD = child, folder
+			if child, folder, root, wrapped := registrationWrappedCall(call.Args, values, currentCWD, home); wrapped {
+				removal, removalCWD, removalRoot = child, folder, root
 				childProgram, childKnown := staticProgramWord(child[0], home)
 				removalBase, removalKnown = programBase(childProgram), childKnown
 			}
@@ -357,7 +358,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 						fields = fields[:len(fields)-1]
 					}
 					for _, value := range fields {
-						if protectedReachPath(OperandPath(value, removalCWD), protected, "") {
+						if protectedReachPath(OperandPath(registrationRootedOperand(value, removalRoot), removalCWD), protected, "") {
 							found = true
 							return false
 						}
@@ -369,7 +370,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths, truncated := registrationGlobMatches(OperandPath(value, removalCWD))
+					paths, truncated := registrationGlobMatches(OperandPath(registrationRootedOperand(value, removalRoot), removalCWD))
 					for _, path := range paths {
 						if protectedReachPath(path, protected, "") {
 							found = true
@@ -381,7 +382,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					noteGlobCut(truncated)
 					continue
 				}
-				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(value, removalCWD), protected, "") {
+				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(registrationRootedOperand(value, removalRoot), removalCWD), protected, "") {
 					found = true
 					return false
 				}
@@ -430,40 +431,86 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 	return found
 }
 
+// registrationRootedOperand is an operand of a call run under root (chroot;
+// "" for the caller's root) as the caller's file system names it: an
+// absolute operand is below the new root.
+func registrationRootedOperand(value, root string) string {
+	if root != "" && filepath.IsAbs(value) {
+		return filepath.Join(root, value)
+	}
+	return value
+}
+
 // registrationRemovalPrograms remove, move or change the mode, owner or
 // attributes of their operands: an operand that is a registered file or
 // folder is reached.
 var registrationRemovalPrograms = []string{"rm", "rmdir", "unlink", "mv", "gmv", "chmod", "chown", "chgrp", "setfacl", "chattr"}
 
-// registrationWrappedCall is the call a chain of static prefix wrappers at
-// the head of args runs (actionfacts.StaticPrefixWrapperChild, the reader of
-// the nested -c body and of the action analysis) and the folder it runs it
-// in. The folder is placed as a cd to it is (actionPosixAdvanceDirectory):
-// sudo -D/--chdir DIR and env -C DIR from cwd, resolved through its links.
-// A child that starts in a folder the words do not name (sudo -i/--login:
-// the target user's home; ~user) keeps cwd, as a cd the walk cannot place
-// does. wrapped is false when args is no such chain, when the chain changes
-// which program the child word names (env PATH=...), or when the child word
-// is not static.
-func registrationWrappedCall(args []*syntax.Word, values actionValues, cwd, home string) (child []*syntax.Word, folder string, wrapped bool) {
+// registrationWrappedCall is the call a chain of wrappers at the head of
+// args runs, the folder it runs it in and the root it runs it under ("" for
+// the caller's root). The chain is read by the readers the nested -c body
+// and the action analysis use: static prefix wrappers
+// (actionfacts.StaticPrefixWrapperChild) and chroot (actionfacts.ChrootRun).
+// The folder is placed as a cd to it is (actionPosixAdvanceDirectory),
+// resolved through its links: sudo -D/--chdir DIR and env -C DIR from the
+// folder so far, and chroot ROOT at the new root unless --skip-chdir. A
+// child that starts in a folder the words do not name (sudo -i/--login: the
+// target user's home; ~user) keeps the folder so far, as a cd the walk
+// cannot place does. wrapped is false when args is no such chain, when the
+// chain changes which program the child word names (env PATH=...), or when
+// the child word is not static.
+func registrationWrappedCall(args []*syntax.Word, values actionValues, cwd, home string) (child []*syntax.Word, folder, root string, wrapped bool) {
 	words, static := make([]string, len(args)), make([]bool, len(args))
 	for index, word := range args {
 		words[index], static[index] = actionWordValue(word, values, cwd, home)
 	}
-	run, ok := actionfacts.StaticPrefixWrapperChild(words, static)
-	if !ok || run.ChangesResolution || run.Index <= 0 || run.Index >= len(args) || !static[run.Index] || words[run.Index] == "" {
-		return nil, "", false
-	}
-	folder = cwd
-	if dir := run.Dir; dir != "" && !run.DirUnknown && !strings.HasPrefix(dir, "~") {
-		place := OperandPath(dir, cwd)
-		if resolved, ok := ResolveWriteTarget(place); ok {
-			folder = resolved
-		} else {
-			folder = filepath.Clean(place)
+	place := func(dir string) string {
+		if root != "" && filepath.IsAbs(dir) {
+			dir = filepath.Join(root, dir)
 		}
+		path := OperandPath(dir, folder)
+		if resolved, ok := ResolveWriteTarget(path); ok {
+			return resolved
+		}
+		return filepath.Clean(path)
 	}
-	return args[run.Index:], folder, true
+	folder, at := cwd, 0
+	for depth := 0; depth < 4 && at < len(words) && static[at]; depth++ {
+		next := 0
+		if run, ok := actionfacts.StaticPrefixWrapperChild(words[at:], static[at:]); ok {
+			if run.ChangesResolution {
+				return nil, "", "", false
+			}
+			if dir := run.Dir; dir != "" && !run.DirUnknown && !strings.HasPrefix(dir, "~") && !strings.ContainsRune(dir, 0) {
+				folder = place(dir)
+			}
+			next = run.Index
+		} else if programBase(words[at]) == "chroot" {
+			newRoot, index, skipChdir, ok := actionfacts.ChrootRun(words[at:])
+			if !ok || !static[at+index] {
+				return nil, "", "", false
+			}
+			if !filepath.IsAbs(newRoot) && root == "" {
+				newRoot = OperandPath(newRoot, folder)
+			}
+			root = place(newRoot)
+			if !skipChdir {
+				folder = root
+			}
+			next = index
+		} else {
+			break
+		}
+		if next <= 0 || at+next >= len(args) {
+			return nil, "", "", false
+		}
+		at += next
+		wrapped = true
+	}
+	if !wrapped || !static[at] || words[at] == "" {
+		return nil, "", "", false
+	}
+	return args[at:], folder, root, true
 }
 
 // registrationShadowable names the builtins and programs the exact reading

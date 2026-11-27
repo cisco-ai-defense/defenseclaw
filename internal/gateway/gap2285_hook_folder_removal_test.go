@@ -22,7 +22,8 @@ import (
 //     cell rm of the folder gets under a plain HOME (and find ~/.claude
 //     -delete got under either); before, each allowed in every tier.
 //   - rel-1-0-10:GAP-2286: the removal a prefix wrapper runs in a folder it
-//     names (sudo -D/--chdir DIR, env -C/--chdir DIR) gets the cell of cd DIR
+//     names (sudo -D/--chdir DIR, env -C/--chdir DIR, chroot DIR) gets the
+//     cell of cd DIR
 //     and the same removal; plain sudo, nice and sudo -u the cell of the
 //     unwrapped call; sudo -i (the target user's home, a folder the words do
 //     not name) the cell of a cd the walk cannot place. Before, each allowed
@@ -75,6 +76,8 @@ func TestGAP2285GAP2286HookFolderRemovalVerdict(t *testing.T) {
 			"sudo":         {"sudo rm -rf ~/.claude", proj},
 			"nice":         {"nice rm -rf ~/.claude", proj},
 			"sudo-dotdot":  {"sudo -D " + home + "/proj/.. rm -rf .claude", proj},
+			"chroot":       {"chroot \"$HOME\" rm -rf .claude", proj},
+			"sudo-chroot":  {"sudo chroot " + home + " rm -rf .claude", proj},
 		}
 		benign := map[string]row{
 			"project":        {"rm -rf ~/proj/build", proj},
@@ -84,6 +87,8 @@ func TestGAP2285GAP2286HookFolderRemovalVerdict(t *testing.T) {
 			"env-elsewhere":  {"env -C /tmp rm -rf .claude", proj},
 			"sudo-elsewhere": {"sudo -D /tmp rm -rf .claude", proj},
 			"env-cache":      {"env -C ~ rm -rf .cache", proj},
+			"chroot-tmp":     {"chroot /tmp rm -rf .claude", proj},
+			"chroot-rooted":  {"chroot /tmp rm -rf ~/.claude", proj},
 		}
 		for _, tier := range boundedTestTiers {
 			for _, connector := range []string{"claudecode", "codex"} {
