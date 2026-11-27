@@ -19,9 +19,12 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -33,7 +36,9 @@ import (
 // told its person that the sandbox's DNS settings may have changed. The hook
 // answers of an actor in that state carry one line naming DefenseClaw and the
 // replaced callout: the model reads it (additionalContext) and, where the
-// agent shows one, so does the person (systemMessage).
+// agent shows one, so does the person (systemMessage). GAP-1151: the other
+// kit connectors carry it as the agent's context where their answer already
+// has a context field (substrateAddContextCalloutNote).
 
 // substrateCalloutViewEvery is how old the hook path's view of the slot may
 // get before a hook call starts a new read (the controller reads the slot
@@ -125,18 +130,26 @@ func substrateEnvelopeEvent(env substrateEnvelope) string {
 }
 
 // substrateAddCalloutNote adds note to the native answer of an allowed (or
-// alerted) call in obj: as model context on the prompt, session start and
-// tool result events, and as the person's line on the prompt and session
-// start. A refusal keeps its own answer.
+// alerted) call in obj. A refusal keeps its own answer, and an answer that
+// cannot carry the note stays as it is.
 func substrateAddCalloutNote(obj map[string]json.RawMessage, connector, event, note string) bool {
-	field := substrateCalloutNoteField[connector]
-	if field == "" || note == "" {
+	if note == "" {
 		return false
 	}
 	var action string
 	if json.Unmarshal(obj["action"], &action) != nil || (action != "allow" && action != "alert") {
 		return false
 	}
+	if field := substrateCalloutNoteField[connector]; field != "" {
+		return substrateAddNativeCalloutNote(obj, field, connector, event, note)
+	}
+	return substrateAddContextCalloutNote(obj, connector, event, note)
+}
+
+// substrateAddNativeCalloutNote adds note to the Claude Code or Codex answer
+// field: as model context on the prompt, session start and tool result
+// events, and as the person's line on the prompt and session start.
+func substrateAddNativeCalloutNote(obj map[string]json.RawMessage, field, connector, event, note string) bool {
 	out := map[string]any{}
 	if raw := obj[field]; len(raw) > 0 && string(raw) != "null" {
 		if json.Unmarshal(raw, &out) != nil || out == nil {
@@ -183,4 +196,67 @@ func substrateAddCalloutNote(obj map[string]json.RawMessage, connector, event, n
 	}
 	obj[field] = b
 	return true
+}
+
+// substrateAddContextCalloutNote adds note as the agent's context to the
+// answer of a kit connector other than Claude Code and Codex, in the field an
+// alert's context already goes to (GAP-1151): Amp's plugin reads the
+// answer's additional_context on a prompt (agent.start); Cursor, Copilot,
+// Devin, Antigravity and Hermes read their hook_output
+// (connector.HookContextOutput names the events). The note joins the
+// answer's own context, and an answer whose hook_output is not the
+// connector's context-only answer stays as it is. OpenCode's plugin reads
+// only a decision, and the Kiro 2.x agent hooks an actor runs show the agent
+// nothing on an allowed call, so neither carries the note.
+func substrateAddContextCalloutNote(obj map[string]json.RawMessage, name, event, note string) bool {
+	var have string
+	if raw := obj["additional_context"]; len(raw) > 0 && string(raw) != "null" {
+		if json.Unmarshal(raw, &have) != nil {
+			return false
+		}
+	}
+	joined := note
+	if have != "" {
+		joined = have + "\n" + note
+	}
+	ctxField, _ := json.Marshal(joined)
+	if name == "amp" {
+		if !strings.EqualFold(strings.TrimSpace(event), "agent.start") {
+			return false
+		}
+		obj["additional_context"] = ctxField
+		return true
+	}
+	now, ok := connector.HookContextOutput(name, event, have)
+	if !ok || !substrateSameHookOutput(obj["hook_output"], now) {
+		return false
+	}
+	out, _ := connector.HookContextOutput(name, event, joined)
+	b, err := json.Marshal(out)
+	if err != nil || len(out) == 0 {
+		return false
+	}
+	obj["hook_output"] = b
+	obj["additional_context"] = ctxField
+	return true
+}
+
+// substrateSameHookOutput reports whether the answer's hook_output raw is
+// want (absent, null and {} are an empty want).
+func substrateSameHookOutput(raw json.RawMessage, want map[string]any) bool {
+	var have any
+	if len(raw) > 0 {
+		if json.Unmarshal(raw, &have) != nil {
+			return false
+		}
+	}
+	if m, ok := have.(map[string]any); have == nil || (ok && len(m) == 0) {
+		return len(want) == 0
+	}
+	b, err := json.Marshal(want)
+	if err != nil {
+		return false
+	}
+	var w any
+	return json.Unmarshal(b, &w) == nil && reflect.DeepEqual(have, w)
 }
