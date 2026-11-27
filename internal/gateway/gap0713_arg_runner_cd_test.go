@@ -13,10 +13,10 @@ import (
 // TestGAP0713ArgRunnerCDIsTheCD is substrate-1:GAP-0713: after a function
 // that only runs its arguments (f() { "$@"; }), a call f cd X moves the shell
 // as cd X does, so the next relative operand is read in X: the call gets the
-// verdict of the plain cd form in the strict pack. The default pack reads the
-// call on its straight-line function walk, where the body stays a dynamic
-// command: there it is at least the alert (rel allowed it; the plain form
-// blocks: still open). The same call before an ordinary file stays allowed.
+// verdict of the plain cd form in both packs: the strict pack on its folder
+// walk, the default pack on its straight-line function walk, which runs the
+// call's arguments as the body (rel allowed it; the plain form blocks). The
+// same call before an ordinary file stays allowed.
 func TestGAP0713ArgRunnerCDIsTheCD(t *testing.T) {
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
@@ -30,6 +30,8 @@ func TestGAP0713ArgRunnerCDIsTheCD(t *testing.T) {
 		{filepath.Join(home, "proj"), "cd .. && rm .aws/credentials"},
 		{home, "cd .aws && rm credentials"},
 		{home, "cd .aws && cp /tmp/x credentials"},
+		{home, "cd .aws && cat credentials"},
+		{home, `cd "$HOME/.aws" && rm credentials`},
 	}
 	for _, pack := range []string{"default", "strict"} {
 		handler := hostClaudeHookHandlerForTest(t, pack)
@@ -47,8 +49,8 @@ func TestGAP0713ArgRunnerCDIsTheCD(t *testing.T) {
 			}
 			runner := `f(){ "$@"; }; f ` + row.plain
 			got := verdict(row.cwd, runner)
-			if pack == "strict" && got != want || pack != "strict" && got == "allow" {
-				t.Errorf("%s: %q = %s, want %s (its plain cd form; at least alert in default)", pack, runner, got, want)
+			if got != want {
+				t.Errorf("%s: %q = %s, want %s (its plain cd form)", pack, runner, got, want)
 			}
 		}
 		for _, control := range []string{`f(){ "$@"; }; f cd .. && rm notes.txt`, `f(){ "$@"; }; f echo hi`} {
