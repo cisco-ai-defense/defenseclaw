@@ -253,12 +253,13 @@ func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string,
 // candidate the cd itself had). Only the statement just before && counts, so
 // cd -, a directory set by another program (source, eval, a function) and a
 // cd in a subshell or group keep every candidate, and so does a relative
-// operand CDPATH or cdable_vars may send elsewhere (actionCdSearchMayApply).
-// A right side that may change the directory again (cd -, popd, cd ~-,
+// operand CDPATH or cdable_vars may send elsewhere: searchMayApply, from
+// actionCdSearchMayApply on this command or on a command that runs it in a
+// nested shell. A right side that may change the directory again (cd -, popd, cd ~-,
 // cd "$OLDPWD", a nested shell that does so) keeps every candidate for all
 // its calls (RV26-1), and a command with a function, an alias, a trap, eval
 // or source keeps them all.
-func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.CallExpr]*syntax.CallExpr {
+func actionCertainDirectoryCalls(file *syntax.File, home string, searchMayApply bool) map[*syntax.CallExpr]*syntax.CallExpr {
 	certain := make(map[*syntax.CallExpr]*syntax.CallExpr)
 	opaque := false
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -281,9 +282,6 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 	if opaque {
 		return certain
 	}
-	// searchMayApply: 0 not asked yet, 1 a bare relative operand may be
-	// searched (actionCdSearchMayApply), 2 it may not.
-	searchMayApply := 0
 	// syntax.Walk visits an outer && before the ones inside its right side,
 	// so the innermost cd a call depends on is the one kept.
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -309,16 +307,8 @@ func actionCertainDirectoryCalls(file *syntax.File, home string) map[*syntax.Cal
 		if !programStatic || !targetStatic || program != "cd" && program != "pushd" || target == "" || target == "-" {
 			return true
 		}
-		if !filepath.IsAbs(target) && !actionCdOperandUnsearched(target) {
-			if searchMayApply == 0 {
-				searchMayApply = 2
-				if actionCdSearchMayApply(file, home) {
-					searchMayApply = 1
-				}
-			}
-			if searchMayApply == 1 {
-				return true
-			}
+		if searchMayApply && !filepath.IsAbs(target) && !actionCdOperandUnsearched(target) {
+			return true
 		}
 		if actionMayChangeDirectory(binary.Y, home) {
 			return true
@@ -348,8 +338,9 @@ func actionCdOperandUnsearched(target string) bool {
 // the command names CDPATH (cdpath in zsh) or cdable_vars anywhere, quoting
 // and brace punctuation removed, or it sets a variable whose name the hook
 // cannot read (export "$n"=..., printf -v, read, declare, an arithmetic
-// assignment, an indirect expansion), which may be CDPATH (GAP-1155). A
-// CDPATH or shell option set outside the command is not seen.
+// assignment, an indirect expansion), which may be CDPATH (GAP-1155). The
+// first match ends the walk; a later word never clears it. A CDPATH or shell
+// option set outside the command is not seen.
 func actionCdSearchMayApply(file *syntax.File, home string) bool {
 	joined := strings.NewReplacer(`'`, "", `"`, "", `\`, "", "{", "", "}", "", ",", "", "`", "")
 	names := func(text string) bool {
@@ -358,6 +349,9 @@ func actionCdSearchMayApply(file *syntax.File, home string) bool {
 	}
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
 		switch node := node.(type) {
 		case *syntax.Lit:
 			found = names(node.Value)

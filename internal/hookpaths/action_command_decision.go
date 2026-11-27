@@ -543,6 +543,14 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 // ActionPrivateKeyReadWithDialect uses the executing shell to distinguish
 // PowerShell pipeline path binding from POSIX stdin readers.
 func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfacts.Dialect) bool {
+	return actionPrivateKeyReadIn(command, cwd, home, dialect, false)
+}
+
+// actionPrivateKeyReadIn is ActionPrivateKeyReadWithDialect for a command
+// that may run in a nested shell: cdSearch is set when the enclosing command
+// names CDPATH or cdable_vars (actionCdSearchMayApply), which the nested
+// shell inherits (GAP-1155).
+func actionPrivateKeyReadIn(command, cwd, home string, dialect actionfacts.Dialect, cdSearch bool) bool {
 	if command == "" || home == "" {
 		return false
 	}
@@ -558,14 +566,14 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 		// POSIX reader, on the Windows file system; another POSIX shell
 		// call on this host is read by both readers (GAP-1717).
 		if actionGitBashReadsAlone(command, home, dialect) {
-			return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+			return actionPosixPrivateKeyRead(command, cwd, home, dialect, cdSearch)
 		}
 		return actionWindowsPrivateKeyReadIn(command, cwd, home, dialect == actionfacts.DialectPOSIX) ||
 			actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) ||
 			dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" &&
-				actionPosixPrivateKeyRead(command, cwd, home, dialect)
+				actionPosixPrivateKeyRead(command, cwd, home, dialect, cdSearch)
 	}
-	return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+	return actionPosixPrivateKeyRead(command, cwd, home, dialect, cdSearch)
 }
 
 // ActionPrivateKeyReadBoundedIn is ActionPrivateKeyReadWithDialect that also
@@ -665,8 +673,10 @@ func (call *hookCall) globCutOf(read func()) bounded.CapSet {
 	return truncated
 }
 
-// actionPosixPrivateKeyRead is the POSIX shell's private-key reader.
-func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Dialect) bool {
+// actionPosixPrivateKeyRead is the POSIX shell's private-key reader. cdSearch
+// is set when an enclosing command names CDPATH or cdable_vars
+// (actionPrivateKeyReadIn).
+func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Dialect, cdSearch bool) bool {
 	if actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) {
 		return true
 	}
@@ -701,7 +711,14 @@ func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Di
 	// directory or a later one, not in the earlier candidates (cd ~/.ssh &&
 	// cd /proj && grep -rn TODO ., GAP-2421). cdAt is where each cd call
 	// put its directory in dirs.
-	certain := actionCertainDirectoryCalls(file, home)
+	// A bare relative cd may follow CDPATH or cdable_vars when this command
+	// or one that runs it names them; a nested shell inherits them
+	// (GAP-1155).
+	if cdSearch || actionCdSearchMayApply(file, home) {
+		cdSearch = true
+		mode |= keyReadCdSearch
+	}
+	certain := actionCertainDirectoryCalls(file, home, cdSearch)
 	cdAt := make(map[*syntax.CallExpr]int)
 	candidatesOf := func(call *syntax.CallExpr) []string {
 		if at, ok := cdAt[certain[call]]; ok {
@@ -839,6 +856,9 @@ const (
 	keyReadWindows keyReadMode = 1 << iota
 	keyReadDotglob
 	keyReadNativeGlob
+	// keyReadCdSearch: the command names CDPATH or cdable_vars, which a
+	// nested shell inherits (GAP-1155).
+	keyReadCdSearch
 )
 
 // Wrapper arguments are not file reads. Resolve a bounded, literal child
@@ -972,7 +992,7 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		if body, known := shellCommandBodyIndex(words); known && body < len(words) {
 			// The -c body runs in the child shell. On Windows, losing the
 			// POSIX dialect here would read a Git Bash glob as PowerShell.
-			return ActionPrivateKeyReadWithDialect(words[body], cwd, home, actionfacts.DialectPOSIX)
+			return actionPrivateKeyReadIn(words[body], cwd, home, actionfacts.DialectPOSIX, mode&keyReadCdSearch != 0)
 		}
 		return false
 	}
