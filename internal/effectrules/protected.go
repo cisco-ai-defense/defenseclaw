@@ -382,9 +382,16 @@ var hostGOOS = runtime.GOOS
 // the whole answer, a member or not by name, never an unresolved target that
 // reaches every set (DET111 D3; it graded every Windows home write the
 // unknown tier).
-func resolverFor(flavor effects.Flavor) resolver {
+func resolverFor(flavor effects.Flavor) resolver { return resolverForWith(flavor, nil) }
+
+// resolverForWith is resolverFor with host as the resolver of the host's own
+// flavor (nil: defaultResolver). The other flavor keeps the placed path.
+func resolverForWith(flavor effects.Flavor, host resolver) resolver {
 	if (flavor == effects.FlavorWindows) != (hostGOOS == "windows") {
 		return func(p string) (string, bool) { return p, true }
+	}
+	if host != nil {
+		return host
 	}
 	return defaultResolver
 }
