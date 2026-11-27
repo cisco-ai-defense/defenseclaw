@@ -55,6 +55,23 @@ func TestTranslatedChatStreamAcceptedRequestIsUnknownCost(t *testing.T) {
 			sse200(w)
 			_, _ = w.Write([]byte("data: {\"error\":{\"code\":500,\"message\":\"Internal error encountered.\",\"status\":\"INTERNAL\"}}\n\n"))
 		}, true, http.StatusOK, ""},
+		// GAP-2255: a later request's error status hides a billed earlier one.
+		{"fallback-429-then-200-reset", "openai/gpt-5-mini", false, []string{"openai/gpt-5-nano"}, func(w http.ResponseWriter, r *http.Request, hit int32, _ string) {
+			if hit == 1 {
+				status(w, http.StatusTooManyRequests, rateLimited)
+				return
+			}
+			sse200(w)
+			time.Sleep(50 * time.Millisecond)
+			resetConn1112(w)
+		}, true, http.StatusOK, ""},
+		{"replicate-created-then-stream-404", "replicate/meta/meta-llama-3-8b-instruct", true, nil, func(w http.ResponseWriter, r *http.Request, _ int32, url string) {
+			if r.Method == http.MethodPost {
+				status(w, http.StatusCreated, `{"id":"p1","status":"starting","urls":{"get":"`+url+`/v1/predictions/p1","cancel":"`+url+`/v1/predictions/p1/cancel","stream":"`+url+`/stream/p1"}}`)
+				return
+			}
+			status(w, http.StatusNotFound, `{"detail":"not found"}`)
+		}, true, http.StatusOK, ""},
 		// Unchanged: the reverse order, and calls no provider accepted.
 		{"fallback-200-reset-then-429", "openai/gpt-5-mini", false, []string{"openai/gpt-5-nano"}, func(w http.ResponseWriter, r *http.Request, hit int32, _ string) {
 			if hit == 1 {
