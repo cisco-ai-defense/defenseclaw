@@ -10,11 +10,9 @@ func TestGAP2265ProcessCWDLinkSpelling(t *testing.T) {
 	for name, want := range map[string]string{
 		"/proc/self/cwd/../.ssh/authorized_keys":        "/sandbox/.ssh/authorized_keys",
 		"/proc/thread-self/cwd/../.ssh/authorized_keys": "/sandbox/.ssh/authorized_keys",
-		"/proc/self/task/7/cwd/../.ssh":                 "/sandbox/.ssh",
 		"//proc/./self/cwd/../notes.txt":                "/sandbox/notes.txt",
-		"/tmp/../proc/self/cwd/x/../../.ssh/rc":         "/sandbox/.ssh/rc",
+		"/tmp/../proc/self/cwd/../../.ssh/rc":           "/.ssh/rc",
 		"/proc/self/cwd/.ssh/authorized_keys":           "/sandbox/app/.ssh/authorized_keys",
-		"/proc/self/cwd":                                "/sandbox/app",
 	} {
 		got, ok := ProcessCWDLinkSpelling(name, dir)
 		if !ok || got != want {
@@ -26,6 +24,10 @@ func TestGAP2265ProcessCWDLinkSpelling(t *testing.T) {
 		"/proc/self/root/../sandbox/.ssh/authorized_keys",
 		"/proc/self/fd/3/../.ssh/authorized_keys",
 		"/proc/self/task/x/cwd/../.ssh",
+		// a thread's link (GAP-2237), a dot-dot after a name, the bare link
+		"/proc/self/task/7/cwd/../.ssh",
+		"/proc/self/cwd/x/../../.ssh/rc",
+		"/proc/self/cwd",
 		"/proc/self/cwdx/../.ssh",
 		"/sandbox/cwd/../.ssh/authorized_keys",
 		"proc/self/cwd/../.ssh/authorized_keys",

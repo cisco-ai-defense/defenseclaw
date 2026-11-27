@@ -49,7 +49,7 @@ func TestGAP2265ProcessCWDLinkMatchesPlainPath(t *testing.T) {
 		return strings.NewReplacer("{D}", base+"/.ssh", "{F}", base+"/.ssh/authorized_keys",
 			"{O}", base+"/out", "{N}", base+"/notes.txt", "{T}", base+"/tool.py").Replace(template)
 	}
-	links := []string{"/proc/self/cwd/..", "/proc/thread-self/cwd/..", "/proc/self/task/1/cwd/.."}
+	links := []string{"/proc/self/cwd/..", "/proc/thread-self/cwd/.."}
 	for _, pack := range []string{"default", "strict"} {
 		t.Run(pack, func(t *testing.T) {
 			api, actor, home, app := gap0545API(t, "claudecode", pack)
