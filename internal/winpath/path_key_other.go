@@ -10,6 +10,9 @@ import (
 	"strings"
 )
 
+// mayShareComparisonKey: off Windows ComparisonKey asks no file system.
+func mayShareComparisonKey(string, string) bool { return true }
+
 // ComparisonKey returns path cleaned: off Windows a path has one spelling
 // per name, and names are case-sensitive.
 func ComparisonKey(path string) string {

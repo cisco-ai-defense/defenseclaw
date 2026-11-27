@@ -45,6 +45,7 @@ func TestGAP1733PreflightRefusesOnlyWhenEveryTargetIsRefused(t *testing.T) {
 // whose only target holds a per-user install keeps the early refusal with
 // the folder named (GAP-0741), on the standalone profile.
 func TestGAP1733PreflightOfTheOnlyPerUserInstallUserStillRefuses(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	windowsEnterpriseStandaloneProcess = func() bool { return true }

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -21,10 +20,11 @@ import (
 
 func repoPolicyDir(t *testing.T) string {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	dir := filepath.Join(filepath.Dir(file), "..", "..", "policies")
+	dir := filepath.Join(repoRootFromTestFile(t), "policies")
 	if _, err := os.Stat(filepath.Join(dir, "guardrail", "default")); err != nil {
-		t.Skipf("policies not found: %v", err)
+		// A tree with no policies/ is broken; this skip hid the package's
+		// generation tests on every cross-built native run (rel-1-0-10:GAP-1598).
+		t.Fatalf("policies not found: %v", err)
 	}
 	return dir
 }

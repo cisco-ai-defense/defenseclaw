@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"io"
 	"maps"
 	"os"
@@ -29,36 +30,15 @@ import (
 // the command rather than one per member. A write proof concerns one member,
 // so a half reaches exactly when one of its members does.
 func registrationWriteReachedAs(command, cwd, home string, names []string) []string {
-	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
-		return nil
-	}
-	if !RegistrationWriteCandidate(command) {
-		return nil
-	}
-	file, ok := parseShell(command)
+	file, protected, origin, _, ok := registrationReachSet(command, cwd, home, names)
 	if !ok {
 		return nil
 	}
-	protected := make(protectedFiles, 0, len(names))
-	origin := make([]string, 0, len(names))
-	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
-	for _, name := range names {
-		if !filepath.IsAbs(name) {
-			continue
-		}
-		entry := protectedFile{path: filepath.Clean(name), call: call}
-		if info, err := call.stat(entry.path); err == nil {
-			entry.info = info
-		} else if !os.IsNotExist(err) {
-			entry.unknown = true
-		}
-		protected = append(protected, entry)
-		origin = append(origin, name)
-	}
+	writes := &registrationWrites{command: command, cwd: cwd, home: home}
 	var reached []string
 	var narrow func(lo, hi int)
 	narrow = func(lo, hi int) {
-		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected) {
+		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected, writes) {
 			return
 		}
 		if hi-lo == 1 {
@@ -85,9 +65,161 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	return merged
 }
 
+// registrationWrites holds, for one reading of a command, the resolved write
+// targets registrationWriteReach reads in the whole command and in each of
+// its placed statements (TopLevelStatements). They do not depend on the
+// registration set, so the narrowing by halves reads, parses and resolves
+// them once for the command, not once for every half it tries: a dynamic
+// copy-mode call of 1,500 statements after a cd parsed every statement
+// again for each half (rel-1-0-10:GAP-2271). The statements are read in
+// order and only as far as a half needs them.
+type registrationWrites struct {
+	command, cwd, home string
+	whole              []string
+	wholeRead          bool
+	statements         []PlacedStatement
+	listed             bool
+	each               [][]string
+}
+
+// targets are the write operands one reading of body in dir names, resolved
+// as protectedReachPath resolves them (resolveWriteTarget); an operand that
+// does not resolve is left out, as protectedReachPath answers it false.
+func (w *registrationWrites) targets(body, dir string, user KnownUser) []string {
+	writes := LiteralWriteOperands(body, dir, w.home)
+	writes = append(writes, InPlaceEditOperands(body, dir, w.home, user)...)
+	if strings.Contains(body, ">") {
+		redirects, _, _ := ShellWriteOperands(body, dir, w.home)
+		writes = append(writes, redirects...)
+		bounded, _ := BoundedShellWriteOperands(body, dir, w.home)
+		writes = append(writes, bounded...)
+	}
+	var memo *TargetMemo
+	resolved := make([]string, 0, len(writes))
+	for _, path := range writes {
+		if target, ok := memo.resolveWriteTarget(OperandPath(path, dir)); ok {
+			resolved = append(resolved, target)
+		}
+	}
+	return resolved
+}
+
+// wholeTargets are the targets of the whole command in cwd.
+func (w *registrationWrites) wholeTargets() []string {
+	if !w.wholeRead {
+		w.whole = w.targets(w.command, w.cwd, KnownUser{Name: ActionKnownUser(w.command, w.home)})
+		w.wholeRead = true
+	}
+	return w.whole
+}
+
+// statementTargets are the targets of placed statement i, and false past the
+// last one or when the command changes no directory or its statements
+// cannot be placed.
+func (w *registrationWrites) statementTargets(i int) ([]string, bool) {
+	if !w.listed {
+		w.listed = true
+		if ChangesDirectory(w.command) {
+			if statements, ok := TopLevelStatements(w.command, w.cwd, w.home); ok {
+				w.statements = statements
+			}
+		}
+	}
+	if i >= len(w.statements) {
+		return nil, false
+	}
+	for len(w.each) <= i {
+		statement := w.statements[len(w.each)]
+		w.each = append(w.each, w.targets(statement.Command, statement.Dir, statement.User))
+	}
+	return w.each[i], true
+}
+
+// registrationTargetsReach reports a resolved target that is a member of
+// protected (protectedReachResolved).
+func registrationTargetsReach(targets []string, protected protectedFiles) bool {
+	return slices.ContainsFunc(targets, func(target string) bool { return protectedReachResolved(target, protected, "") })
+}
+
+// registrationReachSet parses the command and stats every absolute member of
+// names once: protected and origin are those members in order, at their
+// indexes in names. ok is false when no reading can reach a member.
+func registrationReachSet(command, cwd, home string, names []string) (file *syntax.File, protected protectedFiles, origin []string, at []int, ok bool) {
+	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
+		return nil, nil, nil, nil, false
+	}
+	if !RegistrationWriteCandidate(command) {
+		return nil, nil, nil, nil, false
+	}
+	file, ok = parseShell(command)
+	if !ok {
+		return nil, nil, nil, nil, false
+	}
+	protected = make(protectedFiles, 0, len(names))
+	origin = make([]string, 0, len(names))
+	at = make([]int, 0, len(names))
+	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
+	for index, name := range names {
+		if !filepath.IsAbs(name) {
+			continue
+		}
+		entry := protectedFile{path: filepath.Clean(name), call: call}
+		if info, err := call.stat(entry.path); err == nil {
+			entry.info = info
+		} else if !os.IsNotExist(err) {
+			entry.unknown = true
+		}
+		protected = append(protected, entry)
+		origin = append(origin, name)
+		at = append(at, index)
+	}
+	return file, protected, origin, at, true
+}
+
+// registrationFirstWriteReachedAs is the index in names of the first member
+// registrationWriteReachedAs returns, or len(names) when it returns none or
+// none before limit. It reads the same halves in the same order and stops at
+// the first member a half narrows to: that is the first one the full
+// narrowing appends, which appends in the order of names. A half that starts
+// at limit or past the first flow member cannot hold an earlier member and
+// is not read (rel-1-0-10:GAP-2271).
+func registrationFirstWriteReachedAs(command, cwd, home string, names []string, limit int) int {
+	file, protected, _, at, ok := registrationReachSet(command, cwd, home, names)
+	if !ok {
+		return len(names)
+	}
+	first := len(names)
+	for index, member := range registrationFlowMembers(file, command, cwd, home, protected) {
+		if member {
+			first = at[index]
+			break
+		}
+	}
+	limit = min(limit, first)
+	writes := &registrationWrites{command: command, cwd: cwd, home: home}
+	found := false
+	var narrow func(lo, hi int)
+	narrow = func(lo, hi int) {
+		if found || lo >= hi || at[lo] >= limit || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected, writes) {
+			return
+		}
+		if hi-lo == 1 {
+			found = true
+			first = at[lo]
+			return
+		}
+		mid := lo + (hi-lo)/2
+		narrow(lo, mid)
+		narrow(mid, hi)
+	}
+	narrow(0, len(protected))
+	return first
+}
+
 // registrationWriteReach reports whether the command writes a member of
 // protected, one part of the registration set all the narrowing reads.
-func registrationWriteReach(file *syntax.File, command, cwd, home string, protected, all protectedFiles) bool {
+// writes holds the command's set-free write targets across the narrowing.
+func registrationWriteReach(file *syntax.File, command, cwd, home string, protected, all protectedFiles, writes *registrationWrites) bool {
 	fileProtected := make(protectedFiles, 0, len(protected))
 	for _, entry := range protected {
 		if entry.info == nil || !entry.info.IsDir() {
@@ -97,23 +229,7 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 	if actionClientResolvedProtectedWrite(file, command, cwd, home, protected, "") {
 		return true
 	}
-	readOperands := func(body, dir string, user KnownUser) bool {
-		writes := LiteralWriteOperands(body, dir, home)
-		writes = append(writes, InPlaceEditOperands(body, dir, home, user)...)
-		if strings.Contains(body, ">") {
-			redirects, _, _ := ShellWriteOperands(body, dir, home)
-			writes = append(writes, redirects...)
-			bounded, _ := BoundedShellWriteOperands(body, dir, home)
-			writes = append(writes, bounded...)
-		}
-		for _, path := range writes {
-			if protectedReachPath(OperandPath(path, dir), fileProtected, "") {
-				return true
-			}
-		}
-		return false
-	}
-	if readOperands(command, cwd, KnownUser{Name: ActionKnownUser(command, home)}) {
+	if registrationTargetsReach(writes.wholeTargets(), fileProtected) {
 		return true
 	}
 	if registrationPatchReach(file, cwd, home, protected) {
@@ -126,13 +242,13 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		registrationFindRsyncReach(file, cwd, home, protected, all) {
 		return true
 	}
-	if ChangesDirectory(command) {
-		if statements, ok := TopLevelStatements(command, cwd, home); ok {
-			for _, statement := range statements {
-				if readOperands(statement.Command, statement.Dir, statement.User) {
-					return true
-				}
-			}
+	for i := 0; ; i++ {
+		targets, ok := writes.statementTargets(i)
+		if !ok {
+			break
+		}
+		if registrationTargetsReach(targets, fileProtected) {
+			return true
 		}
 	}
 	if registrationWalkLinks(file, command, cwd, home, protected, false, pipeEachChild) {
@@ -354,10 +470,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths, truncated := actionBoundedGlob(OperandPath(value, currentCWD), false)
-					if len(paths) > 64 {
-						continue
-					}
+					paths, truncated := registrationGlobMatches(OperandPath(value, currentCWD))
 					for _, path := range paths {
 						if protectedReachPath(path, protected, "") {
 							found = true
@@ -649,10 +762,7 @@ func registrationItemPaths(word *syntax.Word, command, cwd, home string) []strin
 		return nil
 	}
 	if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-		matches, truncated := actionBoundedGlob(OperandPath(value, cwd), false)
-		if len(matches) > 64 {
-			return nil
-		}
+		matches, truncated := registrationGlobMatches(OperandPath(value, cwd))
 		// The loop reader decides on the matches read before the cap: the
 		// reading is truncated (RegistrationWriteReachedBounded).
 		noteGlobCut(truncated)
@@ -1851,4 +1961,25 @@ func registrationPatchReach(file *syntax.File, cwd, home string, protected prote
 		return true
 	})
 	return found
+}
+
+// maxRegistrationGlobMatches bounds the matches of one pattern the
+// registration readers resolve and judge. A pattern that matched more than
+// 64 names was skipped before the registered-file check with no signal
+// (rel-1-0-10:GAP-1491); every match up to this cap is judged now, and past
+// it the first ones are judged and the reading is truncated (bounded.Items),
+// so a registered file the cap hides is the unknown tier, never a silent
+// allow.
+const maxRegistrationGlobMatches = 1024
+
+// registrationGlobMatches expands pattern for a registration reader
+// (actionBoundedGlob) and keeps at most maxRegistrationGlobMatches matches,
+// with the caps the expansion and the keep hit.
+func registrationGlobMatches(pattern string) ([]string, bounded.CapSet) {
+	matches, truncated := actionBoundedGlob(pattern, false)
+	if len(matches) > maxRegistrationGlobMatches {
+		matches = matches[:maxRegistrationGlobMatches]
+		truncated = truncated.Union(bounded.Of(bounded.Items))
+	}
+	return matches, truncated
 }

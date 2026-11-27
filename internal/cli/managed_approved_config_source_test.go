@@ -814,6 +814,7 @@ func TestApprovedConfigSourceProofNamesTheConfigTheHandEditReplaced(t *testing.T
 // stop instead of restoring A. Real writers throughout. Benign twin: the same
 // sequence without the lost record restores A.
 func TestRepairOverAHandEditStopsWhenTheGenerationRecordRestartedAfterTheProof(t *testing.T) {
+	keepTestOffTheRealDataHome(t)
 	ctx := context.Background()
 	handEdit := func(t *testing.T, configPath, body string) {
 		t.Helper()

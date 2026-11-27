@@ -80,6 +80,12 @@ var slimHookAllowed = []string{
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded",
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic",
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb",
+	// The tier column of a pack (tiers.yaml, DET111 D1): the rule loader
+	// parses and checks it with the decide table (internal/guardrail
+	// compose.go and rulepack.go; the outage fail mode reads its column).
+	// decide links only the standard library and yaml.v3, which the hook
+	// already links.
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide",
 }
 
 // slimHookKnownHeavy are the heavy packages the hook links in 1.0.10 (the
@@ -294,7 +300,13 @@ func TestEveryIDEInventoryProgramLinksTheSQLiteDriver(t *testing.T) {
 // the hook links it so that a pinned custom pack sets the outage mode exactly
 // as the gateway reads it (rel-1-0-10:GAP-0603). A change that needs more
 // than the room left here adds a heavy library to every agent tool call.
-const slimHookMaxBytes = 43 << 20
+//
+// 1.0.11 DET111 (DET111 ruling a, 2026-11-24): the effects frontends of the
+// one-read redesign grew the Windows hook to 45,191,680 bytes at T23c
+// 08e285b2a6 and 45,381,632 at T23d (Linux 40,972,450), past 43 MiB. The
+// budget is 44 MiB for 1.0.11; hook p99 (DET111 bar piece d) stays the
+// latency gate, and the diet of what DET111 added is rel-1-0-10:GAP-2169.
+const slimHookMaxBytes = 44 << 20
 
 func TestSlimHookSizeBudget(t *testing.T) {
 	if testing.Short() {

@@ -34,6 +34,7 @@ const adminCursorHooks = `{
 `
 
 func TestCursorMergePreservesForeignEntriesInOrder(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path, _ := CursorEnterpriseHooksPath(opts)
 	writeFile(t, path, adminCursorHooks)
@@ -69,6 +70,7 @@ func TestCursorMergePreservesForeignEntriesInOrder(t *testing.T) {
 }
 
 func TestCursorRepairsDriftedOwnedEntry(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	path, _ := CursorEnterpriseHooksPath(opts)
 	if _, err := (cursorTarget{}).Reconcile(opts); err != nil {
@@ -94,6 +96,7 @@ func TestCursorRepairsDriftedOwnedEntry(t *testing.T) {
 }
 
 func TestCopilotDropInAndAdminPolicyCoexist(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	dir, _ := CopilotPolicyDir(opts)
 	admin := filepath.Join(dir, "10-company.json")
@@ -135,6 +138,7 @@ func TestCopilotDropInAndAdminPolicyCoexist(t *testing.T) {
 // timeoutSec. Copilot lets the tool call proceed when the hook times out, so
 // verification must report the timeout and not count the hook as coverage.
 func TestCopilotShortenedHookTimeoutIsAConflict(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	if _, err := (copilotTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)
@@ -220,6 +224,7 @@ func TestCopilotUntrustedDropInIsAConflict(t *testing.T) {
 }
 
 func TestVSCodePolicyFolderDefenseClawCreatedIsRemoved(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	vscodeDir := filepath.Join(opts.Root, "etc/vscode")
 	if err := os.MkdirAll(filepath.Join(opts.Root, "etc"), 0o755); err != nil {
@@ -246,6 +251,7 @@ func TestVSCodePolicyFolderDefenseClawCreatedIsRemoved(t *testing.T) {
 // the policy.d drop-in the Copilot CLI and the GitHub Copilot app load, and
 // writes no VS Code device policy or Copilot managed setting.
 func TestCopilotCLIPolicyOnlyWritesNoEditorPolicy(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.CopilotCLIPolicyOnly = true
 	vscodePolicy := filepath.Join(opts.Root, "etc/vscode/policy.json")
@@ -281,6 +287,7 @@ func TestCopilotCLIPolicyOnlyWritesNoEditorPolicy(t *testing.T) {
 // matched the command rendered for its own key and passed as intact. Verify
 // reports it, and ensure's reconcile rewrites the drop-in without it.
 func TestCopilotHookForAnUnpublishedEventIsAConflict(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	if _, err := (copilotTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)

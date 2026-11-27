@@ -40,12 +40,20 @@ const (
 )
 
 // The files written in the agent's home at start (B1 2.6), relative to
-// $HOME.
+// $HOME. pip reads two user files: PipLegacyConfFile always, and
+// PipConfFile under $XDG_CONFIG_HOME (default ~/.config), which wins a key
+// both set. A connector that points XDG_CONFIG_HOME elsewhere (Devin's
+// kit-owned folder) would miss PipConfFile, so the start writes the same
+// index to both (GAP-0977).
 const (
-	NPMRCFile   = ".npmrc"
-	PipConfFile = ".config/pip/pip.conf"
-	PyPIRCFile  = ".pypirc"
+	NPMRCFile         = ".npmrc"
+	PipConfFile       = ".config/pip/pip.conf"
+	PipLegacyConfFile = ".pip/pip.conf"
+	PyPIRCFile        = ".pypirc"
 )
+
+// registryFileNames are the files the start reads and may write, in order.
+var registryFileNames = []string{NPMRCFile, PipConfFile, PipLegacyConfFile, PyPIRCFile}
 
 // registryMarker is the first line of every file DefenseClaw writes at
 // agent start: a later start replaces such a file, and the doctor reads it
@@ -95,9 +103,10 @@ func RegistryEntries(in []RegistryEntry) []RegistryEntry {
 //
 //   - npm: ~/.npmrc, one //HOST/:_authToken=PLACEHOLDER line per host
 //     (npm reads the user file after the kit's global one).
-//   - pypi: ~/.config/pip/pip.conf names the first index host as
-//     index-url with the placeholder as its password (upload hosts are not
-//     indexes); ~/.pypirc names every host as an upload repository.
+//   - pypi: ~/.config/pip/pip.conf and ~/.pip/pip.conf name the first
+//     index host as index-url with the placeholder as its password (upload
+//     hosts are not indexes); ~/.pypirc names every host as an upload
+//     repository.
 func RegistryFiles(entries []RegistryEntry) map[string]string {
 	out := map[string]string{}
 	var npm, pipIndex, pypirc strings.Builder
@@ -127,6 +136,7 @@ func RegistryFiles(entries []RegistryEntry) map[string]string {
 	}
 	if pipIndex.Len() > 0 {
 		out[PipConfFile] = head + pipIndex.String()
+		out[PipLegacyConfFile] = out[PipConfFile]
 	}
 	if pypirc.Len() > 0 {
 		out[PyPIRCFile] = head + "[distutils]\nindex-servers =\n    " + strings.Join(servers, "\n    ") + "\n" + pypirc.String()
@@ -138,7 +148,8 @@ func pypiUploadHost(h string) bool { return h == "upload.pypi.org" || h == "test
 
 // RegistryProbe is what the agent's home and the image hold before the
 // start writes anything: the content of each file that exists (Links names
-// those that are symbolic links; they are never read or written; TooLarge
+// those that are symbolic links, or sit in a folder below $HOME that is a
+// link or not a folder (GAP-0974); they are never read or written; TooLarge
 // those over registryFileCap, which are kept as they are), and the
 // hosts the image's global npmrc names with a token: the template build
 // writes them for launchers older than 1.0.11 (GAP-0529). BakedNPMTokens
@@ -153,12 +164,13 @@ type RegistryProbe struct {
 }
 
 // Mode says how an agent gets its registry placeholders: "start" (files
-// DefenseClaw wrote at agent start), "template" (lines its template image
-// carries from its build), "template+start", or "none".
+// DefenseClaw wrote at agent start, or lines it added at start to an
+// image's own npmrc), "template" (lines its template image carries from
+// its build), "template+start", or "none" (none of these was found).
 func (p RegistryProbe) Mode() string {
 	start := false
-	for _, f := range []string{NPMRCFile, PipConfFile, PyPIRCFile} {
-		if strings.HasPrefix(p.Files[f], registryMarker) {
+	for _, f := range registryFileNames {
+		if c := p.Files[f]; strings.HasPrefix(c, registryMarker) || (f == NPMRCFile && strings.Contains(c, "\n"+registryAppendMarker+"\n")) {
 			start = true
 		}
 	}
@@ -212,13 +224,20 @@ func PlanRegistryFiles(entries []RegistryEntry, probe RegistryProbe) RegistryPla
 	if len(baked) > 0 {
 		plan.Notes = append(plan.Notes, "the template's npm configuration already names "+strings.Join(baked, ", ")+" (placeholders from its build); DefenseClaw did not add them to ~/.npmrc")
 	}
-	for _, f := range []string{NPMRCFile, PipConfFile, PyPIRCFile} {
-		content, ok := RegistryFiles(entries)[f]
+	rendered := RegistryFiles(entries)
+	for _, f := range registryFileNames {
+		content, ok := rendered[f]
 		if !ok {
 			continue
 		}
+		// ~/.pip/pip.conf only repeats the index of ~/.config/pip/pip.conf
+		// (which wins a key both set), so it is written only with it: an
+		// image's or a linked ~/.config/pip/pip.conf keeps pip as it was.
+		if f == PipLegacyConfFile && plan.Write[PipConfFile] == "" {
+			continue
+		}
 		if slices.Contains(probe.Links, f) {
-			plan.Notes = append(plan.Notes, fmt.Sprintf("~/%s in the agent is a link; DefenseClaw did not write registry placeholders through it", f))
+			plan.Notes = append(plan.Notes, fmt.Sprintf("~/%s in the agent is a link, or a folder on its path is a link or not a folder; DefenseClaw did not write registry placeholders through it", f))
 			continue
 		}
 		if slices.Contains(probe.TooLarge, f) {
@@ -233,11 +252,25 @@ func PlanRegistryFiles(entries []RegistryEntry, probe RegistryProbe) RegistryPla
 				plan.Notes = append(plan.Notes, fmt.Sprintf("~/.npmrc in the agent sets %s, a credential: DefenseClaw did not add registry placeholders to it; remove the credential from the image and bind the registry with defenseclaw substrate secrets add (egress adds it)", k))
 				continue
 			}
-			var add []string
+			// Compare keys the file sets, not text: a comment that names a
+			// bound host sets nothing (GAP-0976).
+			set := npmrcKeys(old)
+			var add, keptKeys []string
 			for _, line := range strings.Split(content, "\n") {
-				if strings.HasPrefix(line, "//") && !strings.Contains(old, strings.SplitN(line, "=", 2)[0]+"=") {
-					add = append(add, line)
+				if !strings.HasPrefix(line, "//") {
+					continue
 				}
+				k, v, _ := strings.Cut(line, "=")
+				ov, has := set[strings.ToLower(k)]
+				switch {
+				case !has:
+					add = append(add, line)
+				case ov != v:
+					keptKeys = append(keptKeys, k)
+				}
+			}
+			if len(keptKeys) > 0 {
+				plan.Notes = append(plan.Notes, fmt.Sprintf("~/.npmrc in the agent already sets %s; DefenseClaw kept the image's line, so Substrate egress swaps only the placeholder it holds", strings.Join(keptKeys, ", ")))
 			}
 			if len(add) == 0 {
 				continue
@@ -267,6 +300,25 @@ func PlanRegistryFiles(entries []RegistryEntry, probe RegistryProbe) RegistryPla
 
 // registryAppendMarker opens the lines added to an image's own npmrc.
 const registryAppendMarker = "# Added by DefenseClaw at agent start (placeholders only):"
+
+// npmrcKeys maps each key data sets (trimmed, lowercased) to its value
+// (trimmed, unquoted; the last line wins, as in npm). Blank lines and
+// comments (# or ;) set nothing.
+func npmrcKeys(data string) map[string]string {
+	set := map[string]string{}
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		set[strings.ToLower(strings.TrimSpace(k))] = strings.Trim(strings.TrimSpace(v), `"'`)
+	}
+	return set
+}
 
 // npmrcCredential reports the first npmrc key of data that holds a
 // credential that is not one of the placeholders.
@@ -299,12 +351,15 @@ const registryWriteMax = 120 << 10
 
 // registryProbeScript prints each registry file of the agent's home and
 // the image's global npmrc, after a separator line with a fresh nonce
-// (DC_REG_SEP), so file content cannot forge a separator. A link is named,
-// never read. Each file is read up to one byte past registryFileCap, so a
-// larger one is seen as larger, not as its first part.
-var registryProbeScript = `for f in .npmrc .config/pip/pip.conf .pypirc; do
+// (DC_REG_SEP), so file content cannot forge a separator. A link, or a
+// file in a folder below $HOME that is a link or not a folder, is named
+// (L), never read. Each file is read up to one byte past registryFileCap,
+// so a larger one is seen as larger, not as its first part.
+var registryProbeScript = `for f in ` + strings.Join(registryFileNames, " ") + `; do
 p="$HOME/$f"
-if [ -L "$p" ]; then printf '\n%s L %s\n' "$DC_REG_SEP" "$f"
+l=; d=$(dirname "$f")
+while [ "$d" != . ]; do { [ -L "$HOME/$d" ] || { [ -e "$HOME/$d" ] && [ ! -d "$HOME/$d" ]; }; } && l=1; d=$(dirname "$d"); done
+if [ -n "$l" ] || [ -L "$p" ]; then printf '\n%s L %s\n' "$DC_REG_SEP" "$f"
 elif [ -f "$p" ]; then printf '\n%s F %s\n' "$DC_REG_SEP" "$f"; head -c ` + strconv.Itoa(registryFileCap+1) + ` "$p"; fi
 done
 if [ -f ` + kit.NPMGlobalConfig + ` ]; then printf '\n%s G global\n' "$DC_REG_SEP"; head -c ` + strconv.Itoa(registryFileCap) + ` ` + kit.NPMGlobalConfig + `; fi
@@ -312,23 +367,41 @@ exit 0
 `
 
 // registryWriteScript writes each non-empty DC_REG_* file as the agent's
-// user (0600), through a temporary file renamed over the old one, so a
-// link put there in the meantime is replaced, not followed.
-const registryWriteScript = `set -e
-umask 077
+// user (0600), through a fresh temporary file (mktemp, never an existing
+// or predictable name) renamed over the old one, so a link put at the file
+// in the meantime is replaced, not followed. Each folder below $HOME is
+// made one at a time and refused when it is a link or not a folder, and a
+// file that is a folder (or a link to one) is refused, so nothing is ever
+// written through a link (GAP-0974). A refused file is named on stderr;
+// the others are still written, and the script exits 3.
+var registryWriteScript = `umask 077
+rc=0
 w() {
 [ -n "$2" ] || return 0
-mkdir -p "$(dirname "$1")"
-t="$1.dc-tmp.$$"
-printf '%s' "$2" > "$t"
-mv -f "$t" "$1"
+r="$HOME"
+for c in $(dirname "$1" | tr / ' '); do
+[ "$c" != . ] || continue
+r="$r/$c"
+if [ -L "$r" ] || { [ -e "$r" ] && [ ! -d "$r" ]; }; then echo "~/$1: ~${r#"$HOME"} is a link or not a folder" >&2; return 3; fi
+[ -d "$r" ] || mkdir "$r" || return 3
+done
+p="$HOME/$1"
+if [ -d "$p" ]; then echo "~/$1 is a folder" >&2; return 3; fi
+t=$(mktemp "$r/.dc-reg.XXXXXXXX") || return 3
+printf '%s' "$2" > "$t" && mv -f "$t" "$p" || { rm -f "$t"; return 3; }
 }
-w "$HOME/.npmrc" "$DC_REG_NPMRC"
-w "$HOME/.config/pip/pip.conf" "$DC_REG_PIPCONF"
-w "$HOME/.pypirc" "$DC_REG_PYPIRC"
+` + registryWriteCalls() + `exit $rc
 `
 
-var registryEnv = map[string]string{NPMRCFile: "DC_REG_NPMRC", PipConfFile: "DC_REG_PIPCONF", PyPIRCFile: "DC_REG_PYPIRC"}
+var registryEnv = map[string]string{NPMRCFile: "DC_REG_NPMRC", PipConfFile: "DC_REG_PIPCONF", PipLegacyConfFile: "DC_REG_PIPLEGACY", PyPIRCFile: "DC_REG_PYPIRC"}
+
+func registryWriteCalls() string {
+	var b strings.Builder
+	for _, f := range registryFileNames {
+		fmt.Fprintf(&b, "w %s \"$%s\" || rc=3\n", f, registryEnv[f])
+	}
+	return b.String()
+}
 
 // ProbeRegistryFiles reads the registry files of the agent's home and the
 // image's global npmrc through the relay.

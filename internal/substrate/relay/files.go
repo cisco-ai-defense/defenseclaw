@@ -79,7 +79,8 @@ const (
 
 // ExecRequest is the body of POST /dcrelay/1/exec.
 type ExecRequest struct {
-	// Argv is exec'd directly: there is no shell.
+	// Argv is exec'd directly: there is no shell. Argv[0] GitCommand is a
+	// git operation of the relay's own (gitpush.go), not a program.
 	Argv []string `json:"argv"`
 	// Workdir is absolute, or relative to the relay's working directory
 	// ("" is that directory).
@@ -284,7 +285,8 @@ func (s *Server) fileExec(w http.ResponseWriter, r *http.Request) {
 
 // runExec runs req in dir and writes its frames to w, ending with the exit
 // frame (or nothing when the client went away), as the agent's user when
-// sep is set (GAP-0116).
+// sep is set (GAP-0116). A GitCommand request is the relay's own git
+// operation (runGitOp, GAP-0795).
 func runExec(ctx context.Context, req ExecRequest, dir string, w io.Writer, flush func(), sep *separation) {
 	timeout := time.Duration(req.TimeoutSeconds) * time.Second
 	if timeout == 0 {
@@ -299,6 +301,25 @@ func runExec(ctx context.Context, req ExecRequest, dir string, w io.Writer, flus
 	kctx, cancelK := context.WithCancel(tctx)
 	defer cancelK()
 	es := &execStream{w: w, flush: flush, left: limit, cancel: cancelK}
+
+	if req.Argv[0] == GitCommand {
+		code := runGitOp(kctx, req.Argv, dir, req.Env, sep, execWriter{es, ExecStdout}, execWriter{es, ExecStderr})
+		es.mu.Lock()
+		defer es.mu.Unlock()
+		if es.werr != nil || ctx.Err() != nil {
+			return
+		}
+		switch {
+		case es.over:
+			es.frame(ExecStderr, []byte(fmt.Sprintf("output limit of %d bytes reached", limit)))
+			code = ExitOutputLimit
+		case code != 0 && tctx.Err() == context.DeadlineExceeded:
+			es.frame(ExecStderr, []byte("timed out"))
+			code = ExitTimedOut
+		}
+		es.frame(ExecExit, []byte(strconv.Itoa(code)))
+		return
+	}
 
 	cmd := exec.CommandContext(kctx, req.Argv[0], req.Argv[1:]...)
 	cmd.Dir = dir

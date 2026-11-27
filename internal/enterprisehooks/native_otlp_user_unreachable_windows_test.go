@@ -23,6 +23,7 @@ import (
 // record one, revoking the credential, when the upgrade itself meets the
 // unreachable share), never clear it.
 func TestWindowsManagedNativeOTLPTakeBackKeepsThePendingMarkerWhenTheLinkedConfigCannotBeReached(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	t.Setenv("CODEX_HOME", "")
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {

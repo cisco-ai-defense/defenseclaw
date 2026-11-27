@@ -12,6 +12,7 @@ import (
 	"sync"
 	"weak"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -183,7 +184,8 @@ func (c *Config) HookPolicyTierForConnector(connector string) string {
 
 // resolveHookPolicyTier reads the tier of the rule pack ref names in dir: the
 // generation's pinned posture, a custom pack the config-load check accepted,
-// the pack manifest, a built-in name, then the folder-name table.
+// the pack's own tier (manifest, else tiers.yaml), a built-in name, then the
+// legacy strict folder (packFolderPosture).
 func (c *Config) resolveHookPolicyTier(ref RulePackRef, dir string) string {
 	if posture, pinned := c.PinnedRulePackPosture(dir); pinned {
 		if posture != "" {
@@ -207,7 +209,7 @@ func (c *Config) resolveHookPolicyTier(ref RulePackRef, dir string) string {
 			return HookPolicyTierStrict
 		}
 	}
-	if posture := packManifestPosture(dir); posture != "" {
+	if posture := packOwnPosture(dir); posture != "" {
 		return posture
 	}
 	if dir == "" && IsBuiltinRulePack(ref.Name) {
@@ -241,15 +243,44 @@ func packManifestPosture(dir string) string {
 	return ""
 }
 
-// packFolderPosture is the folder-name posture table: strict and permissive
-// keep their names, every other folder (and none) is default.
-func packFolderPosture(dir string) string {
-	if strings.TrimSpace(dir) == "" {
-		return HookPolicyTierDefault
+// packOwnPosture is the pack's own tier in dir: its manifest posture, else
+// the tier field of its tiers.yaml (guardrail.ReadPackPosture reads the same
+// two), "" when neither names one. The tiers.yaml is read as the loader reads
+// it (decide.ParseColumn: known fields, version, rows): a file the loader
+// refuses names no tier, so the caller falls back to the built-in name or
+// the folder, never to a tier from a file no generation would load (DET111
+// T19 review P3-3).
+func packOwnPosture(dir string) string {
+	if posture := packManifestPosture(dir); posture != "" {
+		return posture
 	}
-	switch base := strings.ToLower(filepath.Base(filepath.Clean(dir))); base {
-	case HookPolicyTierStrict, HookPolicyTierPermissive:
-		return base
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "tiers.yaml"))
+	if err != nil || len(raw) > 1<<20 {
+		return ""
+	}
+	column, err := decide.ParseColumn(raw)
+	if err != nil {
+		return ""
+	}
+	switch tier := column.Tier.String(); tier {
+	case HookPolicyTierDefault, HookPolicyTierStrict, HookPolicyTierPermissive:
+		return tier
+	}
+	return ""
+}
+
+// packFolderPosture is the tier of a pack that names none of its own (no
+// manifest posture, no tiers.yaml): a legacy copy in a folder named strict
+// keeps strict, which a 1.0.10 install of it had (owner ruling on
+// rel-1-0-10:GAP-1562: never weaker by a missing field); every other folder
+// is default. A folder name never lowers a tier: a manifest-less folder named
+// permissive is default (a pack's tier comes from its own tier field).
+func packFolderPosture(dir string) string {
+	if strings.TrimSpace(dir) != "" && strings.EqualFold(filepath.Base(filepath.Clean(dir)), HookPolicyTierStrict) {
+		return HookPolicyTierStrict
 	}
 	return HookPolicyTierDefault
 }

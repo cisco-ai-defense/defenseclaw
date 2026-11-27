@@ -158,34 +158,62 @@ func posixParseTruncation(request trustedActionRequest, facts actionfacts.Facts)
 	if _, twinRead := overLimitCommandBoundedTwinRequest(request, facts); twinRead {
 		return bounded.CapSet{}
 	}
-	if _, dataOnly := posixDataWordTwinRequest(request, facts); dataOnly {
+	if _, _, dataOnly := posixDataWordTwinRequest(request, facts); dataOnly {
 		return bounded.CapSet{}
 	}
 	return bounded.Of(bounded.Bytes)
 }
 
 // posixDataWordTwinRequest is the request for the twin of a call whose every
-// over-limit word is DATA: the same call with each such word shortened, which
-// the analysis reads to the end. false when a word is in code position, the
-// text cannot be read with certainty, or the twin is still past a bound.
-func posixDataWordTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
+// over-limit word is DATA or the inline query of a SQL client: the same call
+// with each data word shortened and each query read to its statements within
+// the bound (actionfacts.OverLimitWordSplit.Query), which the analysis reads
+// to the end, and the split that made it. false when a word is in code
+// position, the text cannot be read with certainty, or the twin is still
+// past a bound.
+func posixDataWordTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, actionfacts.OverLimitWordSplit, bool) {
 	command := posixByteBoundCommand(request, facts)
 	if command == "" || len(command) > actionfacts.MaxCommandTextBytes {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, actionfacts.OverLimitWordSplit{}, false
 	}
 	split, ok := actionfacts.SplitOverLimitWords(command)
 	if _, text := trustedBashCommandInput(request.Input); !text {
 		split, ok = actionfacts.SplitOverLimitWordsOfArgv(command)
 	}
-	if !ok || split.Code > 0 || split.Data == 0 ||
+	if !ok || split.Code > 0 || split.Data+split.Query == 0 ||
 		actionfacts.ShellInputPastByteBound(split.Twin, len(request.Input.Args)) {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, actionfacts.OverLimitWordSplit{}, false
 	}
 	twin := bashReadingRequest(request, command, split.Twin)
 	if !actionfacts.OverLimitTwinWithinBounds(twin.Input, split.Twin) {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, actionfacts.OverLimitWordSplit{}, false
 	}
-	return twin, true
+	return twin, split, true
+}
+
+// sqlQueryChunkRequests are the readings of the statements of an over-limit
+// inline query past its first chunk (actionfacts.OverLimitWordSplit
+// .QueryChunks): the call with the query replaced by each further chunk of
+// whole statements, judged as the twin is and joined raise-only (DET111
+// ruling B on GAP-1926). A chunk whose reading is past a bound is not read;
+// its statements stay under the truncation record, which raises nothing.
+func sqlQueryChunkRequests(request trustedActionRequest, facts actionfacts.Facts, split actionfacts.OverLimitWordSplit) []trustedActionRequest {
+	if len(split.QueryChunks) == 0 {
+		return nil
+	}
+	command := posixByteBoundCommand(request, facts)
+	requests := make([]trustedActionRequest, 0, len(split.QueryChunks))
+	for _, text := range split.QueryChunks {
+		if actionfacts.ShellInputPastByteBound(text, len(request.Input.Args)) {
+			continue
+		}
+		chunk := bashReadingRequest(request, command, text)
+		if !actionfacts.OverLimitTwinWithinBounds(chunk.Input, text) {
+			continue
+		}
+		requests = append(requests, chunk)
+	}
+	return requests
 }
 
 // posixDataWordTitle is the reason of the record a data word leaves.
@@ -195,18 +223,56 @@ const posixDataWordTitle = "Shell word past the analysis bound is data to the lo
 // record of the word the analysis did not read: the call keeps the verdict of
 // its twin, and the record is no action raise. A limit finding the call
 // already carries, or a record a twin left, is kept as it is. The record is
-// marked (dataWordRecord) so no cap logic reads it as a cap the call hit
+// marked (boundRecord) so no cap logic reads it as a cap the call hit
 // (rel-1-0-10:GAP-0760).
 func withPosixDataWordRecord(findings []RuleFinding) []RuleFinding {
-	if boundedLimitIndex(findings) >= 0 || slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.dataWordRecord }) {
+	return withBoundRecord(findings, posixDataWordTitle, bounded.Of(bounded.Bytes).Reason()+"; operand")
+}
+
+// sqlQueryCutTitle is the reason of the record the inline query of a SQL
+// client past the shell word bound leaves.
+const sqlQueryCutTitle = "SQL client inline query past the shell word bound, judged on its statements within the bound (bounded_truncated cap=bytes, query)"
+
+// withSQLQueryCutRecord adds the detection-only record of the inline query
+// of a SQL client (psql -c, mysql -e, sqlcmd -Q, snowsql -q) past the shell
+// word bound: the query is code to the server and the call is recorded
+// truncated, but the cut by itself raises nothing, as a SQL facts cap hit
+// does (DET111 ruling on FIX-T20B: a long benign query must not start
+// alerting). The call is judged as its twin, which keeps the statements
+// within the bound with their long literals shortened, so a rule that
+// matches there still fires.
+func withSQLQueryCutRecord(findings []RuleFinding) []RuleFinding {
+	return withBoundRecord(findings, sqlQueryCutTitle, bounded.Of(bounded.Bytes).Reason()+"; query")
+}
+
+// withSQLASTCapRecord adds the detection-only record of the SQL facts
+// reader's cap hits in set: the SQL past the bound gets no SQL fact and the
+// legacy SQL readers judge it as at 1.0.10, so the hit is recorded in the
+// decision and raises nothing by itself (DET111 ruling on T20 review P3-1:
+// a large benign SQL text must not start alerting).
+func withSQLASTCapRecord(findings []RuleFinding, set bounded.CapSet) []RuleFinding {
+	return withBoundRecord(findings, sqlASTCapRecordTitle+" ("+set.Reason()+")", set.Reason())
+}
+
+// sqlASTCapRecordTitle is the reason of the record a SQL facts cap leaves.
+const sqlASTCapRecordTitle = "SQL text past the SQL facts bound, judged by the SQL rules only"
+
+// withBoundRecord adds a detection-only record with title (one per title) to
+// the findings of a call: INFO, recorded only (no action raise) and marked
+// boundRecord, so no cap logic reads it as a cap the call hit. A limit
+// finding the call already carries says more and is kept alone.
+func withBoundRecord(findings []RuleFinding, title, evidence string) []RuleFinding {
+	if boundedLimitIndex(findings) >= 0 || slices.ContainsFunc(findings, func(f RuleFinding) bool {
+		return f.boundRecord && f.Title == title
+	}) {
 		return findings
 	}
 	record := trustedActionLimitFindings(false)[0]
-	record.Title = posixDataWordTitle
-	record.Evidence = bounded.Of(bounded.Bytes).Reason() + "; operand"
+	record.Title = title
+	record.Evidence = evidence
 	record.Severity = "INFO" // a record is no CRITICAL on an allowed call
-	record.enforcement = findingEnforcementDetectionOnly
-	record.dataWordRecord = true
+	record.Proof = record.Proof.Record()
+	record.boundRecord = true
 	return append(slices.Clip(findings), record)
 }
 

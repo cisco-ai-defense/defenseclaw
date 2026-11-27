@@ -60,6 +60,14 @@ type protectedSet struct {
 	// in one of these but is not an exact member is a protected basename in an
 	// unexpected directory (rule c): graded unknown, not clean.
 	tails []string
+	// bases are the folders a call with an unknown working folder may be in
+	// for this set: the home and the set's protected folders (R-CWD).
+	bases []string
+	// readReach: a read of a member behind an unread word prefix reaches the
+	// set (credentials only).
+	readReach bool
+	// homeRoots are passwd homes resolved from this call's Options.Accounts.
+	homeRoots []string
 }
 
 // agentConfigFolders are the per-connector configuration folders whose hook
@@ -134,7 +142,7 @@ func buildSets(home string, flavor effects.Flavor) map[string]protectedSet {
 	for _, rel := range credentialRelPaths {
 		cred = append(cred, j(home, rel))
 	}
-	sets[SetCredentials] = protectedSet{files: cred}
+	sets[SetCredentials] = protectedSet{files: cred, readReach: true}
 
 	// Agent hook config: per-connector settings/hooks files and hook trees,
 	// plus the project instruction files.
@@ -147,7 +155,11 @@ func buildSets(home string, flavor effects.Flavor) map[string]protectedSet {
 		agentTrees = append(agentTrees, j(base, "hooks"))
 		agentDirs = append(agentDirs, base)
 	}
-	agentFiles = append(agentFiles, j(home, "CLAUDE.md"), j(home, "AGENTS.md"))
+	// Codex keeps its hooks and notify command in config.toml: the 1.0.10
+	// hook config guard reads it as a hook config (hookpaths), so a delete or
+	// write of it by any program is the plain spelling's hook config change
+	// (rel-1-0-10:GAP-1478).
+	agentFiles = append(agentFiles, j(home, ".codex", "config.toml"), j(home, "CLAUDE.md"), j(home, "AGENTS.md"))
 	sets[SetAgentHookConfig] = protectedSet{files: agentFiles, dirs: agentDirs, trees: agentTrees}
 
 	// DefenseClaw self-protection state under ~/.defenseclaw.
@@ -171,6 +183,9 @@ func buildSets(home string, flavor effects.Flavor) map[string]protectedSet {
 			}
 		}
 		ps.tails = tails
+		if home != "" {
+			ps.bases = append([]string{home}, ps.dirs...)
+		}
 		sets[name] = ps
 	}
 

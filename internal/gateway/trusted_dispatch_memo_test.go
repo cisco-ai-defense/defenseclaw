@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // TestTrustedDispatchMemoKeyCoversEveryField: every field of a request that
@@ -28,11 +29,13 @@ func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 		"ResolvedWriteTargets": "value", "ActiveAgentFileIdentities": "value", "ShellStartup": "value",
 		"guestClaimHomePlaces": "value", "guestHomePlaces": "value",
 		"budget": "identity", "capFloor": "identity", "generation": "identity", "targetMemo": "identity",
-		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity",
-		"simpleMemo": "cache", "guestMemo": "cache",
+		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity", "Tiers": "identity",
+		"preservedHookConfigTargets": "value",
+		"simpleMemo":                 "cache", "guestMemo": "cache",
 		"overBudgetOmission": "out", "unresolvedTarget": "out", "resolvedTarget": "out",
 		"nonWriteMention": "out", "unprovenTarget": "out", "unknownMention": "out",
 		"record": "recorder", "recordTelemetry": "recorder", "recordEffectShadow": "recorder",
+		"aliasPending":        "recorder",
 		"guestWriteClaimOnly": "off", "guestByNameOnly": "off",
 	}
 	rt := reflect.TypeOf(trustedActionRequest{})
@@ -178,6 +181,30 @@ func TestTrustedDispatchMemoChargesTheBudget(t *testing.T) {
 	}
 }
 
+// TestTrustedDispatchMemoAliasPendingReevaluates keeps a pending cross-call
+// alias write from being lost when the same call is judged twice.
+func TestTrustedDispatchMemoAliasPendingReevaluates(t *testing.T) {
+	previous := trustedDispatchRunHook
+	t.Cleanup(func() { trustedDispatchRunHook = previous })
+	runs := 0
+	trustedDispatchRunHook = func(request trustedActionRequest) {
+		if request.aliasPending != nil {
+			runs++
+		}
+	}
+	ctx := context.WithValue(t.Context(), trustedDispatchMemoKey{}, &trustedDispatchMemo{})
+	request := trustedActionRequest{
+		Input:     actionfacts.Input{Tool: "Bash", Command: "echo constant"},
+		Connector: "claudecode", aliasPending: &effectAliasPending{},
+	}
+	dispatchTrustedAction(ctx, request)
+	request.aliasPending = &effectAliasPending{}
+	dispatchTrustedAction(ctx, request)
+	if runs != 2 {
+		t.Fatalf("pending alias recorder saw %d dispatches, want both calls", runs)
+	}
+}
+
 // TestTrustedDispatchMemoOffFieldsSkipTheMemo: a request that asks for an
 // out-parameter the memo does not replay (the "off" fields of
 // TestTrustedDispatchMemoKeyCoversEveryField) is judged without the memo. A
@@ -206,7 +233,7 @@ func TestTrustedDispatchMemoOffFieldsSkipTheMemo(t *testing.T) {
 			ctx := context.WithValue(context.Background(), trustedDispatchMemoKey{}, memo)
 			bucket := request.Input.Tool + "\x00" + request.Input.Command + "\x00" + request.LegacyText
 			key, refs := trustedDispatchMemoKeyOf(request)
-			state := trustedDispatchStateOf(request)
+			state := trustedDispatchStateOf(hookpaths.FoundHookCall(request.hookCall), request)
 			poison := []RuleFinding{{RuleID: "GAP-1048-STALE-REPLAY"}}
 			memo.store(bucket, &trustedDispatchMemoEntry{ctx: ctx, key: key, refs: refs, state: state, findings: poison})
 			if memo.lookup(ctx, bucket, key, refs, state) == nil {

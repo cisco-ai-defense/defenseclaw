@@ -762,3 +762,42 @@ async def test_inventory_sub_tabs_are_drawn_once_at_80x24(tmp_path) -> None:
         body = app._inventory_body_text()
     assert not any(label in body for label in ("Summary", "Skills", "Plugins", "MCPs", "Memory")), body
     assert body.count("\n") <= 1, body
+
+
+async def test_inventory_tables_fit_80x24_without_scrolling_sideways(tmp_path) -> None:
+    # GAP-2051: a long Source value ("All 10 connectors: Amp, Antigravity, ...")
+    # made the Summary table wider than the screen, so it scrolled sideways and
+    # drew a scrollbar of block glyphs instead of ending in an ellipsis. The
+    # Skills tab spent 7 rows on two boxed bars.
+    import sys
+    from pathlib import Path
+
+    from textual.widgets import DataTable
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from fixtures import screen_text, snapshot_app
+
+    names = ("amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode")
+    app = snapshot_app(tmp_path)
+    app.inventory_model.show_connector_column = True
+    app.inventory_model.apply_merged(
+        [(name, json.dumps({"connector": name, "skills": [{"id": f"skill-{name}"}]})) for name in names]
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("inventory")
+        await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        assert not table.show_horizontal_scrollbar
+        assert any(cell.endswith("…") for row in app._table_rows for cell in row), app._table_rows
+        source = next(row[1] for row in app._table_rows if row[0] == "Source")
+        assert source.startswith("All 10 connectors") and len(source) <= 80 - 9 - 16, source
+
+        await pilot.press("l")
+        await pilot.pause()
+        await pilot.pause()
+        assert not table.show_horizontal_scrollbar
+        # Tab bar 3 rows (border and tabs), the filter chips 1 row, no scrollbar rows.
+        text = screen_text(app).splitlines()
+        header = next(i for i, line in enumerate(text) if "Verdict" in line)
+        chips = next(i for i, line in enumerate(text) if "Eligible" in line)
+        assert header - chips == 1, text

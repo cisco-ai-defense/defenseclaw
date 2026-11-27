@@ -11,27 +11,34 @@
 package gateway
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-// repoRoot resolves the absolute path of the repo root from this test
-// file. The other rulepack tests inline this; centralizing it here
-// keeps the local-patterns suite self-contained.
-func repoRootFromTestFile(t *testing.T) string {
+// gatewayTestDir is this package's source folder, read once when the test
+// binary starts: go test starts it there, and the native Windows harness
+// starts a cross-built binary in the same folder of its copy of the tree.
+// runtime.Caller names the folder the binary was compiled in instead, which
+// does not exist on the host a cross-built binary runs on (34 native Windows
+// reds, rel-1-0-10:GAP-1598). Read at start, a test that changes the working
+// folder later does not move it.
+var gatewayTestDir, gatewayTestDirErr = os.Getwd()
+
+// repoRootFromTestFile is the repository root (two folders above
+// gatewayTestDir). Every test of the package that reads a repository file
+// finds it here.
+func repoRootFromTestFile(t testing.TB) string {
 	t.Helper()
-	_, selfPath, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve caller path")
+	if gatewayTestDirErr != nil {
+		t.Fatalf("read the test working folder: %v", gatewayTestDirErr)
 	}
-	// .../internal/gateway/local_patterns_test.go -> repo root
-	return filepath.Join(filepath.Dir(selfPath), "..", "..")
+	return filepath.Join(gatewayTestDir, "..", "..")
 }
 
 // withLocalPatternsRestored snapshots the compiled-in baselines and

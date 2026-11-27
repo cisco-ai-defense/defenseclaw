@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0930. A purge keeps a policy file another account can change
@@ -111,6 +112,7 @@ func requireUnrecordedProblem(t *testing.T, problems []VendorFolderProblem, tc u
 // publish all say the connector is not covered, with the file, the reason and
 // the exact recovery; after the recovery all of them say covered.
 func TestInspectReportsAnUnrecordedPolicyFileAnotherAccountCanChange(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			opts, folder, file := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
@@ -155,6 +157,7 @@ func TestInspectReportsAnUnrecordedPolicyFileAnotherAccountCanChange(t *testing.
 // The trusted case is as it was: an unrecorded file only administrators can
 // change is used, merged into and recorded.
 func TestInspectLeavesAnUnrecordedPolicyFileOnlyAdministratorsCanChange(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			opts, _, _ := plantUnrecorded(t, tc, unrecordedAdminOnlyDACL)
@@ -174,6 +177,7 @@ func TestInspectLeavesAnUnrecordedPolicyFileOnlyAdministratorsCanChange(t *testi
 // The designed case: a vendor folder with no file at all passes, and the
 // first publish takes it over.
 func TestInspectPassesAVendorFolderWithNoFile(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pinReclaimStandalone(t, true)
@@ -197,6 +201,7 @@ func TestInspectPassesAVendorFolderWithNoFile(t *testing.T) {
 // covered, as machine-policy verify does (pending, named). Under verify_only
 // nothing ever moves it, so it is a plain problem with the recovery.
 func TestInspectNamesAnUnrecordedPolicyFileAStandardUserOwnsAsPending(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			opts, folder, file := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
@@ -246,6 +251,7 @@ func TestInspectNamesAnUnrecordedPolicyFileAStandardUserOwnsAsPending(t *testing
 // per-user route (no managed plugin), a connector whose ownership is off, and
 // Secure Client (the 1.0.8 takeover).
 func TestInspectAsksOnlyWhatThePublishUses(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		t.Run(tc.name+" off", func(t *testing.T) {
 			opts, _, _ := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
@@ -292,6 +298,7 @@ func TestInspectAsksOnlyWhatThePublishUses(t *testing.T) {
 // DefenseClaw's own Copilot drop-in name is replaced by the publish whatever
 // its access list says, so it is not a problem; any other *.json is.
 func TestInspectDoesNotAskTheCopilotDropInNameItReplaces(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		if tc.connector != ConnectorCopilot {
 			continue
@@ -310,6 +317,7 @@ func TestInspectDoesNotAskTheCopilotDropInNameItReplaces(t *testing.T) {
 // OpenCode loads opencode.jsonc and opencode.json: each one another account
 // can change is named.
 func TestInspectNamesEachOpenCodeConfigAnotherAccountCanChange(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		if tc.connector != ConnectorOpenCode {
 			continue
@@ -333,6 +341,7 @@ func TestInspectNamesEachOpenCodeConfigAnotherAccountCanChange(t *testing.T) {
 // owns, is a problem the publish fails on (it removes only a standard user's):
 // reported with the move-aside recovery, not skipped.
 func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			opts, folder, file := plantUnrecorded(t, tc, unrecordedAdminOnlyDACL)
@@ -343,9 +352,7 @@ func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
 			if err := os.Remove(file); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(target, file); err != nil {
-				t.Skipf("creating a symbolic link needs the privilege: %v", err)
-			}
+			testenv.Symlink(t, target, file)
 			// An administrator's link: the owner is the Administrators group
 			// whoever ran the test (a runner account owns what it creates).
 			ownAs(t, file, wellKnownSID(t, windows.WinBuiltinAdministratorsSid))
@@ -363,6 +370,7 @@ func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
 // the target raises (an administrator's sibling that is not valid JSON) shows
 // in Setup's problems too, and a healthy folder shows none.
 func TestMachinePolicyProblemsCarryEveryMachinePolicyConflict(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		if tc.connector != ConnectorCopilot {
 			continue
@@ -410,6 +418,7 @@ func TestMachinePolicyProblemsCarryEveryMachinePolicyConflict(t *testing.T) {
 // Copilot's own conflict about the same file is replaced by the new message,
 // not listed beside it.
 func TestVerifyListsAnUnrecordedCopilotFileOnce(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range unrecordedCases() {
 		if tc.connector != ConnectorCopilot {
 			continue
@@ -434,6 +443,7 @@ func TestVerifyListsAnUnrecordedCopilotFileOnce(t *testing.T) {
 // A weak recorded folder's own message names the foreign file it holds; the
 // file is not listed a second time as an unrecorded file (whoever owns it).
 func TestInspectDoesNotListTheForeignFileOfAFolderAlreadyReportedWeak(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		if !tc.siblings {
 			continue
@@ -495,6 +505,7 @@ func TestPSLiteralDoublesEveryQuoteCharacterPowerShellReads(t *testing.T) {
 // it. Checked unpublished, after the Go-owned publish, and with a conflict an
 // administrator's sibling adds.
 func TestMachinePolicyProblemsNameEveryConnectorMachinePolicyVerifyCallsUncovered(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	pinReclaimStandalone(t, true)
 	opts := windowsOpenCodeTestOptions(t)
 	opts.CopilotCLIPolicyOnly = true

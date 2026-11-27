@@ -46,6 +46,7 @@ func windowsFloorOptions(t *testing.T) (Options, *int) {
 }
 
 func TestWindowsClaudeVersionFloorPublishWithdrawAndRemove(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts, locked := windowsFloorOptions(t)
 	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"codex"}); err != nil || *locked != 0 {
 		t.Fatalf("an inactive claudecode with no floor takes no lock: %v locked=%d", err, *locked)
@@ -108,6 +109,7 @@ func TestWindowsClaudeVersionFloorPublishWithdrawAndRemove(t *testing.T) {
 // the uninstall leave it byte for byte, and with nothing recorded the
 // uninstall takes no lock.
 func TestWindowsClaudeVersionFloorLeavesAnAdministratorFile(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts, locked := windowsFloorOptions(t)
 	path := filepath.Join(opts.WindowsProgramFiles, "ClaudeCode", "managed-settings.d", ClaudeVersionFloorDropInName)
 	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err != nil || readFile(t, path) != wantClaudeFloorBytes {

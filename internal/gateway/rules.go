@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
@@ -54,6 +55,9 @@ type PatternRule struct {
 	// did (GAP-1480). markedMigratedLiteral is the rule's migrated_literal.
 	migratedLiteral       bool
 	markedMigratedLiteral bool
+	// assignmentKeys is SEC-SECRET-ASSIGN's key vocabulary from the pack's
+	// keys block, nil for the built-in one (GAP-0433).
+	assignmentKeys *secretAssignmentKeys
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -77,8 +81,7 @@ type RuleFinding struct {
 	// profile is internal audit provenance for a profile-meet member. It is
 	// deliberately absent from hook and inspect responses, which can be read
 	// by an account whose group membership was not proven.
-	profile     string
-	enforcement findingEnforcement
+	profile string
 	// disposition is a private, value-free presentation class for trusted
 	// action findings. It lets benchmark and audit code distinguish an
 	// explicitly advisory result from audit-only evidence without changing the
@@ -89,14 +92,23 @@ type RuleFinding struct {
 	// only the in-process trusted-action boundary may use the proof to decide
 	// whether the finding can participate in a synchronous deny decision.
 	proof findingProof
+	// Proof is the DET111 proof of the finding (internal/guardrail/decide):
+	// what the call does, to which protected class, how sure the reader is.
+	// Value-free and never serialized; decide.Decide reads it to pick the
+	// tier row. The zero Proof is a finding mapped by its severity alone.
+	Proof decide.Proof `json:"-"`
 	// shellProtectedFile marks a finding of the shell-command protected-file
 	// class on a shell command (markShellProtectedFileFindings). It is
-	// private and value-free; profileClassFloor reads it.
+	// private and value-free; legacyFindingProof reads it.
 	shellProtectedFile bool
+	// linkHeld marks a state write the link walk held as a possible keys
+	// write (an unread link step, GAP-1568): it is named by the state rule
+	// and keeps the keys hold's severity (withProvenActiveStateMutation).
+	linkHeld bool
 	// omittedOperand marks the evaluation-limit finding that stands for a
 	// named write operand the hook client left out of its bounded map: a
 	// target the gateway cannot place, which may be a link to a protected
-	// file. It is private and value-free; guardrailActionForProfile keeps its
+	// file. It is private and value-free; decide.Decide keeps its
 	// block in every profile.
 	omittedOperand bool
 	// boundedCaps are the caps of a reader's truncation this evaluation-limit
@@ -104,16 +116,24 @@ type RuleFinding struct {
 	// value-free; a reading joined as a fragment of the call drops its limit
 	// finding but carries these caps to the call (rel-1-0-10:GAP-0477).
 	boundedCaps bounded.CapSet
-	// dataWordRecord marks the detection-only record of a shell word past the
-	// byte bound that the local shell only passes on (withPosixDataWordRecord).
-	// It is a record, not a cap: boundedLimitIndex skips it, so no cap logic
+	// boundRecord marks the detection-only record of a text a reader did not
+	// read past its bound while the call is still judged in full: a shell
+	// word past the byte bound that the local shell only passes on
+	// (withPosixDataWordRecord), the inline query of a SQL client past that
+	// bound (withSQLQueryCutRecord), SQL past the SQL facts bound
+	// (withSQLASTCapRecord). It is a record, not a cap: boundedLimitIndex skips it, so no cap logic
 	// counts it as a limit the call hit or raises it to an enforcing one
 	// (rel-1-0-10:GAP-0760). Private and value-free.
-	dataWordRecord bool
+	boundRecord bool
 	// partialReading marks a finding whose rule contract matched the call's
 	// facts while the analysis read the call only in part, so it could not
 	// enforce (exact fallback, rel-1-0-10:GAP-0892). Private and value-free.
 	partialReading bool
+	// floorRaiseOnly marks a finding of a reading made through a reading
+	// DefenseClaw 1.0.10 did not have (actionfacts.Input.FloorRaiseOnly,
+	// withFloorRaiseOnlyMark): it raises the call, never takes an effect
+	// finding into its own cell (foldTargetsFor). Private and value-free.
+	floorRaiseOnly bool
 	// evaluationFault marks the finding of a call the evaluation failed on:
 	// the shell parser failed on its text (shellparse.ErrParserFault) or a
 	// reader panicked (recoverTrustedActionFault). Nothing proves what the
@@ -122,8 +142,6 @@ type RuleFinding struct {
 	// (rel-1-0-10:GAP-0486). Private and value-free.
 	evaluationFault bool
 }
-
-type findingEnforcement uint8
 
 type findingDisposition uint8
 
@@ -146,24 +164,29 @@ const (
 	findingDispositionFlowSecretEgress
 )
 
-const (
-	// findingEnforcementInherit preserves the enforcement behavior of every
-	// finding produced before trusted semantic dispatch existed.
-	findingEnforcementInherit findingEnforcement = iota
-	findingEnforcementAllowed
-	findingEnforcementDetectionOnly
-	// findingEnforcementAlertOnly preserves a visible runtime alert while
-	// imposing a hard ceiling below confirm/block in every posture profile.
-	findingEnforcementAlertOnly
+// The proof marks of a reader that proved its pattern but knows no kind or
+// target (legacyFindingProof fills them in decideFinding). A reader never
+// picks an action or a ceiling: it says how sure it is, and the tier table
+// says what that is worth (DET111 R5; the 1.0.10 enforcement field and its
+// allowed, detection-only and alert-only values are gone).
+var (
+	// enforcingProof: the finding may enforce (the zero proof).
+	enforcingProof = decide.Proof{}
+	// recordProof: the finding is recorded and never moves the verdict
+	// (the table's record row).
+	recordProof = decide.Proof{}.Record()
+	// advisoryProof: the finding is an alert at most (the advisory row).
+	advisoryProof = decide.Proof{}.Advise()
 )
 
+// contributesToEnforcement reports a finding whose proof may enforce.
 func (f RuleFinding) contributesToEnforcement() bool {
-	return f.enforcement != findingEnforcementDetectionOnly &&
-		f.enforcement != findingEnforcementAlertOnly
+	return !f.Proof.Recorded() && !f.Proof.Advisory()
 }
 
+// contributesToAlertOnly reports an advisory finding.
 func (f RuleFinding) contributesToAlertOnly() bool {
-	return f.enforcement == findingEnforcementAlertOnly
+	return f.Proof.Advisory()
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +335,11 @@ type compiledRulePackCategories struct {
 	// one pack.
 	members     []*compiledRulePackCategories
 	memberNames []string
+	// effectSeverity is the highest live severity of each rule id (upper
+	// case) in this generation, for the effects findings that borrow a pack
+	// rule (indexEffectRuleSeverity, GAP-2208). Empty for a meet: each
+	// member has its own.
+	effectSeverity map[string]string
 }
 
 const (
@@ -445,6 +473,15 @@ func compileRulePackGenerationWithCompiler(
 			semanticRulePositions[ruleID] = len(compiled.semanticRules) - 1
 		}
 	}
+	// Each rule's literal prefilter plan is built with its generation, not by
+	// the first scan that meets the rule, which ran it inside that call's scan
+	// deadline (rel-1-0-10:GAP-1998).
+	for _, category := range ownedCategories {
+		for _, rule := range category.Rules {
+			ruleRequiredLiterals(rule.Pattern)
+		}
+	}
+	compiled.effectSeverity = indexEffectRuleSeverity(ownedCategories, compiler)
 	return compiled, nil
 }
 
@@ -687,6 +724,7 @@ func mergeRulePackCategories(
 				Tags:         append([]string(nil), r.Tags...),
 
 				markedMigratedLiteral: r.MigratedLiteral,
+				assignmentKeys:        compileSecretAssignmentKeys(r.Keys),
 			})
 		}
 		// An explicitly disabled category replaces defaults with zero rules.
@@ -839,7 +877,7 @@ func countRuleEntitiesFor(ctx context.Context, connector, text string) int {
 				continue
 			}
 			for _, loc := range rule.Pattern.FindAllStringIndex(text, maxEntityMatchesPerRule) {
-				if match := text[loc[0]:loc[1]]; acceptedRuleMatchAt(rule.ID, text, match, loc[0], loc[1]) {
+				if match := text[loc[0]:loc[1]]; acceptedPatternRuleMatchAt(*rule, text, match, loc[0], loc[1]) {
 					seen[match] = struct{}{}
 				}
 			}
@@ -915,7 +953,7 @@ func scanContentRulesWithOptions(
 		// narrow scope and retain their original severity.
 		for i := range findings {
 			findings[i].Severity = "LOW"
-			findings[i].enforcement = findingEnforcementDetectionOnly
+			findings[i].Proof = findings[i].Proof.Record()
 		}
 	}
 	return findings
@@ -1236,10 +1274,10 @@ func HighestSeverity(findings []RuleFinding) string {
 	best := "NONE"
 	bestRank := 0
 	for _, f := range findings {
-		r := severityRank[f.Severity]
+		sev, r := verdictSeverity(f)
 		if r > bestRank {
 			bestRank = r
-			best = f.Severity
+			best = sev
 		}
 	}
 	return best
@@ -1249,7 +1287,7 @@ func HighestSeverity(findings []RuleFinding) string {
 func HighestConfidence(findings []RuleFinding, severity string) float64 {
 	best := 0.0
 	for _, f := range findings {
-		if f.Severity == severity && f.Confidence > best {
+		if sev, _ := verdictSeverity(f); sev == severity && f.Confidence > best {
 			best = f.Confidence
 		}
 	}

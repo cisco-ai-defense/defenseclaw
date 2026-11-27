@@ -81,7 +81,9 @@ var effRows = []row{
 	shellRow("EFF-HEREDOC-02 bash -s", raLinHome, "", "bash -s <<'E'\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-03 sh dash", raLinHome, "", "sh - <<'E'\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-04 zsh tab-stripped", raLinHome, "", "zsh <<-'E'\n\techo k >> /home/u/.ssh/authorized_keys\nE", effAK),
-	shellRow("EFF-HEREDOC-05 cat pipe sh", raLinHome, "", "cat <<'E' | sh\necho k >> /home/u/.ssh/authorized_keys\nE", dynamicTarget),
+	// DET111 R1: cat of a static here-document piped to sh is the same script as
+	// sh <<E (the pipe carries exactly the document).
+	shellRow("EFF-HEREDOC-05 cat pipe sh", raLinHome, "", "cat <<'E' | sh\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-06 sh -e flag", raLinHome, "", "sh -e <<'E'\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-07 unquoted expanding", raLinHome, "", "sh <<E\necho k >> $X/authorized_keys\nE", dynamicTarget),
 	shellRow("EFF-HEREDOC-08 here-string", raLinHome, "", `sh <<< 'echo k >> /home/u/.ssh/authorized_keys'`, effAK),
@@ -110,7 +112,7 @@ var effRows = []row{
 	shellRow("EFF-ARCHIVE-08 gzip compresses (original removed)", raLinHome, "", `gzip /home/u/.ssh/authorized_keys`, effAK),
 	shellRow("EFF-ARCHIVE-09 gzip -c is read only", raLinHome, "", `gzip -c /home/u/.ssh/id_rsa`, ""),
 	shellRow("EFF-ARCHIVE-10 zip writes the archive", raLinHome, "", `zip /home/u/.ssh/authorized_keys.zip /t/a`, dynamicTarget),
-	shellRow("EFF-ARCHIVE-11 7z", raLinHome, "", `7z x /t/a.7z -o/home/u/.ssh`, dynamicTarget),
+	shellRow("EFF-ARCHIVE-11 7z", raLinHome, "", `7z x /t/a.7z -o/home/u/.ssh`, "/home/u/.ssh/**"),
 	shellRow("EFF-ARCHIVE-12 bsdtar", raLinHome, "", `bsdtar -xf /t/a.tar -C /home/u/.ssh`, dynamicTarget),
 	shellRow("EFF-ARCHIVE-13 cpio", raLinHome, "", `cd /home/u/.ssh && cpio -id < /t/a.cpio`, dynamicTarget),
 	shellRow("EFF-GITC-01 filter-branch", raLinHome, "", `git -C /home/u/.ssh filter-branch --force HEAD`, dynamicTarget),
@@ -167,6 +169,9 @@ func TestEFFTable(t *testing.T) {
 }
 
 // Launchers are explicitly opaque: the tail is a command line we do not parse.
+// A launcher with a wrapper row (nsenter, script -c, flock, watch) is read
+// through the row instead: its child is walked, and the call is not fully
+// known here because the child (/t/x.sh) is an unmodeled program.
 func TestEFFLaunchersAreOpaque(t *testing.T) {
 	for _, r := range effRows {
 		if !strings.HasPrefix(r.id, "EFF-LAUNCHERS-") {
@@ -175,6 +180,9 @@ func TestEFFLaunchersAreOpaque(t *testing.T) {
 		res := Extract(r.call, r.o)
 		if res.FullyKnown() {
 			t.Errorf("%s: fully known", r.id)
+		}
+		if len(res.Effects) > 0 && len(res.Effects[0].Origin.Wrappers) > 0 {
+			continue
 		}
 		opaque := false
 		for _, e := range res.Effects {

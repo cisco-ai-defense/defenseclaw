@@ -106,8 +106,13 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 		}
 	}
 
-	// With the relax step (run by the guardian as LocalSystem, which the
-	// hardened DACL grants full control; the elevated runner stands in).
+	// The relax step runs as the guardian (LocalSystem, which the hardened
+	// DACL grants full control); only an elevated runner can stand in for it.
+	// The refusal leg above is the owner's own behaviour and runs for a
+	// standard user too.
+	requireElevatedManagedWindows(t)
+
+	// With the relax step.
 	dataDir := testenv.PrivateTempDir(t)
 	if err := connector.PublishHookAPIToken(dataDir, "amp", oldToken); err != nil {
 		t.Fatalf("seed hook token: %v", err)
@@ -151,6 +156,7 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 // user with Hermes and another agent, and the install never reached coverage.
 // The relax step now includes <data dir> for Hermes only.
 func TestRelaxStandalonePerUserFootprintIncludesHermesDataDir(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	// The elevated test runner is not refused by ProtectDirectory on the
 	// hardened shape, so the standard user's refusal is not reproducible here;
 	// the test pins that the relax step gives the owner WRITE_DAC (OWNER RIGHTS

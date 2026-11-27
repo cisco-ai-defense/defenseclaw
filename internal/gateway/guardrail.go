@@ -2249,7 +2249,7 @@ func scanLocalPatternsWithActivation(
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
 		ruleSeverity := rf.Severity
-		if severityRank[ruleSeverity] == 0 || (rf.enforcement == findingEnforcementDetectionOnly && severityRank[ruleSeverity] < severityRank["MEDIUM"]) {
+		if severityRank[ruleSeverity] == 0 || (rf.Proof.Recorded() && severityRank[ruleSeverity] < severityRank["MEDIUM"]) {
 			// A rule without a known severity, and a shipped weak-literal rule
 			// that the trust-literal context demoted to detection-only LOW
 			// (TRUST-FICTIONAL, TRUST-PROMPT-EXTRACT), keep the MEDIUM floor the

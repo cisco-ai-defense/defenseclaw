@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
@@ -21,21 +22,43 @@ func parsePowerShell(command string, o Options) *Script {
 	return lowerPSScript(command, o, true)
 }
 
+// parsePSSource parses a PowerShell script for lowering with
+// psparse.ParseEffects: the pure-Go port of the Microsoft PowerShell parser
+// through psparse.FromPwshparse by default, psparse.Parse when the port declines
+// the input (or under psparse's legacyFrontend test seam). The legacy 1.0.10 PowerShell
+// readers always use psparse.Parse (the raise-only floor). port reports that
+// the port built the Script.
+func parsePSSource(command string) (sc *psparse.Script, port bool, err error) {
+	return psSourceParser(command, psparse.Options{Dialect: psparse.DialectUnknown})
+}
+
+// psSourceParser is the reader of parsePSSource. The frontend differential
+// test (gap1915_frontend_diff_test.go) swaps in psparse.Parse to compare the
+// port with the legacy reader on the same calls.
+var psSourceParser = psparse.ParseEffects
+
 func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	s := &Script{Dialect: DialectPowerShell}
 	// The PowerShell edition is unknown unless the connector proves it, so a
 	// dialect-divergent escape (backtick-e, \u{}) is not treated as static
 	// (psparse review 3 / R4). A future caller that knows the host edition can
 	// pass DialectPwsh7 / DialectWindowsPS51.
-	sc, err := psparse.Parse(command, psparse.Options{Dialect: psparse.DialectUnknown})
+	sc, port, err := parsePSSource(command)
 	if err != nil || sc == nil {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
 		return s
 	}
+	s.RunsNothing = port && sc.HasSyntaxError()
+	return lowerPSParsed(s, sc, port, o, expandNested)
+}
+
+// lowerPSParsed lowers a parsed PowerShell Script into s; port reports that
+// the parser port built sc (psparse.ParseEffects).
+func lowerPSParsed(s *Script, sc *psparse.Script, port bool, o Options, expandNested bool) *Script {
 	for _, d := range sc.Diagnostics {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: psReason(d.Reason)})
 	}
-	lw := &psLower{out: s, o: o, hosts: map[psparse.Node]*HostPayload{}}
+	lw := &psLower{out: s, o: o, hosts: map[psparse.Node]*HostPayload{}, port: port}
 	var nested []psparse.NestedScript
 	if expandNested {
 		nested = psparse.ExtractNestedScripts(sc)
@@ -48,6 +71,27 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 				continue
 			}
 			hp := &HostPayload{Opaque: true}
+			if !ns.Static && ns.Kind == psparse.KindEncodedCommand {
+				// psparse keeps a base64 word with a tab, CR or LF NotStatic; the
+				// host skips those (Convert.FromBase64String), so it is read the
+				// way the host decodes it (DET111 R1, GAP-1199).
+				if text, ok := psEncodedWithBlanks(cmd); ok {
+					ns.Text, ns.Static = text, true
+				}
+			}
+			if !ns.Static && ns.Kind == psparse.KindCmdC &&
+				(ns.Reason == psparse.ReasonLegacyQuoting || ns.Reason == psparse.ReasonCmdArgv) {
+				if text, ok := psLegacyCmdBody(cmd); ok {
+					ns.Text, ns.Static, ns.Dialect = text, true, "cmd"
+				}
+			}
+			if !ns.Static && ns.Kind == psparse.KindPowerShellCommand {
+				if text, maybe, ok := psExpandedCommand(cmd, o); ok && !maybe {
+					ns.Text, ns.Static = text, true
+				} else if ok {
+					hp.Maybe, hp.Dialect = text, DialectPowerShell
+				}
+			}
 			if ns.Static && !psHostUnsafe(cmd, ns) {
 				hp = &HostPayload{Text: ns.Text, Dialect: DialectPowerShell}
 				if ns.Dialect == "cmd" {
@@ -56,6 +100,18 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			}
 			lw.hosts[ns.Source] = hp
 		}
+	}
+	if expandNested {
+		// A host call whose reading depends on the edition (-wd, a positional
+		// script) is read as a possible reading (DET111 R1, GAP-1557).
+		collectPSCommands(sc.Statements, 0, func(c *psparse.Command) {
+			if hp := lw.hosts[c]; hp != nil && !hp.Opaque {
+				return
+			}
+			if hp, ok := psLaunchMaybe(c); ok {
+				lw.hosts[c] = hp
+			}
+		})
 	}
 	lw.statements(sc.Statements, false)
 	if expandNested {
@@ -70,8 +126,35 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 				spShell[c] = true
 			}
 		})
-		for range spShell {
-			s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+		// A child whose command line is literal is also read as the child reads
+		// it (CommandLineToArgvW, then its -Command / -EncodedCommand or cmd /c
+		// body), so what it runs is visible (DET111 R1, GAP-1577, GAP-1655). A
+		// powershell or pwsh child keeps the opaque marker: its edition (and so
+		// its exact argv reading) is not known, so the call is never fully
+		// known. A cmd child has no edition: cmd reads its literal command line
+		// one way, so its body is the call's reading (GAP-1577 var4: a Known
+		// write of a cmd /c body started by Start-Process is Known).
+		for n := range spShell {
+			c, isCmd := n.(*psparse.Command)
+			text, d, ok := "", DialectNone, false
+			if isCmd {
+				text, d, ok = psStartProcessChild(c)
+			}
+			if !ok || d != DialectCMD {
+				s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+			}
+			if !ok {
+				continue
+			}
+			var inner *Script
+			if d == DialectCMD {
+				inner = parseCMD(text, o)
+			} else {
+				inner = lowerPSScript(text, o, true)
+			}
+			s.Funcs = append(s.Funcs, inner.Funcs...)
+			s.Stmts = append(s.Stmts, inner.Stmts...)
+			s.Unknowns = append(s.Unknowns, inner.Unknowns...)
 		}
 		for _, ns := range nested {
 			if spShell[ns.Source] {
@@ -148,43 +231,42 @@ func isShellName(name string) bool {
 // psStartProcessShellTarget reports a Start-Process (saps) command whose child
 // is powershell/pwsh/cmd in any argument form -- the child's -ArgumentList is
 // run as code we cannot reconstruct, so it is opaque (psparse delta review 5
-// (a)). The child is the -FilePath value, else the first positional argument.
+// (a)). The child is bound as PowerShell binds it (psStartProcessBind): the
+// -FilePath value, else the first positional left after the valued parameters
+// took theirs (-WindowStyle Hidden powershell runs powershell). A binding the
+// reader cannot settle (an ambiguous or unknown parameter) is a shell target
+// when any argument names one.
 func psStartProcessShellTarget(c *psparse.Command) bool {
 	if n := psBaseNameOf(c); n != "start-process" && n != "saps" {
 		return false
 	}
-	var target, firstPos psparse.Expr
-	els := c.Elements
-	for i := 0; i < len(els); i++ {
-		switch e := els[i].(type) {
-		case *psparse.Parameter:
-			n := strings.ToLower(e.Name)
-			if n != "" && strings.HasPrefix("filepath", n) { // -F.. -> -FilePath (unique prefix)
-				if e.HasColon && e.Colon != nil {
-					target = e.Colon
-				} else if i+1 < len(els) {
-					if a, ok := els[i+1].(*psparse.Arg); ok {
-						target = a.Value
-						i++
-					}
+	shell := func(e psparse.Expr) bool {
+		s, ok := psparse.LiteralString(e)
+		// A shell child, or a launcher (wt/conhost/start) that itself starts a
+		// shell, runs an opaque payload (psparse delta review 5 (a) / review 6 (c)).
+		return ok && (isShellName(s) || isLauncherName(s))
+	}
+	b := psStartProcessBind(c)
+	if b.unsettled {
+		for _, el := range c.Elements {
+			switch e := el.(type) {
+			case *psparse.Arg:
+				if shell(e.Value) {
+					return true
+				}
+			case *psparse.Parameter:
+				if e.Colon != nil && shell(e.Colon) {
+					return true
 				}
 			}
-		case *psparse.Arg:
-			if firstPos == nil {
-				firstPos = e.Value
-			}
 		}
-	}
-	if target == nil {
-		target = firstPos
-	}
-	if target == nil {
 		return false
 	}
-	s, ok := psparse.LiteralString(target)
-	// A shell child, or a launcher (wt/conhost/start) that itself starts a shell,
-	// runs an opaque payload (psparse delta review 5 (a) / review 6 (c)).
-	return ok && (isShellName(s) || isLauncherName(s))
+	target := b.file
+	if target == nil && len(b.positional) > 0 {
+		target = b.positional[0]
+	}
+	return target != nil && shell(target)
 }
 
 // psBaseNameOf returns the leaf name of a command, or "" when it is not a literal.
@@ -268,7 +350,29 @@ type psLower struct {
 	out   *Script
 	o     Options
 	hosts map[psparse.Node]*HostPayload
+	// envChanged names the environment variables a command of the statement
+	// being lowered changes through the Env: drive or
+	// [Environment]::SetEnvironmentVariable: they are unknown after it.
+	envChanged []string
+	// port: the Script comes from the PowerShell parser port, so a native
+	// program's argv is its elements one for one (nativeParamWords).
+	port bool
+	// funcs are the bodies of the functions defined so far, by lower-case
+	// name; inlining names the ones being inlined now and inlined counts
+	// every inlined call (psMaxInlinedCalls).
+	funcs    map[string]*psparse.ScriptBlockExpr
+	inlining []string
+	inlined  int
 }
+
+// psMaxInlinedCalls bounds the calls of script-defined functions one
+// lowering inlines (each inline lowers the body again), and psMaxInlineDepth
+// the nesting of such calls; a call past either is lowered as before (the
+// walker reads the folder after it as unknown).
+const (
+	psMaxInlinedCalls = 32
+	psMaxInlineDepth  = 4
+)
 
 func (lw *psLower) statements(sts []psparse.Statement, cond bool) {
 	for _, st := range sts {
@@ -293,6 +397,24 @@ func (lw *psLower) statement(st psparse.Statement, cond bool) {
 			}
 		}
 		lw.statements(v.Conditions, cond)
+		if v.Name != "" && strings.EqualFold(v.Keyword, "function") && len(v.Bodies) == 1 && v.Bodies[0] != nil {
+			// A function body runs where the function is called, not here:
+			// its effects stay visible (conditional), but a Set-Location in
+			// it does not move the folder of the statements after the
+			// definition; a plain call of the function lowers the body there
+			// (inlineCall), rel-1-0-10:GAP-1156.
+			sub := &Script{Dialect: lw.out.Dialect}
+			outer := lw.out
+			lw.out = sub
+			lw.statements(v.Bodies[0].Statements, true)
+			lw.out = outer
+			lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
+			if lw.funcs == nil {
+				lw.funcs = map[string]*psparse.ScriptBlockExpr{}
+			}
+			lw.funcs[strings.ToLower(v.Name)] = v.Bodies[0]
+			return
+		}
 		for _, b := range v.Bodies {
 			if b != nil {
 				lw.statements(b.Statements, true)
@@ -316,9 +438,20 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 		for idx, el := range seg.Elements {
 			switch e := el.(type) {
 			case *psparse.Command:
+				if idx == 0 && len(seg.Elements) == 1 && len(seg.Redirs) == 0 && lw.inlineCall(e, segCond) {
+					continue
+				}
 				c := lw.command(e, segCond, idx > 0)
+				if _, literal := psparse.LiteralString(e.Name); !literal && len(lw.funcs) > 0 {
+					if _, block := e.Name.(*psparse.ScriptBlockExpr); !block {
+						c.MayCallFunc = true
+					}
+				}
 				lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: segCond})
 				lastCmd = c
+				lw.noteEnvDrive(c)
+				lw.flushEnv(segCond)
+				lw.noteSessionHome(c, segCond)
 			case *psparse.ExprStatement:
 				lw.exprCommands(e.Expr, segCond)
 			}
@@ -339,12 +472,47 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 	}
 }
 
+// inlineCall lowers a plain call of a function this script defined (the
+// bare name, no arguments, no redirection, not piped) as its body, in place
+// and under the call's condition: PowerShell runs the body in the session,
+// so its Set-Location moves the caller's folder (rel-1-0-10:GAP-1156:
+// function g { cd .defenseclaw }; g; Set-Content config.yaml). A recursive
+// call, or one past the bounds, is not inlined.
+func (lw *psLower) inlineCall(c *psparse.Command, cond bool) bool {
+	if c.InvokeOp != "" && c.InvokeOp != "&" || len(c.Elements) != 0 || len(c.Redirs) != 0 || c.StopParsing != "" {
+		return false
+	}
+	name, ok := psparse.LiteralString(c.Name)
+	if !ok {
+		return false
+	}
+	name = strings.ToLower(name)
+	body := lw.funcs[name]
+	if body == nil || lw.inlined >= psMaxInlinedCalls || len(lw.inlining) >= psMaxInlineDepth || slices.Contains(lw.inlining, name) {
+		return false
+	}
+	lw.inlined++
+	lw.inlining = append(lw.inlining, name)
+	lw.statements(body.Statements, cond)
+	lw.inlining = lw.inlining[:len(lw.inlining)-1]
+	return true
+}
+
 func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {
 	// $env:NAME = value updates the running environment (review PS-7).
-	if v, ok := a.LHS.(*psparse.Variable); ok && strings.EqualFold(v.Scope, "env") {
-		c := &Cmd{Cond: cond, Assigns: []Assign{{Name: v.Name, ValueWord: lw.exprWord(rhsExpr(a.RHS))}}}
-		lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond})
-		return
+	if v, ok := a.LHS.(*psparse.Variable); ok {
+		name := ""
+		switch {
+		case strings.EqualFold(v.Scope, "env"):
+			name = v.Name
+		case v.Scope == "" && strings.EqualFold(v.Name, "home"):
+			name = psHomeVar
+		}
+		if name != "" {
+			c := &Cmd{Cond: cond, Assigns: []Assign{{Name: name, ValueWord: lw.exprWord(rhsExpr(a.RHS))}}}
+			lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond})
+			return
+		}
 	}
 	// any command on the RHS still runs.
 	lw.statement(a.RHS, cond)
@@ -352,15 +520,44 @@ func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {
 
 func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 	out := &Cmd{Cond: cond, PipeIn: pipeIn, Host: lw.hosts[c]}
+	// `& { ... }` / `. { ... }` runs the block now, under the command's own
+	// condition, in this session (a Set-Location or $env: change inside it
+	// stays): its statements are lowered in place (DET111 R1, GAP-1255).
+	if sb, ok := c.Name.(*psparse.ScriptBlockExpr); ok && (c.InvokeOp == "&" || c.InvokeOp == ".") {
+		lw.statements(sb.Statements, cond)
+		for _, el := range c.Elements {
+			if e, ok := el.(psparse.Expr); ok {
+				lw.exprCommands(e, true)
+			} else if a, ok := el.(*psparse.Arg); ok {
+				lw.exprCommands(a.Value, true)
+			}
+		}
+		for _, r := range c.Redirs {
+			lw.addRedir(out, r)
+		}
+		return out
+	}
 	// program name
 	if name, ok := psparse.LiteralString(c.Name); ok && c.InvokeOp != "." {
 		out.Words = append(out.Words, Word{Value: name, Static: true, Segs: []WordSeg{{Lit: name}}})
 	} else {
 		out.Words = append(out.Words, Word{Reason: ReasonDynamicExpansion})
 	}
-	for _, el := range c.Elements {
-		switch e := el.(type) {
+	native := psNativeName(c)
+	for i := 0; i < len(c.Elements); i++ {
+		switch e := c.Elements[i].(type) {
 		case *psparse.Parameter:
+			if native && lw.port {
+				out.Words = append(out.Words, lw.nativeParamWords(e)...)
+				continue
+			}
+			if native && !e.HasColon && i+1 < len(c.Elements) {
+				if wd, ok := lw.fusedNativeArg(e, c.Elements[i+1]); ok {
+					out.Words = append(out.Words, wd)
+					i++
+					continue
+				}
+			}
 			out.Words = append(out.Words, Word{Value: "-" + e.Name, Static: true, Segs: []WordSeg{{Lit: "-" + e.Name}}})
 			if e.HasColon && e.Colon != nil {
 				// -Path:a,b,c : a comma list is several operands, never one path.
@@ -385,6 +582,87 @@ func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 	lw.exprCommands(c.Name, true)
 	for _, r := range c.Redirs {
 		lw.addRedir(out, r)
+	}
+	return out
+}
+
+// psNativeName reports a command whose name is a program, not a cmdlet: a
+// literal name with no Verb-Noun hyphen. PowerShell binds a cmdlet's -Name
+// value to the parameter, but hands a native program the source text of a
+// switch and the argument glued to it (-o$env:X\y) as one argv word.
+func psNativeName(c *psparse.Command) bool {
+	name := psBaseNameOf(c)
+	return name != "" && !strings.Contains(name, "-")
+}
+
+// fusedNativeArg reads a psparse.Parse Script (the legacyFrontend seam reader
+// and the deep-nesting fallback): psparse splits -o$env:X\y into
+// a switch -o and a glued argument, and this joins them into one argv word
+// (DET111 R1, GAP-1663), ok false when a blank separates them or the argument
+// is several words. A port Script needs no join (nativeParamWords).
+func (lw *psLower) fusedNativeArg(p *psparse.Parameter, next psparse.CommandElement) (Word, bool) {
+	a, ok := next.(*psparse.Arg)
+	if !ok {
+		return Word{}, false
+	}
+	_, pEnd := p.Span()
+	aStart, _ := a.Span()
+	if pEnd != aStart {
+		return Word{}, false
+	}
+	ws := lw.argWords(a.Value)
+	if len(ws) != 1 {
+		return Word{}, false
+	}
+	lw.exprCommands(a.Value, true)
+	return fuseWord("-"+p.Name, ws[0]), true
+}
+
+// nativeParamWords is the argv a native program gets for a parameter token of
+// a port Script, as PowerShell's native binder builds it (checked against
+// pwsh 7.6.6 and Windows PowerShell 5.1): the token text as written, literal
+// (-o$env:X\y is the parameter o$env with the argument X\y, passed as the one
+// unexpanded word -o$env:X\y), and for the colon form the argument's value
+// glued to "-name:" as one word (-o:$d\w is -o:<value of $d>\w), or a word of
+// its own when a blank follows the colon. A cmdlet binds parameters instead.
+func (lw *psLower) nativeParamWords(p *psparse.Parameter) []Word {
+	head := p.Raw
+	if head == "" {
+		head = "-" + p.Name
+	}
+	if !p.HasColon {
+		return []Word{{Value: head, Static: true, Segs: []WordSeg{{Lit: head}}}}
+	}
+	head += ":"
+	hw := Word{Value: head, Static: true, Segs: []WordSeg{{Lit: head}}}
+	if p.Colon == nil {
+		return []Word{hw}
+	}
+	lw.exprCommands(p.Colon, true)
+	ws := lw.argWords(p.Colon)
+	ps, _ := p.Span()
+	cs, _ := p.Colon.Span()
+	if len(ws) != 1 || cs != ps+len(head) {
+		return append([]Word{hw}, ws...)
+	}
+	return []Word{fuseWord(head, ws[0])}
+}
+
+// fuseWord is the one argv word of a literal switch text sw followed with no
+// blank by the word w.
+func fuseWord(sw string, w Word) Word {
+	if w.Reason != "" {
+		return Word{Reason: w.Reason}
+	}
+	segs := []WordSeg{{Lit: sw}}
+	if w.Segs != nil {
+		segs = append(segs, w.Segs...)
+	} else {
+		segs = append(segs, WordSeg{Lit: w.Value, Quoted: w.Quoted})
+	}
+	out := Word{Segs: segs, Static: w.Static, Quoted: w.Quoted}
+	if w.Static {
+		out.Value = sw + w.Value
 	}
 	return out
 }
@@ -448,11 +726,18 @@ func (lw *psLower) exprWord(e psparse.Expr) Word {
 	if e == nil {
 		return Word{Reason: ReasonDynamicExpansion}
 	}
-	if v, ok := e.(*psparse.Variable); ok && strings.EqualFold(v.Scope, "env") {
-		return Word{Segs: []WordSeg{{Var: v.Name}}}
+	if v, ok := e.(*psparse.Variable); ok {
+		if seg, ok := psVarSeg(v); ok {
+			return Word{Segs: []WordSeg{seg}}
+		}
 	}
 	if s, ok := psparse.LiteralString(e); ok {
 		return Word{Value: s, Static: true, Segs: []WordSeg{{Lit: s}}}
+	}
+	if sl, ok := e.(*psparse.StringLit); ok {
+		if wd, ok := psStringWord(sl); ok {
+			return wd // "$HOME\.aws\x", $env:USERPROFILE\.ssh (DET111 R1, GAP-0998)
+		}
 	}
 	return Word{Reason: ReasonDynamicExpansion}
 }
@@ -492,6 +777,7 @@ func (lw *psLower) exprCommands(e psparse.Expr, cond bool) {
 		for _, a := range v.Args {
 			lw.exprCommands(a, cond)
 		}
+		lw.noteEnvInvoke(v, cond)
 	case *psparse.Binary:
 		lw.exprCommands(v.LHS, cond)
 		lw.exprCommands(v.RHS, cond)

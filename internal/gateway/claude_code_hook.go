@@ -333,6 +333,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				Input:                         actionInput,
 				LegacyText:                    string(toolArgs),
 				Connector:                     "claudecode",
+				sessionID:                     req.SessionID,
 				EnforcementCapable:            true,
 				ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
 				SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),

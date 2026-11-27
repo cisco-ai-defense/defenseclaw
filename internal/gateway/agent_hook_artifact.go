@@ -102,8 +102,12 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 		return resp
 	}
 	intent := guardrailActionAllow
-	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		intent = profileMeetActionForFindings(ctx, a.decisionConfig(ctx), req.ConnectorName, enforceable, true, false)
+	decisive := enforceableRuleFindings(findings)
+	if i := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == artifactUnreadRuleID }); i >= 0 {
+		decisive = append(decisive, findings[i])
+	}
+	if len(decisive) > 0 {
+		intent = profileMeetActionForFindings(ctx, a.decisionConfig(ctx), req.ConnectorName, decisive, true, false)
 	}
 	resp = mergeAgentHookFindings(profile, req, resp, findings, intent)
 	if !req.SuppressCorrelationEmit {
@@ -177,13 +181,22 @@ func promotedArtifactFindings(
 	for i := range seenRules {
 		seenRules[i] = make(map[string]struct{})
 	}
+	// late: a script was not read, or not judged to the end, within the
+	// hook call (artifactUnreadFindings); lateEnforceable: one of them was
+	// a candidate that may block at this boundary.
+	late, lateEnforceable := false, false
 	for _, candidate := range candidates {
-		body, dialect, ok := readPromotedArtifactBounded(
+		body, dialect, ok, unreadInTime := readPromotedArtifactBounded(
 			ctx,
 			candidate.path,
 			candidate.dialect,
 		)
 		if !ok {
+			if unreadInTime {
+				late = true
+				lateEnforceable = lateEnforceable || (preExecutionBoundary &&
+					promotedArtifactCandidateEnforcementEligible(facts, candidate))
+			}
 			continue
 		}
 		analysisBody := promotedArtifactAnalysisBody(body)
@@ -246,6 +259,12 @@ func promotedArtifactFindings(
 			}
 		}
 		noteMeetBudget(generation, budget)
+		if ctx.Err() != nil {
+			// The hook budget ended inside the readers (they stop at
+			// ctx.Done): what they found stands, the rest is unjudged.
+			late = true
+			lateEnforceable = lateEnforceable || outerCandidateEnforceable
+		}
 		if recordTelemetry != nil && !observed.empty() {
 			recordTelemetry(observed)
 		}
@@ -282,6 +301,9 @@ func promotedArtifactFindings(
 	var all []RuleFinding
 	for _, member := range findings {
 		all = append(all, member...)
+	}
+	if late {
+		all = appendArtifactUnreadFindings(ctx, all, lateEnforceable)
 	}
 	return all
 }
@@ -682,26 +704,38 @@ type promotedArtifactReadResult struct {
 }
 
 // readPromotedArtifactBounded reads one candidate script within the hook's
-// time and concurrency budget. For a sandbox request, a script the check
+// time and concurrency budget. One read limit covers the wait for a free
+// reader and the read itself. late reports a script left unread because no
+// reader came free, the read did not finish, or the hook budget ended; the
+// caller judges it as an unread script (artifactUnreadFindings), never as a
+// script with nothing in it (rel-1-0-10:GAP-2171: busy readers or a loaded
+// box used to drop a blocking script's raise without a word). A path that is
+// not a readable script (missing, not regular, no execute bit, no shebang,
+// changed while read) is not late. For a sandbox request, a script the check
 // could not read (no host view, outside the mounted project, or no read
 // slot or time left) is recorded as a coverage gap on the request.
 func readPromotedArtifactBounded(
 	ctx context.Context,
 	path string,
 	dialect actionfacts.Dialect,
-) ([]byte, actionfacts.Dialect, bool) {
+) (body []byte, resolved actionfacts.Dialect, ok, late bool) {
 	view, sandboxed := sandboxHookView(ctx)
-	unread := func() ([]byte, actionfacts.Dialect, bool) {
+	unread := func() ([]byte, actionfacts.Dialect, bool, bool) {
 		if sandboxed {
 			noteSandboxCoverageGap(ctx, sandboxGapArtifactUnreadable)
 		}
-		return nil, actionfacts.DialectNone, false
+		return nil, actionfacts.DialectNone, false, true
 	}
+	if ctx.Err() != nil {
+		return unread()
+	}
+	timer := time.NewTimer(promotedArtifactReadLimit)
+	defer timer.Stop()
 	select {
 	case promotedArtifactReadSlots <- struct{}{}:
 	case <-ctx.Done():
 		return unread()
-	default:
+	case <-timer.C:
 		return unread()
 	}
 	result := make(chan promotedArtifactReadResult, 1)
@@ -722,11 +756,9 @@ func readPromotedArtifactBounded(
 			body: body, dialect: resolvedDialect, ok: ok,
 		}
 	}()
-	timer := time.NewTimer(promotedArtifactReadLimit)
-	defer timer.Stop()
 	select {
 	case read := <-result:
-		return read.body, read.dialect, read.ok
+		return read.body, read.dialect, read.ok, false
 	case <-ctx.Done():
 		return unread()
 	case <-timer.C:

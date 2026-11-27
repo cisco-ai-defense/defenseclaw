@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -105,16 +106,13 @@ func appendUnknownKeyOverflowFinding(findings []RuleFinding, generation *compile
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementAlertOnly
-	if request.StrictPolicy {
-		enforcement = findingEnforcementAllowed
-	}
+	enforcement := request.tieredProof(enforcingProof, tierGateStrict)
 	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: "Warning: file tool arguments exceed the target verification bound",
 		Severity: rule.Severity, Confidence: rule.Confidence,
 		Evidence: trustedActionInputText(request.Input, ""),
 		Tags:     append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	}))
 }
 
@@ -143,7 +141,6 @@ func appendUnverifiedWriteTargetFinding(
 		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: findingEnforcementAllowed,
 	}))
 }
 
@@ -195,15 +192,15 @@ func appendOverLimitElidedContentFinding(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if !request.EnforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	finding := adjustConfidence(request.Input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	})
 	for index, existing := range findings {
 		if existing.RuleID != rule.ID {
@@ -290,12 +287,20 @@ func overLimitTwinDialect(request trustedActionRequest, input actionfacts.Input)
 // as withTwinProvenBlocks counts them, and the rules it only records.
 func withOverLimitTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 	findings = withTwinProvenBlocks(findings, twin)
+	_, twin = withEffectsFoldedEitherWay(findings, twin)
 	for _, finding := range twin {
-		if finding.contributesToEnforcement() ||
-			slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }) {
+		if finding.contributesToEnforcement() {
 			continue
 		}
-		findings = append(findings, finding)
+		if finding.Proof.Source != decide.SourceEffects {
+			// The twin's 1.0.10 reading takes the slot of the effects-lane
+			// finding of its rule (readingRuleSlot).
+			findings = withReadingFinding(findings, finding)
+			continue
+		}
+		if !slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }) {
+			findings = append(findings, finding)
+		}
 	}
 	return findings
 }

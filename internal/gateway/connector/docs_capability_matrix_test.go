@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 )
@@ -37,11 +36,7 @@ type documentedCapabilityMatrix struct {
 // TestDocsCapabilityMatrixMatchesConnectors makes the JSON shared by the docs
 // table and command generator a checked projection of the connector registry.
 func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
+	repoRoot := connectorRepoRoot(t)
 	path := filepath.Join(repoRoot, "docs-site", "data", "capability-matrix.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {

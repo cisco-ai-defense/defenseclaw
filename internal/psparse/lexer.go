@@ -15,6 +15,13 @@ import (
 // command; PowerShell payloads in the corpora are far smaller.
 const maxInput = 1 << 20 // 1 MiB
 
+// truncatedInput is the one byte bound of a PowerShell reading (GAP-2086): a
+// source of maxInput bytes or more is cut here (or may have been cut to
+// maxInput by its caller), so its reading is a truncated row. Parse reads it
+// (its first maxInput bytes, with a ReasonTruncated diagnostic) and the port
+// declines it (FromPwshparse).
+func truncatedInput(src string) bool { return len(src) >= maxInput }
+
 // lexer turns PowerShell source into a token slice. It never panics: every
 // malformed construct becomes a TokError with a Reason, and scanning
 // continues from the next plausible boundary.
@@ -28,16 +35,32 @@ type lexer struct {
 	// used to decide whether '-' / '.' / '@' start an operator or a word, and
 	// whether we are at a command-start position.
 	prevSignificant TokenKind
-	prevWasValue    bool   // last token could end a value (for dash disambiguation)
-	atStart         bool   // at a token boundary (for '#' comment vs bareword)
-	braceStack      []byte // 'h' for an open @{ hashtable, 'b' for a { scriptblock
+	prevWasValue    bool // last token could end a value (for dash disambiguation)
+	atStart         bool // at a token boundary (for '#' comment vs bareword)
+	// wordOpen: the last token is a piece of an unquoted word that pwsh still
+	// scans as one generic token (a bareword, variable, number or parameter,
+	// or a quoted piece glued to one). A quote, '#' or '<#' glued to an open
+	// word continues that word; it does not start a token (GAP-1850).
+	wordOpen bool
+	// stmtLead is the kind of the first significant token of the current
+	// statement (TokEOF until one is seen). An assignment operator in a
+	// statement led by a variable is an expression operator, so the next rune
+	// starts a fresh token, where '#' and '<#' begin comments.
+	stmtLead TokenKind
+	// leadStack saves stmtLead across ( ), $( ), @( ), { } and @{ } so the
+	// statement that encloses a group keeps its lead after the group closes.
+	leadStack  []TokenKind
+	braceStack []byte // 'h' for an open @{ hashtable, 'b' for a { scriptblock
+	// diags are parse errors the lexer found but read past (a here-string
+	// whose $( ) never closes); Parse reports them with every TokError.
+	diags []Diagnostic
 }
 
 func newLexer(src string) *lexer {
 	if len(src) > maxInput {
 		src = src[:maxInput]
 	}
-	l := &lexer{src: src, atStart: true}
+	l := &lexer{src: src, atStart: true, stmtLead: TokEOF}
 	l.runes = make([]rune, 0, len(src))
 	l.pos = make([]int, 0, len(src)+1)
 	for off := 0; off < len(src); {
@@ -75,23 +98,80 @@ func (l *lexer) cur() rune { return l.peek(0) }
 func (l *lexer) emit(k TokenKind, a, b int) {
 	t := Token{Kind: k, Raw: l.slice(a, b), Start: l.byteAt(a), End: l.byteAt(b)}
 	t.Value = t.Raw
+	l.push(t)
+}
+
+func (l *lexer) push(t Token) {
+	glued := false
+	if n := len(l.toks); n > 0 {
+		glued = l.wordOpen && l.toks[n-1].End == t.Start
+	}
 	l.toks = append(l.toks, t)
+	k := t.Kind
 	if k != TokNewline && k != TokComment {
 		l.prevSignificant = k
 		l.prevWasValue = k == TokVariable || k == TokNumber || k == TokString ||
 			k == TokGeneric || k == TokRParen || k == TokRBracket || k == TokRBrace
 	}
 	l.setAtStart(k)
+	switch k {
+	case TokGeneric, TokVariable, TokNumber, TokParameter:
+		l.wordOpen = true
+	case TokString:
+		// A quoted piece glued to an open word is part of that word, so the
+		// next rune is not at a token boundary: a"b"#x is one word in pwsh.
+		// A string that starts a token ends it: "b"#x is "b" then a comment.
+		l.wordOpen = glued && (t.Str == StrSingle || t.Str == StrDouble)
+		if l.wordOpen {
+			l.atStart = false
+		}
+	case TokLBracket, TokRBracket:
+		// In command arguments pwsh scans [int], a[# and .\a[1] as one generic
+		// word, so a '#' glued after a bracket is word text, not a comment.
+		l.wordOpen = l.stmtLead == TokGeneric
+		if l.wordOpen {
+			l.atStart = false
+		}
+	default:
+		l.wordOpen = false
+	}
+	switch k {
+	case TokLParen, TokLBrace, TokDollarParen, TokAtParen, TokAtBrace:
+		l.leadStack = append(l.leadStack, l.stmtLead)
+		l.stmtLead = TokEOF
+	case TokRParen, TokRBrace:
+		if n := len(l.leadStack); n > 0 {
+			l.stmtLead = l.leadStack[n-1]
+			l.leadStack = l.leadStack[:n-1]
+		}
+	case TokNewline, TokSemi, TokPipe, TokPipePipe, TokAmpAmp:
+		l.stmtLead = TokEOF
+	case TokComment:
+	case TokOperator:
+		if l.stmtLead == TokVariable && isAssignOp(t.Value) {
+			// $x = ...: the right side is a new pipeline that starts at a
+			// token boundary ($x =# c and $x =<# c #> are comments in pwsh).
+			l.atStart = true
+			l.stmtLead = TokEOF
+			break
+		}
+		if l.stmtLead == TokEOF {
+			l.stmtLead = k
+		}
+	default:
+		if l.stmtLead == TokEOF {
+			l.stmtLead = k
+		}
+	}
 }
 
-func (l *lexer) push(t Token) {
-	l.toks = append(l.toks, t)
-	if t.Kind != TokNewline && t.Kind != TokComment {
-		l.prevSignificant = t.Kind
-		l.prevWasValue = t.Kind == TokVariable || t.Kind == TokNumber || t.Kind == TokString ||
-			t.Kind == TokGeneric || t.Kind == TokRParen || t.Kind == TokRBracket || t.Kind == TokRBrace
+// isAssignOp reports whether an operator token value is an assignment.
+func isAssignOp(v string) bool {
+	switch v {
+	case "=", "+=", "-=", "*=", "/=", "%=", "??=":
+		return true
 	}
-	l.setAtStart(t.Kind)
+	return false
 }
 
 // setAtStart records whether the next token begins at a token boundary (after a
@@ -116,6 +196,7 @@ func (l *lexer) lex() []Token {
 		case r == ' ' || r == '\t' || r == '\r' || r == '\f' || r == 0xA0:
 			l.i++
 			l.atStart = true
+			l.wordOpen = false
 		case r == '`' && (l.peek(1) == '\n' || l.peek(1) == '\r' || l.peek(1) == -1):
 			// line continuation: swallow backtick + newline
 			l.i++
@@ -126,6 +207,7 @@ func (l *lexer) lex() []Token {
 				l.i++
 			}
 			l.atStart = true
+			l.wordOpen = false
 		case r == '\n':
 			a := l.i
 			l.i++
@@ -269,21 +351,208 @@ func (l *lexer) lexHereString() {
 	if l.cur() == '\n' {
 		l.i++
 	}
+	body := l.i
 	// Terminator: a line that begins with  "@  (or '@), i.e. the quote then @
-	// at the start of a line.
-	for l.i < len(l.runes) {
-		atLineStart := l.i == 0 || l.runes[l.i-1] == '\n'
-		sameClass := (kind == StrHereSingle && isSingleQuote(l.cur())) || (kind == StrHereDouble && isDoubleQuote(l.cur()))
-		if atLineStart && sameClass && l.peek(1) == '@' {
-			l.i += 2
-			t := Token{Kind: TokString, Str: kind, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
-			t.Value = t.Raw
-			l.push(t)
-			return
+	// at the start of a line. In an expandable here-string pwsh reads a $( )
+	// as code up to its matching ), and a "@ line inside it does not end the
+	// string: @"<nl>$(@"<nl>x<nl>"@)<nl>"@ is one string (GAP-1853). The
+	// code reading respects backtick escapes, quotes, nested strings and
+	// comments, so a `$( or a quoted '$(' does not open a group.
+	end, ok := scanHereBody(l.runes, body, kind == StrHereDouble, kind == StrHereDouble)
+	if !ok && kind == StrHereDouble {
+		// A $( ) that never closes: pwsh rejects the script. Fall back to the
+		// 1.0.10 reading (the first terminator line ends the string), so the
+		// text after it is still read, and record the parse error: a here-string
+		// must never swallow the rest of a script as a clean parse.
+		if end, ok = scanHereBody(l.runes, body, true, false); ok {
+			l.diags = append(l.diags, Diagnostic{span: span{l.byteAt(a), l.byteAt(end)}, Reason: ReasonUnterminated,
+				Detail: "here-string $( ) not closed; read to the first terminator line", Lexical: true})
 		}
-		l.i++
 	}
+	if ok {
+		l.i = end
+		t := Token{Kind: TokString, Str: kind, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
+		t.Value = t.Raw
+		l.push(t)
+		return
+	}
+	l.i = len(l.runes)
 	l.push(Token{Kind: TokError, Str: kind, Value: ReasonUnterminated, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)})
+}
+
+// scanHereBody returns the rune index just past the terminator of the
+// here-string body that starts at rune i: a line that begins with the closing
+// quote class (double or single) then @. With expand, a backtick escapes the
+// next rune and a $( is read as code up to its matching ), so a terminator
+// line inside it does not end the body. ok is false when no terminator is
+// found (or a $( never closes).
+func scanHereBody(rs []rune, i int, double, expand bool) (int, bool) {
+	return scanNested(rs, i, scanFrame{kind: frameHere, double: double, expand: expand})
+}
+
+// scanSubexpr reads the code of a $( ) group that starts at rune i (just past
+// the opening "$(") and returns the index just past its matching ).
+func scanSubexpr(rs []rune, i int) (int, bool) {
+	return scanNested(rs, i, scanFrame{kind: frameCode, atStart: true})
+}
+
+type scanFrameKind uint8
+
+const (
+	frameHere scanFrameKind = iota // a here-string body
+	frameCode                      // the code of a $( ) group
+	frameDQ                        // a "..." string inside code
+)
+
+type scanFrame struct {
+	kind           scanFrameKind
+	double, expand bool // frameHere: the quote class, and whether $( ) expands
+	parens         int  // frameCode: open ( ) inside the group
+	atStart        bool // frameCode: at a token boundary ('#' and '<#' begin comments)
+}
+
+// scanNested finds the end of the construct start opens at rune i, the way
+// pwsh's tokenizer does: in code, parens nest, single-quoted strings,
+// comments and backtick escapes are skipped whole, and "..." strings and
+// here-strings nest with their own $( ) groups, so a ) or $( inside a quote,
+// a comment or after a backtick does not count. It returns the index just
+// past the construct's end; ok is false at the end of input. The frames are
+// an explicit stack, so the scan is linear in the input at any nesting depth
+// (the nested parse of the text carries the depth bound, ps_depth_limit).
+func scanNested(rs []rune, i int, start scanFrame) (int, bool) {
+	n := len(rs)
+	stack := []scanFrame{start}
+	pop := func() bool { stack = stack[:len(stack)-1]; return len(stack) == 0 }
+	for i < n {
+		top := &stack[len(stack)-1]
+		r := rs[i]
+		switch top.kind {
+		case frameHere:
+			if i > 0 && rs[i-1] == '\n' && i+1 < n && rs[i+1] == '@' &&
+				((top.double && isDoubleQuote(r)) || (!top.double && isSingleQuote(r))) {
+				i += 2
+				if pop() {
+					return i, true
+				}
+				continue
+			}
+			if top.expand {
+				// A backtick before a line break does not hide the next line's
+				// terminator: ending early keeps the rest of the script read.
+				if r == '`' && i+1 < n && rs[i+1] != '\n' && rs[i+1] != '\r' {
+					i += 2
+					continue
+				}
+				if r == '$' && i+1 < n && rs[i+1] == '(' {
+					stack = append(stack, scanFrame{kind: frameCode, atStart: true})
+					i += 2
+					continue
+				}
+			}
+			i++
+		case frameDQ:
+			switch {
+			case r == '`':
+				i += 2
+			case r == '$' && i+1 < n && rs[i+1] == '(':
+				stack = append(stack, scanFrame{kind: frameCode, atStart: true})
+				i += 2
+			case isDoubleQuote(r) && i+1 < n && isDoubleQuote(rs[i+1]):
+				i += 2 // a doubled quote escapes one
+			case isDoubleQuote(r):
+				i++
+				if pop() {
+					return i, true
+				}
+			default:
+				i++
+			}
+		case frameCode:
+			switch {
+			case r == '`':
+				i += 2
+				top.atStart = false
+			case r == '(':
+				top.parens++
+				top.atStart = true
+				i++
+			case r == ')' && top.parens == 0:
+				i++
+				if pop() {
+					return i, true
+				}
+				stack[len(stack)-1].atStart = false
+			case r == ')':
+				top.parens--
+				top.atStart = false
+				i++
+			case isSingleQuote(r):
+				end, ok := scanSingleBody(rs, i+1)
+				if !ok {
+					return 0, false
+				}
+				i, top.atStart = end, false
+			case isDoubleQuote(r):
+				top.atStart = false
+				stack = append(stack, scanFrame{kind: frameDQ})
+				i++
+			case r == '@' && i+1 < n && (isDoubleQuote(rs[i+1]) || isSingleQuote(rs[i+1])) && blankToLineEnd(rs, i+2):
+				double := isDoubleQuote(rs[i+1])
+				top.atStart = false
+				for i < n && rs[i] != '\n' {
+					i++
+				}
+				stack = append(stack, scanFrame{kind: frameHere, double: double, expand: double})
+				i++
+			case r == '#' && top.atStart:
+				for i < n && rs[i] != '\n' {
+					i++
+				}
+			case r == '<' && i+1 < n && rs[i+1] == '#' && top.atStart:
+				j := i + 2
+				for j+1 < n && (rs[j] != '#' || rs[j+1] != '>') {
+					j++
+				}
+				if j+1 >= n {
+					return 0, false
+				}
+				i, top.atStart = j+2, true
+			case isSpace(r) || r == '\n' || r == ';' || r == '|' || r == '{' || r == '}' || r == '=' || r == ',':
+				top.atStart = true
+				i++
+			default:
+				top.atStart = false
+				i++
+			}
+		}
+	}
+	return 0, false
+}
+
+// scanSingleBody returns the index just past the closing quote of a
+// single-quoted string whose text starts at rune i (” escapes one quote).
+func scanSingleBody(rs []rune, i int) (int, bool) {
+	for n := len(rs); i < n; i++ {
+		if isSingleQuote(rs[i]) {
+			if i+1 < n && isSingleQuote(rs[i+1]) {
+				i++
+				continue
+			}
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+// blankToLineEnd reports whether only blanks follow rune i up to the end of
+// its line (the rest of a here-string opening line must be blank).
+func blankToLineEnd(rs []rune, i int) bool {
+	for n := len(rs); i < n && rs[i] != '\n'; i++ {
+		if !isSpace(rs[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *lexer) lexSplatVariable() {

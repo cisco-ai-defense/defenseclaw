@@ -49,6 +49,12 @@ const (
 	// administrator's status says. The standalone Unix enumerator writes it
 	// with the ledger's ownership and mode.
 	HookGuardianUnprotectedAgentsFile = "unprotected-agents.json"
+	// HookGuardianAgentVersionsFile, next to the ledger, lists the agent
+	// version the standalone Unix enumerator last verified per account and
+	// connector, in the ledger's target shape. A Linux or macOS
+	// machine-policy connector has no per-user guardian row, so the gateway
+	// reads the caller's version here (rel-1-0-10:GAP-0114).
+	HookGuardianAgentVersionsFile = "agent-versions.json"
 	// HookGuardianCredentialTransactionFile, next to the ledger, is the
 	// root-only record of the per-user credential rotation in progress
 	// (enterprisehooks.CredentialTransaction). The standalone Unix guardian

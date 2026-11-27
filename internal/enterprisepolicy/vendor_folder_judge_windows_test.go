@@ -56,6 +56,7 @@ func publishedWeakCase(t *testing.T, tc vendorFolderCase, dacl string) (Options,
 // same verdict: a clean folder is re-protected (reported once), a folder
 // something holds or changed is refused with the same message.
 func TestInspectRecordedVendorFoldersIsTheVerdictThePublishReaches(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		for variant, dacl := range weakDACLs(tc) {
 			t.Run(tc.name+" ("+variant+", clean)", func(t *testing.T) {
@@ -116,6 +117,7 @@ func TestInspectRecordedVendorFoldersIsTheVerdictThePublishReaches(t *testing.T)
 // message from the inspection, the publish and machine-policy verify, and the
 // uncovered verdict. Once the blocker is gone the next pass re-protects.
 func TestSafeTransactionRefusesWhatItCannotProve(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	type blockerCase struct {
 		name  string
 		want  string
@@ -245,6 +247,7 @@ func TestSafeTransactionRefusesWhatItCannotProve(t *testing.T) {
 // Setup's own entry point: the same transaction, called before an install-like
 // action, heals what it can and returns what it cannot.
 func TestReprotectRecordedVendorFoldersHealsTheCleanAndReturnsTheBlocked(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			opts, file, folder := publishedWeakCase(t, tc, vendorFolderReplaceableDACL)
@@ -277,6 +280,7 @@ func TestReprotectRecordedVendorFoldersHealsTheCleanAndReturnsTheBlocked(t *test
 // it: the first publish takes it over and records the file, and after that
 // the folder passes.
 func TestInspectRecordedVendorFoldersPassesAFreshInstallOnTheInheritedDefaults(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pinReclaimStandalone(t, true)
@@ -335,6 +339,7 @@ func TestInspectRecordedVendorFoldersLeavesAnAddOnlyFolderOfASingleFileVendor(t 
 // Secure Client keeps the takeover of 1.0.8: nothing is inspected, nothing is
 // refused, whatever the folder allows.
 func TestInspectRecordedVendorFoldersReportsNothingOffStandalone(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			opts, _, _ := publishedWeakCase(t, tc, vendorFolderReplaceableDACL)
@@ -365,6 +370,7 @@ func TestInspectRecordedVendorFoldersReportsNothingOffStandalone(t *testing.T) {
 // can change. It leaves it byte for byte, drops the record, and warns once:
 // the file's DefenseClaw hook entries now name removed programs, with the fix.
 func TestRemovalKeepsAnUntrustedRecordedFileAndWarnsOnce(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pinReclaimStandalone(t, true)

@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"runtime"
 	"strings"
 	"testing"
 
@@ -75,11 +74,17 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 		// read /x partially and allowed it, a miss the old "stays partial"
 		// row pinned; the FU12 fold (rel 8e58b26846..efdb4f76a4) reads it
 		// fully (lead ruling D31, 2026-11-21). The benign twin shows that /x
-		// itself does not block. Only the Windows reading takes /x; on other
-		// hosts the launcher reading still stops at it and names the rule as
-		// detection-only, as rel does (rel-1-0-10:GAP-1708, 1.0.11).
-		{"cmd.exe /x body is read", `cmd.exe /x /c echo dccert-block-marker > codex-blocked2.txt`, runtime.GOOS == "windows"},
+		// itself does not block. The launcher reading and the psparse host
+		// reading take one cmd switch set, so a gateway on any host reads
+		// /x and /y (the old name of /e:off) as Windows does
+		// (rel-1-0-10:GAP-1708).
+		{"cmd.exe /x body is read", `cmd.exe /x /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /y body is read", `cmd.exe /y /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /x /y /d body is read", `cmd.exe /x /y /d /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /t:a /c body is read", `cmd.exe /t:a /c echo dccert-block-marker > codex-blocked2.txt`, true},
 		{"benign cmd.exe /x", `cmd.exe /x /c echo hi > codex-allowed.txt`, false},
+		{"benign cmd.exe /y", `cmd.exe /y /c echo hello > codex-allowed.txt`, false},
+		{"cmd.exe /t:0g stays partial", `cmd.exe /t:0g /c echo dccert-block-marker > codex-allowed.txt`, false},
 		{"cmd.exe /e:maybe stays partial", `cmd.exe /e:maybe /c echo dccert-block-marker > codex-allowed.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +138,8 @@ func TestWindowsConnectorMarkerRuleUsesCompleteCMDWrapperArgv(t *testing.T) {
 				`cmd.exe /v:off /c echo dccert-block-marker > marker.txt`,
 				`cmd.exe /f:on /c echo dccert-block-marker > marker.txt`,
 				`cmd.exe /t:0A /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /x /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /y /c echo dccert-block-marker > marker.txt`,
 				`cmd /d /c dccert-block-marker`,
 				`cmd /c dccert-block-marker`,
 				`& cmd.exe /c echo dccert-block-marker > marker.txt`,

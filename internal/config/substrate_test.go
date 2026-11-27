@@ -235,7 +235,6 @@ func TestSubstrateValidate(t *testing.T) {
 		"api.auth":           func(s *SubstrateConfig) { s.API.Auth = "kerberos" },
 		"supported_versions": func(s *SubstrateConfig) { s.SupportedVersions = "~1.0" },
 		"token_lifetime":     func(s *SubstrateConfig) { s.Identity.TokenLifetimeSeconds = 4000 },
-		"actor_cert_oid":     func(s *SubstrateConfig) { s.Identity.ActorCertOID = "1.3.x" },
 		"keys_url http":      func(s *SubstrateConfig) { s.Identity.KeysURL = "http://idp.ate-system.svc/openid/v1/jwks" },
 		"keys_url query":     func(s *SubstrateConfig) { s.Identity.KeysURL = "https://idp.ate-system.svc/jwks?a=1" },
 		"oidc client":        func(s *SubstrateConfig) { s.Identity.OIDC.Issuer = "https://login" },

@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 )
 
 func windowsCommandFindingsWithOptions(
@@ -202,11 +203,30 @@ func windowsCommandText(text, toolName string) (string, windowsShellDialect, boo
 		return "", dialect, false
 	}
 
+	answer := memoArgs(argsWindowsCommand, text, func() windowsArgsCommand { return decodeWindowsArgsCommand(text) })
+	if answer.object {
+		return answer.command, dialect, answer.ok
+	}
+	return text, dialect, strings.TrimSpace(text) != ""
+}
+
+// windowsArgsCommand is the command a JSON object of tool arguments carries
+// (object false: the text is no JSON object).
+type windowsArgsCommand struct {
+	command    string
+	object, ok bool
+}
+
+// decodeWindowsArgsCommand reads the command of the tool arguments text.
+// windowsCommandText remembers the answer for large arguments, which every
+// Windows reading of one call decoded again (GAP-0299).
+func decodeWindowsArgsCommand(text string) windowsArgsCommand {
+	workcount.AddLarge(workcount.ArgsDecode, len(text))
 	var object map[string]interface{}
 	if json.Unmarshal([]byte(text), &object) == nil {
 		for _, key := range []string{"command", "CommandLine", "commandLine", "cmd", "script", "input"} {
 			if value, ok := object[key].(string); ok && strings.TrimSpace(value) != "" {
-				return value, dialect, true
+				return windowsArgsCommand{command: value, object: true, ok: true}
 			}
 			if values, ok := object[key].([]interface{}); ok {
 				argv := make([]string, 0, len(values))
@@ -218,13 +238,13 @@ func windowsCommandText(text, toolName string) (string, windowsShellDialect, boo
 					argv = append(argv, quoteWindowsArg(value))
 				}
 				if len(argv) > 0 {
-					return strings.Join(argv, " "), dialect, true
+					return windowsArgsCommand{command: strings.Join(argv, " "), object: true, ok: true}
 				}
 			}
 		}
-		return "", dialect, false
+		return windowsArgsCommand{object: true}
 	}
-	return text, dialect, strings.TrimSpace(text) != ""
+	return windowsArgsCommand{}
 }
 
 func quoteWindowsArg(value string) string {

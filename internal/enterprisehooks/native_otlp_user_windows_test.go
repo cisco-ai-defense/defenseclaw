@@ -279,6 +279,7 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 // token. It reports an orphaned token as residue without treating the
 // guardian's different SID as a settings-inspection failure.
 func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	viewer, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
@@ -344,6 +345,7 @@ func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
 
 // The same row through the real Claude Code managed Install and Verify.
 func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -407,6 +409,7 @@ func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T)
 // earlier per-user install, so an exporter left there sends no DefenseClaw
 // credential to the holder of its port.
 func TestWindowsManagedRowNeverFailsOnAnUnreachableAgentFolder(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for name, value := range map[string]string{
 		"unreachable share": `\\dc-unreachable.invalid\share\claude`,
 		"unresolvable":      `%DC_NOT_SET%\claude`,

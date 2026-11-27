@@ -611,7 +611,7 @@ func ruleFindingsToInspect(in []RuleFinding, location string) []scanner.InspectF
 		if f.profile != "" {
 			tags = append(tags, "profile:"+f.profile)
 		}
-		if f.enforcement == findingEnforcementDetectionOnly && !hasStableFindingTag(tags, scanner.FindingTagDetectionOnly) {
+		if f.Proof.Recorded() && !hasStableFindingTag(tags, scanner.FindingTagDetectionOnly) {
 			tags = append(tags, scanner.FindingTagDetectionOnly)
 		}
 		out = append(out, scanner.InspectFinding{

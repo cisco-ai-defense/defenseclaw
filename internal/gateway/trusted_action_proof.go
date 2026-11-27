@@ -202,23 +202,23 @@ func applyTrustedActionProofBoundary(
 	for index := range gated {
 		finding := &gated[index]
 		if !enforcementCapable {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			continue
 		}
-		if finding.enforcement == findingEnforcementDetectionOnly {
+		if finding.Proof.Recorded() {
 			continue
 		}
-		if finding.enforcement == findingEnforcementAlertOnly {
+		if finding.Proof.Advisory() {
 			// Alert-only owners have already passed their exact semantic
 			// prerequisite. They deliberately cannot authorize confirm/block,
 			// so they do not require an enforcement-eligible command projection.
 			continue
 		}
 		if finding.proof.authorizes(finding.RuleID) {
-			finding.enforcement = findingEnforcementAllowed
+			finding.Proof = finding.Proof.Enforce()
 			continue
 		}
-		finding.enforcement = findingEnforcementDetectionOnly
+		finding.Proof = finding.Proof.Record()
 	}
 	return gated
 }

@@ -195,8 +195,13 @@ type hookCall struct {
 	scripts     map[scriptReadKey]string
 	scriptBytes int
 	// keyReads are the answers of the private-key reader, by its reading
-	// (ActionPrivateKeyReadBounded).
+	// (ActionPrivateKeyReadBoundedIn).
 	keyReads map[keyReadKey]keyReadAnswer
+	// stateIdentities are the identity indexes of the active state trees
+	// this call walked whose folders had not settled (activeStateIdentities):
+	// kept for the call only, as the file system is the same for the whole
+	// decision.
+	stateIdentities map[string][]activeStateIdentity
 }
 
 type statAnswer struct {
@@ -281,6 +286,73 @@ func (call *hookCall) shareWait() time.Duration {
 func HookCall() (end func()) {
 	_, end = beginHookCall()
 	return end
+}
+
+// Call is the hook call a goroutine runs, found once (the zero Call: none).
+// A caller that reads the call more than once keeps the Call instead of
+// finding it again: off Windows each find is a traceback of the goroutine's
+// stack (goroutineID), and a decision found its call four times per dispatch
+// (DET111-PERF-A). Its readings are those of HookCallState and
+// ShareBodyUnreadCauses for the same call.
+type Call struct{ call *hookCall }
+
+// BeginHookCall is HookCall that also returns the Call the goroutine runs
+// until end: the one it began or the one already open.
+func BeginHookCall() (Call, func()) {
+	call, end := beginHookCall()
+	return Call{call}, end
+}
+
+// CurrentHookCall is the Call the calling goroutine runs (the zero Call: none).
+func CurrentHookCall() Call { return Call{currentHookCall()} }
+
+// JoinHookCall is BeginHookCall for a goroutine that found its open call a
+// moment before (found, from BeginHookCall or CurrentHookCall in a frame
+// that is still running, so the call is still open). Off Windows that call
+// is the one BeginHookCall would find, with nothing to end, and is returned
+// without a second traceback of the goroutine's stack (goroutineID): each
+// costs a walk of every frame, and a gateway decision found its call about
+// 110 times, 8% of its time (DET111-LANEON-PERF, GAP-2197). A zero found,
+// and every call on Windows (foundCallServes), begins as BeginHookCall does.
+func JoinHookCall(found Call) (Call, func()) {
+	if found.call != nil && foundCallServes {
+		return found, func() {}
+	}
+	return BeginHookCall()
+}
+
+// FoundHookCall is CurrentHookCall for a goroutine that found its open call
+// a moment before (found, as for JoinHookCall): off Windows that call, else
+// the call found again.
+func FoundHookCall(found Call) Call {
+	if found.call != nil && foundCallServes {
+		return found
+	}
+	return CurrentHookCall()
+}
+
+// joinHookCall is JoinHookCall on the package's own call type.
+func joinHookCall(found Call) (*hookCall, func()) {
+	if found.call != nil && foundCallServes {
+		return found.call, func() {}
+	}
+	return beginHookCall()
+}
+
+// State is the CallState of the call (the zero CallState: none).
+func (c Call) State() CallState {
+	if c.call == nil {
+		return CallState{}
+	}
+	return c.call.state()
+}
+
+// ShareBodyUnreadCauses is ShareBodyUnreadCauses for the call.
+func (c Call) ShareBodyUnreadCauses() (budget, linkBound bool) {
+	if c.call == nil {
+		return false, false
+	}
+	return c.call.bodyUnread, c.call.bodyLinks
 }
 
 // beginHookCall is HookCall that also returns the call the goroutine runs
@@ -627,11 +699,7 @@ func ShareBodyUnread() bool {
 // links than the walk follows, so a share on it may not have been asked
 // (rel-1-0-9:GAP-0621). Both can hold in one call.
 func ShareBodyUnreadCauses() (budget, linkBound bool) {
-	call := currentHookCall()
-	if call == nil {
-		return false, false
-	}
-	return call.bodyUnread, call.bodyLinks
+	return CurrentHookCall().ShareBodyUnreadCauses()
 }
 
 // evictNetworkShareProbesLocked drops the finished probes and reports
@@ -1023,6 +1091,10 @@ type CallState struct {
 	budgetCuts                           uint64
 }
 
+// GlobCut is the caps the pattern expansions of the call hit so far
+// (noteGlobCut): every one is a TRUNCATED reading of the call.
+func (s CallState) GlobCut() bounded.CapSet { return s.globCut }
+
 // noteStateUnanswered marks the goroutine's hook call (none: nothing): a
 // write target was refused as not proved free of the state because a local
 // read it needed did not answer in time (rel-1-0-10:GAP-1805).
@@ -1043,13 +1115,7 @@ func StateCheckUnanswered() bool {
 }
 
 // HookCallState is the CallState of the hook call the goroutine runs.
-func HookCallState() CallState {
-	call := currentHookCall()
-	if call == nil {
-		return CallState{}
-	}
-	return call.state()
-}
+func HookCallState() CallState { return CurrentHookCall().State() }
 
 // state is the CallState of call (not nil).
 func (call *hookCall) state() CallState {

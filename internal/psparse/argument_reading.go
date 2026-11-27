@@ -15,9 +15,17 @@ import (
 // number: this is an additional reading for positive proofs, never a
 // replacement for the original reading. Uninvoked script blocks stay data.
 func ArgumentCommandReading(source string) (string, bool, bounded.CapSet) {
+	text, changed, _, cut := ArgumentCommandReadingWithGroup(source)
+	return text, changed, cut
+}
+
+// ArgumentCommandReadingWithGroup also reports an evaluated (group) block.
+// Such a group must receive the rule reading of its command, since the outer
+// statement's parser does not dispatch the header's inner command.
+func ArgumentCommandReadingWithGroup(source string) (string, bool, bool, bounded.CapSet) {
 	var trunc bounded.Truncated
 	if !trunc.Within(bounded.Bytes, len(source), 64<<10) {
-		return "", false, trunc.Set()
+		return "", false, false, trunc.Set()
 	}
 	r := argumentReader{trunc: &trunc, nodes: bounded.NewCounter(&trunc, bounded.Nodes, 8192)}
 	sc, _ := Parse(source, Options{Dialect: DialectUnknown})
@@ -32,15 +40,16 @@ func ArgumentCommandReading(source string) (string, bool, bounded.CapSet) {
 	parts := r.statements(sc.Statements, source, 0)
 	text := strings.Join(parts, "\n")
 	if !trunc.Within(bounded.Bytes, len(text), 128<<10) {
-		return "", false, trunc.Set()
+		return "", false, false, trunc.Set()
 	}
-	return text, r.changed, trunc.Set()
+	return text, r.changed, r.group, trunc.Set()
 }
 
 type argumentReader struct {
 	trunc   *bounded.Truncated
 	nodes   bounded.Counter
 	changed bool
+	group   bool
 }
 type argumentEdit struct {
 	start, end int
@@ -269,6 +278,20 @@ func (r *argumentReader) evaluations(sts []Statement, src string, depth int) []s
 			}
 		case *ExprStatement:
 			out = append(out, r.expression(v.Expr, src, depth+1)...)
+		case *Block:
+			// Parenthesized header statements can parse as a (group) block
+			// when the header has more than one statement (foreach $x in
+			// (command)). Those statements run as part of the header; only
+			// this evaluated group is descended into, not block literals.
+			if v.Keyword == "(group)" {
+				for _, body := range v.Bodies {
+					if body != nil {
+						parts := r.evaluations(body.Statements, src, depth+1)
+						r.group = r.group || len(parts) != 0
+						out = append(out, parts...)
+					}
+				}
+			}
 		case *Assignment:
 			out = append(out, r.evaluations([]Statement{v.RHS}, src, depth+1)...)
 		}

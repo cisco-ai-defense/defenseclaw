@@ -258,8 +258,7 @@ func TestTrustedExactFallbackUsesExecutingProjectionWithPreviewSibling(t *testin
 
 	findings := filterExactFallbackFindings(
 		[]RuleFinding{{
-			RuleID:      "CMD-REVSHELL-NC",
-			enforcement: findingEnforcementAllowed,
+			RuleID: "CMD-REVSHELL-NC",
 		}},
 		input,
 		facts,

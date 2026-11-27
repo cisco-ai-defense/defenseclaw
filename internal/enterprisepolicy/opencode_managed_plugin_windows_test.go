@@ -33,6 +33,7 @@ import (
 // config, so OpenCode takes the machine-policy route; teardown removes the
 // entry and then the plugin.
 func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsOpenCodeTestOptions(t)
 	if route := opts.Route(ConnectorOpenCode); route != RoutePerUser {
 		t.Fatalf("before the guardian installs the plugin OpenCode is per-user, got %s", route)
@@ -117,6 +118,7 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 // the read-only attribute) leaves the plugin readable by no one. The
 // guardian's watch restores it within seconds, without waiting for a pass.
 func TestWatchOpenCodeManagedPluginRestoresAChangedPlugin(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsOpenCodeTestOptions(t)
 	if _, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode}); err != nil {
 		t.Fatal(err)
@@ -240,6 +242,7 @@ func windowsOpenCodeTestOptions(t *testing.T) Options {
 // tool call on DefenseClaw's own per-user plugin). Once the config names the
 // plugin the summary moves OpenCode onto machine policy.
 func TestPublishWindowsGoOwnedKeepsTheOpenCodeSummaryPerUserWithOwnershipOff(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	merge := windowsOpenCodeTestOptions(t)
 	merge.PublicPolicyPath = filepath.Join(merge.WindowsProgramData, "machine-policy.json")
 	off := withPolicy(merge, ConnectorOpenCode, func(p *config.EnterpriseConnectorPolicy) {
@@ -284,6 +287,7 @@ func TestPublishWindowsGoOwnedKeepsTheOpenCodeSummaryPerUserWithOwnershipOff(t *
 // loads it, but no later release can replace it, so the guardian's heal
 // rewrites it and clears the attribute.
 func TestInstallOpenCodeManagedPluginClearsAReadOnlyAttribute(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsOpenCodeTestOptions(t)
 	if _, err := InstallOpenCodeManagedPlugin(opts); err != nil {
 		t.Fatal(err)

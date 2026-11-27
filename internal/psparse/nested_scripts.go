@@ -17,6 +17,11 @@ type NestedScript struct {
 	Static  bool
 	Reason  string // set when !Static (a Reason* code)
 	Source  Node   // the command or expression it was embedded in
+	// BlankDecoded is an -EncodedCommand body read only through the host
+	// decoder's skip of the tab, CR and LF blanks inside its quoted value
+	// (hostWord.enc, rel-1-0-10:GAP-1199), a reading DefenseClaw 1.0.10 did
+	// not have. It is provenance only: the body is read the same either way.
+	BlankDecoded bool
 }
 
 const (
@@ -285,6 +290,37 @@ type hostWord struct {
 	// folder from the caller's home or environment ($HOME\.ssh, "$env:TEMP\x"):
 	// only a -WorkingDirectory value may be one (folderValueWord).
 	folder bool
+	// enc is the value of a quoted literal word that is outside the static
+	// class only because it holds a tab, CR or LF. Only an -EncodedCommand
+	// value reads it: the host decoder (Convert.FromBase64String) skips those
+	// blanks wherever they stand and runs the script (rel-1-0-10:GAP-1199).
+	enc string
+}
+
+// encodedText is the word an -EncodedCommand value hands the host decoder: a
+// static word, or a quoted word whose only runes outside the static class are
+// the blanks the decoder skips (enc).
+func (w hostWord) encodedText() (string, bool) {
+	if w.static {
+		return w.text, true
+	}
+	return w.enc, w.enc != ""
+}
+
+// encodedWord returns the value of a quoted literal that is outside the static
+// class only because of a tab, CR or LF (HostBase64 drops them, as the host
+// decoder does). Every other rune keeps the quoted-literal class, so a backtick
+// escape, a variable or a non-ASCII rune still leaves the word unread
+// (rel-1-0-10:GAP-1199).
+func encodedWord(e Expr) string {
+	v, ok := e.(*StringLit)
+	if !ok || !v.Static || v.Fused || v.Bare || v.Kind == StrBare || v.Kind == StrHereSingle || v.Kind == StrHereDouble {
+		return ""
+	}
+	if !strings.ContainsAny(v.Value, "\t\r\n") || !safeQuotedLiteral(HostBase64(v.Raw)) || !safeQuotedLiteral(HostBase64(v.Value)) {
+		return ""
+	}
+	return v.Value
 }
 
 func hostWords(c *Command) []hostWord {
@@ -313,17 +349,25 @@ func hostWords(c *Command) []hostWord {
 			}
 		case *Arg:
 			v, ok := nativeWord(e.Value)
-			out = append(out, hostWord{text: v, static: ok, folder: !ok && folderValueWord(e.Value)})
+			w := hostWord{text: v, static: ok}
+			if !ok {
+				w.folder, w.enc = folderValueWord(e.Value), encodedWord(e.Value)
+			}
+			out = append(out, w)
 		case Expr:
 			v, ok := nativeWord(e)
-			out = append(out, hostWord{text: v, static: ok})
+			w := hostWord{text: v, static: ok}
+			if !ok {
+				w.enc = encodedWord(e)
+			}
+			out = append(out, w)
 		}
 		// An element glued to its neighbour (-c'x', a'b' c) is merged by the caller
 		// into one native argument or split in a way the AST does not show: neither
 		// word is certain (review 9 R9-4).
 		if prevEnd >= 0 && s0 == prevEnd {
 			for k := prevStart; k < len(out); k++ {
-				out[k].static, out[k].folder = false, false
+				out[k].static, out[k].folder, out[k].enc = false, false, ""
 			}
 		}
 		prevStart, prevEnd = start, s1
@@ -333,12 +377,16 @@ func hostWords(c *Command) []hostWord {
 
 // folderValueWord reports an expandable string that the caller hands over as
 // one native argv word built only from literal text and the caller's home,
-// current folder or environment variables ($HOME\.ssh, "$env:TEMP\x"): no
-// sub-expression, no splat, no other variable (a variable may hold an array,
-// which becomes several words). It is never a static word; it is only allowed
-// as the value of -WorkingDirectory, which is not part of the script
-// (rel-1-0-10:GAP-0198).
+// current folder or environment variables ($HOME\.ssh, "$env:TEMP\x"), or one
+// such variable alone ($env:X: an environment value is one string, so one
+// word, rel-1-0-10:GAP-1556): no sub-expression, no splat, no other variable
+// (a variable may hold an array, which becomes several words). It is never a
+// static word; it is only allowed as the value of -WorkingDirectory, which is
+// not part of the script (rel-1-0-10:GAP-0198).
 func folderValueWord(e Expr) bool {
+	if alone, isVariable := e.(*Variable); isVariable {
+		return folderVariable(alone)
+	}
 	v, ok := e.(*StringLit)
 	if !ok || v.Static || v.Fused || v.Kind == StrHereSingle || v.Kind == StrHereDouble || len(v.Parts) == 0 {
 		return false
@@ -352,8 +400,7 @@ func folderValueWord(e Expr) bool {
 				return false
 			}
 		case *Variable:
-			name := strings.ToLower(x.Name)
-			if x.Splat || (!strings.EqualFold(x.Scope, "env") && (x.Scope != "" || name != "home" && name != "pwd")) {
+			if !folderVariable(x) {
 				return false
 			}
 			variable = true
@@ -362,6 +409,17 @@ func folderValueWord(e Expr) bool {
 		}
 	}
 	return variable
+}
+
+// FolderValueWord reports a launcher argument a -WorkingDirectory value may be
+// (folderValueWord): the host reading and a reader of the launcher's argv
+// words take the same values.
+func FolderValueWord(e Expr) bool { return folderValueWord(e) }
+
+// folderVariable reports an environment variable, $HOME or $PWD, not splatted.
+func folderVariable(x *Variable) bool {
+	name := strings.ToLower(x.Name)
+	return !x.Splat && x.Name != "" && (strings.EqualFold(x.Scope, "env") || x.Scope == "" && (name == "home" || name == "pwd"))
 }
 
 // nativeWord returns the one native argv word an argument expression becomes,
@@ -559,12 +617,13 @@ func joinRest(words []hostWord, kind, dialect string, src Node) NestedScript {
 
 func decodeWord(w hostWord, src Node) NestedScript {
 	ns := NestedScript{Kind: KindEncodedCommand, Dialect: "powershell", Source: src}
-	if !w.static {
+	text, ok := w.encodedText()
+	if !ok {
 		ns.Reason = ReasonNonLiteral
 		return ns
 	}
-	if dec, ok := DecodeEncodedCommand(w.text); ok {
-		ns.Text, ns.Static = dec, true
+	if dec, ok := DecodeEncodedCommand(text); ok {
+		ns.Text, ns.Static, ns.BlankDecoded = dec, true, !w.static
 	} else {
 		ns.Reason = ReasonNonLiteral
 	}

@@ -27,10 +27,14 @@ const boundedImportPath = "github.com/defenseclaw/defenseclaw/internal/guardrail
 //     bounded.NewCounter (a constructor path that forgets it reads unbound);
 //   - a package that imports bounded and has no _test.go file calling
 //     bounded.PanicOnMisuse(true), so its tests would run on the production
-//     fallback instead of panicking where a misuse is made.
+//     fallback instead of panicking where a misuse is made;
+//   - a package-level max* cap a reader package (readerPackages) compares a
+//     count against and does not register with bounded.Register under its own
+//     name, or a cap name registered twice (DET111 step 2, the cap registry).
 func TestAdopters(t *testing.T) {
 	root := moduleRoot(t)
 	problems := adopterProblems(t, root)
+	problems = append(problems, capRegistryProblems(t, root)...)
 	for _, p := range problems {
 		t.Error(p)
 	}

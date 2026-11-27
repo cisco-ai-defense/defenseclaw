@@ -612,6 +612,22 @@ func PatchNamesUnplacedTarget(tool string, args json.RawMessage) bool {
 	return false
 }
 
+// PatchPathIsUnplacedWindowsName reports a patch target the patch tool reads
+// as a Windows name that no reader places (isAcceptedPatchPath): a
+// drive-relative path (C:x), a device or namespace path, a share without a
+// file. False where the patch tool does not read Windows names
+// (patchTargetsAreWindowsNames) and for the home forms, which a tool that
+// expands them (Hermes) places. Hermes' V4A patch tool writes such a file as
+// apply_patch does, so the gateway judges that call at the unknown tier too
+// (rel-1-0-10:GAP-1057).
+func PatchPathIsUnplacedWindowsName(value string) bool {
+	if !patchTargetsAreWindowsNames || value == "" || value == "~" ||
+		strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+		return false
+	}
+	return !isAcceptedPatchPath(value)
+}
+
 // CommandPatchNamesUnplacedTarget reports a shell command of facts that feeds
 // apply_patch an envelope, by a here-document (applyPatchStdinText), with a
 // header no reader places, or with a body the shell expands, whose headers

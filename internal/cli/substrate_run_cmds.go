@@ -18,12 +18,14 @@ package cli
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
 // substrateRunFlags are the flags of run.
@@ -96,7 +98,8 @@ go with --detach or --batch.`,
 			"defenseclaw substrate run claude --mcp \"files=npx -y @modelcontextprotocol/server-filesystem .\"",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return errors.New("name the agent: claude, codex, copilot, opencode, kiro, hermes or antigravity")
+				names := sandboxcli.HarnessArgs()
+				return errors.New("name the agent: " + strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1])
 			}
 			if len(args) > 1 && cmd.ArgsLenAtDash() != 1 {
 				return errors.New("pass agent arguments after --")

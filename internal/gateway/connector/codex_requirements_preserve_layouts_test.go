@@ -4,7 +4,6 @@
 package connector
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -41,35 +40,19 @@ func TestGAP1754CodexRequirementsKeepAdministratorLayouts(t *testing.T) {
 	layouts := []struct {
 		name string
 		text func(dir string) string
-		// wholeRender: the editor cannot narrow a root dotted hooks key, so
-		// the file is rendered whole and the administrator's values (not
-		// their comments) are what survives. kept names a value to find in
-		// the decoded document after install and after removal.
-		wholeRender bool
-		kept        func(doc map[string]interface{}) bool
 	}{
 		// One event's blocks are not next to each other: another event's
 		// block sits between them.
-		{"split event blocks", func(string) string { return "# IT policy\n[hooks]\n# IT hooks\n" + groupA + groupB + groupC }, false, nil},
+		{"split event blocks", func(string) string { return "# IT policy\n[hooks]\n# IT hooks\n" + groupA + groupB + groupC }},
 		// The administrator wrote the managed dir (the protected one) as a
-		// dotted key at the root, and a dotted features key beside it.
+		// dotted key at the root, and a dotted features key beside it. The
+		// new keys of those tables are dotted root keys too, so the comments
+		// survive (GAP-2119; the file was rendered whole before).
 		{"root dotted hooks keys", func(dir string) string {
 			return "# IT policy\nhooks.windows_managed_dir = '" + dir + "' # IT dir\nfeatures.web_search = false # IT search\n"
-		}, true, func(doc map[string]interface{}) bool {
-			features, _ := doc["features"].(map[string]interface{})
-			return features != nil && features["web_search"] == false
 		}},
 		{"root dotted hooks key before a hook group", func(dir string) string {
 			return "# IT policy\nhooks.windows_managed_dir = '" + dir + "' # IT dir\n\n" + groupA
-		}, true, func(doc map[string]interface{}) bool {
-			hooks, _ := doc["hooks"].(map[string]interface{})
-			groups, _ := hooks["PreToolUse"].([]interface{})
-			for _, group := range groups {
-				if strings.Contains(fmt.Sprint(group), `IT\a.exe`) {
-					return true
-				}
-			}
-			return false
 		}},
 	}
 	for name, opts := range map[string]WindowsCodexMachineRequirementsOptions{
@@ -88,18 +71,7 @@ func TestGAP1754CodexRequirementsKeepAdministratorLayouts(t *testing.T) {
 					t.Fatalf("the installed file does not verify: %v\n%s", err, installed)
 				}
 				lines := codexAdminLines(text)
-				requireKept := func(label string, got []byte) {
-					t.Helper()
-					if !layout.wholeRender {
-						requireCodexAdminLines(t, label, got, lines)
-						return
-					}
-					doc := map[string]interface{}{}
-					if err := parseCodexTOML(got, &doc); err != nil || !layout.kept(doc) {
-						t.Fatalf("%s lost the administrator's value (err=%v):\n%s", label, err, got)
-					}
-				}
-				requireKept("install", installed)
+				requireCodexAdminLines(t, "install", installed, lines)
 				repaired, changed, err := reconcileWindowsCodexRequirements(installed, opts, true)
 				if err != nil || changed || string(repaired) != string(installed) {
 					t.Fatalf("a repair of an intact file rewrote it (changed=%v err=%v):\n%s", changed, err, repaired)
@@ -108,7 +80,21 @@ func TestGAP1754CodexRequirementsKeepAdministratorLayouts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("removal: %v", err)
 				}
-				requireKept("removal", removed)
+				// The standalone removal takes out a managed dir that names
+				// the DefenseClaw folder, as before; every other line stays.
+				doc := map[string]interface{}{}
+				if err := parseCodexTOML(removed, &doc); err != nil {
+					t.Fatalf("removal does not parse: %v\n%s", err, removed)
+				}
+				hooks, _ := doc["hooks"].(map[string]interface{})
+				_, dirKept := hooks["windows_managed_dir"]
+				var keep []string
+				for _, line := range lines {
+					if dirKept || !strings.HasPrefix(line, "hooks.windows_managed_dir") {
+						keep = append(keep, line)
+					}
+				}
+				requireCodexAdminLines(t, "removal", removed, keep)
 				if strings.Contains(string(removed), "defenseclaw-hook") {
 					t.Fatalf("removal left a DefenseClaw hook group:\n%s", removed)
 				}

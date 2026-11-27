@@ -21,6 +21,7 @@ import (
 )
 
 func TestWindowsPrivateWalkInspectsAnACLProtectedOrdinaryDirectory(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home := t.TempDir()
 	blocked := filepath.Join(home, "private")
 	if err := os.Mkdir(blocked, 0o700); err != nil {

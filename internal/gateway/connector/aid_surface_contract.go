@@ -29,6 +29,7 @@ var aidPromptSurfaceEvents = map[string]bool{
 	"userpromptsubmit": true, "userpromptsubmitted": true, "userprompttransformed": true,
 	"beforesubmitprompt": true, "preuserprompt": true, "subagentstart": true,
 	"prellmcall": true, "beforeagent": true, "beforemodel": true, "agentstart": true,
+	"sessionprompt": true,
 }
 
 var aidToolResultSurfaceEvents = map[string]bool{

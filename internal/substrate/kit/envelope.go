@@ -203,7 +203,8 @@ type AttachedFile struct {
 	// -m module the kit looked for in the folder and did not find), or one
 	// of the folder facts of a registry fetcher and a bare command
 	// (mcp_fetch_checked, mcp_fetch_local, mcp_fetch_config,
-	// mcp_fetch_names, mcp_command_path; fetchfacts.go, GAP-0573).
+	// mcp_fetch_names, mcp_fetch_bins, mcp_command_path, mcp_command_path_hit;
+	// fetchfacts.go, GAP-0573).
 	Role     string `json:"role"`
 	Path     string `json:"path"`
 	Resolved string `json:"resolved,omitempty"`

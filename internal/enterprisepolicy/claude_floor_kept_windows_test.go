@@ -23,6 +23,7 @@ import (
 // DefenseClaw's own record of the floor goes; nothing behind the link is read,
 // changed or removed, and neither pass takes the policy lock.
 func TestWindowsClaudeVersionFloorRemovalKeepsALinkedFolder(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts, locked := windowsFloorOptions(t)
 	if _, err := PublishWindowsClaudeVersionFloor(opts, []string{"claudecode"}); err != nil {
 		t.Fatal(err)

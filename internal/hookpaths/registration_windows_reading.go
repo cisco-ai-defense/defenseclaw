@@ -47,6 +47,22 @@ func RegistrationWriteReached(command, cwd, home string, names []string) []strin
 	return merged
 }
 
+// RegistrationFirstWriteReached is the first member of names
+// RegistrationWriteReached returns, or "" when it returns none, read only as
+// far as that member: a caller that names one reached file does not narrow
+// the halves after it (rel-1-0-10:GAP-2271). On a Windows host the second
+// reading looks only before the first member the POSIX reading reaches.
+func RegistrationFirstWriteReached(command, cwd, home string, names []string) string {
+	first := registrationFirstWriteReachedAs(command, cwd, home, names, len(names))
+	if reading, windows := WindowsShellReading(command); windows && first != 0 {
+		first = min(first, registrationFirstWriteReachedAs(reading, cwd, home, names, first))
+	}
+	if first < len(names) {
+		return names[first]
+	}
+	return ""
+}
+
 // RegistrationArchivePossibleReach reports an extraction into a directory
 // containing a registration when the archive's entries are not named in the
 // command, in either reading of the command on a Windows host. This is a

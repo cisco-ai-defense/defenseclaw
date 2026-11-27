@@ -109,7 +109,7 @@ func withoutFolderFacts(f *Facts) *Facts {
 	var keep []AttachedFile
 	for _, a := range f.Files {
 		switch a.Role {
-		case roleFetchChecked, roleFetchLocal, roleFetchConfig, roleFetchNames, roleCommandPath:
+		case roleFetchChecked, roleFetchLocal, roleFetchConfig, roleFetchNames, roleFetchBins, roleCommandPath, roleCommandPathHit:
 		default:
 			keep = append(keep, a)
 		}

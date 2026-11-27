@@ -163,6 +163,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
             # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
             "b8d2429990d76d73d9ff909ed8f7f9b848d0bef33fe887b0ce4d69f6690f7cb0",
+            # 1.0.11 (det111/engine-train-9 T23E6, rel 7177ac08f9): tiers.yaml, the secrets.yaml rules and the
+            # commands.yaml changes of the T23e train.
+            "b217bb47a4f6e447cc0b5c1dd1586f064543dbd0e413de44fc57e5eb213909e9",
         }
     ),
     "permissive": frozenset(
@@ -274,6 +277,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
             # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
             "8d817b012e5e158bdcf6b95b5789e61f020729f58c673b0fbf4a0cd5c8c20171",
+            # 1.0.11 (det111/engine-train-9 T23E6, rel 7177ac08f9): tiers.yaml, the secrets.yaml rules and the
+            # commands.yaml changes of the T23e train.
+            "2322caa5e681f7f191ba2df924e9798dd4b19d92efbf65a775347f5b61f88686",
         }
     ),
     "strict": frozenset(
@@ -384,6 +390,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
             # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
             "43d89f5201e1a168203fd8fe26003217684f9d6a81a237b91392c428ab802288",
+            # 1.0.11 (det111/engine-train-9 T23E6, rel 7177ac08f9): tiers.yaml, the secrets.yaml rules and the
+            # commands.yaml changes of the T23e train.
+            "8245154b570ab339bf21786dd167b273b13ebc80eb2704e736cb2b9c071f9344",
         }
     ),
 }

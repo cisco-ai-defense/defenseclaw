@@ -6052,7 +6052,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 	if !ok || (rest != "" && !copilotBoundEventArgument(rest)) {
 		return false
 	}
-	if !filepath.IsAbs(word) || filepath.Clean(word) != word {
+	if !copilotCleanAbsoluteScriptWord(word) {
 		return false
 	}
 	if copilotMarkedShellCopy(word) {
@@ -6603,7 +6603,7 @@ func copilotOldManagedCopyEntry(raw interface{}) bool {
 	for _, key := range []string{"bash", "command"} {
 		command, _ := entry[key].(string)
 		word, rest, parsed := posixHookCommandSplit(strings.TrimSpace(command))
-		if !parsed || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
+		if !parsed || !copilotCleanAbsoluteScriptWord(word) ||
 			(rest != "" && !strings.HasPrefix(rest, " --event ")) {
 			continue
 		}

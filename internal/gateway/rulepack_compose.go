@@ -247,6 +247,7 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 	// Resolve levels from the same loaded bytes whose digest was checked above.
 	// Reading the path again could observe a later manifest edit.
 	notePackPosture(s.dir, base.Posture())
+	notePackTable(base, s.dir, base.Tiers)
 	return base, nil
 }
 

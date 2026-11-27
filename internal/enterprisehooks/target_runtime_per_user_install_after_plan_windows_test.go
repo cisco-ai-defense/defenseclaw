@@ -17,6 +17,7 @@ import (
 // plan has the same private DACL and inode, so stage and finalize took it
 // over. Both refuse it the same way now.
 func TestWindowsManagedRuntimeRefusesAPerUserInstallMadeAfterThePlan(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	windowsEnterpriseStandaloneProcess = func() bool { return true }

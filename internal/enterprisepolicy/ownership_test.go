@@ -74,6 +74,7 @@ func mustRemove(t *testing.T, target Target, opts Options) State {
 // install-time preimage. For Codex only a publish that adopts administrator
 // edits (the unix reconcile action) folds it in (GAP-1928).
 func TestRemoveAfterReconcileKeepsLaterAdministratorEdits(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	t.Run("codex", func(t *testing.T) {
 		opts := testOptions(t)
 		path := codexPath(t, opts)
@@ -152,6 +153,7 @@ func TestRemoveAfterReconcileKeepsLaterAdministratorEdits(t *testing.T) {
 // as the administrator's preimage, or removal would put DefenseClaw's hooks
 // and lock back for every user.
 func TestPreimageNeverKeepsDefenseClawContent(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	t.Run("codex export deployed then merge", func(t *testing.T) {
 		opts := testOptions(t)
 		path := codexPath(t, opts)
@@ -211,6 +213,7 @@ func TestPreimageNeverKeepsDefenseClawContent(t *testing.T) {
 // Whole-file drop-ins: removal never leaves an empty file, which is not
 // valid JSON.
 func TestRemoveNeverLeavesAnEmptyDropIn(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range []struct {
 		name   string
 		target Target

@@ -123,6 +123,7 @@ func requirePlainProtectedDataDir(t *testing.T, dataDir string) {
 // the account's own link aside without following it and protects a new
 // folder.
 func TestWindowsClaudeEnrollmentMovesAccountOwnDataDirJunctionAside(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	stubWindowsAuthorizedRepairIdentityChecks(t)
 	var outside, canary string
 	fixture := newWindowsManagedInstallFixtureWithHomeSetup(t, nil, func(home string, targetSID *windows.SID) {
@@ -221,6 +222,7 @@ func TestWindowsDataDirLinkAsideLeavesOtherLinks(t *testing.T) {
 // Secure Client profile are refused as reparse points, and neither the link
 // nor what it names changes.
 func TestInstallWindowsClaudeRefusesDataDirLinkOutsideTheDeferredEnrollment(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
 		t.Fatal(err)

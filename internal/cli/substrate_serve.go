@@ -54,6 +54,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/pushgrant"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
@@ -619,6 +620,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			Git: func() config.SubstrateGitConfig { return live().Substrate.Git },
 			// B2 2.4: git_push and substrate.git.push_branch, read live.
 			GitPush: func(profile string) string { return gateway.SubstrateGitPushFor(live())(profile) },
+			// GAP-1073: an allowed push opens a grant the callout enforces.
+			PushGrants: &pushgrant.Client{Leader: toLeader},
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
@@ -849,6 +852,8 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	// The controller's egress callout slot reads, for the gateways
 	// (GAP-0505).
 	controller.ServeCallout(srv, &controller.CalloutBoard{})
+	// The pull --push-branch push grants the callout enforces (GAP-1073).
+	pushgrant.Serve(srv, pushgrant.NewStore())
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		chainOpts.EgressAction, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[chainOpts.EgressAction])
@@ -942,8 +947,9 @@ func kubeHTTPClient() (*http.Client, error) {
 // substrateLeaderPermissions is who may call what on the leader
 // (GAP-0094): gateway replicas every method but the controller's own
 // (leader.NamedOnly, GAP-0553); the callout only the egress chain check,
-// the name lookup of a registration (GAP-0090) and its egress decisions for
-// the telemetry relay; the controller the registrations, the chain
+// the name lookup of a registration (GAP-0090), its egress decisions for
+// the telemetry relay and the check of a git push against the open push
+// grants (GAP-1073, never their opening or closing); the controller the registrations, the chain
 // lifecycle, the activity feed, its counts for the relay (GAP-0450) and
 // publishing its egress callout slot read (GAP-0505). Each relay method
 // accepts only its poster's kinds of record.
@@ -958,7 +964,7 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		}
 	}
 	add(gateways, "*")
-	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress)
+	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress, pushgrant.MethodCheck)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
 		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts,
 		leader.MethodCalloutPublish)
@@ -1381,12 +1387,21 @@ func substrateChainRegistrations(store registry.Store) chainstate.Options {
 		},
 		// An actor registered in this leader term, not a fork, skips the
 		// chain start grace (GAP-0642).
-		Born: func(ctx context.Context, atespace, uid string) (time.Time, string, error) {
-			reg, ok, err := store.Get(ctx, atespace, uid)
-			if err != nil || !ok {
-				return time.Time{}, "", err
+		// "Registered in this term" is the leader's own set of registrations
+		// it wrote (GAP-1148), not a comparison of CreatedAt, written by
+		// another node, with this node's clock.
+		Born: func(ctx context.Context, atespace, uid string) (bool, string, error) {
+			term, ok := store.(interface {
+				RegisteredThisTerm(atespace, uid string) bool
+			})
+			if !ok || !term.RegisteredThisTerm(atespace, uid) {
+				return false, "", nil
 			}
-			return reg.CreatedAt, reg.ParentUID, nil
+			reg, found, err := store.Get(ctx, atespace, uid)
+			if err != nil || !found {
+				return false, "", err
+			}
+			return true, reg.ParentUID, nil
 		},
 	}
 }

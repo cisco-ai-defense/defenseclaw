@@ -77,6 +77,7 @@ func devinCascadeStateOf(t *testing.T, states []State) State {
 // Cascade pre-events reads the Devin file. The report must not call the
 // state covered, and an administrator's files stay byte for byte.
 func TestDevinCascadePublishesNothingAndClaimsNoCoverage(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	layouts := []struct {
 		name          string
 		devin, legacy string
@@ -144,6 +145,7 @@ func TestDevinCascadePublishesNothingAndClaimsNoCoverage(t *testing.T) {
 // Devin CLI that imports the pre-rename file is not refused, keeps the
 // administrator entries, and removes a file only the refusal was left in.
 func TestDevinCascadeWithdrawsTheRefusalAnEarlierReleaseWrote(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	cases := []struct {
 		name                        string
 		devinAdmin, legacyAdmin     string
@@ -214,6 +216,7 @@ func TestDevinCascadeWithdrawsTheRefusalAnEarlierReleaseWrote(t *testing.T) {
 // tool: DefenseClaw reports the refusal an earlier release left and does not
 // edit.
 func TestDevinCascadeVerifyOnlyReportsButDoesNotEditAnEarlierRefusal(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := publishTestOptions(t)
 	opts = withPolicy(opts, ConnectorDevinCascade, func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipVerifyOnly })
 	legacyPath, _ := devinCascadeLegacyHooksPath(opts)
@@ -238,6 +241,7 @@ func TestDevinCascadeVerifyOnlyReportsButDoesNotEditAnEarlierRefusal(t *testing.
 // An entry that only resembles the refusal, or any other administrator hook,
 // is never withdrawn.
 func TestDevinCascadeKeepsEntriesThatAreNotTheEarlierRefusal(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := publishTestOptions(t)
 	legacyPath, _ := devinCascadeLegacyHooksPath(opts)
 	lookalike := "{\n  \"hooks\": {\n    \"pre_user_prompt\": [\n      {\n        \"command\": \"printf '%s\\\\n' 'Cascade is off' >&2; exit 2\"\n      }\n    ]\n  }\n}\n"

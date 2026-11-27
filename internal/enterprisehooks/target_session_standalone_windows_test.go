@@ -61,6 +61,7 @@ func deferredPendingProofFixture(t *testing.T, standalone bool) ManifestTarget {
 // DACL. The pending proof must accept it, and enrollment in the account's
 // session must adopt it instead of failing every reconcile.
 func TestStandaloneDeferredPendingProofAndEnrollmentAdoptAnAccountCreatedDataDirectory(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	target := deferredPendingProofFixture(t, true)
 	sid := currentWindowsTestSID(t)
 	dataDir := filepath.Join(target.UserHome, ".defenseclaw")

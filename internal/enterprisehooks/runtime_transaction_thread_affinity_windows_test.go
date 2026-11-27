@@ -20,6 +20,7 @@ import (
 // different OS threads and checks that a waiter in another handle gets the
 // machine-wide mutex at once.
 func TestWindowsUserRuntimeTransactionUnlockFromAnotherOSThreadReleasesTheMachineMutex(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	sid := currentWindowsTestSID(t).String()
 	name, err := windows.UTF16PtrFromString(`Global\Cisco.DefenseClaw.EnterpriseHooks.` + strings.ToUpper(sid))
 	if err != nil {

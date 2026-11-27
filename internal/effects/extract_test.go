@@ -242,9 +242,14 @@ func TestWindowsPathNormalization(t *testing.T) {
 	if _, ok, reason := placePath(`C:\a\b.txt. `, o); ok || reason != ReasonNonCanonicalPath {
 		t.Errorf("trailing dot/space should be non_canonical_path; ok=%v reason=%s", ok, reason)
 	}
-	// C:foo (drive-relative) cannot be placed.
-	if _, ok, reason := placePath(`C:foo`, o); ok || reason != ReasonDynamicCWD {
-		t.Errorf("C:foo should be dynamic_cwd; ok=%v reason=%s", ok, reason)
+	// C:foo (drive-relative) is relative to the current folder of drive C: the
+	// working folder when it is on C (rel-1-0-10:GAP-1078); another drive's
+	// current folder is unknown.
+	if p, ok, _ := placePath(`C:foo`, o); !ok || p != `c:\work\foo` {
+		t.Errorf("C:foo should place under the C: working folder; got %q ok=%v", p, ok)
+	}
+	if _, ok, reason := placePath(`D:foo`, o); ok || reason != ReasonDynamicCWD {
+		t.Errorf("D:foo should be dynamic_cwd; ok=%v reason=%s", ok, reason)
 	}
 }
 

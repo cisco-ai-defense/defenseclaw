@@ -47,6 +47,7 @@ func (c *windowsGuardCaptureConnector) AgentPaths(opts connector.SetupOpts) conn
 // or Copilot) without the per-user agent discovery; it names no shipped
 // connector.
 func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsGenericCodexFixture(t)
 	// A name native Windows certifies: an uncertified plugin connector is
 	// refused before its render (ConnectorSupportOnOS fails closed).

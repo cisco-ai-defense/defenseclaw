@@ -28,6 +28,12 @@ func lockHookCallKey() (unlock func()) {
 // open call is locked to, so it finds none.
 func hookCallKey() uint64 { return uint64(windows.GetCurrentThreadId()) }
 
+// foundCallServes is false on Windows: the key is the OS thread, which a
+// goroutine may let go between two reads (releaseHookCallThread), and
+// reading it is one GetCurrentThreadId, so every read finds the call again
+// as it did (JoinHookCall).
+const foundCallServes = false
+
 // releaseHookCallThread lets the thread of the calling goroutine's hook call
 // go for a wait in which the goroutine reads none of the call's memory, and
 // returns the call to give to retakeHookCallThread after the wait (nil: the

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -45,6 +44,11 @@ type shellGlobOptions struct {
 	dotGlob, noCaseGlob, nullGlob, failGlob, noGlob bool
 	globStar, extGlob, globIgnore, unknown          bool
 	may                                             uint8
+	// readPosition: the word is one of a statement the target scan reads as
+	// read-only, not an operand the call may write: a walk stopped at its
+	// bound is TRUNCATED there, and unread elsewhere, as on rel/1.0.10
+	// (rel-1-0-10:GAP-1324, GAP-2300). Not a shell option.
+	readPosition bool
 }
 
 // unmodeled reports an option state the resolver cannot expand exactly.
@@ -78,13 +82,6 @@ func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 	o.globIgnore = getenv("GLOBIGNORE") != ""
 	return o
 }
-
-// globOptionsChangeText is the text that can change the glob options inside
-// one call: shopt, set with an option, an assignment of GLOBIGNORE,
-// BASHOPTS or SHELLOPTS, eval and source (they run text the scan does not
-// read), a nested bash with -O or -o. Read as text on purpose: every later
-// glob word of such a call is uncertain.
-var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+]|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
 
 // shellGlobOptionsForCall is the options a call's glob words are expanded
 // with: the agent's environment (the client's header for a per-user gateway,
@@ -191,10 +188,20 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	hidden := actionGlobViewHidden(cwd, home)
 	userView := !hidden && actionProcessOwnsHome(home)
 	dots := func() bool { return opts.dotGlob || actionShellProfileMayDotglob(home) }
-	matches, complete, unseen := actionExpandGlobStar(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob, opts.globStar)
+	matches, complete, unseen, capped := actionExpandGlobWalk(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob, opts.globStar)
 	var truncated bounded.Truncated
 	candidates := bounded.NewCounter(&truncated, bounded.Paths, MaxResolvedCandidates)
 	switch {
+	case capped && opts.readPosition:
+		// A walk that read every folder it reached and stopped only at a
+		// counted bound, in a read-only statement, is TRUNCATED, as a result
+		// past MaxResolvedCandidates is: the bound rule judges it, on the
+		// hook call (rel-1-0-10:GAP-1324). As a write operand its unread
+		// folders may hold a link to a key file: unread below, as on
+		// rel/1.0.10 (GAP-2300).
+		cut := bounded.Of(bounded.Paths)
+		noteGlobCut(cut)
+		return resolvedWord{uncertain: wordUncertainTruncated, caps: cut}
 	case unseen || !complete:
 		return resolvedWord{uncertain: wordUncertainUnread}
 	case !candidates.TakeN(len(matches)):
@@ -278,6 +285,16 @@ func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts s
 	literalWhole, err := expand.Fields(resolverConfig(values, cwd), word)
 	if err != nil || len(literalWhole) != 1 {
 		whole.uncertain = wordUncertainDynamic
+		return whole
+	}
+	if len(whole.candidates) == 0 && !opts.nullGlob && !opts.failGlob {
+		// The whole word matched nothing, so the program receives it as
+		// written and writes the value after the equals sign. Whether that
+		// value names a file is a question for the value's folder, not the
+		// whole word's (of=./key[9]: the folder of the whole word is "of=.",
+		// which is not there): dd of=./key[9] writes ./key[9]
+		// (rel-1-0-10:GAP-1289).
+		whole.candidates = resolverCandidates([]string{fields[0]}, cwd, true)
 		return whole
 	}
 	literalPath := OperandPath(literalWhole[0], cwd)

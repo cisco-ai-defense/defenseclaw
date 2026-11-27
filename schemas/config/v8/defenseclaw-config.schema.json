@@ -1797,7 +1797,7 @@
     },
     "cascadeLane": {
       "type": "string",
-      "description": "A cascade lane switch: off, or shadow (compute and record beside today's rules, never change the answer). The lane ships shadow-only in 1.0.10, so on is refused (internal/config/cascade_lanes.go lists the open gaps).",
+      "description": "A cascade lane switch: off, or shadow (compute and record beside today's rules, never change the answer). The lane ships shadow-only, so on is refused (internal/config/cascade_lanes.go lists the open gaps).",
       "enum": [
         "off",
         "shadow"
@@ -1815,14 +1815,15 @@
     "cascadeLanes": {
       "type": "object",
       "maxProperties": 64,
-      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only (effects, secret_flow) accepts off and shadow. The alignment lane (alignment check) accepts off, shadow, alert or block. The gateway refuses any other value or lane name.",
+      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only (secret_flow) accepts off and shadow. The alignment lane (alignment check) accepts off, shadow, alert or block. The gateway refuses any other value or lane name.",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_]{0,63}$"
       },
       "properties": {
         "effects": {
-          "$ref": "#/$defs/cascadeLane",
-          "default": "shadow"
+          "$ref": "#/$defs/cascadeLiveLane",
+          "default": "on",
+          "description": "The effect-model rule lane. on (default): its verdicts join today's rules as raises only, never lowering a verdict; an unknown effect reaches the unknown tier only with a reach reason. shadow records its verdict without changing the answer; off computes nothing. Top level only (process-wide)."
         },
         "secret_flow": {
           "$ref": "#/$defs/cascadeLane",

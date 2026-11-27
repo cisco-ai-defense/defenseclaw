@@ -35,7 +35,8 @@ def _declared(path: Path) -> set[str]:
 
 
 def test_every_kit_test_file_is_linux_only() -> None:
-    untagged = [p.name for p in sorted(KIT.glob("*_test.go")) if _constraint(p) != "linux"]
+    # `linux` alone or as the first term of an and (`linux && !race`).
+    untagged = [p.name for p in sorted(KIT.glob("*_test.go")) if _constraint(p).split(" && ")[0] != "linux"]
     assert not untagged, f"add //go:build linux to {untagged}: the actor kit refuses other systems"
 
 

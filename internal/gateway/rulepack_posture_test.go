@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -803,11 +802,7 @@ func TestUnicodeObfuscationRuleThresholdAndAdjacency(t *testing.T) {
 
 func guardrailPoliciesRoot(t *testing.T) string {
 	t.Helper()
-	_, selfPath, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve caller path")
-	}
-	return guardrailPoliciesRootFrom(t, filepath.Join(filepath.Dir(selfPath), "..", "..", "policies", "guardrail"))
+	return guardrailPoliciesRootFrom(t, filepath.Join(repoRootFromTestFile(t), "policies", "guardrail"))
 }
 
 // guardrailPoliciesRootFrom returns source when it is a directory. A test

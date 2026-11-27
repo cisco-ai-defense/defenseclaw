@@ -3602,6 +3602,7 @@ func loadConfigSourceCheckedWithLayout(
 	}
 
 	warnPlaintextSecrets(&cfg)
+	warnRetiredSubstrateKeys(&cfg)
 
 	// Provenance: seed the content_hash from the exact source bytes at load
 	// time so events emitted between sidecar boot and the first Save()
@@ -4039,6 +4040,14 @@ func checkRuntimeConfigVersion(version int, secureClient bool) error {
 			version, newerConfigAction)
 	}
 	return nil
+}
+
+// warnRetiredSubstrateKeys names a substrate key a config still sets that
+// nothing reads any more. The config loads; the key is removed in 1.0.14.
+func warnRetiredSubstrateKeys(cfg *Config) {
+	if cfg.Substrate.Identity.ActorCertOID != "" {
+		log.Printf("WARNING: substrate.identity.actor_cert_oid is retired and ignored; remove it from config.yaml (it stops loading in 1.0.14)")
+	}
 }
 
 // warnPlaintextSecrets logs a deprecation warning for each secret stored as

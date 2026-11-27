@@ -3825,8 +3825,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: identifier-v1
-    overrides: {max_utf8_bytes: 63, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}
-    notes: the --name of enterprise secret set or remove, or the name of a Substrate secret an egress rule injected (log.secret.injected); a name the command refused is left out. Never the value, a prefix, a placeholder or a hash of it
+    overrides: {max_utf8_bytes: 253, pattern: '^[a-z0-9][a-z0-9.-]{0,252}$'}
+    notes: the --name of enterprise secret set or remove, or the name of a Substrate secret (substrate.secrets[].name, a DNS-1123 subdomain, so it may hold dots) an egress rule injected (log.secret.injected) or a change set; a name the command refused is left out. Never the value, a prefix, a placeholder or a hash of it
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.secret.action
   type: string

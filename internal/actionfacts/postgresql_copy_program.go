@@ -32,12 +32,27 @@ func ExactPostgreSQLCopyProgram(facts Facts) (string, bool) {
 	return digest, true
 }
 
-func projectPostgreSQLCopyPrograms(input Input) []PostgreSQLCopyProgramFact {
-	connection, database, query, ok := exactSQLQueryInput(input)
-	if !ok || !exactPostgreSQLConnection(connection, database) ||
-		!exactPostgreSQLCopyProgramQuery(query) {
-		return nil
+func projectPostgreSQLCopyPrograms(input Input, sqlReads []exactSQLMutationInput) []PostgreSQLCopyProgramFact {
+	connection, database, query, structured := exactSQLQueryInput(input)
+	if structured {
+		if !exactPostgreSQLConnection(connection, database) || !exactPostgreSQLCopyProgramQuery(query) {
+			return nil
+		}
+		return postgreSQLCopyProgramFacts(connection, database)
 	}
+	// A psql in any command of a shell call, each of its -c (DET111 T20
+	// review P3-3) and each statement of a query (sqlCLIReadInputs).
+	for _, candidate := range sqlReads {
+		if candidate.engine == "postgresql" && exactPostgreSQLCopyProgramQuery(candidate.query) {
+			return postgreSQLCopyProgramFacts(candidate.connectionIdentity, candidate.databaseIdentity)
+		}
+	}
+	return nil
+}
+
+// postgreSQLCopyProgramFacts is the one fact of a COPY ... PROGRAM on the
+// connection, nil when the connection has no digest.
+func postgreSQLCopyProgramFacts(connection, database string) []PostgreSQLCopyProgramFact {
 	digest := sqlConnectionIdentityDigest(
 		postgreSQLConnectionDigestDomain,
 		connection,
@@ -309,12 +324,41 @@ func (p *postgreSQLCopyParser) scalarLiteral() bool {
 	return true
 }
 
+// stringLiteral reads a PostgreSQL string constant and returns its text: a
+// quoted string ('...', a doubled quote for a quote), an escape string
+// (E'...', a backslash takes the next byte) or a dollar-quoted string ($$...$$,
+// $tag$...$tag$). The server reads each as the same text, so a reader of a
+// program, a path or a library is not limited to one quoting (FIX-T20C: TO
+// PROGRAM $$id$$ was no COPY ... PROGRAM).
 func (p *postgreSQLCopyParser) stringLiteral() (string, bool) {
+	if p.index < len(p.source) && p.source[p.index] == '$' {
+		tag, ok := sqlDollarTag(p.source[p.index:])
+		if !ok {
+			return "", false
+		}
+		body := p.source[p.index+len(tag):]
+		end := strings.Index(body, tag)
+		if end < 0 {
+			return "", false
+		}
+		p.index += len(tag) + end + len(tag)
+		return body[:end], true
+	}
+	escapes := p.index+1 < len(p.source) && (p.source[p.index] == 'E' || p.source[p.index] == 'e') &&
+		p.source[p.index+1] == '\''
+	if escapes {
+		p.index++
+	}
 	if !p.take('\'') {
 		return "", false
 	}
 	var decoded strings.Builder
 	for p.index < len(p.source) {
+		if escapes && p.source[p.index] == '\\' && p.index+1 < len(p.source) {
+			decoded.WriteByte(p.source[p.index+1])
+			p.index += 2
+			continue
+		}
 		if p.source[p.index] != '\'' {
 			decoded.WriteByte(p.source[p.index])
 			p.index++
