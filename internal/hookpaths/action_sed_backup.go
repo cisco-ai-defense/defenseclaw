@@ -324,12 +324,12 @@ func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit boo
 // already drops the version of perl (perl5.38.2).
 func sedProgram(word string) string {
 	name := programBase(word)
-	switch {
-	case name == "gsed":
+	switch name {
+	case "gsed":
 		return "sed"
-	case name == "gxargs":
+	case "gxargs":
 		return "xargs"
-	case name == "gfind":
+	case "gfind":
 		return "find"
 	}
 	return name
