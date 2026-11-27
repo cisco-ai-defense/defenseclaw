@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"container/heap"
 	"errors"
 	"io"
 	"path"
@@ -413,13 +414,17 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	written := writtenScripts(file, inputs)
 	priorIndex, lastShell := 0, ""
 	var visit func(syntax.Node) bool
-	// pending holds the here-documents of file. A call between the operator
-	// of one and its body (on the operator's line) must not put a line
-	// break into the twin there, or the body would start inside the text it
-	// adds (CHK-RF-HOOKSHELL F2).
+	// pending holds the here-documents of file, sorted by operator. A call
+	// between the operator of one and its body (on the operator's line) must
+	// not put a line break into the twin there, or the body would start
+	// inside the text it adds (CHK-RF-HOOKSHELL F2).
 	type heredocSpan struct {
 		redir                *syntax.Redirect
 		operator, body, tail int
+		// text is the document's script text (heredocScriptText); literal
+		// reports text the reading knows and the shell does not expand.
+		text    string
+		literal bool
 	}
 	var pending []heredocSpan
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -436,32 +441,83 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 		return true
 	})
-	respelled := map[*syntax.Redirect]bool{}
+	sort.SliceStable(pending, func(i, j int) bool { return pending[i].operator < pending[j].operator })
+	// The spans pending at offset at are those of pending[:pendingBefore(at)]
+	// whose body starts after at. maxBody[i] is the largest body offset of
+	// pending[:i+1], so a scan down from there stops at the first i with
+	// maxBody[i] <= at. Each call costs the spans it reads, not the
+	// document count (CHK-RF-HOOKSHELL-R2 B1).
+	maxBody := make([]int, len(pending))
+	for i, span := range pending {
+		maxBody[i] = span.body
+		if i > 0 && maxBody[i-1] > span.body {
+			maxBody[i] = maxBody[i-1]
+		}
+	}
+	pendingBefore := func(at int) int {
+		return sort.Search(len(pending), func(i int) bool { return pending[i].operator >= at })
+	}
+	// read reads every pending document once, on the first call that finds
+	// one pending: maxOpaqueBody[i] is the largest body offset of the spans
+	// of pending[:i+1] that are not literal, -1 for none. below[i] is the
+	// highest index at or below i that unpend has not respelled, -1 for
+	// none (path-compressed), so a span is respelled at most once and then
+	// skipped.
+	var maxOpaqueBody, below []int
+	read := func() {
+		if below != nil {
+			return
+		}
+		maxOpaqueBody, below = make([]int, len(pending)), make([]int, len(pending))
+		opaque := -1
+		for i := range pending {
+			span := &pending[i]
+			var known bool
+			span.text, known = heredocScriptText(span.redir)
+			span.literal = known && !heredocHasParameters(span.redir)
+			if !span.literal && span.body > opaque {
+				opaque = span.body
+			}
+			maxOpaqueBody[i], below[i] = opaque, i
+		}
+	}
+	unrespelledAtOrBelow := func(i int) int {
+		root := i
+		for root >= 0 && below[root] != root {
+			root = below[root]
+		}
+		for i > root && below[i] != root {
+			i, below[i] = below[i], root
+		}
+		return root
+	}
+	respelled := 0
 	// unpend respells every here-document pending at offset at as the
 	// here-string of the same text (cat <<'EOF' ... EOF -> cat <<< 'TEXT'),
 	// so the line holds no pending document and the twin can break it.
 	// It is false, and respells nothing, when one of them has text the
-	// reading does not know or that the shell expands.
+	// reading does not know or that the shell expands. It is true, and
+	// respells nothing, when none is pending.
 	unpend := func(at int) bool {
-		var spans []heredocSpan
-		for _, span := range pending {
-			if span.operator < at && at < span.body {
-				if _, known := heredocScriptText(span.redir); !known || heredocHasParameters(span.redir) {
-					return false
-				}
-				spans = append(spans, span)
-			}
+		count := pendingBefore(at)
+		if count == 0 || maxBody[count-1] <= at {
+			return true
 		}
-		for _, span := range spans {
-			if respelled[span.redir] {
+		read()
+		if maxOpaqueBody[count-1] > at {
+			return false
+		}
+		for i := unrespelledAtOrBelow(count - 1); i >= 0 && maxBody[i] > at; i = unrespelledAtOrBelow(i - 1) {
+			span := pending[i]
+			if span.body <= at {
 				continue
 			}
-			respelled[span.redir] = true
-			text, _ := heredocScriptText(span.redir)
-			wordEnd, group := int(span.redir.Word.End().Offset()), len(respelled)
+			below[i] = i - 1
+			respelled++
+			wordEnd := int(span.redir.Word.End().Offset())
 			edits = append(edits,
-				edit{start: span.operator, end: wordEnd, text: "<<< " + posixSingleQuoted(strings.TrimSuffix(text, "\n")), soft: group},
-				edit{start: span.body, end: span.tail, soft: group})
+				edit{start: span.operator, end: wordEnd, text: "<<< " + posixSingleQuoted(strings.TrimSuffix(span.text, "\n")), soft: respelled},
+				edit{start: span.body, end: span.tail, soft: respelled})
 		}
 		return true
 	}
@@ -470,9 +526,9 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	// line of statements can start. ok is false when none is pending.
 	afterPending := func(at int) (offset int, ok bool) {
 		offset = -1
-		for _, span := range pending {
-			if span.operator < at && at < span.body && span.tail > offset {
-				offset = span.tail
+		for i := pendingBefore(at) - 1; i >= 0 && maxBody[i] > at; i-- {
+			if at < pending[i].body && pending[i].tail > offset {
+				offset = pending[i].tail
 			}
 		}
 		return offset, offset >= 0
@@ -480,9 +536,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	// unpendCall respells the here-documents pending where call starts, if
 	// any (unpend).
 	unpendCall := func(call *syntax.CallExpr) {
-		if _, ok := afterPending(int(call.Pos().Offset())); ok {
-			unpend(int(call.Pos().Offset()))
-		}
+		unpend(int(call.Pos().Offset()))
 	}
 	// keepOperands reads the assignments of call and its operands after
 	// args[fileAt] as any other words of the call: the twin keeps them in
@@ -514,7 +568,9 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		if len(call.Assigns) > 0 {
 			from = int(call.Assigns[len(call.Assigns)-1].End().Offset())
 		}
-		if at, ok := afterPending(callStart); ok && !unpend(callStart) {
+		if !unpend(callStart) {
+			// unpend is false only when a document is pending at callStart.
+			at, _ := afterPending(callStart)
 			head := ":"
 			if len(call.Assigns) > 0 {
 				head = " :"
@@ -778,21 +834,64 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 // withoutOverlappedSoftEdits drops every edit of a soft group (span reports
 // an edit's start, end and group, 0 for none) when one of them overlaps an
 // edit outside the group: the respelling gives way as a whole, and the twin
-// is built from the edits that change what runs.
+// is built from the edits that change what runs. edits are sorted by start.
+//
+// One sweep keeps the open edits: the non-empty ones that hold the current
+// start (start <= at < end). Any two open edits overlap, so two groups open
+// together were already dropped when the later one opened. A non-empty edit
+// overlaps every open edit; an empty one (an insertion) only those that
+// start before it, as it overlaps an edit it falls strictly inside. That is
+// O(E log E), not E^2 (CHK-RF-HOOKSHELL-R2 B1).
 func withoutOverlappedSoftEdits[E any](edits []E, span func(E) (int, int, int)) []E {
 	dropped := map[int]bool{}
-	for i := range edits {
-		start, end, group := span(edits[i])
-		if group == 0 || dropped[group] {
-			continue
+	open := &openEdits{}
+	groups := map[int]int{} // open edits by group
+	overlaps := func(group int) {
+		others := len(groups)
+		if groups[group] > 0 {
+			others--
 		}
-		for j := range edits {
-			otherStart, otherEnd, otherGroup := span(edits[j])
-			if otherGroup != group && otherStart < end && start < otherEnd {
-				dropped[group] = true
+		if others == 0 {
+			return
+		}
+		if group != 0 {
+			dropped[group] = true
+		}
+		if others == 1 {
+			for other := range groups {
+				if other != group && other != 0 {
+					dropped[other] = true
+				}
+			}
+		}
+	}
+	for i := 0; i < len(edits); {
+		at, _, _ := span(edits[i])
+		run := i + 1
+		for ; run < len(edits); run++ {
+			if start, _, _ := span(edits[run]); start != at {
 				break
 			}
 		}
+		for open.Len() > 0 && (*open)[0].end <= at {
+			closed := heap.Pop(open).(openEdit)
+			if groups[closed.group]--; groups[closed.group] == 0 {
+				delete(groups, closed.group)
+			}
+		}
+		for _, change := range edits[i:run] {
+			if start, end, group := span(change); end <= start {
+				overlaps(group)
+			}
+		}
+		for _, change := range edits[i:run] {
+			if start, end, group := span(change); end > start {
+				overlaps(group)
+				heap.Push(open, openEdit{end: end, group: group})
+				groups[group]++
+			}
+		}
+		i = run
 	}
 	if len(dropped) == 0 {
 		return edits
@@ -804,6 +903,23 @@ func withoutOverlappedSoftEdits[E any](edits []E, span func(E) (int, int, int)) 
 		}
 	}
 	return kept
+}
+
+// openEdit is an edit withoutOverlappedSoftEdits holds open; openEdits is a
+// min-heap of them by end.
+type openEdit struct{ end, group int }
+
+type openEdits []openEdit
+
+func (h openEdits) Len() int           { return len(h) }
+func (h openEdits) Less(i, j int) bool { return h[i].end < h[j].end }
+func (h openEdits) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *openEdits) Push(x any)        { *h = append(*h, x.(openEdit)) }
+func (h *openEdits) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
 }
 
 // writtenScript is the text one statement of a call writes to a file it
@@ -1472,15 +1588,20 @@ func heredocScriptText(redir *syntax.Redirect) (string, bool) {
 		return "", false
 	}
 	var out strings.Builder
-	params := map[int]int{}
-	names := map[string]bool{}
-	printer := syntax.NewPrinter()
+	// The maps and the printer serve parameters only: a body of literal
+	// text, the common case, allocates none (CHK-RF-HOOKSHELL-R2 B1).
+	var params map[int]int
+	var names map[string]bool
+	var printer *syntax.Printer
 	for _, part := range body.Parts {
 		switch typed := part.(type) {
 		case *syntax.Lit:
 			out.WriteString(unescapeHeredocLiteral(typed.Value))
 			continue
 		case *syntax.ParamExp:
+			if printer == nil {
+				params, names, printer = map[int]int{}, map[string]bool{}, syntax.NewPrinter()
+			}
 			if !heredocParamNames(typed, names) {
 				return "", false
 			}
