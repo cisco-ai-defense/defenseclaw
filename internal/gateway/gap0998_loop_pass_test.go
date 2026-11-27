@@ -90,6 +90,12 @@ func TestGAP0998GuestLoopPassRunsTheBodyAfterTheCd(t *testing.T) {
 // the later pass (substrate-1 GAP-0998).
 func TestGAP0998GuestScriptCallsLoopOnce(t *testing.T) {
 	const body = "g() { echo m > config.yaml; }"
+	// CHK-P49U P1, P3: an eval, source or . the loop does not hold runs text
+	// that may define n, a function the file does not declare, to run
+	// continue; the loop calls n between the cd and the break.
+	folder := "~/" + ".defenseclaw"
+	called := "for i in 1 2; do $CMD; " + body + "; cd " + folder + "; n; break; done"
+	runs := func(words ...string) string { return strings.Join(words, " ") + "; " + called }
 	for _, row := range []struct {
 		command string
 		after   bool
@@ -116,6 +122,11 @@ func TestGAP0998GuestScriptCallsLoopOnce(t *testing.T) {
 		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; n; break; done", false}, // a static call: the loop still runs once
 		{"n() { continue; }; for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; n; break; done", true},
 		{"n() { $C; }; for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; n; break; done", true},
+		{runs("source", "x"), true},            // CHK-P49U P1
+		{runs(".", "x"), true},                 // P1, the dot form
+		{runs("eval", "$D"), true},             // CHK-P49U P3
+		{runs("builtin", "source", "x"), true}, // P1 through a wrapper
+		{runs("command", "-p", "eval", "$D"), true},
 	} {
 		calls, _ := guestScriptCalls(row.command, "/home/alice")
 		write, cd := -1, -1
