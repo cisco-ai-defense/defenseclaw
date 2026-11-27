@@ -3497,8 +3497,10 @@ func directoryStackTildeName(name string) bool {
 // simpleNestedChildFolder follows the same static wrapper child indexes as
 // simpleNestedScript. A changed root or working directory belongs to the
 // child, not to the caller's later statements. standIn is Input.StandInCWD:
-// a relative nsenter working directory based at a folder reached from it is
-// unknown, not resolved (rel-1-0-10:GAP-2188).
+// a relative chroot root or nsenter working directory based at a folder
+// reached from it is unknown, not resolved (rel-1-0-10:GAP-2188, GAP-2189):
+// the stand-in is not the caller's folder, so a step up from it names no
+// known place.
 func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, standIn string) (folder string, changed, unknown bool) {
 	words := make([]string, len(args))
 	static := make([]bool, len(args))
@@ -3518,7 +3520,7 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 			if !slices.Contains(words[1:child], "--skip-chdir") {
 				if filepath.IsAbs(parsed.root) {
 					folder = filepath.Clean(parsed.root)
-				} else if folder != "" {
+				} else if folder != "" && !standInReached(folder, standIn) {
 					folder = filepath.Join(folder, parsed.root)
 				} else {
 					return "", true, true

@@ -61,6 +61,10 @@ type shellWordReader struct {
 	// included) runs here-document or here-string text the reading cannot
 	// know (rel-1-0-10:GAP-1147).
 	unread bool
+	// rootWrapper is set when the reading went through a root or
+	// namespace wrapper (chroot, nsenter) to a shell (rel-1-0-10:GAP-2132);
+	// callRootWrapper is set for the call shellCallProgram read last.
+	rootWrapper, callRootWrapper bool
 }
 
 type shellWordKey struct {
@@ -275,10 +279,21 @@ func (r *shellWordReader) expand(word *syntax.Word, zeroIsShell bool, lastShell 
 // gateway judges such a call at the unknown tier of the pack at least, with
 // or without a twin (rel-1-0-10:GAP-1147).
 func RunTimeShellTwin(command string) (twin string, ok bool, truncated bounded.CapSet, unread bool) {
+	twin, ok, truncated, unread, _ = RunTimeShellTwinReading(command)
+	return twin, ok, truncated, unread
+}
+
+// RunTimeShellTwinReading is RunTimeShellTwin with rootWrapper: the reading
+// went through a root or namespace wrapper (chroot, nsenter) to the shell it
+// runs, a reading DefenseClaw 1.0.10 did not have. The gateway judges such a
+// twin as a raise only (actionfacts.Input.FloorRaiseOnly): its findings never
+// take the effect finding of the call, so the twin of chroot / sh <<E never
+// gives back the grade the call held before it (rel-1-0-10:GAP-2132).
+func RunTimeShellTwinReading(command string) (twin string, ok bool, truncated bounded.CapSet, unread, rootWrapper bool) {
 	var trunc bounded.Truncated
 	reader := newShellWordReader(&trunc)
 	twin, ok = runTimeShellTwin(command, 0, true, reader)
-	return twin, ok, trunc.Set(&reader.words), reader.unread
+	return twin, ok, trunc.Set(&reader.words), reader.unread, reader.rootWrapper
 }
 
 func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shellWordReader) (twin string, ok bool) {
@@ -506,6 +521,17 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 					source = nil
 				}
 			}
+			if reader.callRootWrapper && (source == nil || source.Op == syntax.WordHdoc) {
+				// Behind chroot or nsenter the twin reads the here-document
+				// the call itself redirects into the shell, the -c spelling
+				// of the call (GAP-2132). Text a pipeline stage feeds it
+				// keeps the reading it had, and so does a here-string: the
+				// pipeline reading and the here-string twin
+				// (printf WORD | CMD) do not place the shell in the
+				// wrapper's root, so a twin there judged chroot / sh <<<
+				// TEXT above its -c spelling.
+				return true
+			}
 			if known && inputs[call].parameters &&
 				(!heredocReadingShellKnown(program, shell) || heredocTextMentionsBoundName(body, outerBound) ||
 					strings.Contains(command, "\\\n")) {
@@ -520,7 +546,18 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 						body = nested
 					}
 				}
-				edits = append(edits, edit{int(call.Args[at].Pos().Offset()), int(call.End().Offset()), "bash -c " + posixSingleQuoted(body)})
+				// Behind chroot or nsenter the twin is the -c spelling of
+				// the call as typed: the shell keeps its own name (chroot /
+				// sh <<E is chroot / sh -c TEXT), so the twin is judged
+				// as that spelling is, no stronger (rel-1-0-10:GAP-2132).
+				program := "bash"
+				if reader.callRootWrapper {
+					program = shell
+					if program == "" {
+						program = command[call.Args[at].Pos().Offset():call.Args[at].End().Offset()]
+					}
+				}
+				edits = append(edits, edit{int(call.Args[at].Pos().Offset()), int(call.End().Offset()), program + " -c " + posixSingleQuoted(body)})
 				if source != nil {
 					if start, end, ok := stdinSourceSpan(command, source); ok {
 						edits = append(edits, edit{start: start, end: end, text: ""})
@@ -583,7 +620,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 // shellCallProgram returns the index of the program word of a shell that
 // args start after words that may expand to nothing and static prefix
 // wrappers (env, command, exec, nohup, nice, timeout, sudo, setsid, ...;
-// wrapperChildIndex): a shell named at run time (RunTimeShellWord, whose
+// wrapperChildIndex), xargs, chroot and nsenter: a shell named at run time (RunTimeShellWord, whose
 // static name is returned) or a static POSIX shell (an empty name).
 func shellCallProgram(reader *shellWordReader, args []*syntax.Word, zeroIsShell bool, lastShell string) (int, string, bool) {
 	// A wrapper reads the shell named at run time as the shell it names,
@@ -600,6 +637,7 @@ func shellCallProgram(reader *shellWordReader, args []*syntax.Word, zeroIsShell 
 	}
 	var run PrefixWrapperRun
 	index := 0
+	reader.callRootWrapper = false
 	for index < len(args) && run.ReadsMore() {
 		if shell, named := reader.read(args[index], zeroIsShell, lastShell, 0); named {
 			return index, shell, true
@@ -625,6 +663,33 @@ func shellCallProgram(reader *shellWordReader, args []*syntax.Word, zeroIsShell 
 				argv[i], _ = value(index + i)
 			}
 			if start, _, known := XargsProgram(argv); known && start > 0 {
+				index += start
+				continue
+			}
+			return 0, "", false
+		}
+		if name == "chroot" || name == "nsenter" {
+			// A shell behind a root or namespace wrapper reads its script
+			// as the same shell does behind any other wrapper: a
+			// here-document or here-string fed to it is the -c STRING of
+			// the same call, so the call is judged as its -c spelling is,
+			// root word, working folder and all (rel-1-0-10:GAP-2132).
+			// Without it the twin stopped at the wrapper and the body of a
+			// here-document behind an unresolved root was judged nowhere.
+			// A word made at run time is read as its static prefix and a
+			// marker, so the grammar reads --wd="$D" or --userspec="$U" as
+			// the option it starts with and "$ROOT" as an operand, never as
+			// an option or as nothing.
+			argv := make([]string, len(args)-index)
+			for i := range argv {
+				word, static := value(index + i)
+				if !static {
+					word = projectPOSIXWord(args[index+i]).staticPrefix + "\x00"
+				}
+				argv[i] = word
+			}
+			if start, known := rootWrapperChild(argv); known {
+				reader.rootWrapper, reader.callRootWrapper = true, true
 				index += start
 				continue
 			}
