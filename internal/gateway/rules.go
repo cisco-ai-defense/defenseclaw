@@ -335,6 +335,11 @@ type compiledRulePackCategories struct {
 	// one pack.
 	members     []*compiledRulePackCategories
 	memberNames []string
+	// effectSeverity is the highest live severity of each rule id (upper
+	// case) in this generation, for the effects findings that borrow a pack
+	// rule (indexEffectRuleSeverity, GAP-2208). Empty for a meet: each
+	// member has its own.
+	effectSeverity map[string]string
 }
 
 const (
@@ -476,6 +481,7 @@ func compileRulePackGenerationWithCompiler(
 			ruleRequiredLiterals(rule.Pattern)
 		}
 	}
+	compiled.effectSeverity = indexEffectRuleSeverity(ownedCategories, compiler)
 	return compiled, nil
 }
 

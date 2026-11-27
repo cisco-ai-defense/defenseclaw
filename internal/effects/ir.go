@@ -241,6 +241,9 @@ type Redir struct {
 	// Body is the heredoc / here-string body (data, never a path).
 	Body        string
 	BodyExpands bool
+	// In marks an input operator (<&, <>) written without a descriptor
+	// number: it opens the standard input, although FD stays -1.
+	In bool
 }
 
 // UnknownNode marks a span the frontend could not place in the allowlist.

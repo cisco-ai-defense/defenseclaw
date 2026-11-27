@@ -620,6 +620,7 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 			// `>&word`: a numeric word is an fd dup (ignored); a file word is a
 			// stdout+stderr file write (review N9 R4/V20c).
 			red.Op = RedirDup
+			red.In = r.Op == syntax.DplIn && red.FD < 0
 			if r.Op == syntax.DplOut && r.Word != nil {
 				if tw := w.word(r.Word); tw.Static && !allDigits(tw.Value) && tw.Value != "-" {
 					red.Op = RedirWrite
@@ -634,6 +635,7 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 			red.FD = 1
 		default:
 			red.Op = RedirWrite
+			red.In = r.Op == syntax.RdrInOut && red.FD < 0
 		}
 		if r.Word != nil {
 			red.Target = w.word(r.Word)

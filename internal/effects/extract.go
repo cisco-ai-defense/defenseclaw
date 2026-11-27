@@ -6,6 +6,7 @@ package effects
 
 import (
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -657,10 +658,10 @@ func (w *walker) markShown(reads []int) {
 // stagePrints reports a command whose stdout carries the bytes it reads: a
 // reader (cat, head, grep, sed without -i) or a program that prints what it
 // is piped (tee), unless it prints only a summary (wc, a digest, grep -c,
-// diff -q) or edits in place (DET111 GAP-1846). A copy, an upload or an
+// diff -q, cmp without -l or -b) or edits in place (DET111 GAP-1846). A copy, an upload or an
 // archive prints none of its reads: their bytes go to the destination.
 func stagePrints(p Program, words []Word) bool {
-	if p.Summary || hasRowFlag(words, p, p.SummaryFlags) {
+	if p.Summary && !hasRowFlag(words, p, p.ShowFlags) || hasRowFlag(words, p, p.SummaryFlags) {
 		return false
 	}
 	if p.InPlace != "" && hasRowFlag(words, p, append([]string{p.InPlace}, p.InPlaceFlags...)) {
@@ -1675,6 +1676,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 2. Strip wrappers.
 	inner, wrappers, foreign, fromInput, wrapperUA := w.stripWrappers(words)
+	// bareXargs: the command is xargs CMD with no xargs option, so xargs
+	// splits its input on blanks and newlines into one run of CMD.
+	bareXargs := fromInput && len(inner) > 0 && len(inner) < len(words) &&
+		words[len(words)-len(inner)-1].Static &&
+		programBasename(words[len(words)-len(inner)-1].Value, w.o.flavor()) == "xargs"
 	foreign = foreign || w.foreignContext
 	spec := w.spec // the child-process environment this command applies (round 8 E)
 	if len(inner) == 0 {
@@ -2203,7 +2209,13 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// printed exactly one literal filename, feed that word through the same
 	// source/destination grammar as ordinary argv; otherwise keep the dynamic
 	// unknown operand path below. This lets cp's table role retain a literal
-	// destination (or -t source) for the protected classifier.
+	// destination (or -t source) for the protected classifier. A bare xargs
+	// (no option) of a linker, or of a copier fed several words, whose input
+	// the call shows exactly (stdinText: the last stdin redirect, else the
+	// exact output of the stage before it) gets every word it splits from it,
+	// and its operands are then the call's own, so echo SRC DST | xargs ln -s
+	// reads as ln -s SRC DST (GAP-2214). A redirect of xargs's own stdin
+	// replaces the pipe, so the piped words are never its input then.
 	allStatic := true
 	for _, word := range operandWords {
 		if !word.Static {
@@ -2211,10 +2223,29 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			break
 		}
 	}
-	if fromInput && entry.Pos == PosSourcesDest && allStatic {
+	if fromInput && allStatic {
+		inText, inCond, inExact := w.stdinText(c)
+		inExact = inExact && !inCond
 		piped := strings.TrimSpace(w.stageIn.literal)
-		if piped != "" && !strings.ContainsAny(piped, " \t\r\n\x00") {
+		if slices.ContainsFunc(c.Redirs, stdinRedirect) {
+			piped = ""
+			if inExact {
+				piped = strings.TrimSpace(inText)
+			}
+		}
+		switch {
+		case entry.Pos == PosSourcesDest && piped != "" && !strings.ContainsAny(piped, " \t\r\n\x00"):
+			// One word to a copier: as before, its write keeps the operands
+			// from input reason (GAP-1317).
 			operandWords = append(append([]Word(nil), operandWords...), Word{Value: piped, Static: true})
+		case bareXargs && inExact && (entry.Pos == PosSourcesDest || entry.Pos == PosLinkTargetLink):
+			if items, ok := xargsInputItems(inText); ok {
+				operandWords = append([]Word(nil), operandWords...)
+				for _, item := range items {
+					operandWords = append(operandWords, Word{Value: item, Static: true})
+				}
+				fromInput = false
+			}
 		}
 	}
 	if dialect != DialectPOSIX && (lprog == "new-item" || lprog == "ni") {
@@ -2815,6 +2846,30 @@ func hasAppendFlag(words []Word, flag string, dialect Dialect) bool {
 		}
 	}
 	return false
+}
+
+// maxXargsInputItems bounds the input words xargsInputItems feeds to one
+// command; more read as the dynamic operands they were.
+const maxXargsInputItems = 64
+
+// xargsInputItems splits text the way a bare xargs splits its input: on
+// blanks and newlines. False when xargs would read it its own way (a quote,
+// a backslash, NUL, another control space), for a word _ (an end-of-file
+// marker in some xargs builds), for no word and past maxXargsInputItems.
+func xargsInputItems(text string) ([]string, bool) {
+	if strings.ContainsAny(text, "'\"\\\x00\v\f\r") {
+		return nil, false
+	}
+	items := strings.FieldsFunc(text, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' })
+	if len(items) == 0 || len(items) > maxXargsInputItems {
+		return nil, false
+	}
+	for _, item := range items {
+		if item == "_" {
+			return nil, false
+		}
+	}
+	return items, true
 }
 
 // execCmd is an inner command a find/fd/xargs-style flag runs.

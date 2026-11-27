@@ -147,8 +147,12 @@ type Program struct {
 	// digest of what it reads, never the bytes (wc, sha256sum, cmp);
 	// SummaryFlags are the options that make it so (grep -c, -l, -L, -q;
 	// diff -q). Its reads are not shown to the agent (DET111 GAP-1846).
+	// ShowFlags are the options with which a Summary program prints the
+	// bytes it reads after all (cmp -l, -b, --verbose, --print-bytes; BSD
+	// -x): with one of them its reads are shown (GAP-2213).
 	Summary      bool
 	SummaryFlags []string
+	ShowFlags    []string
 	// Prints: a program outside PosAllRead that prints what it is piped
 	// (tee), so a read upstream of it reaches the call's output.
 	Prints bool
@@ -194,10 +198,14 @@ var gnuLongOptions = map[string]string{
 	"stat":      "--cached --dereference --file-system --format --help --printf --terse --version",
 	"readlink":  "--canonicalize --canonicalize-existing --canonicalize-missing --help --no-newline --quiet --silent --verbose --version --zero",
 	"realpath":  "--canonicalize-existing --canonicalize-missing --help --logical --no-symlinks --physical --quiet --relative-base --relative-to --strip --version --zero",
-	"diff":      "--GTYPE-group-format --LTYPE-line-format --brief --color --context --ed --exclude --exclude-from --expand-tabs --from-file --help --horizon-lines --ifdef --ignore-all-space --ignore-blank-lines --ignore-case --ignore-file-name-case --ignore-matching-lines --ignore-space-change --ignore-tab-expansion --ignore-trailing-space --initial-tab --label --left-column --line-format --minimal --new-file --no-dereference --no-ignore-file-name-case --normal --paginate --palette --rcs --recursive --report-identical-files --show-c-function --show-function-line --side-by-side --speed-large-files --starting-file --strip-trailing-cr --suppress-blank-empty --suppress-common-lines --tabsize --text --to-file --unidirectional-new-file --unified --version --width",
+	"diff":      "--brief --changed-group-format --color --context --ed --exclude --exclude-from --expand-tabs --from-file --help --horizon-lines --ifdef --ignore-all-space --ignore-blank-lines --ignore-case --ignore-file-name-case --ignore-matching-lines --ignore-space-change --ignore-tab-expansion --ignore-trailing-space --initial-tab --label --left-column --line-format --minimal --new-file --new-group-format --new-line-format --no-dereference --no-ignore-file-name-case --normal --old-group-format --old-line-format --paginate --palette --rcs --recursive --report-identical-files --show-c-function --show-function-line --side-by-side --speed-large-files --starting-file --strip-trailing-cr --suppress-blank-empty --suppress-common-lines --tabsize --text --to-file --unchanged-group-format --unchanged-line-format --unidirectional-new-file --unified --version --width",
 	"cmp":       "--bytes --help --ignore-initial --print-bytes --quiet --silent --verbose --version",
 	"sha256sum": "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
 	"md5sum":    "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
+	"sha1sum":   "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
+	"sha512sum": "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
+	"b2sum":     "--binary --check --help --ignore-missing --length --quiet --status --strict --tag --text --version --warn --zero",
+	"cksum":     "--algorithm --base64 --check --debug --help --ignore-missing --length --quiet --raw --status --strict --tag --untagged --version --warn --zero",
 }
 
 // posixShellBuiltins is the union of common Bash and Zsh builtins. The oracle
@@ -230,18 +238,17 @@ func init() {
 // result or a digest of what it reads, whatever its options (Program.Summary:
 // wc, md5sum, sha256sum, cksum, b2sum), in the GNU and the BSD tables
 // alike. A reader that prints a summary only with an option (grep -c, diff
-// -q) is not one, nor is cmp: cmp -l, -b, --verbose and --print-bytes print
-// the bytes it compares (GAP-2212).
+// -q) is not one, nor is a summary program with options that print the bytes
+// it reads (ShowFlags: cmp -l, -b, --verbose, --print-bytes, GAP-2212,
+// GAP-2213).
 func SummaryReader(program string) bool {
-	if program == "cmp" {
-		return false
+	for _, bsd := range []bool{false, true} {
+		p, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, bsd)
+		if !ok || !p.Summary || len(p.ShowFlags) > 0 {
+			return false
+		}
 	}
-	gnu, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, false)
-	if !ok || !gnu.Summary {
-		return false
-	}
-	bsd, ok := lookupProgram(program, FlavorPOSIX, DialectPOSIX, true)
-	return ok && bsd.Summary
+	return true
 }
 
 func lookupProgram(name string, flavor Flavor, dialect Dialect, bsd bool) (Program, bool) {
@@ -894,16 +901,89 @@ func buildPOSIXTable() {
 	// file named by a flag. uniq and xxd take an OUTPUT operand and are split out.
 	readerFlags := fl(map[string]Flag{"-o": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-w": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}},
 		"-l", "-m", "-L", "-h", "-a", "-b", "-s", "-k", "-v", "-i", "-r", "-u", "-z", "-x", "-p", "-g", "-H", "-P", "-A", "-B", "-C", "-D", "-q", "-y", "-e")
-	add(Program{Names: []string{"cut", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "look"}, Pos: PosAllRead, Flags: readerFlags})
+	add(Program{Names: []string{"comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "look"}, Pos: PosAllRead, Flags: readerFlags})
+	// The readers below have their own rows: the tool's own option grammar
+	// (GNU coreutils 9.4 and diffutils --help on the build box; shasum is the
+	// Perl tool), long options and value arity included, so a long spelling
+	// reads as Known as its short twin does, a switch never takes the next
+	// word (wc -c, md5sum -c, diff -w, du -c, stat -f, readlink -f) and an
+	// option value is never a file (cut -b LIST, diff -U NUM) (GAP-2273). An
+	// option that names a file of more operands or patterns (--files0-from,
+	// --exclude-from, -X) is left out on purpose: it stays an unknown flag.
+	inertValue := Flag{Value: true, Role: RoleIgnore}
+	attachedValue := Flag{Optional: true}
+	add(Program{Names: []string{"cut"}, Pos: PosAllRead,
+		Flags: fl(map[string]Flag{"-b": inertValue, "--bytes": inertValue, "-c": inertValue, "--characters": inertValue,
+			"-d": inertValue, "--delimiter": inertValue, "-f": inertValue, "--fields": inertValue, "--output-delimiter": inertValue},
+			"-n", "-s", "-z", "--complement", "--only-delimited", "--zero-terminated", "--help", "--version")})
 	// Summary readers print a count, a digest or a difference flag, never the
-	// bytes they read (DET111 GAP-1846); diff prints lines unless -q.
-	add(Program{Names: []string{"wc", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "cmp", "shasum"}, Pos: PosAllRead, Summary: true, Flags: readerFlags})
-	add(Program{Names: []string{"diff"}, Pos: PosAllRead, SummaryFlags: []string{"-q", "--brief"}, Flags: readerFlags})
+	// bytes they read (DET111 GAP-1846); diff prints lines unless -q. With
+	// --check a digest tool reads the checksum list it is given and prints
+	// the names in it with OK or FAILED.
+	add(Program{Names: []string{"wc"}, Pos: PosAllRead, Summary: true,
+		Flags: fl(map[string]Flag{"--total": inertValue},
+			"-c", "-m", "-l", "-L", "-w", "--bytes", "--chars", "--lines", "--max-line-length", "--words", "--help", "--version")})
+	digestCheck := []string{"-c", "-w", "-z", "--check", "--warn", "--zero", "--tag", "--ignore-missing", "--quiet", "--status", "--strict", "--help", "--version"}
+	digestSwitches := append([]string{"-b", "-t", "--binary", "--text"}, digestCheck...)
+	add(Program{Names: []string{"md5sum", "sha1sum", "sha256sum", "sha512sum"}, Pos: PosAllRead, Summary: true, Flags: fl(nil, digestSwitches...)})
+	add(Program{Names: []string{"b2sum"}, Pos: PosAllRead, Summary: true,
+		Flags: fl(map[string]Flag{"-l": inertValue, "--length": inertValue}, digestSwitches...)})
+	add(Program{Names: []string{"cksum"}, Pos: PosAllRead, Summary: true,
+		Flags: fl(map[string]Flag{"-a": inertValue, "--algorithm": inertValue, "-l": inertValue, "--length": inertValue},
+			append([]string{"--base64", "--raw", "--untagged", "--debug"}, digestCheck...)...)})
+	add(Program{Names: []string{"shasum"}, Pos: PosAllRead, Summary: true,
+		Flags: fl(map[string]Flag{"-a": inertValue, "--algorithm": inertValue},
+			"-b", "-c", "-t", "-U", "-0", "-q", "-s", "-w", "-h", "-v", "--binary", "--check", "--tag", "--text", "--UNIVERSAL", "--01",
+			"--ignore-missing", "--quiet", "--status", "--strict", "--warn", "--help", "--version")})
+	// cmp names the first differing byte, or with -l / --verbose, -b /
+	// --print-bytes (BSD also -x) the bytes it compares (GAP-2213). Its row
+	// is the GNU diffutils and BSD option grammar, long options and their
+	// value arity included, so a long-option spelling reads as Known as its
+	// short twin does (GAP-2217): -i / --ignore-initial SKIP and -n / --bytes
+	// LIMIT take a value; BSD -h (no link follow), -x (hex bytes) and -z (size
+	// first) are switches.
+	add(Program{Names: []string{"cmp"}, Pos: PosAllRead, Summary: true,
+		ShowFlags: []string{"-l", "--verbose", "-b", "--print-bytes", "-x"},
+		Flags: fl(map[string]Flag{"-i": inertValue, "--ignore-initial": inertValue, "-n": inertValue, "--bytes": inertValue},
+			"-b", "-l", "-s", "-v", "-h", "-x", "-z", "--print-bytes", "--verbose", "--quiet", "--silent", "--help", "--version")})
+	// diff: --from-file and --to-file name a file it compares with every
+	// operand; -S, --label and the formats are names and text, not files.
+	diffRead := Flag{Value: true, Role: RoleRead}
+	add(Program{Names: []string{"diff"}, Pos: PosAllRead, SummaryFlags: []string{"-q", "--brief"},
+		Flags: fl(map[string]Flag{"-C": inertValue, "--context": attachedValue, "-U": inertValue, "--unified": attachedValue,
+			"-W": inertValue, "--width": inertValue, "-F": inertValue, "--show-function-line": inertValue, "-L": inertValue, "--label": inertValue,
+			"--tabsize": inertValue, "-x": inertValue, "--exclude": inertValue, "-S": inertValue, "--starting-file": inertValue,
+			"--from-file": diffRead, "--to-file": diffRead, "-I": inertValue, "--ignore-matching-lines": inertValue, "-D": inertValue, "--ifdef": inertValue,
+			"--line-format": inertValue, "--old-line-format": inertValue, "--new-line-format": inertValue, "--unchanged-line-format": inertValue,
+			"--old-group-format": inertValue, "--new-group-format": inertValue, "--changed-group-format": inertValue, "--unchanged-group-format": inertValue,
+			"--horizon-lines": inertValue, "--color": attachedValue, "--palette": inertValue},
+			"--normal", "-q", "--brief", "-s", "--report-identical-files", "-c", "-u", "-e", "--ed", "-n", "--rcs", "-y", "--side-by-side",
+			"--left-column", "--suppress-common-lines", "-p", "--show-c-function", "-t", "--expand-tabs", "-T", "--initial-tab",
+			"--suppress-blank-empty", "-l", "--paginate", "-r", "--recursive", "--no-dereference", "-N", "--new-file", "--unidirectional-new-file",
+			"--ignore-file-name-case", "--no-ignore-file-name-case", "-i", "--ignore-case", "-E", "--ignore-tab-expansion", "-Z", "--ignore-trailing-space",
+			"-b", "--ignore-space-change", "-w", "--ignore-all-space", "-B", "--ignore-blank-lines", "-a", "--text", "--strip-trailing-cr",
+			"-d", "--minimal", "--speed-large-files", "--help", "-v", "--version")})
 	// Metadata-only programs: they report a file's size, type, inode data or
 	// resolved name, never its bytes, so an operand is accounted but carries no
 	// content-read effect (DET111 ruling 3a: stat of a credential file is not a
 	// credential read). file reads magic bytes but prints only a type label.
-	add(Program{Names: []string{"du", "df", "stat", "file", "readlink", "realpath"}, Pos: PosAllRead, MetadataOnly: true, Flags: readerFlags})
+	add(Program{Names: []string{"df", "file"}, Pos: PosAllRead, MetadataOnly: true, Flags: readerFlags})
+	add(Program{Names: []string{"du"}, Pos: PosAllRead, MetadataOnly: true,
+		Flags: fl(map[string]Flag{"-B": inertValue, "--block-size": inertValue, "-d": inertValue, "--max-depth": inertValue,
+			"-t": inertValue, "--threshold": inertValue, "--time": attachedValue, "--time-style": inertValue, "--exclude": inertValue},
+			"-0", "--null", "-a", "--all", "--apparent-size", "-b", "--bytes", "-c", "--total", "-D", "--dereference-args", "-H",
+			"-h", "--human-readable", "--inodes", "-k", "-L", "--dereference", "-l", "--count-links", "-m", "-P", "--no-dereference",
+			"-S", "--separate-dirs", "--si", "-s", "--summarize", "-x", "--one-file-system", "--help", "--version")})
+	add(Program{Names: []string{"stat"}, Pos: PosAllRead, MetadataOnly: true,
+		Flags: fl(map[string]Flag{"-c": inertValue, "--format": inertValue, "--printf": inertValue, "--cached": inertValue},
+			"-L", "--dereference", "-f", "--file-system", "-t", "--terse", "--help", "--version")})
+	add(Program{Names: []string{"readlink"}, Pos: PosAllRead, MetadataOnly: true,
+		Flags: fl(nil, "-f", "--canonicalize", "-e", "--canonicalize-existing", "-m", "--canonicalize-missing", "-n", "--no-newline",
+			"-q", "--quiet", "-s", "--silent", "-v", "--verbose", "-z", "--zero", "--help", "--version")})
+	add(Program{Names: []string{"realpath"}, Pos: PosAllRead, MetadataOnly: true,
+		Flags: fl(map[string]Flag{"--relative-to": inertValue, "--relative-base": inertValue},
+			"-e", "--canonicalize-existing", "-m", "--canonicalize-missing", "-L", "--logical", "-P", "--physical",
+			"-q", "--quiet", "-s", "--strip", "--no-symlinks", "-z", "--zero", "--help", "--version")})
 	// uniq and xxd get their own exact flag sets: the union above makes -c a
 	// valued flag, which for uniq (a count switch) would swallow the next operand.
 	inert := func(names ...string) map[string]Flag {

@@ -21,4 +21,5 @@ var (
 	_ = bounded.Register("effects.maxNestedDepth", bounded.Depth, int(maxNestedDepth))
 	_ = bounded.Register("effects.maxSpellingBytes", bounded.Bytes, int(maxSpellingBytes))
 	_ = bounded.Register("effects.maxStageSources", bounded.Items, int(maxStageSources))
+	_ = bounded.Register("effects.maxXargsInputItems", bounded.Items, int(maxXargsInputItems))
 )

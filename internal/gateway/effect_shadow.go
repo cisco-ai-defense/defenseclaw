@@ -1518,9 +1518,11 @@ func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier
 	res := computeEffectShadow(request, mode, tier)
 	findings := withEffectClassWriteSeverity(effectShadowFindings(res, mode), generation)
 	if ruleID := res.FetchedScriptRule; ruleID != "" {
-		if severity := effectRuleSeverity(generation(), ruleID); severity != "" {
+		// One finding per profile whose own pack has the rule live
+		// (effectRuleScopes, GAP-2206).
+		for _, scope := range effectRuleScopes(generation(), ruleID) {
 			f := RuleFinding{RuleID: ruleID, Title: "Fetched script supplied to a shell",
-				Severity: severity, Confidence: 1}
+				Severity: scope.severity, Confidence: 1, profile: scope.profile}
 			f.Proof = f.Proof.Advise() // the plain CMD-PIPE cell is alert-only
 			f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
 			findings = append(findings, f)
@@ -1559,7 +1561,7 @@ func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier
 // finding of the class still takes the restricted finding, as for the plain
 // write.
 func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *compiledRulePackCategories) []RuleFinding {
-	out := findings[:0]
+	out := make([]RuleFinding, 0, len(findings))
 	for _, f := range findings {
 		// Only the class rule finding of a credential write: the call's
 		// effect.protected_target_<tier> finding has a credential proof too
@@ -1567,40 +1569,18 @@ func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *com
 		if f.Proof.Kind != decide.KindRead && f.Proof.Source == decide.SourceEffects &&
 			(f.Proof.Target == decide.TargetCredential || f.Proof.Target == decide.TargetOtherHomeCredential) &&
 			f.RuleID != "" && f.RuleID == decide.RuleFor(f.Proof) {
-			severity := effectRuleSeverity(generation(), f.RuleID)
-			if severity == "" {
-				continue
+			// One finding per profile whose own pack has the class rule live
+			// (GAP-2206); none when no pack does.
+			for _, scope := range effectRuleScopes(generation(), f.RuleID) {
+				scoped := f
+				scoped.Severity, scoped.Proof, scoped.floorRaiseOnly, scoped.profile = scope.severity, decide.Proof{}, true, scope.profile
+				out = append(out, scoped)
 			}
-			f.Severity, f.Proof, f.floorRaiseOnly = severity, decide.Proof{}, true
+			continue
 		}
 		out = append(out, f)
 	}
 	return out
-}
-
-// effectRuleSeverity is the highest severity a generation (and each member
-// of a profile combination) gives rule id; "" when the pack has no live
-// tool-call rule with that id. A false expression is a pack tombstone, not
-// authority for an effects finding.
-func effectRuleSeverity(g *compiledRulePackCategories, id string) string {
-	if g == nil {
-		return ""
-	}
-	best := ""
-	for _, category := range g.categories {
-		for _, rule := range category.Rules {
-			if strings.EqualFold(rule.ID, id) && strings.TrimSpace(rule.Expression) != "false" &&
-				decide.ParseSeverity(rule.Severity) > decide.ParseSeverity(best) {
-				best = strings.ToUpper(strings.TrimSpace(rule.Severity))
-			}
-		}
-	}
-	for _, member := range g.members {
-		if s := effectRuleSeverity(member, id); decide.ParseSeverity(s) > decide.ParseSeverity(best) {
-			best = s
-		}
-	}
-	return best
 }
 
 // effectProofKind maps an effect kind to a proof kind. An opaque program is

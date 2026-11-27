@@ -111,26 +111,37 @@ func isStdinPath(v string) bool {
 	return false
 }
 
+// stdinRedirect reports a redirect that replaces the command's standard
+// input: a read, heredoc or here-string on fd 0, any other operator on an
+// explicit fd 0 (0<&3, 0>F), or an input operator with no number (<&3, <>).
+func stdinRedirect(r Redir) bool {
+	switch r.Op {
+	case RedirRead, RedirHeredoc, RedirHereString:
+		return stdinFD(r)
+	}
+	return r.FD == 0 || r.FD < 0 && r.In
+}
+
 // stdinText is the text a command reads on standard input when the call says
-// what it is. The last stdin redirect wins, as in the shell.
+// what it is. The last stdin redirect wins, as in the shell; a stdin redirect
+// it does not model (a descriptor duplicate, <>) is input the call does not
+// show, and the pipe is read only when no redirect replaces it.
 func (w *walker) stdinText(c *Cmd) (text string, cond, ok bool) {
 	found := false
 	for _, r := range c.Redirs {
-		if !stdinFD(r) {
+		if !stdinRedirect(r) {
 			continue
 		}
+		found = true
+		text, cond, ok = "", false, false
 		switch r.Op {
 		case RedirHeredoc:
-			found = true
-			text, cond, ok = r.Body, false, !r.BodyExpands
+			text, ok = r.Body, !r.BodyExpands
 		case RedirHereString:
-			found = true
-			text, cond, ok = "", false, false
 			if rv := w.resolveWord(r.Target); rv.Static && !rv.Glob {
 				text, ok = rv.Value+"\n", true
 			}
 		case RedirRead:
-			found = true
 			text, cond, ok = w.redirInput(r.Target)
 		}
 	}
