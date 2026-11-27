@@ -18,11 +18,16 @@ import (
 // another account's home (GAP-0835); it must not raise one's own files to
 // CRITICAL or make the managed default pack block them.
 func TestOwnDeveloperTokenReadIsJudgedLikeOwnCloudCredentialsFiveTiers(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home spellings")
-	}
-	const home = "/home/alice"
+	// The account's own home is spelled the way the host spells it: a POSIX
+	// path on Linux and macOS, a drive path (slash form, as an agent
+	// writes it in a command) on Windows.
+	home := "/home/alice"
 	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		home = "C:/Users/alice"
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", `C:\Users\alice`)
+	}
 	// The install window reads DEFENSECLAW_HOME, else HOME/.defenseclaw. Keep it in a
 	// private folder: on a host with a real, unreadable /home/alice the lock read
 	// fails, counts as held and the strict tier blocks.
