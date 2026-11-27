@@ -51,6 +51,11 @@ var skillEntryManaged = skillEntryAdminOwned
 // managed skill folder is also one only root can change: root owns it and
 // neither its group nor others may write it. A file or subfolder a user owns
 // or others may write makes the skill the user's, as on Windows (GAP-2147).
+// Only the owner and the mode bits are read. A Linux POSIX access list that
+// grants write shows in the group bits (the mask) and is caught; a macOS
+// extended access list is not visible in them and is not read (a documented
+// limit, rel-1-0-10:GAP-2165: the CGO-free build has no call that reads it
+// from the handle).
 func skillEntryAdminOwned(opened *os.File, _ string) bool {
 	info, err := opened.Stat()
 	if err != nil || info.Mode().Perm()&0o022 != 0 {
