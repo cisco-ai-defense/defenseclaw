@@ -2152,7 +2152,12 @@ func posixEnvChdirTarget(command CommandFact, index int, prefix string) string {
 	switch {
 	case value == "" || strings.ContainsAny(value, "\x00\n"):
 		return "\x00"
-	case simplePOSIXAbs(value):
+	case simplePathAbs(value):
+		// A native absolute folder (C:\Users\a on Windows, the folder Git
+		// Bash hands env) is that folder, as for cd; read as relative, it
+		// became ./C:\Users\a, a folder that does not exist, and a search
+		// walk there read no file (native Windows TestSubChainAReadForms
+		// E03 E05 E06 E07, TST-7957/7958).
 		return value
 	}
 	return "./" + value
