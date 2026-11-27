@@ -15,7 +15,8 @@ import (
 // the shared roots in it (.config), a folder below the one that holds the
 // file and a project folder are no credentials folder, and a copy or an
 // archive that does not take the folder tree (cp, rsync -d, zip without -r)
-// reads no file in it.
+// reads no file in it. The call takes the verdict of the read of the file,
+// not only its finding.
 func TestGAP0995CredentialFolderTreeReadIsTheFileRead(t *testing.T) {
 	const connector = "gap0995-folder-tree-test"
 	installDefaultProfileConnector(t, connector)
@@ -27,6 +28,12 @@ func TestGAP0995CredentialFolderTreeReadIsTheFileRead(t *testing.T) {
 		})
 	}
 	ruleIDs := []string{"PATH-AWS-CREDS", "PATH-KUBE", "PATH-DOCKER", "secrets.cloud_credential_read"}
+	fileRead := "alert"
+	for _, command := range []string{"cat ~/.aws/credentials", "cat ~/.kube/config", "cat ~/.docker/config.json", "cat ~/.config/gcloud/application_default_credentials.json"} {
+		if got := buildVerdict(check(command), "tool_call").Action; got != fileRead {
+			t.Fatalf("%q: action %s, want %s", command, got, fileRead)
+		}
+	}
 	for _, tt := range []struct{ command, ruleID string }{
 		{"tar cz ~/.aws", "PATH-AWS-CREDS"},
 		{"tar czf /tmp/a.tgz /home/alice/.aws", "PATH-AWS-CREDS"},
@@ -53,6 +60,12 @@ func TestGAP0995CredentialFolderTreeReadIsTheFileRead(t *testing.T) {
 			findings := check(tt.command)
 			if findingWithID(findings, tt.ruleID) == nil {
 				t.Fatalf("%q: no %s finding, all=%v", tt.command, tt.ruleID, FindingStrings(findings))
+			}
+			// The verdict of the read of the file: a local credentials read
+			// alerts in the default pack. The finding alone was not enough:
+			// graded as a reference (LOW audit record), the call allowed.
+			if got := buildVerdict(findings, "tool_call").Action; got != fileRead {
+				t.Errorf("%q: action %s, want %s (the read of the file), all=%v", tt.command, got, fileRead, FindingStrings(findings))
 			}
 		})
 	}

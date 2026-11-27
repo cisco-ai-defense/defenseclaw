@@ -362,7 +362,7 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 	},
 	{
 		ruleIDs: []string{"PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS"},
-		matcher: trustedActionPathValueMatcher(matchesAWSCredentials),
+		matcher: trustedActionWithFolderTree(trustedActionPathValueMatcher(matchesAWSCredentials), actionfacts.CredentialFileAWS, true),
 	},
 	{
 		ruleIDs: []string{"PATH-PASSWORD-CRACKER-POTFILE"},
@@ -370,11 +370,11 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 	},
 	{
 		ruleIDs: []string{"PATH-KUBE", "PATH-WIN-KUBE-CONFIG"},
-		matcher: trustedActionPathValueMatcher(matchesKubeConfig),
+		matcher: trustedActionWithFolderTree(trustedActionPathValueMatcher(matchesKubeConfig), actionfacts.CredentialFileKubeconfig, true),
 	},
 	{
 		ruleIDs: []string{"PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC"},
-		matcher: trustedActionPathValueMatcher(matchesPackageCredentialFile),
+		matcher: trustedActionWithFolderTree(trustedActionPathValueMatcher(matchesPackageCredentialFile), actionfacts.CredentialFilePackageRegistry, true),
 	},
 	{
 		ruleIDs: []string{
@@ -422,7 +422,7 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 	},
 	{
 		ruleIDs: []string{"SECRETS.CLOUD_CREDENTIAL_READ"},
-		matcher: matchesContextualCloudCredentialFile,
+		matcher: trustedActionWithFolderTree(matchesContextualCloudCredentialFile, actionfacts.CredentialFileCloudCLI, false),
 	},
 	{
 		ruleIDs: []string{"SECRETS.BROWSER_SESSION_STORE_READ"},
@@ -432,6 +432,24 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 		ruleIDs: []string{"SECRETS.WORKLOAD_IDENTITY_TOKEN_READ"},
 		matcher: trustedActionPathValueMatcher(matchesWorkloadIdentityToken),
 	},
+}
+
+// trustedActionWithFolderTree is matcher joined to the folder side of the
+// owner of the same rule (credentialFolderTreeMatcher, semantic_owners.go):
+// an archive or recursive copy of a credentials folder reads the file
+// matcher names, so its read is classified as the read of that file. Before,
+// only the owner took the folder (substrate-1:GAP-0995 part 2), and this
+// catalog, which grades the finding, saw no read of a matched path: the
+// finding was an audit record (LOW, allow) where the file read alerts.
+func trustedActionWithFolderTree(
+	matcher trustedActionSensitivePathMatcher,
+	class actionfacts.CredentialFileClass,
+	otherHomes bool,
+) trustedActionSensitivePathMatcher {
+	folder := credentialFolderTreeMatcher(class, otherHomes)
+	return func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		return matcher(facts, candidate) || folder(facts, candidate)
+	}
 }
 
 func trustedActionPathValueMatcher(
