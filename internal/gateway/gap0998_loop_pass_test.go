@@ -96,6 +96,9 @@ func TestGAP0998GuestScriptCallsLoopOnce(t *testing.T) {
 	folder := "~/" + ".defenseclaw"
 	called := "for i in 1 2; do $CMD; " + body + "; cd " + folder + "; n; break; done"
 	runs := func(words ...string) string { return strings.Join(words, " ") + "; " + called }
+	dq := func(word string) string { return `"` + word + `"` }
+	sq := func(word string) string { return "'" + word + "'" }
+	bs := func(word string) string { return `\` + word }
 	for _, row := range []struct {
 		command string
 		after   bool
@@ -127,6 +130,19 @@ func TestGAP0998GuestScriptCallsLoopOnce(t *testing.T) {
 		{runs("eval", "$D"), true},             // CHK-P49U P3
 		{runs("builtin", "source", "x"), true}, // P1 through a wrapper
 		{runs("command", "-p", "eval", "$D"), true},
+		// CHK-0998C P1q P1s P1b P3q P3s P3b: a quoted, single-quoted or
+		// backslash runner word is still eval, source or . to bash.
+		{runs(dq("source"), "x"), true},
+		{runs(sq("source"), "x"), true},
+		{runs(bs("source"), "x"), true},
+		{runs(dq("."), "x"), true},
+		{runs(sq("."), "x"), true},
+		{runs(bs("."), "x"), true},
+		{runs(dq("eval"), "$D"), true},
+		{runs(sq("eval"), "$D"), true},
+		{runs(bs("eval"), "$D"), true},
+		{runs(dq("builtin"), sq("source"), "x"), true},
+		{runs(dq("echo"), "x"), false}, // a quoted word that runs no text: the loop still runs once
 	} {
 		calls, _ := guestScriptCalls(row.command, "/home/alice")
 		write, cd := -1, -1
