@@ -922,6 +922,8 @@ gateway-test: sync-openclaw-extension
 # and a 4 s answer window, and 8 shards of 64 parallel tests each on one box
 # made a hook miss its window.
 CONNECTOR_TEST_GATEWAY_DIR := $(abspath $(DIST_DIR))/connector-test-gateway
+# CONNECTOR_TEST_FLAGS="$(GO_RACE_FLAGS)" runs the shards with -race.
+CONNECTOR_TEST_FLAGS ?=
 connector-test: sync-openclaw-extension
 	rm -rf $(CONNECTOR_TEST_GATEWAY_DIR)
 	mkdir -p $(CONNECTOR_TEST_GATEWAY_DIR)/account-home
@@ -929,7 +931,7 @@ connector-test: sync-openclaw-extension
 		-o $(CONNECTOR_TEST_GATEWAY_DIR)/defenseclaw ./cmd/defenseclaw
 	cpus=$$(getconf _NPROCESSORS_ONLN); per=$$(( (cpus + $(GO_TEST_SHARDS) - 1) / $(GO_TEST_SHARDS) )); [ "$$per" -ge 2 ] || per=2; \
 	DC_TEST_NATIVE_GATEWAY=$(CONNECTOR_TEST_GATEWAY_DIR)/defenseclaw GOMAXPROCS=$$per $(GO_SHARD_RUN) --package-dir internal/gateway/connector -- \
-		go test -count=1 -timeout $(GO_TEST_TIMEOUT) -v ./internal/gateway/connector
+		go test $(CONNECTOR_TEST_FLAGS) -count=1 -timeout $(GO_TEST_TIMEOUT) -v ./internal/gateway/connector
 
 # packaging-macos-test runs the pure-bash unit tests for the macOS installer
 # scripts under packaging/macos/. They don't touch /Library, sudo, or
