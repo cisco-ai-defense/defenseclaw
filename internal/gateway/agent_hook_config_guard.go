@@ -138,6 +138,11 @@ type agentHookConfigGuard struct {
 	// (rel-1-0-10:GAP-1316). It is nil between passes: a pass never answers
 	// from the reads of another.
 	identities map[string]string
+	// spellings are the physical spellings of the registration names read
+	// in this hook call (hookpaths.RegistrationSpellings): every statement
+	// of the call is read against the same names, and a guard made for the
+	// folder of one statement shares the set of the call (TST-18078).
+	spellings *hookpaths.RegistrationSpellings
 }
 
 // beginIdentityPass begins a pass of the guard in which the identity of each
@@ -210,7 +215,8 @@ func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
 }
 
 func newAgentHookConfigGuard(cwd, home string) *agentHookConfigGuard {
-	guard := &agentHookConfigGuard{cwd: cwd, home: home, files: gatewayconnector.AgentHookConfigFiles()}
+	guard := &agentHookConfigGuard{cwd: cwd, home: home, files: gatewayconnector.AgentHookConfigFiles(),
+		spellings: hookpaths.NewRegistrationSpellings()}
 	if home != "" && filepath.IsAbs(home) {
 		guard.home = filepath.Clean(home)
 		for _, file := range agentHookConfigHomeFiles {
@@ -1149,11 +1155,13 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		// configuration change on the launched agent is still a proved
 		// disablement of this call's hooks.
 		parts, placed, _ := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
+		spellings := hookpaths.NewRegistrationSpellings()
 		for index, part := range parts {
 			if placed && index == 0 {
 				continue
 			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
+			guard.spellings = spellings
 			if hookpaths.RegistrationWriteCandidate(part.Command) {
 				owned, _, truncated := agentHookConfigReachedPaths(part, guard, agentHookConfigRegistrationPaths(guard))
 				for _, path := range owned {
@@ -1271,6 +1279,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 			partGuard = newAgentHookConfigGuard(part.Dir, guard.home)
 			partGuard.gitIndexRedirected = guard.gitIndexRedirected
 			partGuard.links = guard.links
+			partGuard.spellings = guard.spellings
 		}
 		// Every write operand the shell reading names is judged as the
 		// managed route judges the resolved targets of the hook client: a
@@ -2244,7 +2253,7 @@ func agentHookConfigShellWriteOperands(command, dir, home string) []string {
 func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string, truncated bounded.CapSet) {
 	// One pass over the paths the statement reaches (rel-1-0-10:GAP-1316).
 	defer guard.endIdentityPass(guard.beginIdentityPass())
-	reached, truncated := hookpaths.RegistrationWriteReachedBounded(part.Command, part.Dir, guard.home, registered)
+	reached, truncated := hookpaths.RegistrationWriteReachedBounded(part.Command, part.Dir, guard.home, registered, guard.spellings)
 	for _, path := range reached {
 		if guard.ownedFile(path) || guard.ownedFolder(path) {
 			owned = append(owned, path)

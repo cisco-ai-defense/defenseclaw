@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -138,12 +139,15 @@ func TestGAP0641LeadingParentFromLinkedWorkingDirectory(t *testing.T) {
 	}
 }
 
-// OperandPath keeps a dot-dot step after a name raw. A step in front of every
-// name (also with a ./ before it) stays raw when the supplied directory has a
-// link in its path (the kernel applies the step to the link target) and is
-// cleaned when it has none: the clean join is then the path the kernel opens,
-// also for a directory that does not exist, which a command such as pushd has
-// not entered.
+// OperandPath cleans a dot-dot step only where the kernel climbs from the
+// same folder. A step in front of every name (also with a ./ before it) stays
+// raw when the supplied directory has a link in its path (the kernel applies
+// the step to the link target) and is cleaned when it has none, also for a
+// directory that does not exist, which a command such as pushd has not
+// entered. A step after a name, and every step of an absolute operand, is
+// cleaned only after a directory that exists with no link in its path
+// (rel-1-0-10:GAP-1648); after a missing name or a link the spelling stays
+// raw.
 func TestOperandPathCleansDotDotOnlyWithoutALink(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -182,9 +186,20 @@ func TestOperandPathCleansDotDotOnlyWithoutALink(t *testing.T) {
 		{real, "./../a/../x", real + "/./../a/../x"},
 		{missing, "../x", filepath.Join(root, "missing", "x")},
 		{missing, "./../x", filepath.Join(root, "missing", "x")},
-		{root, "real/../x", root + "/real/../x"},
+		{root, "real/../x", root + "/x"},
 		{root, "inner/../x", root + "/inner/../x"},
 		{inner, "./../x", inner + "/./../x"},
+		{real, "../real/../x", root + "/x"},
+		{"/unused", real + "/../x", root + "/x"},
+		{"/unused", real + "/./../../x", filepath.Dir(root) + "/x"},
+		{"/unused", root + "/../" + filepath.Base(root) + "/real/x", real + "/x"},
+		{"/unused", linked + "/../x", linked + "/../x"},
+		{"/unused", inner + "/../x", inner + "/../x"},
+		{"/unused", real + "/a/../x", real + "/a/../x"},
+		{"/unused", missing + "/../x", missing + "/../x"},
+		{"/unused", real + "/" + strings.Repeat("../", 17) + "x", real + "/" + strings.Repeat("../", 17) + "x"},
+		{"/unused", "/..", "/"},
+		{"/unused", "/../" + strings.TrimPrefix(real, "/"), real},
 	} {
 		if got := filepath.ToSlash(OperandPath(row.name, row.cwd)); got != filepath.ToSlash(row.want) {
 			t.Errorf("OperandPath(%q, %q)=%q, want %q", row.name, row.cwd, got, row.want)

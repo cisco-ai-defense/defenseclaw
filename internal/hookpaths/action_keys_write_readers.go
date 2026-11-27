@@ -498,8 +498,9 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
+	finds := protected.findReads()
 	for _, root := range roots {
-		root, absoluteRoot, prefix := findRootStart(root, cwd, home)
+		root, absoluteRoot, prefix := finds.start(root, cwd, home)
 		// A root that is a link reaches the key files below the place it
 		// links to, which the protected set does not spell.
 		for _, key := range AuthorizedKeysFiles {
@@ -508,8 +509,9 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 				return true
 			}
 		}
+		walked := finds.root(absoluteRoot, prefix)
 		for _, target := range protected {
-			if !findRootHolds(absoluteRoot, prefix, target.path) {
+			if !walked.holds(target.path) {
 				continue
 			}
 			// The walk deletes only the entries it finds: a generic name

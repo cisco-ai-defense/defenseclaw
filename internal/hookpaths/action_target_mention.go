@@ -2126,7 +2126,22 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	if !filepath.IsAbs(pattern) {
 		literal = filepath.Clean(cwd)
 	}
+	// The client's answer is keyed by the uncleaned spelling as well:
+	// OperandPath applies a dot-dot step only where this process reads the
+	// folder in front of it as a plain directory (rel-1-0-10:GAP-1648), so
+	// a gateway that cannot read the user's home keeps the step and asks by
+	// that spelling (rel-1-0-10:GAP-2294, rm -rf build/../out/*).
+	raw := operandRawSpelling(pattern, cwd)
 	pattern = OperandPath(pattern, cwd)
+	if raw == pattern || !hasDotDotStep(raw) {
+		raw = ""
+	}
+	note := func(answer string) {
+		globs.note(pattern, answer)
+		if raw != "" {
+			globs.note(raw, answer)
+		}
+	}
 	dots := sync.OnceValue(func() bool { return windows || globs.dotNames() || actionShellProfileMayDotglob(home) })
 	// The names are matched in the folder the pattern's dot-dot steps lead
 	// to: rm -f x/../.ssh/* after cd .. names the authorized keys files as
@@ -2159,12 +2174,12 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			continue
 		}
 		if protectedReachResolved(resolved, protected, ssh) {
-			globs.note(pattern, "1")
+			note("1")
 			return true
 		}
 	}
 	if complete && (!hidden || !unseen) {
-		globs.note(pattern, "0")
+		note("0")
 		return false
 	}
 	if capped {
@@ -2175,7 +2190,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		// rule), recorded on the hook call (noteGlobCut). The name match
 		// above still holds a pattern that can spell .ssh or a key file
 		// (rel-1-0-10:GAP-1324, GAP-2300).
-		globs.note(pattern, GlobFactCapped)
+		note(GlobFactCapped)
 		if write {
 			return true
 		}
@@ -2183,7 +2198,11 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		return false
 	}
 	if hidden && unseen {
-		if answer := globs.answer(pattern); answer != "" {
+		answer := globs.answer(pattern)
+		if answer == "" && raw != "" {
+			answer = globs.answer(raw)
+		}
+		if answer != "" {
 			// A walk this process could not see defers to the client,
 			// which expanded the pattern as the user; its walk past a
 			// bound reads as this process's own would (above).
