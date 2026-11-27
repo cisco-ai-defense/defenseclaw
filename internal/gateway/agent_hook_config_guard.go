@@ -1408,6 +1408,11 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 			}
 			format := sandboxAgentHookConfigFormat(target, input.ActiveHome)
 			if format == "" {
+				if reached := sandboxAgentHookKitReached(ctx, target); reached != "" {
+					format = sandboxAgentHookConfigFormat(reached, input.ActiveHome)
+				}
+			}
+			if format == "" {
 				continue
 			}
 			// Prefer exact facts on every settings path, then the confined
@@ -1422,8 +1427,12 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 				}
 				return agentHookConfigWriteRuleID, "cannot apply this settings edit to the available document", target
 			}
-			if request.Connector == "claudecode" && format == gatewayconnector.AgentHookConfigClaudeSettings {
-				if reason := sandboxAgentHookWithoutBefore(format, change, sandboxClaudeRegisteredHooks); reason != "" {
+			// Claude's settings register its hooks whichever agent writes
+			// them: a Codex call that Writes {} there turns them off as a
+			// Claude call does, and the laptop blocks both (substrate-1
+			// GAP-0616).
+			if format == gatewayconnector.AgentHookConfigClaudeSettings {
+				if reason := sandboxAgentHookWithoutBefore(format, change, input.ActiveHome); reason != "" {
 					if reason != sandboxAgentHookNoBefore {
 						reason += "; " + sandboxManagedHooksBoundary + "; " + sandboxAgentHookNoBefore
 					}
@@ -1469,6 +1478,13 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 		whole.Authoritative() && !strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
 		if target := sandboxAgentHookConfigInlineWrite(command, input.CWD, input.ActiveHome); target != "" {
 			return agentHookConfigWriteRuleID, "", target
+		}
+		if len(command) > agentHookConfigMaxPlacedBytes && path.IsAbs(input.CWD) {
+			for _, statement := range agentHookConfigLongCallStatements(command, input.CWD, input.ActiveHome) {
+				if target := sandboxAgentHookConfigPlacedWrite(statement.Command, statement.Dir, input.ActiveHome); target != "" {
+					return agentHookConfigWriteRuleID, "", target
+				}
+			}
 		}
 		return "", "", ""
 	}
@@ -1601,8 +1617,53 @@ func sandboxStatementMayNameHookConfig(statement string) bool {
 
 // agentHookConfigMaxPlacedBytes bounds the command the hook-config guards
 // split into placed statements (agentHookConfigPlacedCommands and the
-// sandbox guard): a longer one is read only as the whole call.
+// sandbox guard) with every statement read: a longer one is read through
+// agentHookConfigLongCallStatements only.
 const agentHookConfigMaxPlacedBytes = 8192
+
+// agentHookConfigLongCallStatementCap bounds the statements of a call over
+// agentHookConfigMaxPlacedBytes that the guards read.
+const agentHookConfigLongCallStatementCap = 16
+
+// agentHookConfigLongCallStatements are the top-level statements of a call
+// over agentHookConfigMaxPlacedBytes, up to the analyzer's command bound,
+// in the folder a static cd leaves each in, that the guards read: those of
+// at most agentHookConfigMaxPlacedBytes that may name a hook file or a
+// DefenseClaw file (sandboxStatementMayNameHookConfig), at most
+// agentHookConfigLongCallStatementCap of them, in order. A call padded past
+// the bound with a data word in its own statement read nothing, so
+// cd .cache && echo '{}' > ../.claude/settings.json && echo <9 KB> was an
+// allow on the laptop and in an actor, where 8 KB of padding named the
+// write (substrate-1 GAP-0365). nil when the call is over the analyzer's
+// bound or its directories cannot be placed (TopLevelStatements): such a
+// call is read as before. One parse; the filter and both caps keep the
+// statement work under what one call at the bound costs (substrate-1
+// GAP-0364).
+func agentHookConfigLongCallStatements(command, cwd, home string) []hookpaths.PlacedStatement {
+	if len(command) > agentHookConfigLongCallMaxBytes || !path.IsAbs(filepath.ToSlash(cwd)) && !filepath.IsAbs(cwd) {
+		return nil
+	}
+	statements, ok := hookpaths.TopLevelStatements(command, cwd, home)
+	if !ok {
+		return nil
+	}
+	var out []hookpaths.PlacedStatement
+	for _, statement := range statements {
+		if len(statement.Command) > agentHookConfigMaxPlacedBytes ||
+			!sandboxStatementMayNameHookConfig(statement.Command) && !strings.Contains(strings.ToLower(statement.Command), "defenseclaw") {
+			continue
+		}
+		out = append(out, statement)
+		if len(out) == agentHookConfigLongCallStatementCap {
+			break
+		}
+	}
+	return out
+}
+
+// agentHookConfigLongCallMaxBytes is the analyzer's command bound
+// (actionfacts maxCommandBytes): a longer call is an input-limit call.
+const agentHookConfigLongCallMaxBytes = 64 << 10
 
 // sandboxAgentHookConfigWrite is the first hook file a reading writes,
 // appends or deletes, by its lexical path in the guest's namespace, or "".
@@ -1693,23 +1754,42 @@ var sandboxAgentHookConfigParts = sync.OnceValue(func() []string {
 	return slices.Compact(parts)
 })
 
-// A no-copy replacement cannot prove that any Claude settings file never
-// held DefenseClaw's entries. Use the same hook-preservation fallback on every
-// recognized Claude settings path; edits never receive an invented document.
-const sandboxClaudeRegisteredHooks = `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"~/.defenseclaw/hooks/claude-code-hook.sh","timeout":30}]}]}`
-
 const sandboxAgentHookNoBefore = "DefenseClaw could not see the settings file to judge this edit; re-run with a current DefenseClaw kit that includes the settings snapshot"
 
-// Without a document, scalar and member fragments have no trustworthy key
-// context: even a model-looking value can be a reserved env or hook value,
-// including when the spelling is escaped JSON. A complete JSON old_string
-// is still only a substring: it could be a reserved env value or a nested
-// hook object. Byte-preserving edits and equivalent complete JSON string
-// tokens can be proved harmless without a snapshot; the current kit supplies
-// the actual key context for other edits.
-func sandboxAgentHookWithoutBefore(format string, change agentHookConfigChange, hooks string) string {
+// sandboxAgentHookWithoutBefore judges a change of a Claude settings file
+// the gateway has no snapshot of. A no-copy replacement cannot prove that
+// the file never held DefenseClaw's entries, so on every recognized Claude
+// settings path a complete replacement must keep the hooks Setup installs
+// on every event (gatewayconnector.ClaudeCodeSettingsKeepsHooks, under "~"
+// or the guest home). The old fallback fingerprinted one PreToolUse entry
+// with a "~" command: a Write that kept only it passed though it dropped
+// every other installed event, and one that kept Setup's real, absolute
+// command was refused (substrate-1 GAP-0615, GAP-0619).
+//
+// An Edit whose first old text is empty creates the file, which the agent
+// does only on a missing or empty one: the before-state is known (empty)
+// and the result is the edits applied to it, judged as the laptop judges
+// it (substrate-1 GAP-0617). Without a document, other scalar and member
+// fragments have no trustworthy key context: even a model-looking value can
+// be a reserved env or hook value, including when the spelling is escaped
+// JSON. A complete JSON old_string is still only a substring: it could be a
+// reserved env value or a nested hook object. Byte-preserving edits and
+// equivalent complete JSON string tokens can be proved harmless without a
+// snapshot; the current kit supplies the actual key context for other edits.
+func sandboxAgentHookWithoutBefore(format string, change agentHookConfigChange, home string) string {
 	if reason := sandboxAgentHookEditWork(change); reason != "" {
 		return reason
+	}
+	if len(change.edits) > 0 && change.edits[0].old == "" {
+		after, exists, ok := agentHookConfigApplyEdits(nil, false, change.edits)
+		if !ok {
+			// The agent refuses the edit and writes nothing.
+			return ""
+		}
+		if len(after) > sandboxAgentHookDocumentBound {
+			return "exceeds the actor settings document bound: split them"
+		}
+		return agentHookConfigTurnsOff(format, nil, false, after, exists)
 	}
 	if len(change.edits) > 0 {
 		unchanged := true
@@ -1735,14 +1815,36 @@ func sandboxAgentHookWithoutBefore(format string, change agentHookConfigChange, 
 	if !exists || updated == nil {
 		return "removes or leaves unreadable the file that registers DefenseClaw's hooks"
 	}
-	var expected any
-	if json.Unmarshal([]byte(hooks), &expected) != nil {
-		return sandboxAgentHookNoBefore
+	if event := gatewayconnector.ClaudeCodeSettingsKeepsHooks(updated["hooks"], []string{"~", home}); event != "" {
+		return "removes or changes DefenseClaw's hook entries (" + event + ")"
 	}
-	remaining := agentHookConfigFingerprint(updated["hooks"])
-	for entry, count := range agentHookConfigFingerprint(expected) {
-		if remaining[entry] < count {
-			return "removes or changes DefenseClaw's hook entries"
+	return ""
+}
+
+// sandboxAgentHookKitReached is the file the kit reports a native file
+// tool's path reaches through links in the guest (its path facts: the
+// resolved file, or the last link target of a link to a missing file), ""
+// when it reports none or the same file. The facts are a claim of the
+// agent's user; here they can only add a finding. The laptop guard judges
+// the file a link reaches (resolvePlaces); the actor judged the link's
+// spelling alone, so a Write or Edit through a project link to the user
+// settings was allowed (substrate-1 GAP-0618).
+func sandboxAgentHookKitReached(ctx context.Context, target string) string {
+	env, ok := substrateEnvelopeFrom(ctx)
+	if !ok || env.Facts == nil {
+		return ""
+	}
+	target = path.Clean(target)
+	for _, fact := range env.Facts.Paths {
+		if !path.IsAbs(fact.Abs) || path.Clean(fact.Abs) != target {
+			continue
+		}
+		reached := fact.Resolved
+		if !path.IsAbs(reached) && len(fact.LinkChain) > 0 {
+			reached = fact.LinkChain[len(fact.LinkChain)-1]
+		}
+		if path.IsAbs(reached) && path.Clean(reached) != target {
+			return path.Clean(reached)
 		}
 	}
 	return ""
@@ -2168,10 +2270,20 @@ func decodeAgentHookConfigRawShellCommand(raw json.RawMessage) string {
 // read), the whole command is the only reading of the top-level writes
 // (rel-1-0-10:GAP-1014, rv1014).
 func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool) {
-	if depth > 4 || command == "" || len(command) > agentHookConfigMaxPlacedBytes {
+	if depth > 4 || command == "" {
 		return nil, false
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}
+	if len(command) > agentHookConfigMaxPlacedBytes {
+		if depth > 0 {
+			return nil, false
+		}
+		statements := agentHookConfigLongCallStatements(command, cwd, home)
+		if len(statements) == 0 {
+			return nil, false
+		}
+		return append([]hookpaths.PlacedStatement{root}, statements...), true
+	}
 	out := []hookpaths.PlacedStatement{root}
 	placed := []hookpaths.PlacedStatement{root}
 	topPlaced := false

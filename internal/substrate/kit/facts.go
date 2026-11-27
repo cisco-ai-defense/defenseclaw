@@ -165,7 +165,7 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	if event == "SessionStart" || event == "sessionStart" || (isPre && strings.HasPrefix(view.ToolName, "mcp__")) {
 		budget = attachMCP(f, connector, cwd, budget)
 	} else if isPre {
-		budget = attachAgentHookBefore(f, connector, view.ToolName, budget)
+		budget = attachAgentHookBefore(f, view.ToolName, budget)
 		// A Write or Edit of one of those configs: its next content.
 		budget = attachMCPWrite(f, connector, cwd, input, budget)
 		// A command that may add an MCP server (claude mcp add, codex mcp
@@ -192,11 +192,12 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 // attachAgentHookBefore supplies exact current settings bytes for semantic
 // native-edit and replacement judgement. One bounded read per settings target;
 // the shared post budget also bounds multi-file patches. Unrelated calls attach
-// nothing, and oversized files receive no digest pass.
-func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) int64 {
-	if connectorName != "claudecode" {
-		return budget
-	}
+// nothing, and oversized files receive no digest pass. Claude's settings
+// register its hooks whichever agent edits them, so every connector attaches
+// them (a Codex actor's Write {} there went unjudged, substrate-1 GAP-0616),
+// and so does a path that reaches them through a link, by its own name (the
+// gateway reads the link's target from the path fact, substrate-1 GAP-0618).
+func attachAgentHookBefore(f *Facts, tool string, budget int64) int64 {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "edit", "edit_file", "str_replace", "multiedit", "multi_edit", "multi-edit",
 		"write", "write_file", "writefile", "write-file", "create", "create_file",
@@ -209,8 +210,8 @@ func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) i
 		if pf.Field != "tool_input.file_path" && pf.Field != "tool_input.filePath" && pf.Field != "tool_input.path" && !strings.HasSuffix(pf.Field, ".patch") {
 			continue
 		}
-		p := filepath.ToSlash(pf.Abs)
-		if !strings.HasSuffix(p, "/.claude/settings.json") && !strings.HasSuffix(p, "/.claude/settings.local.json") {
+		if !claudeSettingsPath(pf.Abs) && !claudeSettingsPath(pf.Resolved) &&
+			(len(pf.LinkChain) == 0 || !claudeSettingsPath(pf.LinkChain[len(pf.LinkChain)-1])) {
 			continue
 		}
 		if attached[pf.Abs] {
@@ -242,8 +243,9 @@ func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) i
 			}
 			file.Close()
 		}
-		if os.IsNotExist(err) && pf.Type == "missing" {
-			// A missing file is an exact empty before-state, not a failed read.
+		if os.IsNotExist(err) && (pf.Type == "missing" || pf.Type == "symlink") {
+			// A missing file, or a link to one, is an exact empty
+			// before-state, not a failed read.
 			a.Size, a.Truncated = 0, false
 			sum := sha256.Sum256(nil)
 			a.SHA256 = hex.EncodeToString(sum[:])
@@ -255,6 +257,12 @@ func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) i
 		budget -= int64(len(a.Content))
 	}
 	return budget
+}
+
+// claudeSettingsPath reports a Claude Code settings file name.
+func claudeSettingsPath(p string) bool {
+	p = filepath.ToSlash(p)
+	return strings.HasSuffix(p, "/.claude/settings.json") || strings.HasSuffix(p, "/.claude/settings.local.json")
 }
 
 // collectProjectHooks returns the connector's project settings files under
