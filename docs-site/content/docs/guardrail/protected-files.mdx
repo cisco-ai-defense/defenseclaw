@@ -84,3 +84,14 @@ The write proof checks command text before a tool runs. It does not see what chi
   the upgrade. A 1.0.5 or older release started on a config that sets
   `guardrail.protected_files` refuses it, so remove the block first if you
   move the config by hand. Unset, nothing is written.
+- A `find` command that picks names with `-regex` or `-path` and uses an escape
+  DefenseClaw cannot read exactly (for example the GNU word anchors `\<` and
+  `\>`) is treated as if it could reach the protected files, so it may be
+  blocked even when the pattern only matches ordinary files such as a build
+  folder. Use `-name` or a plain pattern, or run the command yourself in a
+  terminal.
+- Copying or moving a whole folder into a new child folder of the DefenseClaw
+  state folder (`~/.defenseclaw`) with `cp -r`, `rsync` or `mv` is allowed, so
+  the new folder is not reported. A copy onto a file that is already in the
+  state folder is reported as a write to protected state, and blocked in the
+  strict pack.
