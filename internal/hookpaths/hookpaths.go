@@ -337,23 +337,6 @@ func shellWriteOperands(command, cwd, home string, user KnownUser) (operands, kn
 	return operands, known, true, dynamic
 }
 
-// redirectOperandPath is the key of a redirect target. On Windows a rooted
-// name with no drive (> /tmp/list, > \list) names a file on the drive or
-// share of the working directory, never one below it, as a rooted
-// apply_patch header is placed (patchTargetPaths). Joined to the directory,
-// > /tmp/list after cd into a project was keyed inside that project, where
-// a link the command copies (rsync -a ./ out/) made it an unknown write
-// (rel-1-0-10:GAP-2300). Any other name, and every name off Windows, is
-// OperandPath's. Every reader of redirect targets (this walk, the redirect
-// safety list, the directory walk of shell_directory.go) keys them so.
-func redirectOperandPath(name, cwd string) string {
-	if runtime.GOOS == "windows" && name != "" && os.IsPathSeparator(name[0]) &&
-		filepath.VolumeName(name) == "" && filepath.IsAbs(cwd) {
-		name = filepath.VolumeName(cwd) + name
-	}
-	return OperandPath(name, cwd)
-}
-
 // shellFileWriteOperands is shellWriteOperands on a parsed command.
 func shellFileWriteOperands(file *syntax.File, cwd, home string, user KnownUser) (operands, known []string, dynamic bool) {
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
@@ -383,7 +366,7 @@ func shellFileWriteOperands(file *syntax.File, cwd, home string, user KnownUser)
 				if user.Name != "" {
 					if name, static = knownValueWord(redirect.Word, home, user); static && name != "" && name != "-" &&
 						strings.Trim(name, "0123456789") != "" {
-						known = append(known, redirectOperandPath(name, cwd))
+						known = append(known, OperandPath(name, cwd))
 					}
 				}
 				return true
@@ -391,7 +374,7 @@ func shellFileWriteOperands(file *syntax.File, cwd, home string, user KnownUser)
 			if name == "" || name == "-" || strings.Trim(name, "0123456789") == "" {
 				return true
 			}
-			operands = append(operands, redirectOperandPath(name, cwd))
+			operands = append(operands, OperandPath(name, cwd))
 			return true
 		default:
 			return true
@@ -401,7 +384,7 @@ func shellFileWriteOperands(file *syntax.File, cwd, home string, user KnownUser)
 			dynamic = true
 			if user.Name != "" {
 				if name, static = knownValueWord(redirect.Word, home, user); static && name != "" {
-					known = append(known, redirectOperandPath(name, cwd))
+					known = append(known, OperandPath(name, cwd))
 				}
 			}
 			return true
@@ -409,7 +392,7 @@ func shellFileWriteOperands(file *syntax.File, cwd, home string, user KnownUser)
 		if name == "" {
 			return true
 		}
-		operands = append(operands, redirectOperandPath(name, cwd))
+		operands = append(operands, OperandPath(name, cwd))
 		return true
 	})
 	return operands, known, dynamic
@@ -689,6 +672,11 @@ func mergeFacts(first, second map[string]string) map[string]string {
 // it, and the gateway asks for them by the same function.
 func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
+}
+
+// MentionOperandPath is actionfacts.MentionOperandPath.
+func MentionOperandPath(name, cwd string) string {
+	return actionfacts.MentionOperandPath(name, cwd)
 }
 
 func init() { actionfacts.SetOperandLinkProbe(directoryHasLink) }
@@ -6291,7 +6279,7 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			if word == "" {
 				return true
 			}
-			path := redirectOperandPath(word, cwd)
+			path := OperandPath(word, cwd)
 			if !seen[path] {
 				absolute[path] = filepath.IsAbs(word) && rootLiteralWord(redirect.Word)
 			}

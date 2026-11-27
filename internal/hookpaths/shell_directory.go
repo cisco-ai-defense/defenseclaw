@@ -234,14 +234,14 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 				!strings.HasPrefix(name, "~/") && shellAuthorizedKeysBase(name) {
 				unknown = true
 			}
-			placed := redirectOperandPath(name, s.logical)
+			placed := OperandPath(name, s.logical)
 			if linuxGuest && !filepath.IsAbs(name) && strings.Contains(s.logical, "/proc/") {
 				// OperandPath cleans dot-dot before the guest root link is
 				// folded. Keep this relative write raw through that link.
 				placed = s.logical + string(filepath.Separator) + name
 			}
 			redirects = append(redirects, placed)
-			keys = append(keys, redirectOperandPath(name, cwd))
+			keys = append(keys, OperandPath(name, cwd))
 		}
 		if !s.changed {
 			redirectIndex += len(redirects)

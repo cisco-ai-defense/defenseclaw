@@ -199,7 +199,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			}
 			return actionPosixWindowsProtected(value, base, home)
 		}
-		operand := OperandPath(value, base)
+		operand := MentionOperandPath(value, base)
 		if stateOnly {
 			return actionProtectedStatePath(operand, stateHome)
 		}
