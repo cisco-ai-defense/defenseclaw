@@ -226,7 +226,7 @@ How many Claude Code tool calls a second one host can check depends on the opera
 | Managed | RHEL 9 | m8i.2xlarge (8) | 50 calls a second | 50 calls a second (0.06 s) | 100 calls a second: 50% answered in time, 54% with 10 sessions |
 | Managed | macOS | mac2.metal, Apple M1 (8) | 25 calls a second (next to interactive sessions, on a 1.0.9 audit store upgraded in place) | not reached at the lowest step: 0.89 s at 25 calls a second | 100 calls a second: none answered in time |
 | Managed | Windows Server 2025 | c5a.2xlarge (8) | 13 calls a second | 10 calls a second (0.29 s) | 16 calls a second: 21% answered in time |
-| Per-user and managed | Linux, one very large command (not a rate) | c7i.16xlarge (64) | A 1 MiB command takes about 0.75 s and 246 MiB of memory for one hook check | not a rate | Larger commands cost more in proportion; a shared parse that cuts this is planned for 1.0.11 |
+| Per-user and managed | Linux, one very large command (not a rate) | c7i.16xlarge (64) | A command near 1 MiB, such as a large here-document, takes longer to judge: a few hundred milliseconds (about 0.3 s) and about 100 MiB of memory for one hook check | not a rate | Larger commands cost more in proportion |
 
 **Known limit:** 1.0.10 does not reach 100 tool calls a second on one host. The target applies to Linux with 8 or more vCPU, and a managed RHEL 9 host on 8 vCPU reaches 50. Raising the rate is planned for a later release. The rate grows with the free CPU cores of the host. These rows are not limits for other instance types: check a different instance type with your own agents and the counts below.
 

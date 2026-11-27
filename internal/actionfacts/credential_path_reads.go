@@ -653,9 +653,10 @@ type credentialPathResolver struct {
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
 	wait       CredentialWalkBudget     // the wait for walk slots left, the call's
-	// walkedBy holds the folders each command already searched, as named
-	// and as resolved: a folder named again by the same command adds
-	// nothing, so grep -r K . . . walks it once (rel-1-0-10:GAP-1668).
+	// walkedBy holds the folders each command already searched, by the
+	// cleaned folder: a folder named again by the same command, in any
+	// spelling (. ./ ././), adds nothing, so grep -r K . ./ ././ walks it
+	// once (rel-1-0-10:GAP-1668).
 	walkedBy map[credentialWalkKey]bool
 	// rgConfig: the call sets RIPGREP_CONFIG_PATH, so an rg may read
 	// options (--hidden) from a file (substrate-1:GAP-0682).
@@ -1943,7 +1944,12 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	if (shown == "~" || strings.HasPrefix(shown, "~/")) && r.home != "" {
 		shown = r.home + shown[1:]
 	}
-	key := credentialWalkKey{id: id, dir: filepath.Clean(dir), shown: shown}
+	key := credentialWalkKey{id: id, dir: filepath.Clean(dir)}
+	if filter.readsPath() {
+		// an rg glob reads the path as rg names it, so another spelling of
+		// the folder may admit other files: it is its own walk
+		key.shown = shown
+	}
 	if r.walkedBy[key] {
 		return
 	}
@@ -2082,8 +2088,8 @@ func credentialFolderEndsIn(dir string, segments []string) bool {
 	return true
 }
 
-// credentialWalkKey is one folder one command searched: its resolved path
-// and its spelling, which the found files are named under.
+// credentialWalkKey is one folder one command searched: its cleaned path,
+// and its spelling only when an rg glob reads the path as rg names it.
 type credentialWalkKey struct {
 	id         int64
 	dir, shown string
