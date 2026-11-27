@@ -819,6 +819,31 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
             assert max(jobs) + 45 <= 0.65 * 11 * 60, [round(seconds) for seconds in jobs]
 
 
+def test_plain_gateway_shards_plan_on_plain_times() -> None:
+    # substrate-1 GAP-1107: the plain 16-shard gateway gate planned on the
+    # -race times of go-linux.json, where the GAP-0429 stream tests weigh
+    # 17-25 s but take 53-69 s plain (they run larger plain-only tables);
+    # the planner put seven of them in one shard, which ran 753 s at
+    # GOMAXPROCS=4 on dc-build-1 (three shards over go test's 600 s default
+    # timeout). Planned on go-linux-plain.json first, the same run measured
+    # every shard under 600 s. Keep the plain file recording those tests and
+    # the heaviest 16-shard plan inside 560 s (the 600 s default less room
+    # for the test binary's start and a slower box).
+    root = Path(__file__).resolve().parents[2]
+    plain, linux = (
+        json.loads((root / "scripts/test-timings" / name).read_text(encoding="utf-8"))
+        for name in ("go-linux-plain.json", "go-linux.json")
+    )
+    recorded = plain["tests"]["internal/gateway"]
+    for name in ("TestGAP0429StreamedSecretHeldPassthrough", "TestGAP0429StreamedSecretHeldRawForward"):
+        assert recorded[name] >= linux["tests"]["internal/gateway"][name], name
+    tests = package_test_seconds([plain, linux], "internal/gateway")
+    weigh = weigher_of(tests)
+    shards = partition_test_files(discover_test_files(root / "internal/gateway"), 16, tests)
+    jobs = [sum(weigh(name) for name in names) for names in shards]
+    assert max(jobs) <= 560, [round(seconds) for seconds in jobs]
+
+
 def test_test_timing_files_have_no_duplicate_keys() -> None:
     # json.loads keeps the last of two equal keys, so a duplicate made by a merge
     # silently replaces a recorded time.
