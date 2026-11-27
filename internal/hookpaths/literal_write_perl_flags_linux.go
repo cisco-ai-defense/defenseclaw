@@ -5,7 +5,15 @@
 
 package hookpaths
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+// perlPlatformWriteBits are the open flag bits beyond the access mode that
+// change the path.
+const perlPlatformWriteBits = uint64(os.O_CREATE | os.O_TRUNC | os.O_APPEND)
 
 var perlPlatformFlags = [...]perlFlagConstant{
 	{"O_NOFOLLOW", unix.O_NOFOLLOW},

@@ -193,7 +193,7 @@ func perlOverrideBodyPaths(tokens []perlToken, body perlOverrideDef, caller perl
 				continue
 			}
 			flags, known := perlFlagExpression(tokens, inner, inner.args[2], nil)
-			if known && (flags&3 != 0 || flags&uint64(perlCommonFlags[3].value|perlCommonFlags[4].value|perlCommonFlags[5].value) != 0) {
+			if known && perlFlagsWrite(flags, perlPlatformWriteBits) {
 				if path, fixed := pathAt(1); fixed {
 					paths = append(paths, path)
 				}
