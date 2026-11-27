@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -274,16 +275,21 @@ func (b *substrateMCPBridge) fromAgent(ctx context.Context, raw []byte) {
 	verdict := b.judge(ctx, method, c)
 	switch verdict.Verdict {
 	case "allow":
-		if len(verdict.Findings) > 0 {
-			// Allowed with a finding (arguments past the reading's bounds,
-			// GAP-1094): the row says so, never a silent allow.
-			row := map[string]any{"tool": tool, "method": method, "source": verdict.Source, "reason": verdict.Reason,
-				"findings": verdict.Findings}
-			if ref != "" {
-				row["ref"] = ref
-			}
-			b.s.audit(context.WithoutCancel(ctx), "alert", row)
+		// Every judged call leaves one row naming its method and tool
+		// (GAP-1104): allowed, or alert when it was allowed with a finding
+		// (arguments past the reading's bounds, GAP-1094), never a silent
+		// allow. The pass-through methods (handshake, ping, lists) write
+		// none; the stream's open and close rows cover them.
+		row := map[string]any{"tool": tool, "method": method}
+		if ref != "" {
+			row["ref"] = ref
 		}
+		what := "allowed"
+		if len(verdict.Findings) > 0 {
+			row["source"], row["reason"], row["findings"] = verdict.Source, verdict.Reason, verdict.Findings
+			what = "alert"
+		}
+		b.s.audit(context.WithoutCancel(ctx), what, row)
 		b.write(false, websocket.BinaryMessage, canon)
 	case "ask":
 		if b.st.cfg.Asks == nil || b.held.Add(1) > substrateMCPMaxHeldAsks {
@@ -297,7 +303,7 @@ func (b *substrateMCPBridge) fromAgent(ctx context.Context, raw []byte) {
 		go func() {
 			defer b.wg.Done()
 			defer b.held.Add(-1)
-			b.hold(ctx, id, method, tool, ref, canon, verdict)
+			b.hold(ctx, id, method, c, canon, verdict)
 		}()
 	default:
 		b.deny(ctx, id, method, tool, ref, verdict.Source, verdict.Reason)
@@ -491,38 +497,27 @@ func substrateMCPArgName(v any) (string, bool) {
 // A call judges at most substrateMCPReadingsPerArgs readings per argument
 // reading, including projections and distinct alias values (RV-0841b F6).
 func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substrateMCPJudgedCall) SubstrateCalloutVerdict {
-	if b.st != nil && substrateMCPOverCap(c) {
-		key := "mcp-judge:" + b.reg.Atespace + "/" + b.reg.UID
-		release, ok := b.st.streams.take(key, 1)
-		if !ok {
-			timer := time.NewTimer(substrateMCPOverCapWait)
-			tick := time.NewTicker(10 * time.Millisecond)
-			defer timer.Stop()
-			defer tick.Stop()
-			for !ok {
-				select {
-				case <-ctx.Done():
-					return substrateMCPBusyVerdict()
-				case <-timer.C:
-					return substrateMCPBusyVerdict()
-				case <-tick.C:
-					release, ok = b.st.streams.take(key, 1)
-				}
-			}
-		}
-		defer release()
-	}
 	readings := c.args
 	if c.params != nil {
 		readings = append(slices.Clip(c.args), c.params)
 	}
+	scans := substrateMCPScanReadings(readings)
+	if b.st != nil && scans.overCap() {
+		release, ok := b.admitOverCap(ctx)
+		if !ok {
+			return substrateMCPBusyVerdict()
+		}
+		defer release()
+	}
 	left := substrateMCPReadingsPerArgs*max(len(c.args), 1) - len(readings)
 	extraBytes := substrateMCPExtraBytesPerCall
+	judged := make(map[string]bool)
 	var out SubstrateCalloutVerdict
 	for i, args := range readings {
 		req := substrateCalloutRequest{V: "1", MCP: calloutapi.MCP{Server: b.s.target, Tool: c.tool, Transport: "stdio", Method: method}, Args: args}
 		req.Actor.Atespace, req.Actor.Name = b.reg.Atespace, b.reg.Name
-		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left, extraBytes: &extraBytes}
+		rd := substrateMCPReading{rulesOnly: c.params != nil && i < len(c.args), left: &left, extraBytes: &extraBytes,
+			scan: scans.scan(i), judged: judged}
 		v := substrateMCPJudge(b.a, withSubstrateMCPReading(ctx, rd), b.reg, req)
 		if i == 0 {
 			out = v
@@ -536,18 +531,111 @@ func (b *substrateMCPBridge) judge(ctx context.Context, method string, c substra
 	return out
 }
 
-// substrateMCPOverCap admits any call that reaches a shared reader limit
-// through the one-active-call actor budget. Ordinary calls do not wait.
-func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
-	if actionfacts.ArgsLimitIssue(c.params) != "" {
-		return true
+// substrateMCPReadingScans are the argument scans of a call's readings. A
+// reading past the reader's bounds is scanned only once admitted (scan).
+type substrateMCPReadingScans struct {
+	readings []json.RawMessage
+	over     []bool
+	scans    []*substrateMCPArgumentScan
+}
+
+func substrateMCPScanReadings(readings []json.RawMessage) substrateMCPReadingScans {
+	s := substrateMCPReadingScans{readings: readings, over: make([]bool, len(readings)),
+		scans: make([]*substrateMCPArgumentScan, len(readings))}
+	for i, r := range readings {
+		if s.over[i] = actionfacts.ArgsLimitIssue(r) != ""; !s.over[i] {
+			scan := substrateMCPScanArguments(r)
+			s.scans[i] = &scan
+		}
 	}
-	for _, args := range c.args {
-		if actionfacts.ArgsLimitIssue(args) != "" {
+	return s
+}
+
+func (s substrateMCPReadingScans) scan(i int) *substrateMCPArgumentScan {
+	if s.scans[i] == nil {
+		scan := substrateMCPScanArguments(s.readings[i])
+		s.scans[i] = &scan
+	}
+	return s.scans[i]
+}
+
+// overCap: a reading past a shared reader bound, at the reader's envelope
+// depth, or with more than substrateMCPFreeCandidates hidden actions is
+// judged under the over-cap admission (GAP-1105, GAP-1141). Ordinary calls
+// do not wait.
+func (s substrateMCPReadingScans) overCap() bool {
+	for i := range s.readings {
+		if s.over[i] || s.scans[i].depthLimited || len(s.scans[i].candidates) > substrateMCPFreeCandidates {
 			return true
 		}
 	}
 	return false
+}
+
+// substrateMCPOverCapGateway is the most over-cap judgments the gateway
+// runs at once across every actor and owner (GAP-1124).
+var substrateMCPOverCapGateway = max(2, runtime.GOMAXPROCS(0)/2)
+
+const (
+	substrateMCPOverCapPerActor = 1
+	substrateMCPOverCapPerOwner = 2
+)
+
+// admitOverCap takes the over-cap permits of the call's actor (one at a
+// time), owner (the verified person, or the atespace of an attributed
+// actor: two at a time, so many registrations of one owner cannot hold
+// them all) and the gateway (substrateMCPOverCapGateway), all or none,
+// waiting at most substrateMCPOverCapWait.
+func (b *substrateMCPBridge) admitOverCap(ctx context.Context) (func(), bool) {
+	owner := "atespace:" + b.reg.Atespace
+	if p := b.reg.Person; p.Subject != "" {
+		owner = "person:" + p.Issuer + "\x00" + p.Subject
+	}
+	permits := []struct {
+		key   string
+		limit int
+	}{
+		{"mcp-judge:" + b.reg.Atespace + "/" + b.reg.UID, substrateMCPOverCapPerActor},
+		{"mcp-judge-owner:" + owner, substrateMCPOverCapPerOwner},
+		{"mcp-judge-gateway", substrateMCPOverCapGateway},
+	}
+	try := func() (func(), bool) {
+		var held []func()
+		for _, p := range permits {
+			release, ok := b.st.streams.take(p.key, p.limit)
+			if !ok {
+				for _, r := range held {
+					r()
+				}
+				return nil, false
+			}
+			held = append(held, release)
+		}
+		return func() {
+			for _, r := range held {
+				r()
+			}
+		}, true
+	}
+	if release, ok := try(); ok {
+		return release, true
+	}
+	timer := time.NewTimer(substrateMCPOverCapWait)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer timer.Stop()
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-timer.C:
+			return nil, false
+		case <-tick.C:
+			if release, ok := try(); ok {
+				return release, true
+			}
+		}
+	}
 }
 
 func substrateMCPBusyVerdict() SubstrateCalloutVerdict {
@@ -570,20 +658,30 @@ func (b *substrateMCPBridge) notBridged(ctx context.Context, id any, method stri
 }
 
 // hold keeps an asked call until the owner decides or the ask limit passes;
-// only an approval forwards it.
-func (b *substrateMCPBridge) hold(ctx context.Context, id any, method, tool, ref string, canon []byte, v SubstrateCalloutVerdict) {
-	reg := b.reg
+// only an approval forwards it. The ask names this call (its arguments'
+// digest in Rule, a redacted preview in Summary), so only an identical
+// held call joins it, and a once approval lets one of them through: the
+// other asks again (GAP-0840, the GAP-0484 rule of the callout route).
+func (b *substrateMCPBridge) hold(ctx context.Context, id any, method string, c substrateMCPJudgedCall, canon []byte, v SubstrateCalloutVerdict) {
+	reg, tool, ref := b.reg, c.tool, c.ref
 	ask := asks.Ask{
 		Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Profile: reg.Profile,
-		Tool: "mcp__" + mcpToolNamePart(b.s.target) + "__" + tool, Summary: "laptop MCP call " + b.s.target + "." + tool,
-		Reason: v.Reason, Severity: v.Severity,
+		Tool: "mcp__" + mcpToolNamePart(b.s.target) + "__" + tool, Rule: substrateMCPAskRule(method, tool, c),
+		Summary: substrateMCPAskSummary(b.s.target, tool, c), Reason: v.Reason, Severity: v.Severity,
 	}
-	got, err := b.st.cfg.Asks.OpenAsk(ctx, ask)
-	if err != nil {
-		b.deny(ctx, id, method, tool, ref, v.Source, "the approval could not be asked")
+	open := func() (asks.Ask, bool) {
+		got, err := b.st.cfg.Asks.OpenAsk(ctx, ask)
+		if err != nil {
+			b.deny(ctx, id, method, tool, ref, v.Source, "the approval could not be asked")
+			return asks.Ask{}, false
+		}
+		b.a.emitSubstrateApprovalV8(ctx, got, true, "")
+		return got, true
+	}
+	got, ok := open()
+	if !ok {
 		return
 	}
-	b.a.emitSubstrateApprovalV8(ctx, got, true, "")
 	limit := config.DefaultSubstrateAskTimeout
 	if b.st.cfg.UnattendedAsk != nil {
 		if r := b.st.cfg.UnattendedAsk(reg.Profile); r.Timeout > 0 {
@@ -606,24 +704,37 @@ func (b *substrateMCPBridge) hold(ctx context.Context, id any, method, tool, ref
 			if err != nil {
 				continue
 			}
-			for _, a := range list {
-				if a.ID != got.ID || a.UID != reg.UID {
-					continue
-				}
-				switch a.State {
-				case asks.StateApproved:
-					row := map[string]any{"tool": tool, "method": method, "ask_id": a.ID}
-					if ref != "" {
-						row["ref"] = ref
+			at := slices.IndexFunc(list, func(a asks.Ask) bool { return a.ID == got.ID && a.UID == reg.UID })
+			if at < 0 {
+				continue
+			}
+			a := list[at]
+			switch a.State {
+			case asks.StateApproved:
+				if !a.Always {
+					// A once approval answers one call: the first holder
+					// that takes it. A twin that lost the race asks again.
+					if _, err := b.st.cfg.Asks.Use(ctx, asks.UseRequest{ID: a.ID, UID: reg.UID}); err != nil {
+						if !asks.IsUsed(err) && !asks.IsNotFound(err) {
+							continue // an outage: read the ask again
+						}
+						if got, ok = open(); !ok {
+							return
+						}
+						continue
 					}
-					b.s.audit(ctx, "approved", row)
-					b.write(false, websocket.BinaryMessage, canon)
-					return
-				case asks.StatePending:
-				default:
-					b.deny(ctx, id, method, tool, ref, v.Source, "the approval was "+a.State)
-					return
 				}
+				row := map[string]any{"tool": tool, "method": method, "ask_id": a.ID}
+				if ref != "" {
+					row["ref"] = ref
+				}
+				b.s.audit(ctx, "approved", row)
+				b.write(false, websocket.BinaryMessage, canon)
+				return
+			case asks.StatePending:
+			default:
+				b.deny(ctx, id, method, tool, ref, v.Source, "the approval was "+a.State)
+				return
 			}
 		}
 	}

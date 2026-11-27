@@ -696,39 +696,26 @@ func hasCommandArgumentAt(args json.RawMessage, depth int) bool {
 }
 
 // conflictingToolArgumentField is the field an argument key names for the
-// conflict check, and whether ActionFacts reviews it. It mirrors
-// actionfacts canonicalInputFieldName (keys equal but for letter case, and
-// the aliases it folds onto one field), plus the edit tools' text keys. Any
+// conflict check, and whether ActionFacts reviews it: the reader's field
+// (actionfacts.ReadArgumentField: keys equal but for letter case, and the
+// aliases it folds onto one field), plus the edit tools' text keys. Any
 // other key names its lower-case form.
 func conflictingToolArgumentField(key string) (string, bool) {
+	// The reader's own aliases come from the reader, so the two cannot drift
+	// (substrate-1:GAP-1132, the GAP-1128 class); only the edit-tool keys,
+	// which the generic reader does not read, are spelled here.
+	if field, known := actionfacts.ReadArgumentField(key); known {
+		return field, true
+	}
 	field := strings.ToLower(key)
 	switch field {
-	case "command", "cmd", "script",
-		"rawcommand", "raw_command", "raw-command",
-		"shellcommand", "shell_command", "shell-command",
-		"commandline", "command_line", "command-line":
-		return "command", true
-	case "argv", "commandargv", "command_argv", "command-argv":
-		return "argv", true
-	case "cwd", "workdir", "work_dir", "work-dir",
-		"workingdirectory", "working_directory", "working-directory":
-		return "cwd", true
-	case "path", "filepath", "file_path", "file-path":
-		return "path", true
-	case "url", "uri", "endpoint":
-		return "url", true
-	case "method", "httpmethod", "http_method", "http-method":
-		return "method", true
-	case "input", "parameters", "request":
-		return "nested", true
 	case "old_string", "oldstring", "old-string", "old_str":
 		return "old_string", true
 	case "new_string", "newstring", "new-string", "new_str":
 		return "new_string", true
 	case "replace_all", "replaceall", "replace-all":
 		return "replace_all", true
-	case "args", "source", "destination", "target",
-		"body", "data", "payload", "content", "headers", "edits":
+	case "edits":
 		return field, true
 	}
 	return field, false

@@ -383,38 +383,41 @@ func exactSingleStaticPOSIXCommand(source string) bool {
 }
 
 func usesClosedCodingAgentArgumentSchema(raw json.RawMessage, tool string) bool {
+	// The tool name selects the schema keys before the arguments are
+	// decoded: every other tool (an MCP tool, for one) is never this schema,
+	// and decoding its arguments here only to answer false doubled the
+	// argument reading of each analysis (substrate-1:GAP-1164).
+	var keys []string
+	switch strings.ToLower(tool) {
+	case "read":
+		keys = []string{"limit", "offset", "pages"}
+	case "edit":
+		keys = []string{"old_string", "new_string", "replace_all", "oldString", "newString", "replaceAll", "old_str", "new_str"}
+	case "multiedit", "multi_edit", "multi-edit":
+		keys = []string{"edits"}
+	case "create":
+		keys = []string{"file_text"}
+	case "grep", "glob":
+		keys = []string{"pattern"}
+	case "webfetch":
+		keys = []string{"prompt"}
+	case "search_code":
+		keys = []string{"root", "pattern", "max_results"}
+	case "notebookedit":
+		keys = []string{"notebook_path", "new_source", "edit_mode"}
+	default:
+		return false
+	}
 	object, problem := exactJSONObject(raw)
 	if problem.status != "" {
 		return false
 	}
-	hasAny := func(keys ...string) bool {
-		for _, key := range keys {
-			if _, ok := object[key]; ok {
-				return true
-			}
+	for _, key := range keys {
+		if _, ok := object[key]; ok {
+			return true
 		}
-		return false
 	}
-	switch strings.ToLower(tool) {
-	case "read":
-		return hasAny("limit", "offset", "pages")
-	case "edit":
-		return hasAny("old_string", "new_string", "replace_all", "oldString", "newString", "replaceAll", "old_str", "new_str")
-	case "multiedit", "multi_edit", "multi-edit":
-		return hasAny("edits")
-	case "create":
-		return hasAny("file_text")
-	case "grep", "glob":
-		return hasAny("pattern")
-	case "webfetch":
-		return hasAny("prompt")
-	case "search_code":
-		return hasAny("root", "pattern", "max_results")
-	case "notebookedit":
-		return hasAny("notebook_path", "new_source", "edit_mode")
-	default:
-		return false
-	}
+	return false
 }
 
 // codingAgentEditKeys names the arguments of a coding-agent edit tool in one

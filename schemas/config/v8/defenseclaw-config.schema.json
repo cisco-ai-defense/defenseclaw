@@ -8596,6 +8596,18 @@
                   "default": "alert"
                 }
               }
+            },
+            "rate_limits": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "per_actor_rps": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1000000,
+                  "default": 200
+                }
+              }
             }
           }
         },
