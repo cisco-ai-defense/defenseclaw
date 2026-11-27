@@ -51,6 +51,12 @@ func TestManagedAuditExportUsesCanonicalDACLForAnAdministrator(t *testing.T) {
 // canonical check refuses, so every SYSTEM export of a managed store failed
 // and its file was removed. The export is owned by Administrators instead.
 func TestManagedAuditExportAsLocalSystemIsCanonical(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		// The export is stamped with the Administrators owner, which a
+		// standard user cannot assign (rel-1-0-10:GAP-2192); the managed
+		// exporter runs as LocalSystem or an administrator.
+		t.Skip("needs an elevated token: a managed audit export is Administrators-owned, which a standard user cannot assign")
+	}
 	current, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || current == nil || current.User.Sid == nil {
 		t.Fatalf("resolve current user SID: %v", err)

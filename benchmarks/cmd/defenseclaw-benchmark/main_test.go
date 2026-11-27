@@ -485,11 +485,14 @@ func TestDTapMigrationOutputLoadsEndToEnd(t *testing.T) {
 	}
 	migratedPath := filepath.Join(dir, "migrated.jsonl")
 	migratedManifestPath := filepath.Join(dir, "migrated.manifest.json")
-	if _, err := exec.LookPath("python3"); err != nil {
+	if err := exec.Command("python3", "-c", "").Run(); err != nil {
 		// The migration is a Python script; the Linux test legs, which have
 		// python3, run this test (rel-1-0-10:GAP-2192: the native Windows
-		// test hosts have no python3 on PATH).
-		t.Skip("needs python3 on PATH: the DTap migration is a Python script")
+		// test hosts have no python3, and a standard user there finds the
+		// Microsoft Store "python3" alias on PATH, which only prints
+		// "Python was not found" and exits 9009, so a PATH lookup is not
+		// enough: the interpreter has to run).
+		t.Skipf("needs a python3 that runs: the DTap migration is a Python script (%v)", err)
 	}
 	command := exec.Command("python3", filepath.Join(repoRoot, "benchmarks", "scripts", "benchmark_normalize_dtap.py"),
 		"--migrate-existing-corpus", corpusPath, "--legacy-manifest", legacyManifestPath,
