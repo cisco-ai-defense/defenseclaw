@@ -60,7 +60,7 @@ func mayShareComparisonKey(path, want string) bool {
 		if strings.Contains(a[i], "~") || strings.Contains(b[i], "~") {
 			continue
 		}
-		if strings.ToLower(a[i]) != strings.ToLower(b[i]) {
+		if !strings.EqualFold(a[i], b[i]) {
 			return false
 		}
 	}
