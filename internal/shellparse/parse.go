@@ -71,8 +71,17 @@ func parseCommand(command string, comments bool) (*syntax.File, bool) {
 // parseCommandVariant is parseCommand that also tells whether the Bash
 // grammar read the tree (bash false: the POSIX one did, or neither).
 func parseCommandVariant(command string, comments bool) (file *syntax.File, ok, bash bool) {
-	if TooDeep(command) {
+	// The budget's second stage may already have parsed the text, in the
+	// same grammars and order and with no comments kept: that tree is this
+	// parse's answer, handed over once (budgetExceeded), with the grammar
+	// that read it. An 8 KB call otherwise parsed the same text twice in a
+	// row (substrate-1 GAP-1153).
+	reason, measured, measuredBash := budgetExceeded(command, !comments)
+	if reason != "" {
 		return nil, false, false
+	}
+	if measured != nil {
+		return measured, true, measuredBash
 	}
 	for at, variant := range parseVariants {
 		workcount.AddLarge(workcount.LargeParse, len(command))

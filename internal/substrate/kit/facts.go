@@ -354,13 +354,19 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
 	}
 	var words []hookpaths.CommandPathWord
+	// Every placed word is walked from the same working folders: one memo
+	// for this call walks each folder once, not once per word and pass. An
+	// 8 KB script of function calls made 4,200 lstat calls for its 840
+	// words without it, each a sandbox system call in the actor
+	// (substrate-1 GAP-1153). The answers are the walk's, for one call.
+	memo := hookpaths.NewTargetMemo()
 	// A call beyond the statement budget needs the protected-target
 	// decision only when its placed words can give the gateway a link or
 	// private-home claim. Keep the p47b placement for every word and dir.
 	if !unresolvedToolWorkdir && shellDecisionOverBudget(command) {
 		words = hookpaths.PlacedCommandPathWords(command, cwd, home)
 		paths, truncated, claimsCut := len(f.Paths), f.Truncated, f.claimsCut
-		if !addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, true) {
+		if !addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, true, memo) {
 			return
 		}
 		f.Paths, f.Truncated, f.claimsCut = f.Paths[:paths], truncated, claimsCut
@@ -373,13 +379,14 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	if words == nil {
 		words = hookpaths.PlacedCommandPathWords(command, cwd, home)
 	}
-	addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, false)
+	addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, false, memo)
 }
 
 // addPlacedCommandWordFacts uses the p47b word and directory bound.
 // ask reports whether a visited word can carry a gateway claim even if
-// privacy has not yet been granted by the protected-write decision.
-func addPlacedCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd, home string, privacy, ask bool) (claimable bool) {
+// privacy has not yet been granted by the protected-write decision. memo
+// keeps the file system answers of this hook call.
+func addPlacedCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd, home string, privacy, ask bool, memo *hookpaths.TargetMemo) (claimable bool) {
 	type placed struct{ text, dir string }
 	seen := map[placed]bool{}
 	for _, word := range words {
@@ -396,7 +403,7 @@ func addPlacedCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd,
 				return claimable
 			}
 			seen[placed{word.Text, dir}] = true
-			fact, listed := commandWordFact(word, dir, home, privacy)
+			fact, listed := commandWordFact(word, dir, home, privacy, memo)
 			if ask && !claimable {
 				claimable = fact.Resolved != "" || fact.Entry != "" ||
 					hookpaths.PrivateHomePlace(hookpaths.CommandWordAbs(word, dir), home)
@@ -451,21 +458,21 @@ func shellDecisionOverBudget(command string) bool {
 
 // commandWordFact is the CommandWordField fact of one command word: its place
 // with every link followed and with its last name kept, each as the kernel
-// walks it from dir (hookpaths.ResolveWriteTarget), and, when privacy is
-// asked, whether it is a private place of home. listed is false when both
-// places are the one the word spells and it is no private place.
-func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy bool) (PathFact, bool) {
+// walks it from dir (hookpaths.ResolveWriteTarget, through memo), and, when
+// privacy is asked, whether it is a private place of home. listed is false
+// when both places are the one the word spells and it is no private place.
+func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy bool, memo *hookpaths.TargetMemo) (PathFact, bool) {
 	full := word.Value
 	if !strings.HasPrefix(full, "/") {
 		full = strings.TrimRight(dir, "/") + "/" + full
 	}
 	lexical := hookpaths.CommandWordAbs(word, dir)
 	fact := PathFact{Field: CommandWordField, Path: word.Text, Abs: lexical, UID: -1, GID: -1, Type: "missing"}
-	if followed, ok := hookpaths.ResolveWriteTarget(full); ok && followed != lexical {
+	if followed, ok := memo.ResolveWriteTarget(full); ok && followed != lexical {
 		fact.Resolved = followed
 	}
 	if dir, name := filepath.Split(strings.TrimRight(full, "/")); dir != "" && name != "" && name != "." && name != ".." {
-		if parent, ok := hookpaths.ResolveWriteTarget(dir); ok {
+		if parent, ok := memo.ResolveWriteTarget(dir); ok {
 			if entry := filepath.Join(parent, name); entry != lexical {
 				fact.Entry = entry
 			}
