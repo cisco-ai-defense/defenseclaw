@@ -230,7 +230,8 @@ func sshPrivateKeyContentReadBy(
 // trustedActionStrictCredentialNotStore are the credential-tagged path rules
 // whose files the strict pack does not block a read of: a project .env, the
 // shell history and the SSH folder's other files (its keys have their own
-// proof) are read in ordinary work. They keep the alert.
+// proof) are read in ordinary work. They keep the alert, as do the system
+// files (rules tagged system-file, /etc/shadow: GAP-1058 keeps rel's tier).
 var trustedActionStrictCredentialNotStore = []string{"PATH-ENV-FILE", "PATH-HISTORY", "PATH-SSH-DIR"}
 
 // trustedActionStrictCredentialContentRead reports a content read of a file
@@ -240,6 +241,7 @@ var trustedActionStrictCredentialNotStore = []string{"PATH-ENV-FILE", "PATH-HIST
 // programs read it as cat does (TestCredentialFileCopyIsJudgedLikeItsRead).
 func trustedActionStrictCredentialContentRead(facts actionfacts.Facts, finding RuleFinding) bool {
 	if !slices.Contains(finding.Tags, "credential") || slices.Contains(finding.Tags, "detection-only") ||
+		slices.Contains(finding.Tags, "system-file") ||
 		slices.Contains(trustedActionStrictCredentialNotStore, finding.RuleID) {
 		return false
 	}
@@ -252,10 +254,9 @@ func trustedActionStrictCredentialContentRead(facts actionfacts.Facts, finding R
 
 // credentialContentReaders are the programs whose read of a credential file
 // returns its content: the private key readers, the other copy programs and
-// the common text viewers and searches.
+// the common text viewers (a search may print a count or a name only).
 var credentialContentReaders = append(slices.Clone(sshPrivateKeyContentReaders),
-	"rsync", "install", "grep", "egrep", "fgrep", "rg", "less", "more", "strings",
-	"xxd", "od", "hexdump", "jq", "tac", "nl")
+	"rsync", "install", "less", "more", "strings", "xxd", "od", "hexdump", "jq", "tac", "nl")
 
 // pathContentReadBy reports a read of a file isFile accepts that returns its
 // content: an executing content reader (one of readers; head and tail

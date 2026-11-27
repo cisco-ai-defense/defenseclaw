@@ -35,7 +35,7 @@ func TestGAP0706StrictCredentialContentReadBlocks(t *testing.T) {
 	notBlocked := []string{
 		"head -c 0 ~/.aws/credentials", "wc -l ~/.aws/credentials", "ls -la ~/.aws",
 		"cat proj/.env",
-		"cat ~/.bash_history", "cat ~/.ssh/known_hosts",
+		"cat ~/.bash_history", "cat ~/.ssh/known_hosts", "grep -c x ~/.aws/credentials",
 	}
 	allowed := []string{"cat proj/credentials.py", "cat proj/config", "cat proj/README.md"}
 	for _, pack := range []string{"default", "permissive", "strict"} {
