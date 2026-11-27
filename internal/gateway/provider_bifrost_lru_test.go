@@ -230,9 +230,11 @@ func TestNewBifrostTenantReleasesIdleClients(t *testing.T) {
 	})
 
 	// A request for a tenant that is not cached (a rotated key).
-	if _, err := getBifrostClient(schemas.OpenAI, "sk-rotated-key", "http://127.0.0.1:1", "gpt-x", tlsOverrides{}, nil, nil, nil, nil); err != nil {
+	_, release, err := getBifrostClient(schemas.OpenAI, "sk-rotated-key", "http://127.0.0.1:1", "gpt-x", tlsOverrides{}, nil, nil, nil, nil)
+	if err != nil {
 		t.Fatalf("getBifrostClient: %v", err)
 	}
+	release()
 
 	select {
 	case got := <-shutdowns:
