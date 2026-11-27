@@ -25,7 +25,7 @@ import (
 // depend on the host's speed.
 const (
 	gap0299MiBAllocPin = 192 << 20
-	gap0299MiBTimePin  = 2 * gap0299MiBTimeRatio
+	gap0299MiBTimePin  = 2 * gap0299MiBTimeRatio * gap0299RaceTimeScale
 )
 
 // gap0299MiBTimeRatio is the measured ratio of the 1 MiB call to the
