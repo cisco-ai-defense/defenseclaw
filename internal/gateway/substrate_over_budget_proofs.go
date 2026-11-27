@@ -32,12 +32,13 @@ func withOverBudgetKitProofs(parent context.Context, request trustedActionReques
 	}
 	command, ok := trustedBashCommandInput(request.Input)
 	// The kit makes the protected-write decision past the statement budget
-	// only when a placed word can carry a claim (a link or a private home
-	// place; substrate-1 GAP-1153), so the proof decides only there: a call
-	// gets the same answer from a kit that skips the decision and from one
-	// that does not (TestGAP1153ActorOverBudgetVerdictIdentity).
+	// only when a placed word can carry a claim (a link, a private home
+	// place or a word that may reach a protected file; substrate-1
+	// GAP-1153, GAP-1156), so the proof decides only there: a call gets the
+	// same answer from a kit that skips the decision and from one that does
+	// not (TestGAP1153ActorOverBudgetVerdictIdentity).
 	claims := substrateGuestClaimsFrom(parent)
-	claimable := claims != nil && (len(claims.placedWords) > 0 || len(claims.homePlaces) > 0)
+	claimable := claims != nil && (len(claims.placedWords) > 0 || len(claims.homePlaces) > 0 || claims.protectedWord)
 	write := ok && claimable && command == request.guestProtectedWriteCommand
 	read := ok && command == request.guestKeyReadCommand
 	if !write && !read {

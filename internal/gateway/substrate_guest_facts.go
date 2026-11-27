@@ -92,6 +92,10 @@ type substrateGuestClaims struct {
 	// homePlaces are the places of the command's path words that the kit
 	// found private in the actor's home (kit.PathFact.PrivateHome).
 	homePlaces map[string]bool
+	// protectedWord is set when the kit found, past the statement budget, a
+	// path word of the command with no other place that may reach a
+	// protected file (kit.PathFact.Protected; substrate-1 GAP-1156).
+	protectedWord bool
 }
 
 // homePlaceView reads the kit's private home places; nil for no claims.
@@ -176,6 +180,9 @@ func substrateGuestClaimsOf(env substrateEnvelope) *substrateGuestClaims {
 					claims.placedWords[hookpaths.CommandWordAt{Text: fact.Path, Abs: abs}] = place
 				}
 			}
+			if fact.Protected {
+				claims.protectedWord = true
+			}
 			if fact.PrivateHome {
 				for _, private := range []string{substrateGuestPlace(fact.Abs), place.Followed, place.Entry} {
 					if private == "" {
@@ -236,7 +243,7 @@ func substrateGuestClaimsOf(env substrateEnvelope) *substrateGuestClaims {
 		}
 	}
 	if claims.keyReadCommand == "" && claims.protectedWriteCommand == "" && len(claims.links) == 0 &&
-		len(claims.placedWords) == 0 && len(claims.homePlaces) == 0 && !claims.cut {
+		len(claims.placedWords) == 0 && len(claims.homePlaces) == 0 && !claims.protectedWord && !claims.cut {
 		return nil
 	}
 	return claims
