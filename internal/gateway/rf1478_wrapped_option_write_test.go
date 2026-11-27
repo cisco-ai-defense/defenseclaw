@@ -11,14 +11,18 @@ import (
 )
 
 // TestGAP1478WrappedOptionWriteIsTheUnwrappedWrite (rel-1-0-10:GAP-1478,
-// TST-17813): an identity wrapper (sudo, doas) or another HOME change
-// (env -i, a HOME= prefix) in front of a writer the program table models
-// (rsync --log-file, a sed w command or s///w flag) does not change the files
-// the call names: the option-argument write keeps the verdict the unwrapped
-// writer gets on that member, and the unwrapped writer gets the action of the
-// plain cp spelling. At f6e151801a the wrapped rsync spellings were allowed in
-// every tier (the HOME change demoted the named write to an unknown role). A
-// log or w file in a project folder stays allowed under every wrapper.
+// TST-17813): an identity wrapper (sudo, doas), a HOME change (env -i, a
+// HOME= prefix) or any other env input the allow list does not account for
+// (FOO=1, env or sudo FOO=1, an export, XDG_CONFIG_HOME=, RSYNC_RSH=, PATH=)
+// in front of a writer the program table models (rsync --log-file, a sed w
+// command or s///w flag, curl -o) does not change the files the call names:
+// the option-argument write keeps the verdict the unwrapped writer gets on
+// that member, and the unwrapped writer gets the action of the plain cp
+// spelling. At f6e151801a the wrapped rsync spellings were allowed in every
+// tier (the env input demoted the named write to an unknown role); at
+// 25efdf4371 only a HOME change was taken back. LANG=C and TZ=UTC are inert
+// names and pin the unchanged rows. A log, w or output file in a project
+// folder stays allowed under every wrapper.
 func TestGAP1478WrappedOptionWriteIsTheUnwrappedWrite(t *testing.T) {
 	home := t.TempDir()
 	for _, f := range []string{".defenseclaw/audit.db", ".defenseclaw/config.yaml", ".codex/config.toml", "proj/notes.txt"} {
@@ -36,14 +40,18 @@ func TestGAP1478WrappedOptionWriteIsTheUnwrappedWrite(t *testing.T) {
 		"rsync -an log": "rsync -an --log-file={t} a/ b/",
 		"sed w":         "sed -n \"w {t}\" /dev/null",
 		"sed s w":       "sed \"s/a/b/w {t}\" /dev/null",
+		"curl -o":       "curl -sS -o {t} https://example.invalid/c",
 	}
-	wrappers := []string{"sudo ", "sudo -n ", "doas ", "env -i ", "HOME=/tmp "}
+	wrappers := []string{"sudo ", "sudo -n ", "doas ", "env -i ", "HOME=/tmp ",
+		"FOO=1 ", "env FOO=1 ", "sudo FOO=1 ", "export FOO=1; ", "XDG_CONFIG_HOME=/tmp ", "RSYNC_RSH=ssh ",
+		"HOME=/tmp FOO=1 ", "PATH=/usr/bin:/bin ", "env -i PATH=/usr/bin ", "LANG=C ", "TZ=UTC "}
 	targets := []string{".defenseclaw/audit.db", ".defenseclaw/config.yaml", ".codex/config.toml"}
 	benign := []string{
 		"rsync -an --log-file=" + home + "/proj/rs.log " + home + "/proj/ /tmp/bk/",
 		"rsync -av " + home + "/proj/ /tmp/bk/",
 		"sed -n \"w " + home + "/proj/out.txt\" " + home + "/proj/notes.txt",
 		"sed \"s/a/b/w " + home + "/proj/out.txt\" " + home + "/proj/notes.txt",
+		"curl -sS -o " + home + "/proj/out.txt https://example.invalid/c",
 	}
 	useDefaultEffectsLane(t)
 	for _, tier := range boundedTestTiers {

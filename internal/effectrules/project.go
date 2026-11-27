@@ -290,12 +290,12 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 		uncertainEffect := fact.GetTargetState() != string(effects.TargetStateKnown) ||
 			fact.GetRoleState() != string(effects.RoleStateKnown) ||
 			fact.GetKind() == string(effects.KindOpaque)
-		namedMutation := HomeInputNamedMutation(fact)
+		namedMutation := EnvInputNamedMutation(fact)
 		for _, match := range target.GetProtected() {
 			// An inode match is direct resolver evidence for the physical file;
 			// retain it when command role or placement remains uncertain. So
-			// is the exact member a named mutation writes when only the HOME
-			// of its program changed (HomeInputNamedMutation).
+			// is the exact member a named mutation writes when only an env
+			// input of its program is unaccounted (EnvInputNamedMutation).
 			keep := match.GetReason() == "inode" ||
 				namedMutation && (match.GetReason() == "exact" || match.GetReason() == "other_home")
 			if uncertainEffect && match.GetState() == string(gradeKnown) && !keep {
@@ -431,30 +431,32 @@ func projectSources(in []effects.Source) []*semanticpb.EffectSource {
 	return out
 }
 
-// homeInputReasons are the reasons of a path effect the call names whose
-// only unknown is the changed HOME of its program (effects.ReasonHomeInput,
-// always beside unknown_flag).
-var homeInputReasons = []string{
+// envInputReasons are the reasons of a path effect the call names whose
+// only unknown is an env input of its program the allow list does not
+// account for (effects.ReasonEnvInput, always beside unknown_flag).
+var envInputReasons = []string{
 	string(effects.ScopeRole) + ":" + string(effects.ReasonUnknownFlag),
-	string(effects.ScopeRole) + ":" + string(effects.ReasonHomeInput),
+	string(effects.ScopeRole) + ":" + string(effects.ReasonEnvInput),
 }
 
-// HomeInput reports a fact whose role the call words decide but for the
-// HOME of its program (sudo, doas, env -i, a HOME= prefix): the program may
-// read config files of its own, so the fact is not fully known, but the
-// target and role it names are (rel-1-0-10:GAP-1478).
-func HomeInput(fact *semanticpb.EffectFact) bool {
+// EnvInput reports a fact whose role the call words decide but for an
+// unaccounted env input of its program (a NAME= prefix, env or sudo NAME=,
+// an export, PATH, or a changed HOME: sudo, doas, env -i): the program may
+// read config of its own, so the fact is not fully known, but the target and
+// role it names are (rel-1-0-10:GAP-1478).
+func EnvInput(fact *semanticpb.EffectFact) bool {
 	return fact.GetTargetState() == string(effects.TargetStateKnown) &&
-		slices.Equal(fact.GetReasons(), homeInputReasons)
+		slices.Equal(fact.GetReasons(), envInputReasons)
 }
 
-// HomeInputNamedMutation reports a HomeInput write, append or delete: sudo
-// rsync --log-file=MEMBER writes MEMBER as the unwrapped spelling does, so
-// its exact protected match stays known (GAP-1478).
-func HomeInputNamedMutation(fact *semanticpb.EffectFact) bool {
+// EnvInputNamedMutation reports an EnvInput write, append or delete: sudo
+// rsync --log-file=MEMBER or FOO=1 rsync --log-file=MEMBER writes MEMBER as
+// the unwrapped spelling does, so its exact protected match stays known
+// (GAP-1478).
+func EnvInputNamedMutation(fact *semanticpb.EffectFact) bool {
 	switch effects.Kind(fact.GetKind()) {
 	case effects.KindWrite, effects.KindAppend, effects.KindDelete:
-		return HomeInput(fact)
+		return EnvInput(fact)
 	}
 	return false
 }
