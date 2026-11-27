@@ -2016,6 +2016,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// per-user gateway serves it only in the authenticated /status.
 		// Secure Client keeps its health body (issue #1092).
 		body["hook_capacity"] = hookCapacity.snapshot()
+		// The hook decisions the managed hook took on its own in the last
+		// 24 h, counted from the host log (rel-1-0-10:GAP-2042).
+		body["host_records"] = hostRecords.snapshot()
 	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger
@@ -2256,6 +2259,7 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
 				status["profile_warnings"] = warnings
 			}
+			status["host_records"] = hostRecords.snapshot() // GAP-2042
 			if broker := routePeerBrokerProbe(r, cfg); broker != nil {
 				status["route_peer_broker"] = broker
 			}

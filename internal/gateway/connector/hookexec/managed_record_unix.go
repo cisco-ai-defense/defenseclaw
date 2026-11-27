@@ -67,7 +67,10 @@ func writeManagedHookDecisionRecord(source, marker, line string) {
 	}
 }
 
-func managedHookDecisionRecordSource(serviceName string) string {
+// ManagedHookDecisionRecordSource is the syslog tag of the decision records:
+// the gateway service name, the production name when there is none. The
+// managed gateway counts the records under it (GAP-2042).
+func ManagedHookDecisionRecordSource(serviceName string) string {
 	if serviceName == "" {
 		return managedHookDecisionRecordDefaultSource
 	}
