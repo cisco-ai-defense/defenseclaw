@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 // GAP-2287: a write through a link the same command makes keeps the spelling
@@ -100,6 +102,48 @@ func TestGAP2288DotDotMoveDestinations(t *testing.T) {
 	for _, command := range []string{"mv /tmp/s .claude/settings.json", "cp /tmp/s x/../.claude/settings.json", "mv /tmp/s $D/../x"} {
 		if got := DotDotMoveDestinations(command, cwd, home); len(got) != 0 {
 			t.Errorf("%q: %q, want none", command, got)
+		}
+	}
+}
+
+// CHK-T6-2287 H1: once the command makes a link, linkBeforeStep read each
+// part of a placed path by joining every part before it, so a long path cost
+// its length squared: a 60 KB command (under actionfacts.MaxCommandBytes) took
+// seconds. The walk keeps a running prefix now, so it costs one pass.
+func TestGAP2287LinkBeforeStepScale(t *testing.T) {
+	const cwd, home = "/sandbox/app", "/sandbox"
+	long := strings.Repeat("d/", 29000)
+	made := madeLinks{"/w/L": "/srv/out"}
+	for _, path := range []string{"/w/L/" + long + "f", "/w/L/" + long + "../f", "/w/" + long[:40000] + strings.Repeat("x/../", 3000) + "f"} {
+		if allocs := testing.AllocsPerRun(3, func() { made.linkBeforeStep(path) }); allocs > 64 {
+			t.Errorf("linkBeforeStep of a %d-byte path: %.0f allocations, want a few (one pass, not one per part)", len(path), allocs)
+		}
+	}
+	for _, row := range []struct {
+		name string
+		run  func() int
+	}{
+		{"cp through a made link", func() int {
+			return len(LiteralWriteOperands("ln -s /srv/out L && cp a.txt L/"+long+"f", cwd, home))
+		}},
+		{"mv dot-dot through a made link", func() int {
+			return len(LiteralWriteOperands("ln -s /srv/out L && mv a.txt L/"+long+"../f", cwd, home))
+		}},
+		{"guard mv dot-dot through a made link", func() int {
+			return len(DotDotMoveDestinations("ln -s /srv/out L && mv a.txt L/"+long+"../f", cwd, home))
+		}},
+	} {
+		best := time.Duration(1 << 62)
+		for range 3 {
+			start := time.Now()
+			if row.run() == 0 {
+				t.Errorf("%s: no write read", row.name)
+			}
+			best = min(best, time.Since(start))
+		}
+		t.Logf("%s: %v", row.name, best)
+		if best > 250*time.Millisecond {
+			t.Errorf("%s, a %d-byte path: %v, want one pass (well under 250ms)", row.name, len(long), best)
 		}
 	}
 }

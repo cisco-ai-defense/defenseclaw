@@ -78,28 +78,45 @@ func (m madeLinks) linkBeforeStep(placed string) bool {
 	if len(m) == 0 && !strings.Contains(slashed, "/../") && !strings.HasSuffix(slashed, "/..") {
 		return false
 	}
-	parts := make([]string, 0, 8)
+	// prefix is the walk so far, "/" and the kept parts; ends holds its
+	// length after each kept part. A part in or a step out costs no rebuild,
+	// so a long path costs one pass, not a join per part (CHK-T6-2287 H1).
+	prefix := make([]byte, 0, len(slashed))
+	ends := make([]int, 0, 8)
+	var notLink map[string]bool
 	for _, part := range strings.Split(slashed, "/")[1:] {
 		switch part {
 		case "", ".":
 			continue
 		case "..":
-			if len(parts) == 0 {
+			if len(ends) == 0 {
 				continue
 			}
-			prefix := "/" + strings.Join(parts, "/")
-			if _, made := m[prefix]; made {
+			if _, made := m[string(prefix)]; made {
 				return true
 			}
-			if info, err := pathLstat(filepath.FromSlash(prefix)); err == nil && info.Mode()&os.ModeSymlink != 0 {
-				return true
+			// A folder already read is no link: a repeated x/.. reads once.
+			if !notLink[string(prefix)] {
+				name := string(prefix)
+				if info, err := pathLstat(filepath.FromSlash(name)); err == nil && info.Mode()&os.ModeSymlink != 0 {
+					return true
+				}
+				if notLink == nil {
+					notLink = make(map[string]bool)
+				}
+				notLink[name] = true
 			}
-			parts = parts[:len(parts)-1]
+			ends = ends[:len(ends)-1]
+			prefix = prefix[:0]
+			if len(ends) != 0 {
+				prefix = prefix[:ends[len(ends)-1]]
+			}
 			continue
 		}
-		parts = append(parts, part)
+		prefix = append(append(prefix, '/'), part...)
+		ends = append(ends, len(prefix))
 		if len(m) != 0 {
-			if target, made := m["/"+strings.Join(parts, "/")]; made && throughProcessLink(target) {
+			if target, made := m[string(prefix)]; made && throughProcessLink(target) {
 				return true
 			}
 		}
