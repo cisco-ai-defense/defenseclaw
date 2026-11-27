@@ -125,6 +125,10 @@ type usageResponseWriter struct {
 	// endErr is how the forwarded call broke off, set by the stream code
 	// (setUsageEndErr); end(nil) ends the record with it (GAP-1112).
 	endErr error
+	// blocked is set once the gateway ends the stream itself
+	// (usageStreamBlocked): what it writes after that is its own block, not
+	// the provider's answer, and is not read for usage.
+	blocked bool
 }
 
 func (u *usageResponseWriter) WriteHeader(status int) {
@@ -149,9 +153,12 @@ func (u *usageResponseWriter) Write(p []byte) (int, error) {
 		u.header = true
 		u.call.UpstreamHeader(http.StatusOK, u.Header())
 	}
-	if u.streaming {
+	switch {
+	case u.blocked:
+		// The gateway's own block: never the provider's usage.
+	case u.streaming:
 		u.call.Chunk(p)
-	} else if !u.over {
+	case !u.over:
 		if len(u.body)+len(p) > usageBodyCap {
 			u.over, u.body = true, nil
 		} else {
@@ -224,6 +231,27 @@ func setUsageEndErr(w http.ResponseWriter, err error) {
 	if uw.endErr == nil && !uw.ended {
 		uw.endErr = err
 	}
+	uw.mu.Unlock()
+}
+
+// usageStreamBlocked tells the usage record of the call answering through w
+// that the gateway ends the stream itself (a guardrail block) after the
+// provider began answering. The record ends cancelled (error type blocked)
+// unless it already broke off another way, and the block the gateway writes
+// next (a block tail with an Anthropic message_delta usage, a Gemini
+// finishReason, a [DONE]) is never read as the provider's usage, so a call
+// cut before the provider's final usage is of unknown cost
+// (substrate-1:GAP-1119).
+func usageStreamBlocked(w http.ResponseWriter) {
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return
+	}
+	uw.mu.Lock()
+	if uw.endErr == nil && !uw.ended {
+		uw.endErr = modelusage.ErrStreamBlocked
+	}
+	uw.blocked = true
 	uw.mu.Unlock()
 }
 

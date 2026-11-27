@@ -472,6 +472,8 @@ func (c *call) build(err error) Record {
 		// The upstream answered with a failure: it stays failed even when
 		// the client then went away while the body was written.
 		rec.Outcome, rec.ErrorType = "failed", "http_"+itoa(c.status)
+	case errors.Is(err, ErrStreamBlocked):
+		rec.Outcome, rec.ErrorType = "cancelled", "blocked"
 	case errors.Is(err, context.Canceled), errors.Is(err, ErrClientGone):
 		rec.Outcome, rec.ErrorType = "cancelled", "cancelled"
 	case err != nil:

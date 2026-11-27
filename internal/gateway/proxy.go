@@ -4178,6 +4178,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta.ResponseID = firstNonEmpty(streamResponseID, stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked"))
 		blockedMeta.ResponseIDReported = strings.TrimSpace(streamResponseID) != ""
 		p.emitLLMResponseEventV8(llmCtx, blockedMeta, "", "", append(streamFinishReasons, "blocked"))
+		// The gateway ended the provider's stream: without the provider's
+		// final usage the call is of unknown cost (substrate-1:GAP-1119).
+		usageStreamBlocked(w)
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
 			ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
@@ -6688,6 +6691,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 
 	blockStream := func(reason string) {
 		streamBlocked = true
+		usageStreamBlocked(w) // substrate-1:GAP-1119
 		sseOutcome = "blocked"
 		sseMetricOutcome = observability.OutcomeBlocked
 		msg := blockMessage(customBlockMsg, "completion", reason)

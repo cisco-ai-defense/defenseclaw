@@ -242,6 +242,9 @@ func (s *passthroughStream) run() {
 	p, w, r, resp, mode, label := s.p, s.w, s.r, s.resp, s.mode, s.label
 	ctx := r.Context()
 	blockedReply := func(msg string) {
+		// The upstream answered: a block from here on cuts the provider's
+		// answer (substrate-1:GAP-1119).
+		usageStreamBlocked(w)
 		out := w
 		if s.bedrock != nil {
 			// The reply headers are out already: the block frames follow them.
@@ -401,6 +404,7 @@ func (s *passthroughStream) run() {
 	// under way, in its own shape after the last content block the agent
 	// got (GAP-1206). Held events are dropped.
 	endBlock := func() {
+		usageStreamBlocked(w)
 		switch {
 		case released == 0:
 			blockedReply(sseBlockMsg)
