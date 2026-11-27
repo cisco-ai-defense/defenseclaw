@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -29,7 +30,7 @@ import (
 // halves, so a command that reaches k members costs about k*log(n) reads of
 // the command rather than one per member. A write proof concerns one member,
 // so a half reaches exactly when one of its members does.
-func registrationWriteReachedAs(command, cwd, home string, names []string) []string {
+func registrationWriteReachedAs(command, cwd, home string, names []string, spellings *RegistrationSpellings) []string {
 	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
 		return nil
 	}
@@ -43,18 +44,21 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	protected := make(protectedFiles, 0, len(names))
 	origin := make([]string, 0, len(names))
 	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
+	if spellings == nil {
+		spellings = NewRegistrationSpellings()
+	}
 	for _, name := range names {
 		if !filepath.IsAbs(name) {
 			continue
 		}
 		entry := protectedFile{path: filepath.Clean(name), call: call}
-		if physical, ok := ResolveWriteTarget(entry.path); ok && physical != entry.path {
-			entry.physical = physical
-		}
 		if info, err := call.stat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
 			entry.unknown = true
+		}
+		if physical := spellings.physical(entry.path); physical != "" && physical != entry.path {
+			entry.physical = physical
 		}
 		protected = append(protected, entry)
 		origin = append(origin, name)
@@ -330,7 +334,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 		// (sudo -D/--chdir DIR, env -C DIR, chroot ROOT; rel-1-0-10:GAP-2286).
 		// Under chroot an absolute operand names a path below the new root.
 		removal, removalCWD, removalRoot, removalBase, removalKnown := call.Args, currentCWD, "", base, known
-		if known && len(call.Args) > 2 && !slices.Contains(registrationRemovalPrograms, base) {
+		if known && len(call.Args) > 2 && (actionfacts.PrefixWrapperProgram(base) || base == "chroot") {
 			if child, folder, root, wrapped := registrationWrappedCall(call.Args, values, currentCWD, home); wrapped {
 				removal, removalCWD, removalRoot = child, folder, root
 				childProgram, childKnown := staticProgramWord(child[0], home)
@@ -429,6 +433,79 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 	}
 	syntax.Walk(file, visit)
 	return found
+}
+
+// RegistrationSpellings are the physical spellings (protectedFile.physical)
+// of registration names, read once for a hook call. The reach reader runs for
+// every statement and every reading of a call against the same names: each
+// statement walked the links of every name again, and a 60-statement removal
+// command cost 1.47 times the hook p99 of its parent (rel-1-0-10:GAP-2285,
+// TST-18078). A hook call is one decision over one file system
+// (ResolveWriteTarget), so a spelling read once holds for the rest of the
+// call; a caller keeps one only for the call it reads. nil reads afresh.
+type RegistrationSpellings struct {
+	mu      sync.Mutex
+	names   map[string]string
+	folders map[string]registrationFolder
+}
+
+// registrationFolder is a folder of registration names as the link-aware
+// walk resolves it.
+type registrationFolder struct {
+	resolved string
+	ok       bool
+}
+
+// NewRegistrationSpellings is an empty set of spellings for one hook call.
+func NewRegistrationSpellings() *RegistrationSpellings {
+	return &RegistrationSpellings{names: make(map[string]string), folders: make(map[string]registrationFolder)}
+}
+
+// physical is the spelling ResolveWriteTarget gives path ("" when it does
+// not resolve), read once for each name.
+func (s *RegistrationSpellings) physical(path string) string {
+	s.mu.Lock()
+	physical, found := s.names[path]
+	s.mu.Unlock()
+	if found {
+		return physical
+	}
+	physical = s.resolve(path)
+	s.mu.Lock()
+	s.names[path] = physical
+	s.mu.Unlock()
+	return physical
+}
+
+// resolve is ResolveWriteTarget of an absolute clean path. The folder of the
+// path is resolved once for every name in it; a last component that is no
+// link (a file, a folder, or missing) is then joined to it, as the walk joins
+// it (walkWritePathWhy). Any other last component (a link, an unreadable
+// entry) is walked whole, and so is every name on Windows, where a mount
+// point is a link too and the call memory already keeps the walks.
+func (s *RegistrationSpellings) resolve(path string) string {
+	if parent := filepath.Dir(path); runtime.GOOS != "windows" && parent != path {
+		s.mu.Lock()
+		folder, found := s.folders[parent]
+		s.mu.Unlock()
+		if !found {
+			folder.resolved, folder.ok = ResolveWriteTarget(parent)
+			s.mu.Lock()
+			s.folders[parent] = folder
+			s.mu.Unlock()
+		}
+		if folder.ok {
+			candidate := filepath.Join(folder.resolved, filepath.Base(path))
+			if info, err := pathLstat(candidate); err == nil && info.Mode()&os.ModeSymlink == 0 || os.IsNotExist(err) {
+				return candidate
+			}
+		}
+	}
+	resolved, ok := ResolveWriteTarget(path)
+	if !ok {
+		return ""
+	}
+	return resolved
 }
 
 // registrationRootedOperand is an operand of a call run under root (chroot;

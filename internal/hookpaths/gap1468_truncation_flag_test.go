@@ -84,7 +84,7 @@ func TestGAP1468RegistrationReadersKeepTheTruncation(t *testing.T) {
 		{"for f in " + small + "/f*; do rm -f \"$f\"; done", []string{registered}, false, false},
 		{"rm -f " + wide + "/0first*", []string{filepath.Join(wide, first)}, true, false},
 	} {
-		reached, truncated := RegistrationWriteReachedBounded(row.command, home, home, row.names)
+		reached, truncated := RegistrationWriteReachedBounded(row.command, home, home, row.names, nil)
 		if got := len(reached) != 0; got != row.reached {
 			t.Errorf("%q: reached %q, want reached=%v", row.command, reached, row.reached)
 		}
