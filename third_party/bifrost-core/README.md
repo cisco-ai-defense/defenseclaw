@@ -14,4 +14,11 @@ also closes it during either step.
 versions. `TestGAP0564RealProviderCancellationReason`,
 `TestGAP0564RealProviderDeadlineDisconnect`, and
 `TestGAP0564RealProviderBenignAnswer` cover the local change.
+`bifrost.go` also sets `BifrostContextKeyProviderAccepted` (a new key in
+`schemas/bifrost.go`) when a provider returns a stream, that is, after its
+HTTP status check passed. It is never cleared for retries or fallbacks, so
+the DefenseClaw gateway can tell a call that a provider accepted (and may
+bill) from one every provider refused with an error status, even when the
+stream then fails with a status of its own or a later attempt is refused.
+`TestTranslatedChatStreamAcceptedRequestIsUnknownCost` covers it.
 The copied Go sources are formatted with the pinned toolchain.

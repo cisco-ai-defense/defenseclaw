@@ -757,11 +757,17 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 // before the response leaves none. An error status the provider answered
 // with is the error's status code on an error Bifrost did not make itself;
 // any other error came from the stream after a 200 (rel-1-0-10:GAP-2233).
-// The gateway configures no retries or fallbacks, so the headers are this
-// attempt's.
+// Once a provider opened a stream (Bifrost marks the call accepted after the
+// HTTP status check), the call answered 200 whatever status the error then
+// carries: an in-stream error event with a status (Gemini error.code, an
+// OpenAI-family status_code, a Bedrock retryable exception) or the error
+// status of a later agent-supplied fallback (rel-1-0-10:GAP-2254, GAP-2255).
 func bifrostStreamAnswer(bCtx *schemas.BifrostContext, bErr *schemas.BifrostError) (int, bool) {
 	if _, ok := bCtx.Value(schemas.BifrostContextKeyProviderResponseHeaders).(map[string]string); !ok {
 		return 0, false
+	}
+	if accepted, _ := bCtx.Value(schemas.BifrostContextKeyProviderAccepted).(bool); accepted {
+		return http.StatusOK, true
 	}
 	if bErr.StatusCode != nil && *bErr.StatusCode >= 400 && !bErr.IsBifrostError && !bifrostStreamBreak(bErr) {
 		return *bErr.StatusCode, true
