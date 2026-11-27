@@ -696,6 +696,14 @@ func (c SubstrateConfig) substrateProfiles() SubstrateProfileResolver {
 	}
 }
 
+// substrateRegistryReadWindow is how long list and status wait for the
+// leader's registry. A leader change takes about 5 s to answer again, so the
+// read retries inside this window; after it the call fails at once with
+// registrations_unavailable and the plain "try again in a minute" message,
+// instead of holding the person for the CLI's whole 30 s timeout
+// (GAP-1089). A var so a test can shorten it.
+var substrateRegistryReadWindow = 8 * time.Second
+
 func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, _ := substrateCallerFrom(r.Context())
@@ -704,7 +712,9 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		if everyone {
 			f.OwnerID = ""
 		}
-		regs, err := st.cfg.Registrations.List(r.Context(), f)
+		readCtx, cancel := context.WithTimeout(r.Context(), substrateRegistryReadWindow)
+		regs, err := st.cfg.Registrations.List(readCtx, f)
+		cancel()
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registrations_unavailable")
 			return
@@ -845,7 +855,9 @@ func (a *APIServer) substrateFind(st *substrateState, r *http.Request, atespace,
 	if err != nil {
 		return registry.Registration{}, http.StatusServiceUnavailable, "control_api_unavailable"
 	}
-	reg, ok, err := st.cfg.Registrations.Get(r.Context(), atespace, live.UID)
+	readCtx, cancel := context.WithTimeout(r.Context(), substrateRegistryReadWindow)
+	reg, ok, err := st.cfg.Registrations.Get(readCtx, atespace, live.UID)
+	cancel()
 	if err != nil {
 		return registry.Registration{}, http.StatusServiceUnavailable, "registrations_unavailable"
 	}
@@ -911,6 +923,9 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "delete_failed")
 			return
 		}
+		// The cluster has deleted the actor: record it now, so the row exists
+		// even when the registration write below fails (GAP-0667).
+		a.substrateAuditDeleted(st, r, reg, snaps, counted)
 		reg.Deleted = true
 		if err := st.cfg.Registrations.Put(r.Context(), reg); err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registration_failed")
@@ -920,7 +935,6 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			inv.Invalidate(reg.Atespace, reg.Name)
 		}
 		v := st.actorView(reg)
-		a.substrateAuditDeleted(st, r, reg, snaps, counted)
 		if counted {
 			v["snapshots"] = snaps
 		}
@@ -952,7 +966,7 @@ func (a *APIServer) substrateAuditDeleted(st *substrateState, r *http.Request, r
 	st.audit(context.WithoutCancel(r.Context()), "INFO", summary, map[string]any{
 		"event": "actor_deleted", "atespace": reg.Atespace, "actor": reg.Atespace + "/" + reg.Name, "actor_uid": reg.UID,
 		"principal": c.person.Principal, "person_id": ownerOf(c.person).ID(), "owner": reg.Person.Principal,
-		"admin": c.admin && !substrateOwnedBy(c, reg), "snapshots": snaps, "batch_id": reg.BatchID,
+		"by_admin": c.admin && !substrateOwnedBy(c, reg), "snapshots": snaps, "batch_id": reg.BatchID,
 	})
 }
 

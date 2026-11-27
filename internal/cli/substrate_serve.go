@@ -1387,12 +1387,21 @@ func substrateChainRegistrations(store registry.Store) chainstate.Options {
 		},
 		// An actor registered in this leader term, not a fork, skips the
 		// chain start grace (GAP-0642).
-		Born: func(ctx context.Context, atespace, uid string) (time.Time, string, error) {
-			reg, ok, err := store.Get(ctx, atespace, uid)
-			if err != nil || !ok {
-				return time.Time{}, "", err
+		// "Registered in this term" is the leader's own set of registrations
+		// it wrote (GAP-1148), not a comparison of CreatedAt, written by
+		// another node, with this node's clock.
+		Born: func(ctx context.Context, atespace, uid string) (bool, string, error) {
+			term, ok := store.(interface {
+				RegisteredThisTerm(atespace, uid string) bool
+			})
+			if !ok || !term.RegisteredThisTerm(atespace, uid) {
+				return false, "", nil
 			}
-			return reg.CreatedAt, reg.ParentUID, nil
+			reg, found, err := store.Get(ctx, atespace, uid)
+			if err != nil || !found {
+				return false, "", err
+			}
+			return true, reg.ParentUID, nil
 		},
 	}
 }

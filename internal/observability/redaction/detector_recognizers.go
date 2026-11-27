@@ -653,6 +653,19 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 	for _, index := range indices {
 		boundary := entropyBoundary(input, index[0], index[1])
 		span := input[index[0]:index[1]]
+		// DefenseClaw's own route text (a substrate API route in an audit row) is
+		// a public grammar, not key material (GAP-1145): its fixed prefix and
+		// path words stay readable; what follows them is judged as before.
+		if routeEnd := routeGrammarEnd(span); routeEnd > 0 {
+			// The span is judged as written, as before, so nothing the detector
+			// redacted after the grammar stops being redacted; only the grammar
+			// itself, which is never a value, stays readable. A span that is
+			// only grammar has nothing left to redact.
+			accepted := boundary && validHighEntropy(span, fieldClass) &&
+				routeEnd < len(span) && !overlapsCredentialClaim(index[0]+routeEnd, index[1], prior)
+			result = append(result, candidate{start: index[0] + routeEnd, end: index[1], accepted: accepted})
+			continue
+		}
 		parts, folderFound := splitAtProductFolders(span)
 		// A product folder component is neutral. A span without one is judged
 		// exactly as before. A span with one is a secret only when the detector
@@ -678,6 +691,45 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 		}
 	}
 	return result
+}
+
+// routeGrammarPrefix is the fixed start of DefenseClaw's substrate API routes.
+const routeGrammarPrefix = "/api/v1/substrate/"
+
+// routeGrammarWords are the path words DefenseClaw's own substrate routes
+// use. A word is exempt only as a whole path component directly after the
+// prefix or another exempt word; a value that is not one of these, or that
+// merely contains one, is judged as before.
+var routeGrammarWords = map[string]struct{}{
+	"actors": {}, "admin": {}, "ask": {}, "asks": {}, "approvals": {}, "attach": {}, "batches": {},
+	"bundle": {}, "callout": {}, "decisions": {}, "doctor": {}, "explain": {}, "files": {}, "hook": {},
+	"info": {}, "inspect": {}, "launcher": {}, "mcp": {}, "notify": {}, "policy": {}, "push": {},
+	"readyz": {}, "recover": {}, "relay": {}, "reset": {}, "revocations": {}, "revoke": {}, "rollback": {},
+	"secret-templates": {}, "secrets": {}, "session-cert": {}, "signin": {}, "snapshot": {}, "status": {},
+	"task": {}, "test": {}, "usage": {}, "verdict": {},
+}
+
+// routeGrammarEnd is how many leading bytes of span are DefenseClaw's fixed
+// route grammar: the literal prefix and the run of its path words that
+// follows it. It is 0 unless span starts with the prefix. The rest of the
+// span (an atespace, a name, an id, anything else) is not exempt.
+func routeGrammarEnd(span string) int {
+	if !strings.HasPrefix(span, routeGrammarPrefix) {
+		return 0
+	}
+	end := len(routeGrammarPrefix)
+	for end < len(span) {
+		next := strings.IndexByte(span[end:], byte(0x2f))
+		word, step := span[end:], len(span)-end
+		if next >= 0 {
+			word, step = span[end:end+next], next+1
+		}
+		if _, ok := routeGrammarWords[word]; !ok {
+			break
+		}
+		end += step
+	}
+	return end
 }
 
 // joinRanges rebuilds span with the product folder components taken out: the

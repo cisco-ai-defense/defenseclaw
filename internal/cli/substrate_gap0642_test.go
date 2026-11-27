@@ -21,7 +21,28 @@ import (
 // still wait out the grace (GAP-0601).
 func TestGAP0642LeaderAnswersAnActorRegisteredInItsTerm(t *testing.T) {
 	ctx := context.Background()
-	store, err := registry.OpenFileStore(t.TempDir())
+	dir := t.TempDir()
+	person := registry.Person{Kind: "oidc", Issuer: "https://idp.example", Subject: "s-1", Principal: "eng1"}
+	reg := func(name, uid, parent string) registry.Registration {
+		return registry.Registration{Atespace: "dc-eng", UID: uid, Name: name, Connector: "claudecode", Person: person, ParentUID: parent}
+	}
+	request := func(name, uid string) chainstate.EgressRequest {
+		return chainstate.EgressRequest{Actor: chainstate.Actor{Atespace: "dc-eng", UID: uid}, Name: name, Host: "github.com", Method: "GET"}
+	}
+	// "older" is on disk when the leader process starts: not registered in its term.
+	before, err := registry.OpenFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Its CreatedAt was written by another node whose clock is an hour ahead
+	// of this one: compared with the term's start it would look born in the
+	// term (GAP-1148). The leader's own set does not read it.
+	skewed := reg("old-1", "7a2b3c4d-5e6f-4a70-8b9c-0d1e2f3a4b5c", "")
+	skewed.CreatedAt = time.Now().Add(time.Hour)
+	if err := before.Put(ctx, skewed); err != nil {
+		t.Fatal(err)
+	}
+	store, err := registry.OpenFileStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,20 +53,16 @@ func TestGAP0642LeaderAnswersAnActorRegisteredInItsTerm(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = svc.Close() })
 	svc.Leading()
-	person := registry.Person{Kind: "oidc", Issuer: "https://idp.example", Subject: "s-1", Principal: "eng1"}
-	put := func(name, uid, parent string, created time.Time) chainstate.EgressRequest {
+	put := func(name, uid, parent string) chainstate.EgressRequest {
 		t.Helper()
-		r := registry.Registration{Atespace: "dc-eng", UID: uid, Name: name, Connector: "claudecode", Person: person,
-			ParentUID: parent, CreatedAt: created}
-		if err := store.Put(ctx, r); err != nil {
+		if err := store.Put(ctx, reg(name, uid, parent)); err != nil {
 			t.Fatalf("put %s: %v", name, err)
 		}
-		return chainstate.EgressRequest{Actor: chainstate.Actor{Atespace: "dc-eng", UID: uid}, Name: name, Host: "github.com", Method: "GET"}
+		return request(name, uid)
 	}
-	fresh := put("sv17-c1", "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b", "", time.Time{})
-	older := put("old-1", "7a2b3c4d-5e6f-4a70-8b9c-0d1e2f3a4b5c", "", time.Now().Add(-time.Hour))
-	fork := put("fork-1", "8b3c4d5e-6f7a-4b80-9c0d-1e2f3a4b5c6d", older.Actor.UID, time.Time{})
-
+	fresh := put("sv17-c1", "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b", "")
+	older := request("old-1", "7a2b3c4d-5e6f-4a70-8b9c-0d1e2f3a4b5c")
+	fork := put("fork-1", "8b3c4d5e-6f7a-4b80-9c0d-1e2f3a4b5c6d", older.Actor.UID)
 	if v, err := svc.Egress(ctx, fresh); err != nil || v.Deny {
 		t.Fatalf("the first clone of an actor registered after the restart: %+v %v, want a clear answer", v, err)
 	}

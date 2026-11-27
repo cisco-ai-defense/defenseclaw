@@ -150,11 +150,12 @@ type Options struct {
 	// cap the first clear check after any restart was refused, however long
 	// after the restart it came (GAP-0601, IB5 TST-2593).
 	StartGrace time.Duration
-	// Born returns when the actor's registration was made and its parent
-	// UID ("" for none). An actor registered in this leader term with no
-	// parent skips the start grace (bornInTerm, GAP-0642). Nil, an error
-	// or no registration keeps the grace.
-	Born func(ctx context.Context, atespace, uid string) (created time.Time, parentUID string, err error)
+	// Born says whether this leader registered the actor itself in its own
+	// term (its own state, not a timestamp another node wrote: GAP-1148) and
+	// returns the actor's parent UID ("" for none). An actor registered in
+	// this leader term with no parent skips the start grace (bornInTerm,
+	// GAP-0642). Nil, an error or no registration keeps the grace.
+	Born func(ctx context.Context, atespace, uid string) (registeredThisTerm bool, parentUID string, err error)
 }
 
 // Service is the leader's chain and intent state. Every actor has its own
@@ -1701,11 +1702,8 @@ func (s *Service) bornInTerm(ctx context.Context, a Actor) bool {
 	if s.opts.Born == nil || a.UID == "" {
 		return false
 	}
-	s.graceMu.Lock()
-	term := s.termAt
-	s.graceMu.Unlock()
-	created, parent, err := s.opts.Born(ctx, a.Atespace, a.UID)
-	return err == nil && parent == "" && !created.IsZero() && !created.Before(term)
+	born, parent, err := s.opts.Born(ctx, a.Atespace, a.UID)
+	return err == nil && born && parent == ""
 }
 
 // startGraceCap is how long after the start of a leader term the start

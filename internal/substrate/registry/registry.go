@@ -317,6 +317,30 @@ type FileStore struct {
 	// certs is the live relay certificate per registration key
 	// (relaycert.go, GAP-0861).
 	certs map[string]RelayCert
+	// born is the keys this process registered for the first time. The leader
+	// alone opens the store and its term lasts as long as the process, so this
+	// is "registered in my term" without comparing clocks of two nodes
+	// (GAP-1148). It stops growing at maxBornKeys: the chain start grace that
+	// reads it lasts seconds, and a key it lacks only keeps the grace.
+	born map[string]struct{}
+}
+
+// maxBornKeys bounds the set of registrations RegisteredThisTerm knows.
+const maxBornKeys = 65536
+
+// RegisteredThisTerm reports whether this process, the leader, wrote the
+// first registration of atespace/uid itself, as opposed to loading it from
+// disk at start. It is the leader's own state, not a timestamp another node
+// wrote (GAP-1148).
+func (s *FileStore) RegisteredThisTerm(atespace, uid string) bool {
+	key, err := sandboxreg.SubstrateKey(atespace, uid)
+	if err != nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.born[key]
+	return ok
 }
 
 // OpenFileStore loads every registration under dir.
@@ -324,7 +348,7 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
 	}
-	s := &FileStore{dir: dir, mem: map[string]Registration{}, newest: map[string]string{}, certs: map[string]RelayCert{}}
+	s := &FileStore{dir: dir, mem: map[string]Registration{}, newest: map[string]string{}, certs: map[string]RelayCert{}, born: map[string]struct{}{}}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
@@ -430,7 +454,8 @@ func (s *FileStore) Put(_ context.Context, r Registration) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.mem[r.Key]; ok {
+	old, existed := s.mem[r.Key]
+	if existed {
 		kitFill := KitFillable(old) && r.Connector != ""
 		if old.Person.ID() != r.Person.ID() || old.Name != r.Name || (old.Connector != r.Connector && !kitFill) ||
 			old.Attributed != r.Attributed || old.Unattended != r.Unattended || old.BatchID != r.BatchID {
@@ -455,6 +480,9 @@ func (s *FileStore) Put(_ context.Context, r Registration) error {
 	}
 	s.mem[r.Key] = r
 	s.indexLocked(r)
+	if !existed && len(s.born) < maxBornKeys {
+		s.born[r.Key] = struct{}{}
+	}
 	return nil
 }
 
