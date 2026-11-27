@@ -55,6 +55,16 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	parsedSource := source
 	file, err := parser.Parse(shellparse.Reader(source), "")
 	if err != nil {
+		if rewritten, ok := normalizePOSIXFunctionKeyword(source); ok {
+			// function f { ...; } is the definition f() { ...; } in Bash and
+			// zsh: read it as that (substrate-1:GAP-0705).
+			parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
+			if parsed, rewrittenErr := parser.Parse(shellparse.Reader(rewritten), ""); rewrittenErr == nil {
+				file, err, parsedSource = parsed, nil, rewritten
+			}
+		}
+	}
+	if err != nil {
 		normalized, valid := normalizePOSIXAggregateRedirects(source, true)
 		if !valid {
 			out.markInvalid(IssueInvalidSyntax)
@@ -201,6 +211,58 @@ func collectExactPOSIXAbsoluteCDFallback(
 	target := projectPOSIXWord(call.Args[1])
 	return !program.Expands && program.Value == "cd" &&
 		!target.Expands && strings.HasPrefix(target.Value, "/")
+}
+
+// normalizePOSIXFunctionKeyword rewrites each Bash and zsh definition that
+// starts with the function keyword (function f { ...; }, function f() ...)
+// into the POSIX definition of the same name and body (f() { ...; }), and
+// false when it has none. The rest of the source is kept byte for byte, so
+// other Bash-only syntax stays invalid; a source with an all-output redirect
+// (&> f, >& f), which POSIX reads as a background command, is left to
+// normalizePOSIXAggregateRedirects and stays invalid with the keyword.
+func normalizePOSIXFunctionKeyword(source string) (string, bool) {
+	if !strings.Contains(source, "function") {
+		return "", false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(source), "")
+	if err != nil {
+		return "", false
+	}
+	type replacement struct {
+		start, end int
+		value      string
+	}
+	var replacements []replacement
+	valid := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Redirect:
+			switch typed.Op {
+			case syntax.RdrAll, syntax.RdrAllClob, syntax.AppAll, syntax.AppAllClob, syntax.DplOut:
+				valid = false
+			}
+		case *syntax.FuncDecl:
+			if !typed.RsrvWord || typed.Name == nil || typed.Body == nil {
+				return valid
+			}
+			start, end := int(typed.Pos().Offset()), int(typed.Body.Pos().Offset())
+			if start < 0 || end <= start || end > len(source) || !strings.HasPrefix(source[start:], "function") {
+				valid = false
+				return false
+			}
+			replacements = append(replacements, replacement{start, end, typed.Name.Value + "() "})
+		}
+		return valid
+	})
+	if !valid || len(replacements) == 0 {
+		return "", false
+	}
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start > replacements[j].start })
+	result := source
+	for _, edit := range replacements {
+		result = result[:edit.start] + edit.value + result[edit.end:]
+	}
+	return result, true
 }
 
 // normalizePOSIXAggregateRedirects rewrites the Bash and zsh redirects of
