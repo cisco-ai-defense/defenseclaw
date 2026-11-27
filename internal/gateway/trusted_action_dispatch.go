@@ -6433,7 +6433,7 @@ func appendJSONStrings(texts []string, raw json.RawMessage) []string {
 // DefenseClaw's own state (the observe-mode self-protection block,
 // provenActiveStateMutation) over any other. A weaker finding the original
 // spelling raised (a ~<login> path the gateway cannot place, GAP-2378) must
-// not hide the twin's proof, nor the same proof at a lower severity.
+// not hide the twin's proof.
 func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 	strength := func(finding RuleFinding) int {
 		switch {
@@ -6462,15 +6462,6 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		case index < 0:
 			findings = append(findings, proven)
 		case strength(proven) > strength(findings[index]):
-			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
-		case strength(proven) == strength(findings[index]) && proven.profile == findings[index].profile &&
-			severityRank[strings.ToUpper(proven.Severity)] > severityRank[strings.ToUpper(findings[index].Severity)]:
-			// The same proof at a higher severity: the strict read of a
-			// ~<login> credential path is HIGH, its twin's upload CRITICAL
-			// (substrate-1:GAP-0706). Only the same profile's: in a meet each
-			// member keeps its own finding of a rule, so an observing
-			// member's CRITICAL never takes the place of the action member's
-			// HIGH (TestMeetConflictingReadKeepsEachMembersVerdictAndAudit).
 			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
 		}
 	}
@@ -8713,7 +8704,6 @@ func finalizeTrustedActionFindings(
 	findings = applyTrustedActionContextDisposition(generation, facts, findings, trustedActionDispositionScope{
 		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
 		sendDestination:        request.sendDestination,
-		strictPolicy:           request.StrictPolicy,
 	})
 	findings = withProvenScopeFindings(generation, request, facts, findings)
 	if !request.StrictPolicy {

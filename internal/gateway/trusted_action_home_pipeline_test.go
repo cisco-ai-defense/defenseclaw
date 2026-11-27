@@ -56,13 +56,6 @@ func TestTrustedActionHomeCredentialPipeline(t *testing.T) {
 					path == nil || !path.contributesToEnforcement() || path.Severity != "CRITICAL" {
 					t.Fatalf("exfil=%+v path=%+v, want enforceable CRITICAL credential upload", exfil, path)
 				}
-			} else if test.name == "read only" {
-				// The strict pack blocks a content read of the credential
-				// file, at HIGH (substrate-1:GAP-0706).
-				if (exfil != nil && exfil.contributesToEnforcement()) ||
-					path == nil || !path.contributesToEnforcement() || path.Severity != "HIGH" {
-					t.Fatalf("findings = %v, want the enforceable HIGH read of the strict pack", FindingStrings(findings))
-				}
 			} else if (exfil != nil && exfil.contributesToEnforcement()) ||
 				(path != nil && path.contributesToEnforcement()) {
 				t.Fatalf("findings = %v, want allowed command", FindingStrings(findings))
