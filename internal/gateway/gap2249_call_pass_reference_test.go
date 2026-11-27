@@ -172,6 +172,18 @@ func (plan *guestPlacementPlan) placementsReference(statementBudget bool) (place
 			}
 		}
 	}
+	// The split-read key calls' candidate readings in the cd targets only an
+	// unrun cd reaches (rel-1-0-10:GAP-2246), as placements adds them after
+	// the call pass.
+	if statementBudget {
+		for _, call := range plan.keyCalls {
+			for at, dir := range plan.targets {
+				if plan.lateTargets[at] && plan.known[dir] <= call.at {
+					callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
+				}
+			}
+		}
+	}
 	callsCut := !placeAll(&pass{statements: map[string]bool{}}, callReadings) || callsDropped
 	return placements, simplesCut || topCut || callsCut
 }
