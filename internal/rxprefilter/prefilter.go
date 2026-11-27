@@ -270,6 +270,14 @@ type Text struct {
 	// (literal_ranges.go).
 	hitMu   sync.Mutex
 	hitSets map[*literalPlan]hitSet
+	// memo, for a text of a role checked again and again (NewTextMemo,
+	// memo.go): memoGen is this text's turn in it, memoCommon the common
+	// prefix with the text before; the views answer the literals (mu).
+	memo       *Memo
+	memoGen    uint64
+	memoCommon int
+	rawView    *PresenceView
+	foldedView *PresenceView
 }
 
 // NewText returns the check state for text.
@@ -295,6 +303,21 @@ func (t *Text) holds(re *regexp.Regexp) bool {
 		return false
 	}
 	if !set.ok {
+		return true
+	}
+	if t.memo != nil {
+		for _, c := range set.clauses {
+			found := false
+			for _, l := range c {
+				if t.contains(l.text, l.fold) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
 		return true
 	}
 	folded := ""

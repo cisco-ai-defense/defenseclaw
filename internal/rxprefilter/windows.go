@@ -222,6 +222,14 @@ func (t *Text) FindStringIndex(re *regexp.Regexp) []int {
 	if t == nil || re == nil {
 		return nil
 	}
+	if t.memo != nil {
+		if first, ok := t.memoMatches(re, true); ok {
+			if len(first) == 0 {
+				return nil
+			}
+			return first[0]
+		}
+	}
 	if len(t.text) >= WindowMinText {
 		if spans, ok := t.runsFor(re); ok {
 			for _, span := range spans {
@@ -245,6 +253,11 @@ func (t *Text) FindStringIndex(re *regexp.Regexp) []int {
 func (t *Text) FindAllStringIndex(re *regexp.Regexp) [][]int {
 	if t == nil || re == nil {
 		return nil
+	}
+	if t.memo != nil {
+		if all, ok := t.memoMatches(re, false); ok {
+			return all
+		}
 	}
 	if len(t.text) >= WindowMinText {
 		if spans, ok := t.runsFor(re); ok {

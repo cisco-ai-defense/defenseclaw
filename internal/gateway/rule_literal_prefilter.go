@@ -11,6 +11,8 @@ import (
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
 
 // A rule's regular expression can match only text that holds one of its
@@ -246,6 +248,10 @@ type ruleScanText struct {
 	mu     sync.Mutex
 	folded string
 	ready  bool
+	// memo, for a text of a stream's mid-stream checks (midStreamScanState,
+	// GAP-0515): the fold comes from it and view answers the literals.
+	memo *midStreamTextMemo
+	view *rxprefilter.PresenceView
 	// holds is whether the folded text holds each literal searched so far.
 	// The rules of a pack share most literals (ssh, .env, curl), and each
 	// search reads the whole text: a 1 MiB command was read once per rule
@@ -280,15 +286,25 @@ func (t *ruleScanText) mayMatch(pattern *regexp.Regexp) bool {
 func (t *ruleScanText) holdsLiteral(literal string) bool {
 	t.mu.Lock()
 	if !t.ready {
-		t.folded, t.ready = foldRuleText(t.text), true
+		if t.memo != nil {
+			t.folded = t.memo.fold.Apply(t.text, foldRuleText, rxprefilter.SplitBeforeASCII)
+			t.view = t.memo.lits.View(t.folded)
+		} else {
+			t.folded = foldRuleText(t.text)
+		}
+		t.ready = true
 	}
 	held, known := t.holds[literal]
-	folded := t.folded
+	folded, view := t.folded, t.view
 	t.mu.Unlock()
 	if known {
 		return held
 	}
-	held = strings.Contains(folded, literal)
+	if view != nil {
+		held = view.Contains(literal)
+	} else {
+		held = strings.Contains(folded, literal)
+	}
 	t.mu.Lock()
 	if t.holds == nil {
 		t.holds = make(map[string]bool)
