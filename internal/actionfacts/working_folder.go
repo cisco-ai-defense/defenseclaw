@@ -261,6 +261,10 @@ type workFolderTracker struct {
 	folders map[*syntax.Stmt]workFolders
 	// movers are the functions of the text whose body may move the folder.
 	movers map[string]bool
+	// runners are the functions of the text whose every definition only
+	// runs its arguments in the shell (f() { "$@"; }): a call f cd X is the
+	// cd X (substrate-1:GAP-0713).
+	runners map[string]bool
 	// shadowed: the text defines a function named cd, chdir, pushd, popd,
 	// builtin or command, so a call of that name may run it instead of the
 	// builtin: every move may go to an unresolved folder (substrate-1:GAP-0684)
@@ -404,6 +408,18 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 		return tracker // no function, so no mover
 	}
 	tracker.movers, tracker.decls = map[string]bool{}, map[string]*syntax.FuncDecl{}
+	tracker.runners = map[string]bool{}
+	notRunner := map[string]bool{}
+	for _, decl := range all {
+		if workFolderArgRunner(decl.Body) {
+			tracker.runners[decl.Name.Value] = true
+		} else {
+			notRunner[decl.Name.Value] = true
+		}
+	}
+	for name := range notRunner {
+		delete(tracker.runners, name)
+	}
 	tracker.defs, tracker.callsOf = map[*syntax.FuncDecl]workFolderDef{}, map[string][]*syntax.CallExpr{}
 	tracker.calls, tracker.defined = new(int), map[workFolderDefinedKey]bool{}
 	tracker.firstRun = map[workFolderDefinedKey]workFolderFirstRun{}
@@ -677,6 +693,30 @@ func workFolderReturn(call *syntax.CallExpr) (returns, ok bool) {
 	return true, true
 }
 
+// workFolderArgRunner reports a function body that only runs the
+// function's arguments as a command in the shell: { "$@"; } with no
+// redirect, background or negation (a ( ) body runs them in a copy).
+func workFolderArgRunner(body *syntax.Stmt) bool {
+	block, ok := body.Cmd.(*syntax.Block)
+	if !ok || len(body.Redirs) != 0 || len(block.Stmts) != 1 {
+		return false
+	}
+	stmt := block.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Negated || stmt.Coprocess || len(stmt.Redirs) != 0 ||
+		len(call.Assigns) != 0 || len(call.Args) != 1 || len(call.Args[0].Parts) != 1 {
+		return false
+	}
+	quoted, ok := call.Args[0].Parts[0].(*syntax.DblQuoted)
+	if !ok || quoted.Dollar || len(quoted.Parts) != 1 {
+		return false
+	}
+	param, ok := quoted.Parts[0].(*syntax.ParamExp)
+	return ok && param.Param != nil && param.Param.Value == "@" &&
+		param.Exp == nil && param.Repl == nil && param.Slice == nil && param.Index == nil &&
+		!param.Excl && !param.Length && !param.Width && param.Names == 0
+}
+
 // workFolderBodyMoves reports a function body with a folder move in it, or
 // a call of one of movers.
 func workFolderBodyMoves(body *syntax.Stmt, movers map[string]bool) bool {
@@ -802,6 +842,13 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 				// After `f() { cd X || cd Y; }; f` the shell is in X, Y or
 				// where it was (rel-1-0-10:GAP-1144).
 				return t.moverCall(name.Value, cmd, in)
+			}
+		}
+		if len(cmd.Args) > 1 && len(t.runners) != 0 {
+			if name := projectPOSIXWord(cmd.Args[0]); !name.Expands && t.runners[name.Value] {
+				// After f() { "$@"; }, f cd X is the cd X, run in the shell
+				// itself (substrate-1:GAP-0713).
+				return t.command(&syntax.Stmt{Cmd: &syntax.CallExpr{Args: cmd.Args[1:]}}, in)
 			}
 		}
 		return in, in
