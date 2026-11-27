@@ -2483,10 +2483,11 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	// break; done cannot call g in ~/.defenseclaw, and counting the later
 	// pass was a strict block where the laptop and both rels allow
 	// (substrate-1 GAP-0998, SEC10-K K12). A function, an alias or an enable
-	// that may change what break or continue runs keeps every loop.
+	// that may change what break or continue runs, or a function that may
+	// run continue (guestFuncMayContinue), keeps every loop.
 	if slices.ContainsFunc(loops, func(loop span) bool { return loop.once }) &&
 		!slices.ContainsFunc(bodies, func(body span) bool { return body.name == "break" || body.name == "continue" }) &&
-		!slices.Contains(programs, "alias") && !slices.Contains(programs, "enable") {
+		!slices.Contains(programs, "alias") && !slices.Contains(programs, "enable") && (len(bodies) == 0 || !guestFuncMayContinue(file)) {
 		loops = slices.DeleteFunc(loops, func(loop span) bool { return loop.once })
 	}
 	if len(loops) == 0 && len(bodies) == 0 {
@@ -2714,7 +2715,7 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 // break that always ends the loop in its first pass: a plain break, or break
 // N of a static N of 1 or more, with no redirection, not in the background
 // and not negated, and no continue anywhere in the body that may start
-// another pass before it (substrate-1 GAP-0998). A break in a condition, a
+// another pass before it (guestLoopMayContinue; substrate-1 GAP-0998). A break in a condition, a
 // group or a subshell may not run or end nothing.
 func guestLoopRunsOnce(body []*syntax.Stmt) bool {
 	once := slices.ContainsFunc(body, func(stmt *syntax.Stmt) bool {
@@ -2732,19 +2733,68 @@ func guestLoopRunsOnce(body []*syntax.Stmt) bool {
 	if !once {
 		return false
 	}
+	// The first statement's own call may run a continue it wraps or expands
+	// to: no statement of the body ran before it in that pass, so another
+	// pass runs none after a later one.
+	first := body[0].Cmd
+	next := true
+	visit := func(node syntax.Node) bool {
+		if call, isCall := node.(*syntax.CallExpr); isCall && len(call.Args) != 0 &&
+			(call.Args[0].Lit() == "continue" || syntax.Command(call) != first && guestLoopMayContinue(call)) {
+			next = false
+		}
+		return next
+	}
 	for _, stmt := range body {
-		next := true
-		syntax.Walk(stmt, func(node syntax.Node) bool {
-			if call, isCall := node.(*syntax.CallExpr); isCall && len(call.Args) != 0 && call.Args[0].Lit() == "continue" {
-				next = false
-			}
-			return next
-		})
-		if !next {
+		if syntax.Walk(stmt, visit); !next {
 			return false
 		}
 	}
 	return true
+}
+
+// guestLoopMayContinue reports a call that may run continue in the loop
+// around it: continue itself, continue run through builtin or command, eval,
+// source or . (their text may hold one), or a program word, or a word after
+// builtin or command and its options, that is not one plain literal: it may
+// expand to continue, and a quoted continue still is one (substrate-1
+// GAP-0998, CHK-T6-SGB3 C2: builtin continue between the cd and the break
+// ran the loop again).
+func guestLoopMayContinue(call *syntax.CallExpr) bool {
+	wrapped := false
+	for _, word := range call.Args {
+		lit := word.Lit()
+		switch {
+		case lit == "builtin" || lit == "command":
+			wrapped = true
+			continue
+		case wrapped && strings.HasPrefix(lit, "-"):
+			continue
+		}
+		return lit == "" || lit == "continue" || lit == "eval" || lit == "source" || lit == "."
+	}
+	return false
+}
+
+// guestFuncMayContinue reports a function of file whose body may run
+// continue (guestLoopMayContinue): a loop that calls it may run again, as
+// bash runs a continue of a function in the loop of its caller.
+func guestFuncMayContinue(file *syntax.File) bool {
+	// The walk is in source order, so a call before the end of the last
+	// function seen that ends after it is in that function's body.
+	found, end := false, -1
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			end = max(end, int(node.End().Offset()))
+		case *syntax.CallExpr:
+			if int(node.Pos().Offset()) < end && guestLoopMayContinue(node) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // guestWordCounts counts each word of text, a longest run of name bytes

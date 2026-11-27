@@ -105,6 +105,17 @@ func TestGAP0998GuestScriptCallsLoopOnce(t *testing.T) {
 		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; [ -f y ] && continue; break; done", true},
 		{"break() { :; }; for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; break; done", true},
 		{"for j in 1 2; do for i in 1; do $CMD; " + body + "; cd ~/.defenseclaw; break; done; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; builtin continue; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; command continue; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; command -p continue; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; builtin $C; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; 'continue'; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; $C; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; eval $C; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; source x; break; done", true},
+		{"for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; n; break; done", false}, // a static call: the loop still runs once
+		{"n() { continue; }; for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; n; break; done", true},
+		{"n() { $C; }; for i in 1 2; do $CMD; " + body + "; cd ~/.defenseclaw; n; break; done", true},
 	} {
 		calls, _ := guestScriptCalls(row.command, "/home/alice")
 		write, cd := -1, -1
