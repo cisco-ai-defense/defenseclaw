@@ -41,7 +41,7 @@ func readHostRecordLines(ctx context.Context, source string, since time.Time) (h
 	if err != nil {
 		return hostRecordRead{}, err
 	}
-	return hostRecordRead{lines: parseJournalRecords(out), capped: capped}, nil
+	return hostRecordRead{lines: parseJournalRecords(hostRecordWhole(out, capped, "\n")), capped: capped}, nil
 }
 
 // hostRecordSource is the tag the managed hook writes under: the default

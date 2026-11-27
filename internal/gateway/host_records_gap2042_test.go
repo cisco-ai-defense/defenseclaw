@@ -79,7 +79,9 @@ func TestGAP2042PlatformParsers(t *testing.T) {
 
 	ndjson := fmt.Sprintf("{\"eventMessage\":%q,\"processImagePath\":\"/x\"}\n{\"eventMessage\":%q}\n{\"count\":2,\"finished\":1}\n",
 		"DefenseClawGateway[4242]: "+block, allow)
-	if got := parseUnifiedLogRecords([]byte(ndjson), "DefenseClawGateway"); len(got) != 2 || got[0] != block || got[1] != allow {
+	tail := &hostRecordTail{max: hostRecordReadMax + 2}
+	_, _ = tail.Write([]byte(ndjson))
+	if got := parseUnifiedLogRecords(tail.newestFirst(), "DefenseClawGateway"); len(got) != 2 || got[0] != allow || got[1] != block {
 		t.Fatalf("unified log = %q", got)
 	}
 
@@ -114,8 +116,65 @@ func TestGAP2042CountBounds(t *testing.T) {
 		t.Fatalf("capped output: %+v", snap)
 	}
 	out := &hostRecordOutput{max: 4}
-	if n, err := out.Write([]byte("abcdef")); n != 6 || err != nil || out.buf.String() != "abcd" || !out.capped {
+	if n, err := out.Write([]byte("abcdef")); n != 4 || !errors.Is(err, errHostRecordOutputFull) || out.buf.String() != "abcd" || !out.capped {
 		t.Fatalf("output cap: n=%d err=%v buf=%q capped=%v", n, err, out.buf.String(), out.capped)
+	}
+	// The record the bound cut is not counted as dropped.
+	if got := string(hostRecordWhole([]byte("a\nb\ncu"), true, "\n")); got != "a\nb\n" {
+		t.Fatalf("whole lines = %q", got)
+	}
+	if got := string(hostRecordWhole([]byte("<Event>a</Event><Event>b</Eve"), true, "</Event>")); got != "<Event>a</Event>" {
+		t.Fatalf("whole events = %q", got)
+	}
+	if got := string(hostRecordWhole([]byte("a\ncu"), false, "\n")); got != "a\ncu" {
+		t.Fatalf("an uncapped output was cut: %q", got)
+	}
+}
+
+// TestGAP2042UnifiedLogKeepsTheNewest: log show reads oldest first with no
+// entry limit; the reader keeps the newest entries, newest first, and says
+// the window had more; an oversized entry is dropped, not mixed into the
+// next (CHK-RFGW2 N1).
+func TestGAP2042UnifiedLogKeepsTheNewest(t *testing.T) {
+	var out strings.Builder
+	for i := 0; i < hostRecordReadMax+100; i++ {
+		decision := "allow"
+		if i >= 100 {
+			decision = "block" // the newest 500 are blocks
+		}
+		fmt.Fprintf(&out, "{\"eventMessage\":%q}\n", hookRecordLine(managed.MarkerBoundary, decision))
+	}
+	out.WriteString("{\"count\":600,\"finished\":1}\n")
+	tail := &hostRecordTail{max: hostRecordReadMax + 2}
+	data := []byte(out.String())
+	for len(data) > 0 { // pieces that cut entries
+		n := min(len(data), 777)
+		_, _ = tail.Write(data[:n])
+		data = data[n:]
+	}
+	snap := countHostRecords(hostRecordRead{lines: parseUnifiedLogRecords(tail.newestFirst(), "DefenseClawGateway"), capped: tail.evicted})
+	if snap.Blocks != hostRecordReadMax || snap.Allows != 0 || !snap.ReadLimitReached || snap.Dropped != 0 {
+		t.Fatalf("newest 500 = %+v", snap)
+	}
+
+	small := &hostRecordTail{max: 4}
+	_, _ = small.Write([]byte("{\"eventMessage\":\"a\"}\n{\"eventMessage\":\"" + strings.Repeat("x", hostRecordTailLineMax) + "\"}\n{\"eventMessage\":\"b\"}"))
+	got := small.newestFirst()
+	if len(got) != 3 || got[0] != `{"eventMessage":"b"}` || got[1] != hostRecordTooLong || got[2] != `{"eventMessage":"a"}` || small.evicted {
+		t.Fatalf("tail = %q evicted=%v", got, small.evicted)
+	}
+	if lines := parseUnifiedLogRecords(got, "DefenseClawGateway"); len(lines) != 3 || lines[1] != "" {
+		t.Fatalf("an oversized entry was read: %q", lines)
+	}
+}
+
+// TestGAP2042UnifiedLogPredicateNamesTheHook: the unified log query reads
+// the managed hook's own lines, not any process's line with the same text.
+func TestGAP2042UnifiedLogPredicateNamesTheHook(t *testing.T) {
+	for _, want := range []string{`process == "defenseclaw-hook"`, `senderImagePath ENDSWITH "/defenseclaw-hook"`, `component=\"hook\"`, ") AND eventMessage"} {
+		if !strings.Contains(hostRecordUnifiedLogPredicate, want) {
+			t.Fatalf("predicate %q lacks %q", hostRecordUnifiedLogPredicate, want)
+		}
 	}
 }
 

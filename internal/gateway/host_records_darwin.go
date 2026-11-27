@@ -14,17 +14,20 @@ import (
 
 // readHostRecordLines reads the hook records of the unified log since since.
 // The hook sends a syslog datagram to /var/run/syslog; the unified log keeps
-// it as eventMessage. The predicate matches the record line, not the sender,
-// and the parser removes a kept "tag[pid]: " (GAP-2042; pinned by fixture).
+// it as eventMessage of the hook process. log show reads oldest first with
+// no entry limit, so the reader keeps the newest hostRecordReadMax+2 lines
+// of its output (the last one is the summary object), and the parser removes
+// a kept "tag[pid]: " (GAP-2042; pinned by fixture).
 func readHostRecordLines(ctx context.Context, source string, since time.Time) (hostRecordRead, error) {
-	out, capped, err := hostRecordCommand(ctx, "/usr/bin/log", "show",
+	tail := &hostRecordTail{max: hostRecordReadMax + 2}
+	err := runHostRecordReader(ctx, tail, "/usr/bin/log", "show",
 		"--style", "ndjson",
 		"--start", since.Local().Format("2006-01-02 15:04:05"),
-		"--predicate", `eventMessage CONTAINS "component=\"hook\""`)
+		"--predicate", hostRecordUnifiedLogPredicate)
 	if err != nil {
 		return hostRecordRead{}, err
 	}
-	return hostRecordRead{lines: parseUnifiedLogRecords(out, source), capped: capped}, nil
+	return hostRecordRead{lines: parseUnifiedLogRecords(tail.newestFirst(), source), capped: tail.evicted}, nil
 }
 
 // hostRecordSource is the tag the managed hook writes under: the default

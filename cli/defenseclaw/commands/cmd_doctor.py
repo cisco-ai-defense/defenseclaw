@@ -8127,8 +8127,8 @@ def _emit_host_records_row(records, r: _DoctorResult) -> None:
     A managed hook that cannot get a gateway answer decides by its fail mode
     and writes one record to the host log (journal, unified log or the
     Windows Application event log). Those decisions are not in the audit
-    log. A block while the gateway now reports healthy is the case to look
-    at: calls were blocked with no policy answer. The records are counted
+    log. Blocks in the window while the gateway reports healthy now are the
+    case to look at: calls were blocked with no policy answer. The records are counted
     only; any local account can write the same tag, so they are not proof.
     """
     from defenseclaw.commands.cmd_status import _host_records_status, _host_records_summary
@@ -8145,8 +8145,9 @@ def _emit_host_records_row(records, r: _DoctorResult) -> None:
         detail += f" (last read {status['last_read']})"
     if status["blocks"]:
         detail += (
-            f". A managed hook blocked {status['blocks']} call(s) without a gateway answer while the gateway "
-            "reports healthy; those decisions are in the host log, not in the audit log"
+            f". {status['blocks']} blocks in the last {status['window_hours']} h; the gateway reports healthy now. "
+            "A managed hook blocked those calls without a gateway answer; the decisions are in the host log, "
+            "not in the audit log"
         )
         _emit("warn", "Host records", detail, r=r)
         return

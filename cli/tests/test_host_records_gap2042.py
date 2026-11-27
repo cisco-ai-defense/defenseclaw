@@ -89,7 +89,8 @@ class HostRecordsDoctorTests(unittest.TestCase):
         self.assertEqual((r.passed, r.warned, r.failed), (0, 1, 0))
         detail = r.checks[-1]["detail"]
         self.assertIn("5 in 24 h, 2 blocks, 0 dropped", detail)
-        self.assertIn("2 call(s) without a gateway answer while the gateway reports healthy", detail)
+        self.assertIn("2 blocks in the last 24 h; the gateway reports healthy now", detail)
+        self.assertNotIn("while the gateway reports healthy", detail)
         self.assertIn("not in the audit log", detail)
 
     def test_unreadable_host_log_is_a_skip(self):

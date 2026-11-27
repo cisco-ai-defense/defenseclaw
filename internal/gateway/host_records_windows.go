@@ -39,7 +39,7 @@ func readHostRecordLines(ctx context.Context, source string, since time.Time) (h
 	if err != nil {
 		return hostRecordRead{}, err
 	}
-	return hostRecordRead{lines: parseEventLogRecords(out), capped: capped}, nil
+	return hostRecordRead{lines: parseEventLogRecords(hostRecordWhole(out, capped, "</Event>")), capped: capped}, nil
 }
 
 // hostRecordSource is the event source the managed hook writes under: the

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -34,7 +35,10 @@ import (
 // hostRecordReadMax entries, hostRecordLineMax bytes per record line and
 // hostRecordOutputMax bytes of reader output, hostRecordReadWait per read,
 // and one read per hostRecordReadEvery; a line that is not a record the hook
-// writes is counted as dropped.
+// writes is counted as dropped. A reader is stopped at its output bound,
+// and the read keeps what came before it (the newest entries: journalctl and
+// wevtutil read newest first; the unified log reader keeps the last entries
+// of its oldest-first output).
 const (
 	hostRecordWindow    = 24 * time.Hour
 	hostRecordReadMax   = 500
@@ -42,7 +46,18 @@ const (
 	hostRecordOutputMax = 4 << 20
 	hostRecordReadWait  = 30 * time.Second
 	hostRecordReadEvery = 5 * time.Minute
+	// hostRecordWaitDelay bounds the wait for a reader's output after it
+	// exited or was stopped: a child that keeps the pipe open cannot hold
+	// the read (and with it every later one) past it.
+	hostRecordWaitDelay = 2 * time.Second
+	// hostRecordTailLineMax bounds one buffered unified log entry.
+	hostRecordTailLineMax = 8 << 10
 )
+
+// hostRecordUnifiedLogPredicate selects the hook's decision records in the
+// macOS unified log: lines the managed hook binary sent, not any process's
+// line with the same text.
+const hostRecordUnifiedLogPredicate = `(process == "defenseclaw-hook" OR senderImagePath ENDSWITH "/defenseclaw-hook") AND eventMessage CONTAINS "component=\"hook\""`
 
 // HostRecordsSnapshot is the /health and /status "host_records" object of a
 // managed gateway.
@@ -238,22 +253,56 @@ func hostRecordKey(key string) bool {
 	return true
 }
 
-// hostRecordCommand runs a host log reader with a bounded output.
+// errHostRecordOutputFull stops a reader whose output reached its bound.
+var errHostRecordOutputFull = errors.New("host record output bound reached")
+
+// hostRecordCommand runs a newest-first host log reader and keeps the first
+// hostRecordOutputMax bytes of its output; capped reports that the reader
+// was stopped there.
 func hostRecordCommand(ctx context.Context, path string, args ...string) ([]byte, bool, error) {
-	cmd := exec.CommandContext(ctx, path, args...)
 	out := &hostRecordOutput{max: hostRecordOutputMax}
-	cmd.Stdout = out
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, false, errors.New("the host log did not answer in time")
-		}
+	if err := runHostRecordReader(ctx, out, path, args...); err != nil {
 		return nil, false, err
 	}
 	return out.buf.Bytes(), out.capped, nil
 }
 
-// hostRecordOutput keeps the first max bytes and drops the rest.
+// runHostRecordReader runs path with its output to out. When out reports
+// errHostRecordOutputFull the reader is killed and the read is kept; a
+// reader that does not finish in ctx is an error. The wait for the output
+// after the reader ended is bounded by hostRecordWaitDelay.
+func runHostRecordReader(ctx context.Context, out io.Writer, path string, args ...string) error {
+	run, stop := context.WithCancel(ctx)
+	defer stop()
+	var full atomic.Bool
+	cmd := exec.CommandContext(run, path, args...)
+	cmd.Stdout = hostRecordStopWriter{out: out, full: func() { full.Store(true); stop() }}
+	cmd.WaitDelay = hostRecordWaitDelay
+	err := cmd.Run()
+	switch {
+	case full.Load():
+		return nil
+	case ctx.Err() != nil:
+		return errors.New("the host log did not answer in time")
+	}
+	return err
+}
+
+// hostRecordStopWriter calls full once out reports its bound.
+type hostRecordStopWriter struct {
+	out  io.Writer
+	full func()
+}
+
+func (w hostRecordStopWriter) Write(p []byte) (int, error) {
+	n, err := w.out.Write(p)
+	if errors.Is(err, errHostRecordOutputFull) {
+		w.full()
+	}
+	return n, err
+}
+
+// hostRecordOutput keeps the first max bytes and then reports the bound.
 type hostRecordOutput struct {
 	buf    bytes.Buffer
 	max    int
@@ -263,12 +312,88 @@ type hostRecordOutput struct {
 func (o *hostRecordOutput) Write(p []byte) (int, error) {
 	if room := o.max - o.buf.Len(); room < len(p) {
 		o.capped = true
-		if room > 0 {
-			o.buf.Write(p[:room])
-		}
-		return len(p), nil
+		o.buf.Write(p[:max(room, 0)])
+		return max(room, 0), errHostRecordOutputFull
 	}
 	return o.buf.Write(p)
+}
+
+// hostRecordWhole cuts a capped output after the last complete record (the
+// last end mark), so the record the bound cut is not counted as dropped.
+func hostRecordWhole(out []byte, capped bool, end string) []byte {
+	if !capped {
+		return out
+	}
+	i := bytes.LastIndex(out, []byte(end))
+	if i < 0 {
+		return nil
+	}
+	return out[:i+len(end)]
+}
+
+// hostRecordTail keeps the last max lines of an oldest-first reader (the
+// unified log), each at most hostRecordTailLineMax bytes; a longer line is
+// kept as a line no parser reads, so it is counted as dropped.
+type hostRecordTail struct {
+	max     int
+	lines   []string
+	next    int
+	part    []byte
+	long    bool
+	evicted bool
+}
+
+const hostRecordTooLong = "\x00"
+
+func (t *hostRecordTail) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		chunk := p
+		if i >= 0 {
+			chunk = p[:i]
+		}
+		if !t.long {
+			if len(t.part)+len(chunk) > hostRecordTailLineMax {
+				t.long, t.part = true, t.part[:0]
+			} else {
+				t.part = append(t.part, chunk...)
+			}
+		}
+		if i < 0 {
+			break
+		}
+		t.push()
+		p = p[i+1:]
+	}
+	return n, nil
+}
+
+func (t *hostRecordTail) push() {
+	line := string(bytes.TrimSpace(t.part))
+	if t.long {
+		line = hostRecordTooLong
+	}
+	t.part, t.long = t.part[:0], false
+	switch {
+	case line == "":
+	case len(t.lines) < t.max:
+		t.lines = append(t.lines, line)
+	default:
+		t.lines[t.next], t.next, t.evicted = line, (t.next+1)%t.max, true
+	}
+}
+
+// newestFirst is the kept lines, the newest first.
+func (t *hostRecordTail) newestFirst() []string {
+	if len(t.part) > 0 || t.long {
+		t.push()
+	}
+	out := make([]string, 0, len(t.lines))
+	for i := range t.lines {
+		out = append(out, t.lines[(t.next-1-i+2*len(t.lines))%len(t.lines)])
+	}
+	return out
 }
 
 // parseJournalRecords reads journalctl --output=json lines: MESSAGE is a
@@ -309,19 +434,16 @@ func parseJournalRecords(out []byte) []string {
 	return lines
 }
 
-// parseUnifiedLogRecords reads log show --style ndjson lines: eventMessage,
-// with the syslog tag of the sender removed when it is kept.
-func parseUnifiedLogRecords(out []byte, source string) []string {
+// parseUnifiedLogRecords reads log show --style ndjson lines (newest
+// first): eventMessage, with the syslog tag of the sender removed when it
+// is kept.
+func parseUnifiedLogRecords(entries []string, source string) []string {
 	var lines []string
-	for _, raw := range bytes.Split(out, []byte("\n")) {
-		raw = bytes.TrimSpace(raw)
-		if len(raw) == 0 {
-			continue
-		}
+	for _, raw := range entries {
 		var entry struct {
 			EventMessage *string `json:"eventMessage"`
 		}
-		if json.Unmarshal(raw, &entry) != nil {
+		if json.Unmarshal([]byte(raw), &entry) != nil {
 			lines = append(lines, "")
 			continue
 		}
