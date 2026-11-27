@@ -763,6 +763,11 @@ def _rollback_hook_backend(data: Path, settings: Path, receipt: Path, restore: s
 {_function('Convert-HooksForRollback')}
 {_function('Restore-HooksAfterAbortedRollback')}
 {_function('Test-HookRollbackRestoreAvailable')}
+# Restore-HooksAfterAbortedRollback asks whether the abort left the Claude Code
+# settings as saved (GAP-1092). Point it at this test's own agent folder so the
+# check never reads the test user's real settings.
+{_function('Test-ClaudeHooksUnchangedSinceConversion')}
+$env:CLAUDE_CONFIG_DIR = {_literal(settings.parent)}
 $script:events = @()
 $global:LASTEXITCODE = 0
 function Get-NativeOutput([string]$FilePath, [string[]]$Arguments) {{
