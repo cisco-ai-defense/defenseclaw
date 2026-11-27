@@ -57,7 +57,8 @@ func TestWorkingFolderResolvesRelativeOperandsAfterACD(t *testing.T) {
 		{"group false and cd", "{ false && cd .git/hooks; }; echo x > pre-push", []string{top, hooks}, false},
 		{"or cd", "true || cd .git/hooks; echo x > pre-push", []string{top, hooks}, false},
 		{"cd or true", "cd .git/hooks || true; echo x > pre-push", []string{top, hooks}, false},
-		{"cd or exit", "cd .git/hooks || exit 1; echo x > pre-push", []string{top, hooks}, false},
+		// The exit ends the shell where the cd failed (substrate-1:GAP-0699).
+		{"cd or exit", "cd .git/hooks || exit 1; echo x > pre-push", []string{hooks}, false},
 		{"if body", "if true; then cd .git/hooks; fi; echo x > pre-push", []string{top, hooks}, false},
 		{"while body moving each pass", "while true; do cd sub; done; echo x > f", []string{"/work/proj/f", "/work/proj/sub/f", "/work/proj/sub/sub/f"}, true},
 		// A call of a function whose body moves leaves the shell where the

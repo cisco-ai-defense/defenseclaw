@@ -266,6 +266,9 @@ type workFolderTracker struct {
 	// builtin: every move may go to an unresolved folder (substrate-1:GAP-0684)
 	// as well as where the builtin goes (substrate-1:GAP-0686).
 	shadowed bool
+	// exitShadowed: the text defines a function named exit or builtin, so
+	// an exit call may return (substrate-1:GAP-0699).
+	exitShadowed bool
 	// decls are the definitions of the movers the text defines once (nil
 	// for one defined more than once): a call of one the definition may
 	// have run before (workFolderDefinedAt) leaves the shell in the folders
@@ -373,6 +376,12 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 				switch node.Name.Value {
 				case "cd", "chdir", "pushd", "popd", "builtin", "command":
 					tracker.shadowed = true
+				}
+				// A function named exit (or builtin) may return: an exit
+				// call ends nothing (substrate-1:GAP-0699).
+				switch node.Name.Value {
+				case "exit", "builtin":
+					tracker.exitShadowed = true
 				}
 			}
 			if node.Name != nil && node.Body != nil {
@@ -548,7 +557,8 @@ func posixWorkFolders(file *syntax.File) (folders, unread map[*syntax.Stmt]workF
 	if tracker.calls == nil || *tracker.calls == 0 {
 		return tracker.folders, nil // no mover body was read: the readings agree
 	}
-	other := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: tracker.movers, unreadMovers: true}
+	other := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: tracker.movers, unreadMovers: true,
+		exitShadowed: tracker.exitShadowed}
 	other.list(file.Stmts, hookWorkFolders)
 	return tracker.folders, other.folders
 }
@@ -597,7 +607,7 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// the folders the call leaves are read here.
 	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, decls: t.decls,
 		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined,
-		firstRun: t.firstRun, shadowed: t.shadowed}
+		firstRun: t.firstRun, shadowed: t.shadowed, exitShadowed: t.exitShadowed}
 	ok, after = inner.stmt(decl.Body, in)
 	// `f() { test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc`
 	// may leave the shell where the body returned, with status 0 (the
@@ -684,6 +694,37 @@ func workFolderBodyMoves(body *syntax.Stmt, movers map[string]bool) bool {
 		return !moves
 	})
 	return moves
+}
+
+// exits reports a statement after which the shell runs nothing more: a
+// call of the exit builtin (or builtin exit), alone or as the last statement
+// of a { } group, in the shell itself (not in the background, a pipe or a
+// subshell), when no function of the text is named exit.
+func (t *workFolderTracker) exits(stmt *syntax.Stmt) bool {
+	for stmt != nil && !t.exitShadowed && !stmt.Background && !stmt.Coprocess && !stmt.Negated {
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.Block:
+			if len(cmd.Stmts) == 0 {
+				return false
+			}
+			stmt = cmd.Stmts[len(cmd.Stmts)-1]
+		case *syntax.CallExpr:
+			args := cmd.Args
+			if len(args) > 1 {
+				if word := projectPOSIXWord(args[0]); !word.Expands && word.Value == "builtin" {
+					args = args[1:]
+				}
+			}
+			if len(args) == 0 {
+				return false
+			}
+			name := projectPOSIXWord(args[0])
+			return !name.Expands && name.Value == "exit"
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // list tracks statements run one after the other from in: ok are the folders
@@ -773,6 +814,12 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		case syntax.OrStmt:
 			leftOK, leftAfter := t.stmt(cmd.X, in)
 			rightOK, rightAfter := t.stmt(cmd.Y, leftAfter)
+			if t.exits(cmd.Y) {
+				// After `cd X || exit` the shell goes on only where the
+				// left side succeeded: the exit ends it where the cd failed
+				// (substrate-1:GAP-0699).
+				return leftOK, leftOK
+			}
 			return unionWorkFolders(leftOK, rightOK), unionWorkFolders(leftAfter, rightAfter)
 		default: // a pipe: each member runs in a copy of the shell
 			t.stmt(cmd.X, in)
