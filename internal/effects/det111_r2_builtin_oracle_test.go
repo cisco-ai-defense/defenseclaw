@@ -6,6 +6,7 @@ package effects
 
 import (
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -21,6 +22,9 @@ func TestDET111R2BuiltinOracle(t *testing.T) {
 	seen := map[string]bool{}
 	for _, shell := range shells {
 		if _, err := exec.LookPath(shell.name); err != nil {
+			if shell.name == "bash" && runtime.GOOS == "windows" {
+				t.Skipf("no bash on PATH on this Windows host (%v): the oracle lists the builtins of a POSIX shell installed on the host", err)
+			}
 			if shell.name == "bash" {
 				t.Fatalf("bash builtin oracle unavailable: %v", err)
 			}

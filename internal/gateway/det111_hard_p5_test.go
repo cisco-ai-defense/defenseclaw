@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,7 +26,27 @@ func hardP5Home(t *testing.T) string {
 		}
 	}
 	t.Setenv("HOME", home)
+	// The hook's active home is os.UserHomeDir, which reads USERPROFILE on
+	// Windows (not HOME).
+	t.Setenv("USERPROFILE", home)
 	return home
+}
+
+// hardP5Path is a path of the test home as the POSIX command text spells it:
+// forward slashes, which Git Bash on a Windows host reads as the same path (a
+// backslash in POSIX text is an escape the shell removes). Elsewhere it is
+// filepath.Join.
+func hardP5Path(parts ...string) string { return filepath.ToSlash(filepath.Join(parts...)) }
+
+// hardP5Routes are the routes that run a call as POSIX shell text on this
+// host: Claude Code's Bash and the Codex shell. On a Windows host only Claude
+// Code's Bash is (Git Bash); the Codex shell there has no dialect hint and is
+// read as PowerShell or cmd (effectCall), so it is no POSIX route.
+func hardP5Routes() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"claudecode"}
+	}
+	return []string{"claudecode", "codex"}
 }
 
 // hardP5Parity checks that each variant of each plain control has the
@@ -38,7 +59,7 @@ func hardP5Parity(t *testing.T, home string, cases map[string][]string, benign [
 	t.Helper()
 	useDefaultEffectsLane(t)
 	for _, tier := range boundedTestTiers {
-		for _, route := range []string{"claudecode", "codex"} {
+		for _, route := range hardP5Routes() {
 			api := gap0589TierAPI(t, route, tier.posture, tier.managed, tier.tier)
 			for control, variants := range cases {
 				wantAction, wantSev := hardP2Verdict(t, api, route, home, control)
@@ -76,18 +97,23 @@ func TestDET111KnownProtectedDeleteIsThePlainSpelling(t *testing.T) {
 	py := func(code string) string { return `python3 -c '` + code + `'` }
 	cases := map[string][]string{}
 	for _, target := range []string{".codex/config.toml", ".claude/settings.json", ".defenseclaw/config.yaml", ".aws/credentials"} {
-		member := filepath.Join(home, target)
+		member := hardP5Path(home, target)
 		cases["rm "+member] = []string{
 			py(`import os;os.remove("` + member + `")`),
 			py(`import os;os.unlink("` + member + `")`),
-			py(`import os;os.remove(os.path.expanduser("~/` + target + `"))`),
 			py(`import pathlib;pathlib.Path("` + member + `").unlink()`),
 			py(`import os,sys;os.remove(sys.argv[1])`) + " " + member,
+		}
+		if runtime.GOOS != "windows" {
+			// Python's expanduser reads HOME on a POSIX host; on Windows it
+			// reads USERPROFILE, which the lane does not model for an inline
+			// program: a POSIX-host row.
+			cases["rm "+member] = append(cases["rm "+member], py(`import os;os.remove(os.path.expanduser("~/`+target+`"))`))
 		}
 	}
 	benign := []string{
 		py(`import os;os.remove("/tmp/x")`),
-		py(`import os;os.remove("` + filepath.Join(home, "proj", "notes.txt") + `")`),
+		py(`import os;os.remove("` + hardP5Path(home, "proj", "notes.txt") + `")`),
 		py(`import pathlib;pathlib.Path("out.txt").unlink()`),
 		py(`import os,sys;os.remove(sys.argv[1])`) + " /tmp/x",
 		py(`import shutil;shutil.rmtree("/tmp/build")`),
@@ -102,9 +128,9 @@ func TestDET111KnownProtectedDeleteIsThePlainSpelling(t *testing.T) {
 // changes no protected file stays allowed.
 func TestDET111SedExecCommandIsTheCommand(t *testing.T) {
 	home := hardP5Home(t)
-	notes := filepath.Join(home, "proj", "notes.txt")
-	settings := filepath.Join(home, ".claude", "settings.json")
-	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	notes := hardP5Path(home, "proj", "notes.txt")
+	settings := hardP5Path(home, ".claude", "settings.json")
+	state := hardP5Path(home, ".defenseclaw", "config.yaml")
 	cases := map[string][]string{
 		"echo x > " + settings: {"sed '1e echo x > " + settings + "' " + notes, "sed -n '1e echo x > " + settings + "' " + notes},
 		"touch " + settings:    {"sed '1e touch " + settings + "' " + notes},
@@ -123,14 +149,17 @@ func TestDET111SedExecCommandIsTheCommand(t *testing.T) {
 // BSD sed, whose -I SUFFIX edits the file in place as GNU sed -i does: the
 // in-place edit of a hook config gets the verdict of sed -i on it.
 func TestDET111BSDSedInPlaceIsSedI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS-host reading: on a Windows host the test home is a drive path, so the hook reads the call as a Windows call (effectWindowsCall), whose userland is not BSD")
+	}
 	defer func(g string) { effectHostGOOS = g }(effectHostGOOS)
 	effectHostGOOS = "darwin"
 	home := hardP5Home(t)
-	settings := filepath.Join(home, ".claude", "settings.json")
+	settings := hardP5Path(home, ".claude", "settings.json")
 	cases := map[string][]string{
 		"sed -i s/a/b/ " + settings: {"/usr/bin/sed -I .bak p " + settings, "/usr/bin/sed -I .bak -e s/a/b/ " + settings},
 	}
-	benign := []string{"/usr/bin/sed -I .bak s/a/b/ " + filepath.Join(home, "proj", "notes.txt")}
+	benign := []string{"/usr/bin/sed -I .bak s/a/b/ " + hardP5Path(home, "proj", "notes.txt")}
 	hardP5Parity(t, home, cases, benign)
 }
 
@@ -144,12 +173,12 @@ func TestDET111BSDSedInPlaceIsSedI(t *testing.T) {
 // allowed.
 func TestDET111UnlistedWritersAreThePlainSpelling(t *testing.T) {
 	home := hardP5Home(t)
-	audit := filepath.Join(home, ".defenseclaw", "audit.db")
+	audit := hardP5Path(home, ".defenseclaw", "audit.db")
 	if err := os.WriteFile(audit, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	settings := filepath.Join(home, ".claude", "settings.json")
-	proj := filepath.Join(home, "proj")
+	settings := hardP5Path(home, ".claude", "settings.json")
+	proj := hardP5Path(home, "proj")
 	cases := map[string][]string{
 		"cp /tmp/x " + audit: {
 			"sqlite3 " + audit + " 'delete from audit_events'",
@@ -162,11 +191,11 @@ func TestDET111UnlistedWritersAreThePlainSpelling(t *testing.T) {
 		},
 	}
 	benign := []string{
-		"sqlite3 " + filepath.Join(proj, "app.db") + " 'insert into t values (1)'",
-		"sqlite3 " + filepath.Join(proj, "app.db") + " 'select count(*) from t'",
-		"git config --file " + filepath.Join(proj, ".gitmodules") + " submodule.x.url https://example.invalid/x",
-		"git config --file " + filepath.Join(proj, ".gitmodules") + " --get submodule.x.url",
-		"ed -s " + filepath.Join(proj, "notes.txt") + " <<< $'1d\\nw\\nq'",
+		"sqlite3 " + hardP5Path(proj, "app.db") + " 'insert into t values (1)'",
+		"sqlite3 " + hardP5Path(proj, "app.db") + " 'select count(*) from t'",
+		"git config --file " + hardP5Path(proj, ".gitmodules") + " submodule.x.url https://example.invalid/x",
+		"git config --file " + hardP5Path(proj, ".gitmodules") + " --get submodule.x.url",
+		"ed -s " + hardP5Path(proj, "notes.txt") + " <<< $'1d\\nw\\nq'",
 		"ed -s " + settings + " <<< $',p\\nq'",
 	}
 	hardP5Parity(t, home, cases, benign)

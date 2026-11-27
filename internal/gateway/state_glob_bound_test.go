@@ -82,8 +82,16 @@ func TestStatePatternReadingReportsItsBounds(t *testing.T) {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: input, Connector: "claudecode", EnforcementCapable: true,
 		})
-		if got := limited(findings); got != row.limit {
-			t.Errorf("%s: limit finding=%v, want %v (findings %v)", row.id, got, row.limit, findingIDs(findings))
+		wantLimit := row.limit
+		if runtime.GOOS == "windows" && strings.HasSuffix(row.command, "cp a.txt ~/.defenseclaw/conf*.yaml") {
+			// A Windows host also reads the call as PowerShell, where Copy-Item
+			// does not expand a wildcard destination: the state write's target
+			// is known only at run time (provenPowerShellStateWrite, the unknown
+			// tier of rel-1-0-10:GAP-1138), next to the state rule.
+			wantLimit = true
+		}
+		if got := limited(findings); got != wantLimit {
+			t.Errorf("%s: limit finding=%v, want %v (findings %v)", row.id, got, wantLimit, findingIDs(findings))
 		}
 		if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 			t.Errorf("%s: block=%v, want %v (findings %v)", row.id, blocked, row.block, findingIDs(findings))

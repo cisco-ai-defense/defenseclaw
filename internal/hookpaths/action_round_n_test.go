@@ -105,6 +105,18 @@ func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 	}
 	testSymlink(t, key, filepath.Join(cwd, "many", fmt.Sprintf("d%03d", actionGlobMaxReads+4), "keylink"))
 	for _, command := range []string{`cp payload many/*/keyl*`, `cd many && cp payload */keyl*`} {
+		if runtime.GOOS == "windows" {
+			// On a Windows host the word resolver reads the pattern: its walk
+			// read every folder it reached and stopped only at its read
+			// bound, a TRUNCATED reading recorded on the hook call for the
+			// bound rule to judge, never a clean allow (rel-1-0-10:GAP-1324).
+			var got string
+			cut := globCutOf(func() { got = posixShellDecision(command, cwd, home) })
+			if got != "" || !cut.Any() {
+				t.Errorf("%s: decision %q, pattern cut %v, want the TRUNCATED reading", command, got, cut.Any())
+			}
+			continue
+		}
 		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("%s: ActionCommandDecision = %q, want protected-target", command, got)
 		}

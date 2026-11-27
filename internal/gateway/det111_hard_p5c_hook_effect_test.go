@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
@@ -19,6 +20,12 @@ import (
 // overwrite dropping registered hooks, and opaque overwrite remain raised.
 func TestGAP1478MixedPurposeHookConfigNeedsProvenDisable(t *testing.T) {
 	home := t.TempDir()
+	// The fixture is a file of this host: its path is a Windows path on a
+	// Windows host, read with that flavor as the hook reads it there.
+	flavor := effects.FlavorPOSIX
+	if runtime.GOOS == "windows" {
+		flavor = effects.FlavorWindows
+	}
 	path := filepath.Join(home, ".codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -78,7 +85,7 @@ func TestGAP1478MixedPurposeHookConfigNeedsProvenDisable(t *testing.T) {
 				if handoff.preserves(path+".other") || (*effectKnownHookConfigTargets)(nil).preserves(path) {
 					t.Fatal("handoff widened beyond the exact, present target")
 				}
-				c := classifyEffects(res, []*semanticpb.EffectFact{f}, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: home, preservedHookConfigPaths: paths})
+				c := classifyEffects(res, []*semanticpb.EffectFact{f}, flavor, tierRestricted, effectReachEnv{Home: home, preservedHookConfigPaths: paths})
 				if c.touches != tc.wantRaise {
 					t.Fatalf("touches=%v, want %v", c.touches, tc.wantRaise)
 				}

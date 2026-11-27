@@ -30,7 +30,8 @@ func TestGAP2280ReaderSwitchReadIsJudgedAsThePlainRead(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", home)
-	useEffectsRulesMode(t, "on") // the shipped default (config.CascadeLaneEffects Default on)
+	t.Setenv("USERPROFILE", home) // the active home on Windows
+	useEffectsRulesMode(t, "on")  // the shipped default (config.CascadeLaneEffects Default on)
 	cwd := filepath.Join(home, "proj")
 	type row struct{ command, twin string }
 	var rows []row
@@ -68,7 +69,7 @@ func TestGAP2280ReaderSwitchReadIsJudgedAsThePlainRead(t *testing.T) {
 		}).Action
 	}
 	for _, tier := range boundedTestTiers {
-		for _, connector := range []string{"claudecode", "codex"} {
+		for _, connector := range hardP5Routes() {
 			api := gap0589TierAPI(t, connector, tier.posture, tier.managed, tier.tier)
 			if tier.name == "default" {
 				// The plain credential read is enforced, so the rows below

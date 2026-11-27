@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -25,6 +26,9 @@ type hardLinkOperandCase struct {
 }
 
 func TestDET111R2HardLinkOperandsUseIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-host fixture: the authorized_keys members come from the host key reader (hookpaths.ProtectedAuthorizedKeysPaths, host separators), so a POSIX path names none of them on a Windows host, and a Windows host reads every hook call with Windows paths (gateway effectWindowsCall)")
+	}
 	const home = "/home/alice"
 	const project = "/home/alice/project"
 	const keys = "/home/alice/.ssh/authorized_keys"

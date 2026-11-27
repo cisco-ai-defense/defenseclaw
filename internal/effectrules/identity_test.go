@@ -36,6 +36,9 @@ func identityProtected(t *testing.T, cmd string, o effects.Options, fn IdentityF
 }
 
 func TestDET111R3HardLinkIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-host fixture: the authorized_keys members come from the host key reader (hookpaths.ProtectedAuthorizedKeysPaths, host separators), so a POSIX path names none of them on a Windows host, and a Windows host reads every hook call with Windows paths (gateway effectWindowsCall)")
+	}
 	px := effects.Options{Flavor: effects.FlavorPOSIX, Home: "/home/dcku", CWD: "/home/dcku/proj", Login: "dcku",
 		Env: map[string]string{"HOME": "/home/dcku"}}
 	ak, idrsa, hook := "/home/dcku/.ssh/authorized_keys", "/home/dcku/.ssh/id_rsa", "/home/dcku/.claude/settings.json"

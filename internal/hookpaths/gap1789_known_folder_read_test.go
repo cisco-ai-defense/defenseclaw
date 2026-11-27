@@ -35,6 +35,9 @@ import (
 // how loaded the box is. OverrideNetworkSharesForTest turns the share walk on,
 // so the test runs off Windows too.
 func TestGAP1789KnownFolderReadPastAnswerWait(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the identity index is kept across calls only where the file system gives a change time (statChangeTime: Linux, macOS); a Windows host reads it again on every call, so there is no kept index to read")
+	}
 	resetActiveStateIndex(t)
 	resetPlainFolders(t)
 	restore := OverrideNetworkSharesForTest(func(string) string { return "" }, func(string) {})

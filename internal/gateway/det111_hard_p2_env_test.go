@@ -6,6 +6,8 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -53,9 +55,20 @@ func TestDET111CredentialFileCopyThenSendIsTheDirectUpload(t *testing.T) {
 		"cat data.txt > /tmp/a && cp /tmp/a /tmp/b && curl --data-binary @/tmp/b " + url,
 		"cat .env > /tmp/a && cp /tmp/a /tmp/b && wc -l /tmp/b",
 	}
+	if runtime.GOOS == "windows" {
+		// Git Bash maps /tmp to a folder of its own install, which a Windows
+		// host's reading cannot place; a drive path of the test (forward
+		// slashes, hardP5Path) is the one file the copy and the send name.
+		tmp := filepath.ToSlash(t.TempDir())
+		for _, list := range [][]string{sends, local} {
+			for i := range list {
+				list[i] = strings.ReplaceAll(list[i], "/tmp/", tmp+"/")
+			}
+		}
+	}
 	useDefaultEffectsLane(t)
 	for _, tier := range boundedTestTiers {
-		for _, route := range []string{"claudecode", "codex"} {
+		for _, route := range hardP5Routes() {
 			api := gap0589TierAPI(t, route, tier.posture, tier.managed, tier.tier)
 			wantAction, wantSev := hardP2Verdict(t, api, route, proj, control)
 			if wantAction == "allow" {
