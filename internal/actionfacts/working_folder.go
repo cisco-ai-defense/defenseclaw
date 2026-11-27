@@ -273,6 +273,12 @@ type workFolderTracker struct {
 	// exitShadowed: the text defines a function named exit or builtin, so
 	// an exit call may return (substrate-1:GAP-0699).
 	exitShadowed bool
+	// unset holds the function names an unset of the text may remove, and
+	// unsetAny says one may remove any function (workFolderUnsetNames): a
+	// definition of such a name may be gone at a call, which then runs the
+	// builtin or program of the name (substrate-1:GAP-1166).
+	unset    map[string]bool
+	unsetAny bool
 	// decls are the definitions of the movers the text defines once (nil
 	// for one defined more than once): a call of one the definition may
 	// have run before (workFolderDefinedAt) leaves the shell in the folders
@@ -407,6 +413,7 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	if len(all) == 0 {
 		return tracker // no function, so no mover
 	}
+	tracker.unset, tracker.unsetAny = workFolderUnsetNames(calls)
 	tracker.movers, tracker.decls = map[string]bool{}, map[string]*syntax.FuncDecl{}
 	tracker.runners = map[string]bool{}
 	notRunner := map[string]bool{}
@@ -626,7 +633,7 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// the folders the call leaves are read here.
 	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, decls: t.decls,
 		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined,
-		firstRun: t.firstRun, shadowed: t.shadowed, exitShadowed: t.exitShadowed}
+		firstRun: t.firstRun, shadowed: t.shadowed, exitShadowed: t.exitShadowed, unset: t.unset, unsetAny: t.unsetAny}
 	ok, after = inner.stmt(decl.Body, in)
 	// `f() { test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc`
 	// may leave the shell where the body returned, with status 0 (the
@@ -641,13 +648,74 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	if len(inner.returnedOK) != 0 {
 		ok = unionWorkFolders(ok, inner.returnedOK)
 	}
-	if !t.defs[decl].topLevel {
+	if t.mayUnset(name) {
+		// An unset of the name may have removed the definition: the call
+		// then runs the builtin or program of the name, which may succeed
+		// where the shell was (substrate-1:GAP-1166).
+		ok, after = unionWorkFolders(ok, in), unionWorkFolders(after, in)
+	} else if !t.defs[decl].topLevel {
 		// A definition in a list, a branch or a body may not have run: the
 		// call then finds no function, fails and leaves the shell where it
 		// was.
 		after = unionWorkFolders(after, in)
 	}
 	return ok, after
+}
+
+// mayUnset reports a function name an unset of the text may remove.
+func (t *workFolderTracker) mayUnset(name string) bool { return t.unsetAny || t.unset[name] }
+
+// workFolderUnsetNames returns the function names the unset calls among
+// calls may remove, wherever they are in the text (one after a call in a
+// loop runs before its next turn): unset -f NAME, and unset NAME, which
+// removes the function when no variable has the name (only -v or -n with
+// no -f leaves functions alone). expands says an option or operand of one
+// expands, so it may remove any function (substrate-1:GAP-1166). An unset
+// run through builtin or command is read the same.
+func workFolderUnsetNames(calls []*syntax.CallExpr) (names map[string]bool, expands bool) {
+	for _, call := range calls {
+		args := call.Args
+		for len(args) > 1 {
+			prefix := projectPOSIXWord(args[0])
+			if prefix.Expands || prefix.Value != "builtin" && prefix.Value != "command" {
+				break
+			}
+			args = args[1:]
+		}
+		if program := projectPOSIXWord(args[0]); program.Expands || program.Value != "unset" {
+			continue
+		}
+		functions, variablesOnly, operands := false, false, false
+		var unset []string
+		for _, arg := range args[1:] {
+			word := projectPOSIXWord(arg)
+			if word.Expands {
+				expands = true
+				break
+			}
+			if !operands && word.Value == "--" {
+				operands = true
+				continue
+			}
+			if !operands && len(word.Value) > 1 && word.Value[0] == '-' {
+				functions = functions || strings.Contains(word.Value, "f")
+				variablesOnly = variablesOnly || strings.ContainsAny(word.Value, "vn")
+				continue
+			}
+			operands = true
+			unset = append(unset, word.Value)
+		}
+		if variablesOnly && !functions {
+			continue
+		}
+		for _, name := range unset {
+			if names == nil {
+				names = map[string]bool{}
+			}
+			names[name] = true
+		}
+	}
+	return names, expands
 }
 
 // add is s with the folders of in, the hook's own folder for an empty in.
@@ -855,13 +923,15 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 				// that may have run (in a list, a branch or a body) may leave
 				// the call to a builtin or program of the name, so the shell
 				// may also stay where it was; one that cannot have run yet
-				// leaves it there (CHK-T6-SCB).
+				// leaves it there (CHK-T6-SCB). So does one an unset of the
+				// text may remove (unset -f f, or unset f): the call may run
+				// the builtin of the name (substrate-1:GAP-1166).
 				decl := t.decls[name.Value]
 				if decl == nil || !t.definedAt(decl, cmd, 0) {
 					return in, in
 				}
 				ok, after := t.command(&syntax.Stmt{Cmd: &syntax.CallExpr{Args: cmd.Args[1:]}}, in)
-				if !t.defs[decl].topLevel {
+				if !t.defs[decl].topLevel || t.mayUnset(name.Value) {
 					ok, after = unionWorkFolders(ok, in), unionWorkFolders(after, in)
 				}
 				return ok, after
