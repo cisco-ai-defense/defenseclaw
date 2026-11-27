@@ -33,6 +33,12 @@ func TestGAP2300RootedRedirectUsesTheVolume(t *testing.T) {
 			t.Errorf("%q: operands %q, want %q", tc.command, got, tc.want)
 		}
 	}
+	// The directory walk places the redirect after a cd on the same volume.
+	work := t.TempDir()
+	directory, unknown := ShellDirectoryWriteOperands("cd "+filepath.ToSlash(work)+" && echo x > /tmp/list.txt", work, `C:\Users\synthetic`, nil, false, false)
+	if want := filepath.VolumeName(work) + `\tmp\list.txt`; unknown || len(directory) != 1 || filepath.Clean(directory[0].Path) != want {
+		t.Errorf("after cd: directory operands %+v, unknown=%v", directory, unknown)
+	}
 	operands, _, _ := ShellWriteOperands("echo x > /tmp/list.txt", `\\server\share\repo`, `C:\Users\synthetic`)
 	if len(operands) != 1 || filepath.Clean(operands[0]) != `\\server\share\tmp\list.txt` {
 		t.Errorf("share cwd: operands %q", operands)

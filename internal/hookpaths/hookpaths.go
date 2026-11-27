@@ -344,7 +344,8 @@ func shellWriteOperands(command, cwd, home string, user KnownUser) (operands, kn
 // > /tmp/list after cd into a project was keyed inside that project, where
 // a link the command copies (rsync -a ./ out/) made it an unknown write
 // (rel-1-0-10:GAP-2300). Any other name, and every name off Windows, is
-// OperandPath's.
+// OperandPath's. Every reader of redirect targets (this walk, the redirect
+// safety list, the directory walk of shell_directory.go) keys them so.
 func redirectOperandPath(name, cwd string) string {
 	if runtime.GOOS == "windows" && name != "" && os.IsPathSeparator(name[0]) &&
 		filepath.VolumeName(name) == "" && filepath.IsAbs(cwd) {
@@ -6290,7 +6291,7 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			if word == "" {
 				return true
 			}
-			path := OperandPath(word, cwd)
+			path := redirectOperandPath(word, cwd)
 			if !seen[path] {
 				absolute[path] = filepath.IsAbs(word) && rootLiteralWord(redirect.Word)
 			}
