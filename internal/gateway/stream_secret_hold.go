@@ -27,7 +27,7 @@ import (
 //     another label, an END line of any label, or a line that no PEM body
 //     has ends it (GAP-0428), and the search goes on after that BEGIN line,
 //     so a decoy header before a key does not hide the key;
-//   - the prefix of a token rule of the secret rules (streamTokenOpen) with
+//   - the prefix of a token rule of the secret rules (streamTokenOpenEach) with
 //     at least one byte of the token, the token still running at the end of
 //     the lane;
 //   - a digit run that can still become a card number or an SSN the
@@ -137,12 +137,10 @@ const streamPIISep = `[\s\p{Zs}\-\x{2010}-\x{2015}\x{2212}]`
 // hold (secretLane.pem).
 var streamSecretExempt = map[string]bool{"SEC-ENV-DUMP-REQUEST": true, "SEC-PRIVKEY": true}
 
-// streamTokenOpen matches a token, or a card or SSN digit run, still running
-// at the end of a text.
-var streamTokenOpen = regexp.MustCompile(`(?:` + strings.Join(streamTokenOpenAlts(), "|") + `)$`)
-
-// streamTokenOpenEach are the alternatives of streamTokenOpen, each anchored
-// at the end on its own (streamTokenOpenStart).
+// streamTokenOpenEach match a token, or a card or SSN digit run, still
+// running at the end of a text: one expression per alternative of
+// streamTokenOpenAlts, each anchored at the end on its own
+// (streamTokenOpenStart).
 var streamTokenOpenEach = func() []*regexp.Regexp {
 	alts := streamTokenOpenAlts()
 	out := make([]*regexp.Regexp, len(alts))
@@ -163,10 +161,12 @@ func streamTokenOpenAlts() []string {
 	return alts
 }
 
-// streamTokenOpenStart is the start of streamTokenOpen's match in tail, -1
-// for none. The joined expression matches at the leftmost offset where one
-// of its alternatives matches up to the end, so the start is the least start
-// of the alternatives' matches. An alternative whose required literals the
+// streamTokenOpenStart is the start of the match in tail of the
+// alternatives joined into one end-anchored expression, -1 for none (the
+// tests hold that expression, streamTokenOpen, as the reference). The joined
+// expression matches at the leftmost offset where one of its alternatives
+// matches up to the end, so the start is the least start of the
+// alternatives' matches. An alternative whose required literals the
 // tail lacks (rxprefilter) cannot match and is not run: the one automaton of
 // every alternative read the whole tail at each piece of a stream, the
 // largest cost of a streamed reply after GAP-0515 (substrate-1:GAP-1107).

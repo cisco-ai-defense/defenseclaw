@@ -309,6 +309,11 @@ func TestSecretLaneOpenStates(t *testing.T) {
 
 // TestStreamTokenOpenRegexpIsAnchored: the token check reads only the end.
 func TestStreamTokenOpenRegexpIsAnchored(t *testing.T) {
+	for _, re := range streamTokenOpenEach {
+		if !strings.HasSuffix(re.String(), ")$") {
+			t.Fatalf("%s: a token open expression must be anchored at the end", re)
+		}
+	}
 	if !strings.HasSuffix(streamTokenOpen.String(), ")$") {
 		t.Fatal("streamTokenOpen must be anchored at the end")
 	}
