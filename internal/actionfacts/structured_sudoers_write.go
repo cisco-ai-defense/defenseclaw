@@ -183,9 +183,9 @@ func OperandPath(name, cwd string) string {
 	return cwd + string(filepath.Separator) + name
 }
 
-// maxOperandLeadingSteps bounds the link probes one operand may cost; an
-// operand with more dot-dot steps stays raw.
-const maxOperandLeadingSteps = 16
+// maxOperandDotDotSteps bounds the link probes one operand may cost: every
+// dot-dot step of it, leading or not, is one; an operand with more stays raw.
+const maxOperandDotDotSteps = 16
 
 // operandLinkProbe reports a directory whose path, or the longest existing
 // part of it, passes through a link. operandPlainDirProbe reports a directory
@@ -235,7 +235,7 @@ func applyDotDotSteps(base, name string) (string, bool) {
 		switch part {
 		case "", ".":
 		case "..":
-			if steps++; steps > maxOperandLeadingSteps {
+			if steps++; steps > maxOperandDotDotSteps {
 				return "", false
 			}
 			if named && !operandPlainDirProbe(prefix) || !named && operandLinkProbe(prefix) {

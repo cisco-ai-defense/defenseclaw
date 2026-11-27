@@ -508,8 +508,9 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 				return true
 			}
 		}
+		walked := newFindRoot(absoluteRoot, prefix)
 		for _, target := range protected {
-			if !findRootHolds(absoluteRoot, prefix, target.path) {
+			if !walked.holds(target.path) {
 				continue
 			}
 			// The walk deletes only the entries it finds: a generic name

@@ -48,6 +48,9 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 			continue
 		}
 		entry := protectedFile{path: filepath.Clean(name), call: call}
+		if physical, ok := ResolveWriteTarget(entry.path); ok && physical != entry.path {
+			entry.physical = physical
+		}
 		if info, err := call.stat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
@@ -321,17 +324,28 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 		}
 		program, known := staticProgramWord(call.Args[0], home)
 		base := programBase(program)
-		if known && (base == "rm" || base == "rmdir" || base == "unlink" || base == "mv" || base == "gmv" ||
-			base == "chmod" || base == "chown" || base == "chgrp" || base == "setfacl" || base == "chattr") {
+		// A static prefix wrapper chain (sudo, env, nice, ...) runs its child
+		// with the caller's argv: the child is the removal read here, in the
+		// folder the chain runs it in, as a cd to that folder would place it
+		// (sudo -D/--chdir DIR, env -C DIR; rel-1-0-10:GAP-2286).
+		removal, removalCWD, removalBase, removalKnown := call.Args, currentCWD, base, known
+		if known && len(call.Args) > 2 && !slices.Contains(registrationRemovalPrograms, base) {
+			if child, folder, wrapped := registrationWrappedCall(call.Args, values, currentCWD, home); wrapped {
+				removal, removalCWD = child, folder
+				childProgram, childKnown := staticProgramWord(child[0], home)
+				removalBase, removalKnown = programBase(childProgram), childKnown
+			}
+		}
+		if removalKnown && slices.Contains(registrationRemovalPrograms, removalBase) {
 			receiver := -1
-			if base == "mv" || base == "gmv" {
-				words := make([]string, len(call.Args))
-				for index, word := range call.Args {
+			if removalBase == "mv" || removalBase == "gmv" {
+				words := make([]string, len(removal))
+				for index, word := range removal {
 					words[index], _ = StaticWord(word, home)
 				}
 				receiver = registrationMoveReceiver(words)
 			}
-			for index, word := range call.Args[1:] {
+			for index, word := range removal[1:] {
 				receives := index+1 == receiver
 				if receives && !actionWordHasBraceText(word) {
 					continue // the destination receives the sources (read where it is placed, below)
@@ -343,19 +357,19 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 						fields = fields[:len(fields)-1]
 					}
 					for _, value := range fields {
-						if protectedReachPath(OperandPath(value, currentCWD), protected, "") {
+						if protectedReachPath(OperandPath(value, removalCWD), protected, "") {
 							found = true
 							return false
 						}
 					}
 					continue
 				}
-				value, known := actionWordValueWithGlob(word, values, currentCWD, home, true)
+				value, known := actionWordValueWithGlob(word, values, removalCWD, home, true)
 				if !known || value == "" || strings.HasPrefix(value, "-") {
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths, truncated := registrationGlobMatches(OperandPath(value, currentCWD))
+					paths, truncated := registrationGlobMatches(OperandPath(value, removalCWD))
 					for _, path := range paths {
 						if protectedReachPath(path, protected, "") {
 							found = true
@@ -367,7 +381,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					noteGlobCut(truncated)
 					continue
 				}
-				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(value, currentCWD), protected, "") {
+				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(value, removalCWD), protected, "") {
 					found = true
 					return false
 				}
@@ -414,6 +428,42 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 	}
 	syntax.Walk(file, visit)
 	return found
+}
+
+// registrationRemovalPrograms remove, move or change the mode, owner or
+// attributes of their operands: an operand that is a registered file or
+// folder is reached.
+var registrationRemovalPrograms = []string{"rm", "rmdir", "unlink", "mv", "gmv", "chmod", "chown", "chgrp", "setfacl", "chattr"}
+
+// registrationWrappedCall is the call a chain of static prefix wrappers at
+// the head of args runs (actionfacts.StaticPrefixWrapperChild, the reader of
+// the nested -c body and of the action analysis) and the folder it runs it
+// in. The folder is placed as a cd to it is (actionPosixAdvanceDirectory):
+// sudo -D/--chdir DIR and env -C DIR from cwd, resolved through its links.
+// A child that starts in a folder the words do not name (sudo -i/--login:
+// the target user's home; ~user) keeps cwd, as a cd the walk cannot place
+// does. wrapped is false when args is no such chain, when the chain changes
+// which program the child word names (env PATH=...), or when the child word
+// is not static.
+func registrationWrappedCall(args []*syntax.Word, values actionValues, cwd, home string) (child []*syntax.Word, folder string, wrapped bool) {
+	words, static := make([]string, len(args)), make([]bool, len(args))
+	for index, word := range args {
+		words[index], static[index] = actionWordValue(word, values, cwd, home)
+	}
+	run, ok := actionfacts.StaticPrefixWrapperChild(words, static)
+	if !ok || run.ChangesResolution || run.Index <= 0 || run.Index >= len(args) || !static[run.Index] || words[run.Index] == "" {
+		return nil, "", false
+	}
+	folder = cwd
+	if dir := run.Dir; dir != "" && !run.DirUnknown && !strings.HasPrefix(dir, "~") {
+		place := OperandPath(dir, cwd)
+		if resolved, ok := ResolveWriteTarget(place); ok {
+			folder = resolved
+		} else {
+			folder = filepath.Clean(place)
+		}
+	}
+	return args[run.Index:], folder, true
 }
 
 // registrationShadowable names the builtins and programs the exact reading
@@ -959,8 +1009,9 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 	for _, root := range roots {
 		root, path, prefix := findRootStart(root, cwd, home)
 		if info, err := pathStat(path); err == nil && info.IsDir() {
+			walked := newFindRoot(path, prefix)
 			for _, target := range protected {
-				if target.path == path || !findRootHolds(path, prefix, target.path) {
+				if target.path == path || !walked.holds(target.path) {
 					continue
 				}
 				// A find hands its child only the entries the walk finds: a
@@ -1087,30 +1138,51 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, 
 
 // findRootHolds reports a path at or below a find root; prefix is the root
 // ending in one separator. Windows compares names without case, so find c:/
-// walks a C: home (rel-1-0-10:GAP-1642).
+// walks a C: home (rel-1-0-10:GAP-1642). A caller that asks about many paths
+// below one root reads the root once (newFindRoot).
+func findRootHolds(root, prefix, path string) bool {
+	return newFindRoot(root, prefix).holds(path)
+}
+
+// findRoot is a find root read once for every path it is asked about.
 //
 // A root that keeps a dot-dot step (OperandPath leaves it raw after a link or
 // a name it cannot read) starts where the kernel climbs: it is compared by the
 // folder the link-aware walk resolves, as a write operand of the same spelling
 // is (rel-1-0-10:GAP-1648), against the path and the file the path resolves
-// to.
-func findRootHolds(root, prefix, path string) bool {
-	if rootSpellingHolds(root, prefix, path) {
+// to. The root is resolved once, not once for every path: a find of 50 roots
+// with three steps each under a linked home cost 4.3 times the plain find
+// when each (root, path) pair resolved the root again (CHK-RF-VB7 N2).
+type findRoot struct {
+	root, prefix             string
+	physical, physicalPrefix string // "" when the spelling alone decides
+}
+
+// newFindRoot reads root (prefix is root ending in one separator).
+func newFindRoot(root, prefix string) findRoot {
+	r := findRoot{root: root, prefix: prefix}
+	if !hasDotDotStep(root) {
+		return r
+	}
+	if physical, ok := ResolveWriteTarget(root); ok && physical != root && !hasDotDotStep(physical) {
+		r.physical, r.physicalPrefix = physical, rootPrefix(physical)
+	}
+	return r
+}
+
+// holds reports path at or below the root.
+func (r findRoot) holds(path string) bool {
+	if rootSpellingHolds(r.root, r.prefix, path) {
 		return true
 	}
-	if !hasDotDotStep(root) {
+	if r.physical == "" {
 		return false
 	}
-	physical, ok := ResolveWriteTarget(root)
-	if !ok || physical == root || hasDotDotStep(physical) {
-		return false
-	}
-	physicalPrefix := rootPrefix(physical)
-	if rootSpellingHolds(physical, physicalPrefix, path) {
+	if rootSpellingHolds(r.physical, r.physicalPrefix, path) {
 		return true
 	}
 	resolved, ok := ResolveWriteTarget(path)
-	return ok && resolved != path && rootSpellingHolds(physical, physicalPrefix, resolved)
+	return ok && resolved != path && rootSpellingHolds(r.physical, r.physicalPrefix, resolved)
 }
 
 // rootSpellingHolds is findRootHolds by the spelling of the root alone.
@@ -1277,8 +1349,9 @@ func registrationFindReach(words []string, cwd, home string, protected, all prot
 	}
 	for _, written := range roots {
 		written, root, prefix := findRootStart(written, cwd, home)
+		walked := newFindRoot(root, prefix)
 		below := func(target protectedFile) bool {
-			return findRootHolds(root, prefix, target.path)
+			return walked.holds(target.path)
 		}
 		aimed := func(target protectedFile, tests []findTest) bool {
 			return slices.ContainsFunc(tests, func(test findTest) bool { return test.aimsAt(written, root, target.path) })

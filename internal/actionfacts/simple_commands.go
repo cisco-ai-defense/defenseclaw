@@ -3600,18 +3600,32 @@ func simpleWrapperRunFolder(dir, cwd string, vars map[string]string, standIn str
 		if !filepath.IsAbs(home) {
 			return "", false
 		}
-		return OperandPath(strings.TrimPrefix(strings.TrimPrefix(dir, "~"), "/"), home), true
+		folder := OperandPath(strings.TrimPrefix(strings.TrimPrefix(dir, "~"), "/"), home)
+		if hasDotDotStep(filepath.ToSlash(folder)) {
+			return "", false
+		}
+		return folder, true
 	}
 	if strings.HasPrefix(dir, "~") {
 		return "", false
 	}
-	if filepath.IsAbs(dir) {
-		return OperandPath(dir, ""), true
+	var folder string
+	switch {
+	case filepath.IsAbs(dir):
+		folder = OperandPath(dir, "")
+	case cwd == "" || standInReached(cwd, standIn):
+		return "", false
+	default:
+		folder = OperandPath(dir, cwd)
 	}
-	if cwd == "" || standInReached(cwd, standIn) {
+	// OperandPath keeps a dot-dot step raw where the kernel climbs from a
+	// link target the text does not name; the child's paths would later be
+	// joined to that text, so the folder is not known (CHK-RF-VB7 GAP-1274
+	// N2).
+	if hasDotDotStep(filepath.ToSlash(folder)) {
 		return "", false
 	}
-	return OperandPath(dir, cwd), true
+	return folder, true
 }
 
 // standInReached reports that folder is the stand-in folder (Input.StandInCWD),

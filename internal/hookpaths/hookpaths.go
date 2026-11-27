@@ -1556,6 +1556,15 @@ type protectedFile struct {
 	path    string
 	info    os.FileInfo
 	unknown bool
+	// physical is the path the link-aware walk resolves path to
+	// (ResolveWriteTarget), when it differs: a registered hook file or
+	// folder below a HOME reached through a link is spelled through the
+	// link, while every operand is compared resolved, so a recursive rm of
+	// the hook folder reached none of it while the find reader, which
+	// compares both spellings, did (rel-1-0-10:GAP-2285). Empty for a set
+	// that lists its resolved spellings as entries of their own (the key
+	// files).
+	physical string
 	// call is the hook call whose memory newProtectedFiles read the set
 	// from (nil: none): target stats through it rather than finding the
 	// call again for every target (rel-1-0-10:GAP-1293).
@@ -1667,7 +1676,7 @@ func newProtectedFilesWith(home string, memo *TargetMemo) protectedFiles {
 // has reports a resolved target that is one of the protected paths.
 func (files protectedFiles) has(resolved string) bool {
 	for _, p := range files {
-		if samePathName(resolved, p.path) {
+		if samePathName(resolved, p.path) || p.physical != "" && samePathName(resolved, p.physical) {
 			return true
 		}
 	}
