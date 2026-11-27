@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 )
 
@@ -71,5 +72,31 @@ func TestPublishEnterpriseWindowsMCPServersNamesWhatItDidNotPublish(t *testing.T
 	}
 	if !published["codex"] {
 		t.Fatalf("Codex MCP servers were not published: %v", published)
+	}
+}
+
+func TestPublishEnterpriseWindowsMCPServersSupportsSecureClientInventory(t *testing.T) {
+	previous := enterpriseWindowsMCPSpoolWriter
+	t.Cleanup(func() { enterpriseWindowsMCPSpoolWriter = previous })
+	var calls int
+	enterpriseWindowsMCPSpoolWriter = func(_, _ string, _ enterprisehooks.Manifest, _ func(string) error, _ func(string, ...any)) error {
+		calls++
+		return nil
+	}
+	cfg := &config.Config{
+		DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+		AIDiscovery:    config.AIDiscoveryConfig{Enabled: true}, DataDir: t.TempDir(),
+	}
+	if err := publishEnterpriseWindowsMCPServers(cfg, enterprisehooks.Manifest{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != len(mcpasuser.PublishedConnectors()) {
+		t.Fatalf("Secure Client publications=%d want=%d", calls, len(mcpasuser.PublishedConnectors()))
+	}
+	cfg.AIDiscovery.Enabled = false
+	calls = 0
+	if err := publishEnterpriseWindowsMCPServers(cfg, enterprisehooks.Manifest{}, &bytes.Buffer{}); err != nil || calls != 0 {
+		t.Fatalf("disabled discovery published %d records: %v", calls, err)
 	}
 }

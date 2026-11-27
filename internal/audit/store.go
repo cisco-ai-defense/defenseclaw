@@ -2171,6 +2171,10 @@ var migrations = []migration{
 		description: "MCP inventory: add bounded durable advertised tool state",
 		apply:       migrateMCPAdvertisedTools,
 	},
+	{
+		description: "MCP inventory: decouple observed tools from configured server parents",
+		apply:       migrateMCPObservedToolCorrelationFields,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

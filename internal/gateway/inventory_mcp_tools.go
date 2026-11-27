@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 const (
 	maxMCPToolObservations = maxManagedMCPInventory
+	maxMCPObservedGroups   = maxManagedMCPInventory
 	// The 256-name bound is per configured server. A collection can contain
 	// one bounded set for each of the 256 managed MCP parents.
 	maxMCPToolCollection = maxManagedMCPInventory * maxMCPToolObservations
@@ -28,26 +28,16 @@ type mcpToolObservation struct {
 }
 
 type pendingMCPObservedTool struct {
-	parentID  string
-	connector string
-	server    string
-	tool      string
-	firstAt   time.Time
-	lastAt    time.Time
-	version   uint64
-}
-
-type mcpToolAliasState uint8
-
-const (
-	mcpToolAliasUnavailable mcpToolAliasState = iota
-	mcpToolAliasUnique
-	mcpToolAliasAmbiguous
-)
-
-type mcpToolAliasResolution struct {
-	configured string
-	state      mcpToolAliasState
+	groupID    string
+	connector  string
+	server     string
+	tool       string
+	userID     string
+	userIDKind string
+	userName   string
+	firstAt    time.Time
+	lastAt     time.Time
+	version    uint64
 }
 
 type mcpObservedToolStore interface {
@@ -55,7 +45,7 @@ type mcpObservedToolStore interface {
 	ListMCPObservedTools(context.Context) ([]audit.MCPObservedTool, error)
 	ReplaceMCPAdvertisedToolsIf(context.Context, audit.MCPAdvertisedToolSnapshot, func() bool) error
 	ListMCPAdvertisedToolSnapshots(context.Context) ([]audit.MCPAdvertisedToolSnapshot, error)
-	DeleteMCPObservedToolsForParents(context.Context, []string) error
+	DeleteMCPAdvertisedToolsForParents(context.Context, []string) error
 }
 
 // mcpToolInventory retains only tool names from completed scanner listings and
@@ -70,6 +60,7 @@ type mcpToolInventory struct {
 	advertised                  map[string][]mcpToolObservation
 	advertisedListedAt          map[string]time.Time
 	observed                    map[string]map[string]time.Time
+	observedOwners              map[string]llmEventUser
 	partial                     map[string]bool
 	advertisedVersion           map[string]uint64
 	pendingAdvertised           map[string]uint64
@@ -77,12 +68,11 @@ type mcpToolInventory struct {
 	observedVersion             uint64
 	observedPartial             map[string]bool
 	parents                     map[string]string
-	blockedObserved             map[string]bool
-	aliases                     map[string]mcpToolAliasResolution
-	restored                    map[string]map[string][]audit.MCPObservedTool
+	blockedAdvertised           map[string]bool
 	restoredAdvertised          map[string]map[string]audit.MCPAdvertisedToolSnapshot
 	pendingRemoval              map[string]struct{}
 	observedRestoreIncomplete   bool
+	observedCollectionPartial   bool
 	advertisedRestoreIncomplete bool
 }
 
@@ -116,24 +106,23 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.blockedObserved == nil {
-		m.blockedObserved = make(map[string]bool)
+	if m.blockedAdvertised == nil {
+		m.blockedAdvertised = make(map[string]bool)
 	}
-	// An incomplete read may retain a last-known parent, but a collision that
-	// was visible in that same read makes the alias unsafe for new calls. Keep
-	// the evidence while refusing observations until a complete read proves the
-	// alias unique again.
-	for key := range m.blockedObserved {
+	// Advertised tools/list data remains tied to a configured server. An
+	// incomplete read may retain that last-known parent, but a visible collision
+	// prevents a new listing from being attributed to either server.
+	for key := range m.blockedAdvertised {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; !incomplete {
-			delete(m.blockedObserved, key)
+			delete(m.blockedAdvertised, key)
 		}
 	}
 	for key, count := range counts {
 		if count != 1 {
-			m.blockedObserved[key] = true
+			m.blockedAdvertised[key] = true
 			// Retain the last complete identity and evidence while refusing new
-			// observations/listings. A later unique read either confirms it or
+			// listings. A later unique read either confirms it or
 			// retires it through the ordinary parent-change path.
 			if old := m.parents[key]; old != "" {
 				next[key] = old
@@ -144,8 +133,8 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 		m.pendingRemoval = make(map[string]struct{})
 	}
 	// A parent whose durable cleanup has not completed cannot become current
-	// again yet. Otherwise a later cleanup retry could delete observations that
-	// were accepted after the parent reappeared.
+	// again yet. Otherwise a later cleanup retry could delete a listing accepted
+	// after the parent reappeared.
 	for key, parentID := range next {
 		if _, pending := m.pendingRemoval[parentID]; pending {
 			delete(next, key)
@@ -164,10 +153,7 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 			delete(m.advertisedListedAt, key)
 			delete(m.advertisedVersion, key)
 			delete(m.pendingAdvertised, key)
-			delete(m.pendingObserved, key)
-			delete(m.observed, key)
 			delete(m.partial, key)
-			delete(m.observedPartial, key)
 		}
 	}
 	// A listing can complete before the first parent refresh. If an
@@ -200,33 +186,6 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 		}
 	}
 	m.parents = next
-	m.rebuildAliasIndexLocked()
-	// Reconcile every durable candidate only after an authoritative connector
-	// read identifies the current parent. This removes stale pre-restart parent
-	// generations without allowing map iteration order to choose a winner.
-	for key, parents := range m.restored {
-		connector, _, _ := strings.Cut(key, "\x00")
-		if _, incomplete := incompleteConnectors[connector]; incomplete {
-			continue
-		}
-		if counts[key] > 1 {
-			// Ambiguous is not absent. Keep every durable candidate staged
-			// without attribution until a complete read identifies one current
-			// parent or confirms that all candidates are gone.
-			continue
-		}
-		current := m.parents[key]
-		for parentID, tools := range parents {
-			if current == "" || parentID != current {
-				m.pendingRemoval[parentID] = struct{}{}
-				continue
-			}
-			for _, tool := range tools {
-				m.restoreToolLocked(key, tool)
-			}
-		}
-		delete(m.restored, key)
-	}
 	for key, parents := range m.restoredAdvertised {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete {
@@ -307,16 +266,17 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 	}
 	server, tool, valid := exactMCPToolResource(req.ToolName, payloadString(req.Payload, "mcp_server_name"))
 	if valid {
-		configuredServer, resolved := a.mcpTools.resolveConfiguredServer(projection.connector, server)
-		if !resolved {
-			a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
-			return
+		user := resolveHookUser(ctx, req.Payload)
+		if user.IDKind == "" {
+			// Payload-only identity is not sufficient for a multi-user inventory
+			// join. The connector and runtime server remain useful without it,
+			// but must not be attributed to a claimed account.
+			user = llmEventUser{}
 		}
-		server = configuredServer
 		if a.mcpTools.store != nil {
-			pending, recorded, queued := a.mcpTools.recordObservedAndBeginWrite(projection.connector, server, tool, at)
+			pending, recorded, queued := a.mcpTools.recordObservedAndBeginWrite(projection.connector, server, tool, at, user)
 			if !recorded {
-				a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
+				a.mcpTools.recordMetric(ctx, "observe", "partial", "incomplete")
 				return
 			}
 			if !queued {
@@ -328,12 +288,15 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 				a.mcpTools.settleObservedWrite(pending, err, attempted.Load())
 			})
 			err := a.mcpTools.store.UpsertMCPObservedToolIf(writeCtx, audit.MCPObservedTool{
-				ParentComponentID: pending.parentID,
-				Connector:         pending.connector,
-				ServerName:        pending.server,
-				ToolName:          pending.tool,
-				FirstObservedAt:   pending.firstAt,
-				LastObservedAt:    pending.lastAt,
+				ObservationGroupID: pending.groupID,
+				Connector:          pending.connector,
+				ServerName:         pending.server,
+				ToolName:           pending.tool,
+				UserID:             pending.userID,
+				UserIDKind:         pending.userIDKind,
+				UserName:           pending.userName,
+				FirstObservedAt:    pending.firstAt,
+				LastObservedAt:     pending.lastAt,
 			}, func() bool {
 				current := a.mcpTools.observedWriteIsCurrent(pending)
 				attempted.Store(current)
@@ -342,69 +305,25 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 			if report == nil || !report.Deferred() {
 				a.mcpTools.settleObservedWrite(pending, err, attempted.Load())
 			}
-		} else if _, recorded := a.mcpTools.recordObserved(projection.connector, server, tool, at); !recorded {
-			a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
+		} else if _, recorded := a.mcpTools.recordObserved(projection.connector, server, tool, at, user); !recorded {
+			a.mcpTools.recordMetric(ctx, "observe", "partial", "incomplete")
 		}
 	}
 }
 
-// resolveConfiguredServer maps an agent's tool-name spelling back to the one
-// configured server alias that owns it. Codex normalizes punctuation to
-// underscores in tool names, so the literal hook spelling is not necessarily
-// the durable inventory identity.
-func (m *mcpToolInventory) resolveConfiguredServer(connector, toolServer string) (string, bool) {
+func (m *mcpToolInventory) beginObservedWrite(connector, server, tool string, at time.Time, owners ...llmEventUser) (pendingMCPObservedTool, bool) {
 	if m == nil {
-		return "", false
-	}
-	connector = canonicalConnectorRulePackKey(connector)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	resolution := m.aliases[mcpToolServerKey(connector, strings.TrimSpace(toolServer))]
-	return resolution.configured, resolution.state == mcpToolAliasUnique
-}
-
-func (m *mcpToolInventory) rebuildAliasIndexLocked() {
-	m.aliases = make(map[string]mcpToolAliasResolution, len(m.parents)*2)
-	for key, blocked := range m.blockedObserved {
-		connector, configured, ok := strings.Cut(key, "\x00")
-		if !blocked || !ok {
-			continue
-		}
-		for _, spelling := range []string{configured, config.MCPToolServerName(connector, configured)} {
-			m.aliases[mcpToolServerKey(connector, spelling)] = mcpToolAliasResolution{state: mcpToolAliasAmbiguous}
-		}
-	}
-	for key, parentID := range m.parents {
-		connector, configured, ok := strings.Cut(key, "\x00")
-		if !ok || parentID == "" {
-			continue
-		}
-		spellings := []string{configured, config.MCPToolServerName(connector, configured)}
-		for _, spelling := range spellings {
-			aliasKey := mcpToolServerKey(connector, spelling)
-			current := m.aliases[aliasKey]
-			if m.blockedObserved[key] || current.state == mcpToolAliasAmbiguous ||
-				current.state == mcpToolAliasUnique && current.configured != configured {
-				m.aliases[aliasKey] = mcpToolAliasResolution{state: mcpToolAliasAmbiguous}
-				continue
-			}
-			m.aliases[aliasKey] = mcpToolAliasResolution{configured: configured, state: mcpToolAliasUnique}
-		}
-	}
-}
-
-func (m *mcpToolInventory) beginObservedWrite(connector, server, tool, parentID string, at time.Time) (pendingMCPObservedTool, bool) {
-	if m == nil || parentID == "" {
 		return pendingMCPObservedTool{}, false
 	}
-	key := mcpToolServerKey(connector, server)
+	user := firstObservedOwner(owners)
+	key := mcpObservedToolKey(connector, user.ID, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.beginObservedWriteLocked(key, connector, server, tool, parentID, at)
+	return m.beginObservedWriteLocked(key, connector, server, tool, user, at)
 }
 
-func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool, parentID string, at time.Time) (pendingMCPObservedTool, bool) {
-	if m.parents[key] != parentID || m.blockedObserved[key] {
+func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool string, user llmEventUser, at time.Time) (pendingMCPObservedTool, bool) {
+	if !m.admitObservedGroupLocked(key) {
 		return pendingMCPObservedTool{}, false
 	}
 	if m.pendingObserved == nil {
@@ -414,10 +333,14 @@ func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool
 		m.pendingObserved[key] = make(map[string]pendingMCPObservedTool)
 	}
 	if _, exists := m.pendingObserved[key][tool]; !exists && len(m.pendingObserved[key]) >= maxMCPToolObservations {
+		if m.observedPartial == nil {
+			m.observedPartial = make(map[string]bool)
+		}
+		m.observedPartial[key] = true
 		return pendingMCPObservedTool{}, false
 	}
 	firstAt, lastAt := at.UTC(), at.UTC()
-	if current, exists := m.pendingObserved[key][tool]; exists && current.parentID == parentID {
+	if current, exists := m.pendingObserved[key][tool]; exists {
 		if current.firstAt.Before(firstAt) {
 			firstAt = current.firstAt
 		}
@@ -427,37 +350,58 @@ func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool
 	}
 	m.observedVersion++
 	pending := pendingMCPObservedTool{
-		parentID: parentID, connector: connector, server: server, tool: tool,
+		groupID:   endpointInventoryComponentID("mcp-observation", key),
+		connector: connector, server: server, tool: tool,
+		userID: user.ID, userIDKind: user.IDKind, userName: user.Name,
 		firstAt: firstAt, lastAt: lastAt, version: m.observedVersion,
 	}
 	m.pendingObserved[key][tool] = pending
 	return pending, true
 }
 
+func (m *mcpToolInventory) admitObservedGroupLocked(key string) bool {
+	if _, exists := m.observed[key]; exists {
+		return true
+	}
+	if _, exists := m.pendingObserved[key]; exists {
+		return true
+	}
+	groups := len(m.observed)
+	for pendingKey := range m.pendingObserved {
+		if _, exists := m.observed[pendingKey]; !exists {
+			groups++
+		}
+	}
+	if groups >= maxMCPObservedGroups {
+		m.observedCollectionPartial = true
+		return false
+	}
+	return true
+}
+
 func (m *mcpToolInventory) observedWriteIsCurrent(pending pendingMCPObservedTool) bool {
 	if m == nil || pending.version == 0 {
 		return false
 	}
-	key := mcpToolServerKey(pending.connector, pending.server)
+	key := mcpObservedToolKey(pending.connector, pending.userID, pending.server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current, ok := m.pendingObserved[key][pending.tool]
-	return ok && current.version == pending.version && m.parents[key] == pending.parentID && !m.blockedObserved[key]
+	return ok && current.version == pending.version
 }
 
 func (m *mcpToolInventory) settleObservedWrite(pending pendingMCPObservedTool, err error, attempted bool) {
 	if m == nil || pending.version == 0 || err != nil {
 		return
 	}
-	key := mcpToolServerKey(pending.connector, pending.server)
+	key := mcpObservedToolKey(pending.connector, pending.userID, pending.server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current, ok := m.pendingObserved[key][pending.tool]
 	if !ok || current.version != pending.version {
 		return
 	}
-	parentStillExists := m.parents[key] == pending.parentID
-	if !attempted && parentStillExists {
+	if !attempted {
 		return
 	}
 	delete(m.pendingObserved[key], pending.tool)
@@ -479,8 +423,8 @@ func (m *mcpToolInventory) flushPendingObserved(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 	sort.Slice(writes, func(i, j int) bool {
-		if writes[i].parentID != writes[j].parentID {
-			return writes[i].parentID < writes[j].parentID
+		if writes[i].groupID != writes[j].groupID {
+			return writes[i].groupID < writes[j].groupID
 		}
 		return writes[i].tool < writes[j].tool
 	})
@@ -488,12 +432,15 @@ func (m *mcpToolInventory) flushPendingObserved(ctx context.Context) error {
 	for _, pending := range writes {
 		var attempted atomic.Bool
 		err := m.store.UpsertMCPObservedToolIf(ctx, audit.MCPObservedTool{
-			ParentComponentID: pending.parentID,
-			Connector:         pending.connector,
-			ServerName:        pending.server,
-			ToolName:          pending.tool,
-			FirstObservedAt:   pending.firstAt,
-			LastObservedAt:    pending.lastAt,
+			ObservationGroupID: pending.groupID,
+			Connector:          pending.connector,
+			ServerName:         pending.server,
+			ToolName:           pending.tool,
+			UserID:             pending.userID,
+			UserIDKind:         pending.userIDKind,
+			UserName:           pending.userName,
+			FirstObservedAt:    pending.firstAt,
+			LastObservedAt:     pending.lastAt,
 		}, func() bool {
 			current := m.observedWriteIsCurrent(pending)
 			attempted.Store(current)
@@ -509,6 +456,11 @@ func (m *mcpToolInventory) flushPendingObserved(ctx context.Context) error {
 
 func mcpToolServerKey(connector, server string) string {
 	return strings.ToLower(strings.TrimSpace(connector)) + "\x00" + strings.TrimSpace(server)
+}
+
+func mcpObservedToolKey(connector, userID, server string) string {
+	return strings.ToLower(strings.TrimSpace(connector)) + "\x00" +
+		strings.TrimSpace(userID) + "\x00" + strings.TrimSpace(server)
 }
 
 func (m *mcpToolInventory) recordAdvertised(connector, server string, names []string, at time.Time, upstreamPartial ...bool) {
@@ -538,7 +490,7 @@ func (m *mcpToolInventory) recordAdvertisedContext(ctx context.Context, connecto
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].name < items[j].name })
 	m.mu.Lock()
-	if m.blockedObserved[key] {
+	if m.blockedAdvertised[key] {
 		m.mu.Unlock()
 		m.recordMetric(ctx, "list", "partial", "incomplete")
 		return
@@ -661,7 +613,7 @@ func (m *mcpToolInventory) recordListingFailureContext(ctx context.Context, conn
 	}
 	key := mcpToolServerKey(connector, server)
 	m.mu.Lock()
-	if m.blockedObserved[key] {
+	if m.blockedAdvertised[key] {
 		m.mu.Unlock()
 		m.recordMetric(ctx, "list", "partial", "incomplete")
 		return
@@ -703,7 +655,7 @@ func (m *mcpToolInventory) recordListingFailureContext(ctx context.Context, conn
 	}
 }
 
-func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at time.Time) (string, bool) {
+func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at time.Time, owners ...llmEventUser) (string, bool) {
 	if m == nil || connector == "" || server == "" {
 		return "", false
 	}
@@ -711,13 +663,18 @@ func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at 
 	if name == "" || name != rawName {
 		return "", false
 	}
-	key := mcpToolServerKey(connector, server)
+	user := firstObservedOwner(owners)
+	key := mcpObservedToolKey(connector, user.ID, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.admitObservedGroupLocked(key) {
+		return key, false
+	}
+	m.rememberObservedOwnerLocked(key, user)
 	return m.recordObservedLocked(key, name, at)
 }
 
-func (m *mcpToolInventory) recordObservedAndBeginWrite(connector, server, rawName string, at time.Time) (pendingMCPObservedTool, bool, bool) {
+func (m *mcpToolInventory) recordObservedAndBeginWrite(connector, server, rawName string, at time.Time, owners ...llmEventUser) (pendingMCPObservedTool, bool, bool) {
 	if m == nil || connector == "" || server == "" {
 		return pendingMCPObservedTool{}, false, false
 	}
@@ -725,30 +682,34 @@ func (m *mcpToolInventory) recordObservedAndBeginWrite(connector, server, rawNam
 	if name == "" || name != rawName {
 		return pendingMCPObservedTool{}, false, false
 	}
-	key := mcpToolServerKey(connector, server)
+	user := firstObservedOwner(owners)
+	key := mcpObservedToolKey(connector, user.ID, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	parentID := m.parents[key]
-	if parentID == "" || m.blockedObserved[key] {
-		return pendingMCPObservedTool{}, false, false
-	}
-	pending, queued := m.beginObservedWriteLocked(key, connector, server, name, parentID, at)
+	pending, queued := m.beginObservedWriteLocked(key, connector, server, name, user, at)
 	if !queued {
-		if m.observedPartial == nil {
-			m.observedPartial = make(map[string]bool)
-		}
-		m.observedPartial[key] = true
 		return pendingMCPObservedTool{}, true, false
 	}
+	m.rememberObservedOwnerLocked(key, user)
 	_, recorded := m.recordObservedLocked(key, name, at)
 	return pending, recorded, true
 }
 
-func (m *mcpToolInventory) recordObservedLocked(key, name string, at time.Time) (string, bool) {
-	parentID := m.parents[key]
-	if parentID == "" || m.blockedObserved[key] {
-		return "", false
+func firstObservedOwner(owners []llmEventUser) llmEventUser {
+	if len(owners) == 0 {
+		return llmEventUser{}
 	}
+	return owners[0]
+}
+
+func (m *mcpToolInventory) rememberObservedOwnerLocked(key string, user llmEventUser) {
+	if m.observedOwners == nil {
+		m.observedOwners = make(map[string]llmEventUser)
+	}
+	m.observedOwners[key] = user
+}
+
+func (m *mcpToolInventory) recordObservedLocked(key, name string, at time.Time) (string, bool) {
 	if m.observed == nil {
 		m.observed = make(map[string]map[string]time.Time)
 	}
@@ -760,13 +721,13 @@ func (m *mcpToolInventory) recordObservedLocked(key, name string, at time.Time) 
 			m.observedPartial = make(map[string]bool)
 		}
 		m.observedPartial[key] = true
-		return parentID, true
+		return key, true
 	}
 	observedAt := at.UTC()
 	if current := m.observed[key][name]; current.IsZero() || observedAt.After(current) {
 		m.observed[key][name] = observedAt
 	}
-	return parentID, true
+	return key, true
 }
 
 func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
@@ -776,17 +737,18 @@ func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.observedRestoreIncomplete = false
-	m.restored = make(map[string]map[string][]audit.MCPObservedTool)
+	m.observedCollectionPartial = false
 	for _, tool := range tools {
 		name := inventorySafeItemName(tool.ToolName, 256)
-		if name == "" || name != tool.ToolName || tool.ParentComponentID == "" {
+		if name == "" || name != tool.ToolName || tool.ObservationGroupID == "" {
 			continue
 		}
-		key := mcpToolServerKey(tool.Connector, tool.ServerName)
-		if m.restored[key] == nil {
-			m.restored[key] = make(map[string][]audit.MCPObservedTool)
+		key := mcpObservedToolKey(tool.Connector, tool.UserID, tool.ServerName)
+		if !m.admitObservedGroupLocked(key) {
+			continue
 		}
-		m.restored[key][tool.ParentComponentID] = append(m.restored[key][tool.ParentComponentID], tool)
+		m.rememberObservedOwnerLocked(key, llmEventUser{ID: tool.UserID, IDKind: tool.UserIDKind, Name: tool.UserName})
+		m.restoreToolLocked(key, tool)
 	}
 }
 
@@ -871,53 +833,41 @@ func (m *mcpToolInventory) retryRestoreFromStore(ctx context.Context) {
 	}
 }
 
-// observedIncomplete reports whether an incomplete connector owns durable
-// observed evidence. Such a connector must keep both observed collections
-// partial: its unreadable configuration may be hiding the server that tells us
-// whether the retained parent is local or remote. An unrelated incomplete
-// connector with no observed evidence cannot make a complete connector's
-// authenticated observations diagnostic-only.
-func (m *mcpToolInventory) observedIncomplete(incompleteConnectors map[string]struct{}) bool {
+// observedIncomplete reports whether durable runtime observations are still
+// being restored or written. Config discovery health is deliberately absent:
+// observed calls form an independent inventory snapshot.
+func (m *mcpToolInventory) observedIncomplete() bool {
 	if m == nil {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.observedRestoreIncomplete || len(m.restored) > 0 || len(m.pendingRemoval) > 0 {
+	if m.observedRestoreIncomplete {
 		return true
 	}
-	for key, tools := range m.observed {
-		connector, _, _ := strings.Cut(key, "\x00")
-		if _, incomplete := incompleteConnectors[connector]; incomplete &&
-			(len(tools) > 0 || m.observedPartial[key]) {
+	for key := range m.observed {
+		if len(m.pendingObserved[key]) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remote bool, onlySource ...string) ([]endpointInventoryComponent, bool) {
+// advertisedComponents projects tools/list evidence beside the configured
+// server that produced it. This relation is intrinsic to the listing and is
+// deliberately separate from runtime observations.
+func (m *mcpToolInventory) advertisedComponents(servers []endpointInventoryComponent, remote bool) ([]endpointInventoryComponent, bool) {
 	if m == nil {
 		return nil, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// A hook supplies an authenticated connector and server alias, but no user
-	// home. An alias present in multiple profiles is ambiguous and is skipped.
 	counts := make(map[string]int, len(servers))
 	for _, server := range servers {
 		counts[mcpToolServerKey(server.agentConnector, server.itemName)]++
 	}
 	rows := make([]endpointInventoryComponent, 0)
-	partial := false
-	includeAdvertised, includeObserved := true, true
-	if len(onlySource) > 0 {
-		includeAdvertised = onlySource[0] == "advertised"
-		includeObserved = onlySource[0] == "observed"
-	}
-	if includeAdvertised && m.advertisedRestoreIncomplete {
-		partial = true
-	}
+	partial := m.advertisedRestoreIncomplete
 	for _, server := range servers {
 		if server.mcpIsRemote != remote {
 			continue
@@ -932,54 +882,84 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 			continue
 		}
 		if m.parents[key] != server.id {
-			if len(m.advertised[key]) > 0 || len(m.observed[key]) > 0 || m.partial[key] || m.observedPartial[key] {
+			if len(m.advertised[key]) > 0 || m.partial[key] {
 				partial = true
 			}
 			continue
 		}
-		if includeAdvertised && m.store != nil && m.pendingAdvertised[key] != 0 {
+		if m.store != nil && m.pendingAdvertised[key] != 0 {
 			partial = true
 		}
 		// A parent that has never been scanned contributes no advertised rows.
 		// A recorded listing failure is partial, while an authoritative empty
 		// listing is represented by an empty advertised slice.
-		if includeAdvertised {
-			partial = partial || m.partial[key]
-		}
-		if includeObserved {
-			partial = partial || m.observedPartial[key]
-			partial = partial || len(m.pendingObserved[key]) > 0
-		}
-		add := func(name, source string, at time.Time) {
+		partial = partial || m.partial[key]
+		add := func(name string, at time.Time) {
 			if len(rows) >= maxMCPToolCollection {
 				partial = true
 				return
 			}
 			rows = append(rows, endpointInventoryComponent{
-				id:            endpointInventoryComponentID("mcp-tool", server.id+"\x00"+source+"\x00"+name),
-				componentType: "mcp_tool", signal: source + "_mcp_tool", product: name,
+				id:            endpointInventoryComponentID("mcp-tool", server.id+"\x00advertised\x00"+name),
+				componentType: "mcp_tool", signal: "advertised_mcp_tool", product: name,
 				active: server.active, itemName: name, agentConnector: server.agentConnector,
-				mcpToolParentID: server.id, mcpToolSource: source,
+				mcpRuntimeServerName: server.itemName,
+				mcpToolParentID:      server.id, mcpToolSource: "advertised",
 				mcpToolObservedAt: at.UTC().Format(time.RFC3339Nano),
 				userID:            server.userID, userIDKind: server.userIDKind,
 				userName: server.userName, userEmail: server.userEmail,
 			})
 		}
-		if includeAdvertised {
-			for _, item := range m.advertised[key] {
-				add(item.name, "advertised", item.at)
-			}
+		for _, item := range m.advertised[key] {
+			add(item.name, item.at)
 		}
-		// Map iteration is nondeterministic; sorting keeps snapshot digests stable.
-		if includeObserved {
-			observedNames := make([]string, 0, len(m.observed[key]))
-			for name := range m.observed[key] {
-				observedNames = append(observedNames, name)
+	}
+	return rows, partial
+}
+
+// observedComponents projects authenticated runtime calls without consulting
+// configured MCP servers. The cloud joins these rows to server inventory by
+// device, agent, and runtime server name.
+func (m *mcpToolInventory) observedComponents() ([]endpointInventoryComponent, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.observed))
+	for key := range m.observed {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	rows := make([]endpointInventoryComponent, 0)
+	partial := m.observedRestoreIncomplete || m.observedCollectionPartial
+	for _, key := range keys {
+		parts := strings.SplitN(key, "\x00", 3)
+		if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
+			partial = true
+			continue
+		}
+		connectorName, serverName := parts[0], parts[2]
+		owner := m.observedOwners[key]
+		partial = partial || m.observedPartial[key] || len(m.pendingObserved[key]) > 0
+		names := make([]string, 0, len(m.observed[key]))
+		for name := range m.observed[key] {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if len(rows) >= maxMCPToolCollection {
+				partial = true
+				break
 			}
-			sort.Strings(observedNames)
-			for _, name := range observedNames {
-				add(name, "observed", m.observed[key][name])
-			}
+			rows = append(rows, endpointInventoryComponent{
+				id:            endpointInventoryComponentID("mcp-tool", key+"\x00observed\x00"+name),
+				componentType: "mcp_tool", signal: "observed_mcp_tool", product: name,
+				active: true, itemName: name, agentConnector: connectorName,
+				mcpRuntimeServerName: serverName, mcpToolSource: "observed",
+				mcpToolObservedAt: m.observed[key][name].UTC().Format(time.RFC3339Nano),
+				userID:            owner.ID, userIDKind: owner.IDKind, userName: owner.Name,
+			})
 		}
 	}
 	return rows, partial

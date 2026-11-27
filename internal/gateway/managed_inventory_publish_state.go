@@ -550,6 +550,7 @@ func managedInventoryComponentsDigest(key string, components []endpointInventory
 			component.mcpArgumentsFingerprint,
 			component.mcpSourceScope,
 			component.mcpServerURL,
+			component.mcpRuntimeServerName,
 			component.mcpURLHost,
 			component.mcpAuthProviderType,
 			managedInventoryOptionalBool(component.mcpDisabled),

@@ -1055,9 +1055,12 @@ inventory. Complete sibling connectors can still submit their server records
 individually. Those submissions are additive observations, not an authoritative
 endpoint snapshot, and do not tell AI Defense to remove rows belonging to the
 unreadable connector.
-On Windows, a LocalSystem gateway cannot read configured user-profile MCP
-files. That collection remains partial until a per-user source provides them;
-the gateway does not replace the last complete cloud snapshot with an empty one.
+On Windows, the LocalSystem gateway does not read user-profile MCP files.
+Instead, the existing per-user hook enumerator publishes a bounded, protected
+record for each enrolled account. The gateway projects those records through
+the same inventory contract used by direct profile reads on macOS. A missing,
+unreadable, or untrusted record keeps only that connector's collection partial;
+it does not replace the last complete cloud snapshot with an empty one.
 
 Local MCP component records include the safe server name, safe command basename,
 transport, connector, native configuration scope when known, and the discovery
@@ -1081,28 +1084,35 @@ update that component in place. DefenseClaw does not probe
 the endpoint to collect this value; it comes from native connector
 configuration. Renaming a remote server alias creates a new component.
 
-When a local or remote MCP admission scan completes, DefenseClaw preserves the bounded tool
-names returned by its existing `tools/list` request even if the scanner reports
-zero findings. Authenticated agent hooks also record the names of MCP tools
-called at runtime. Managed local and remote inventory emit these as `mcp_tool` components with
-the current parent server component ID, `advertised` or `observed` source, and
-the UTC observation time. It exports names only: tool descriptions, input
+When a local or remote MCP admission scan completes, DefenseClaw preserves the
+bounded tool names returned by its existing `tools/list` request even if the
+scanner reports zero findings. These `advertised` rows retain the configured
+server component ID because the listing was obtained from that exact server.
+Authenticated agent hooks separately record MCP tool names called at runtime.
+Observed rows do not require a configured server, do not carry an endpoint-
+assigned parent ID, and are exported in their own snapshot with the connector,
+verified user identity when available, and
+`defenseclaw.inventory.mcp.runtime_server_name`. AI Defense correlates server
+and observed-tool rows asynchronously by tenant, device name, agent identity,
+and runtime server name. Both rows include the UTC observation time. DefenseClaw
+exports names only: tool descriptions, input
 schemas, call arguments, and results are excluded. A completed empty listing
 clears previously advertised names from the bounded durable snapshot; an
-incomplete listing produces a local partial diagnostic. An ambiguous server
-alias across user profiles is not attributed to either profile. Advertised tool
-evidence and observed tool names are persisted in bounded local SQLite state,
-restored after a gateway restart, and retained until an authoritative parent
-refresh retires the configured alias. Each parent retains at most 256 distinct
-advertised names and 256 distinct observed names. Once an observed parent is at
-that limit, a new distinct name is rejected and the collection remains partial;
+incomplete listing produces a local partial diagnostic. Advertised tool
+evidence and observed tool names are persisted independently in bounded local
+SQLite state and restored after a gateway restart. Configured-server refreshes
+retire advertised evidence only; they do not remove authenticated runtime
+observations. Each configured parent retains at most 256 advertised names, and
+each connector/user/runtime-server tuple retains at most 256 observed names.
+Once an observation tuple is at that limit, a new distinct name is rejected
+and the observed collection remains partial;
 existing names and their timestamps are never evicted to make room. A restored complete advertised listing
 remains complete once its configured parent is matched again; a restored
 partial listing remains partial until that server completes a later listing,
 including an empty one. Durable restore completeness is tracked separately for
 advertised and observed tools: an unreadable advertised snapshot keeps only the
-advertised collection diagnostic, while unresolved observed rows keep the
-observed collection diagnostic until their read succeeds. A newly observed
+advertised collection diagnostic, while an unreadable observed snapshot keeps
+the independent observed collection diagnostic until its read succeeds. A newly observed
 tool also remains diagnostic until SQLite confirms its write; a failed write is
 retried on a later inventory cycle without delaying the hook response. A
 listing that completes before its newly configured parent has been refreshed
@@ -1110,8 +1120,9 @@ is retained in memory, persisted, and published after that parent is
 established. Tool components use the managed route only when their parent
 server component is eligible for that route. An over-limit or otherwise
 diagnostic-only parent therefore cannot leave an authoritative orphan tool.
-This flow does not reconcile a central
-principal catalog. Remote tool lineage follows the alias-based server ID.
+This flow does not reconcile a central principal catalog on the endpoint.
+Observed calls are not classified as local or remote because that fact belongs
+to the asynchronously correlated server record.
 DefenseClaw reuses the scanner's existing remote
 `tools/list` request and does not start an additional endpoint probe. If an
 older scanner omits the tool-list field, the gateway marks the listing unknown
@@ -1120,9 +1131,8 @@ records this tool inventory; parent identities refresh with inventory
 publication. An observed call alone does not mark a listing complete.
 The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing,
 authenticated-call observation, and export submission using fixed outcome and
-reason labels. An observation whose verified server parent is unavailable uses
-the bounded `parent_unavailable` reason; the counter never uses a tool name,
-server URL, scan error text, or call argument as a label.
+reason labels. The counter never uses a tool name, server URL, scan error text,
+or call argument as a label.
 
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory

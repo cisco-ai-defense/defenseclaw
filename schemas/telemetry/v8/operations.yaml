@@ -2170,6 +2170,21 @@ attributes:
     id: identifier-v1
     notes: Parent server ID from the same endpoint inventory; no raw command or URL
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.mcp.runtime_server_name
+  type: string
+  brief: MCP server name reported by configuration inventory or an authenticated tool call
+  examples: [github]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 256
+    notes: Correlation indicator only; never interpreted as a local component parent ID
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.tool_source
   type: string
   brief: Whether a tool was advertised by tools/list or observed in an authenticated call
@@ -2237,7 +2252,7 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [none, scan_failed, incomplete, parent_unavailable, publish_error]}
+    overrides: {enum: [none, scan_failed, incomplete, publish_error]}
     notes: No server-controlled text or tool name
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.auth_provider_type
@@ -7611,6 +7626,8 @@ groups:
   - ref: defenseclaw.inventory.mcp.server_url
     requirement_level: recommended
   - ref: defenseclaw.inventory.mcp.tool_parent_id
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.mcp.runtime_server_name
     requirement_level: recommended
   - ref: defenseclaw.inventory.mcp.tool_source
     requirement_level: recommended
