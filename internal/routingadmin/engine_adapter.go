@@ -513,6 +513,16 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 			rt.mu.Unlock()
 		}
 	}
+	// A call of unknown cost on one replica keeps its user, actor or batch
+	// key unknown on every replica within about one sync interval, as known
+	// spend is: the leader holds the marks for UnknownTTL
+	// (substrate-1:GAP-1118). A leader without the method (an older release
+	// during an upgrade) leaves each replica its own marks.
+	if us, ok := local.(UnknownSharer); ok {
+		if marks, err := us.ShareUnknown(ctx, epoch, ledger.UnknownMarks(now)); err == nil {
+			ledger.MergeUnknown(marks)
+		}
+	}
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
 			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), rt.clock())
