@@ -47,11 +47,12 @@ func registrationWriteReachedAs(command, cwd, home string, names []string, spell
 	if spellings == nil {
 		spellings = NewRegistrationSpellings()
 	}
+	finds := newFindReads(spellings) // once for every half the narrowing reads
 	for _, name := range names {
 		if !filepath.IsAbs(name) {
 			continue
 		}
-		entry := protectedFile{path: filepath.Clean(name), call: call}
+		entry := protectedFile{path: filepath.Clean(name), call: call, finds: finds}
 		if info, err := call.stat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
@@ -1124,10 +1125,11 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 		roots = []string{"."}
 	}
 	var reached []string
+	finds := protected.findReads()
 	for _, root := range roots {
-		root, path, prefix := findRootStart(root, cwd, home)
+		root, path, prefix := finds.start(root, cwd, home)
 		if info, err := pathStat(path); err == nil && info.IsDir() {
-			walked := newFindRoot(path, prefix)
+			walked := finds.root(path, prefix)
 			for _, target := range protected {
 				if target.path == path || !walked.holds(target.path) {
 					continue
@@ -1259,7 +1261,7 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, 
 // walks a C: home (rel-1-0-10:GAP-1642). A caller that asks about many paths
 // below one root reads the root once (newFindRoot).
 func findRootHolds(root, prefix, path string) bool {
-	return newFindRoot(root, prefix).holds(path)
+	return newFindRoot(root, prefix, nil).holds(path)
 }
 
 // findRoot is a find root read once for every path it is asked about.
@@ -1270,15 +1272,118 @@ func findRootHolds(root, prefix, path string) bool {
 // is (rel-1-0-10:GAP-1648), against the path and the file the path resolves
 // to. The root is resolved once, not once for every path: a find of 50 roots
 // with three steps each under a linked home cost 4.3 times the plain find
-// when each (root, path) pair resolved the root again (CHK-RF-VB7 N2).
+// when each (root, path) pair resolved the root again (CHK-RF-VB7 N2). The
+// paths are resolved once for every root too (findReads).
 type findRoot struct {
 	root, prefix             string
 	physical, physicalPrefix string // "" when the spelling alone decides
+	targets                  *findReads
 }
 
-// newFindRoot reads root (prefix is root ending in one separator).
-func newFindRoot(root, prefix string) findRoot {
-	r := findRoot{root: root, prefix: prefix}
+// findReads keeps what the find readers read of their roots (findRootStart,
+// newFindRoot) and the ResolveWriteTarget answer of every path a root is
+// asked about, for every root of one find and, through the registration set
+// (protectedFile.finds), for every half the narrowing of one
+// registrationWriteReachedAs reads. A find of 50 roots with three dot-dot
+// steps each under a linked home read every root again for each reader and
+// half, and resolved each registered file again for each root: 5.2 times the
+// 1.0.10 hook time (rel-1-0-10:GAP-2299). The file system of one decision is
+// the same file system, so the answers are the ones each read gave before.
+// A nil findReads reads every time. A registered path is resolved through
+// the spellings of the hook call when the set has them: they are the
+// ResolveWriteTarget answers, read once for the call.
+type findReads struct {
+	mu        sync.Mutex
+	starts    map[findStartKey][3]string
+	roots     map[string]findRoot
+	targets   map[string]findTarget
+	spellings *RegistrationSpellings
+}
+
+type findStartKey struct{ written, cwd, home string }
+
+type findTarget struct {
+	resolved string
+	ok       bool
+}
+
+// newFindReads is an empty find memory; spellings (nil: none) are the
+// physical spellings of the registered names for the hook call.
+func newFindReads(spellings *RegistrationSpellings) *findReads {
+	return &findReads{
+		starts:    make(map[findStartKey][3]string),
+		roots:     make(map[string]findRoot),
+		targets:   make(map[string]findTarget),
+		spellings: spellings,
+	}
+}
+
+// findReads is the find memory of the set (the narrowing one when the set
+// has it), or a new one for a single find.
+func (p protectedFiles) findReads() *findReads {
+	for _, file := range p {
+		if file.finds != nil {
+			return file.finds
+		}
+	}
+	return newFindReads(nil)
+}
+
+// start is findRootStart, read once.
+func (r *findReads) start(written, cwd, home string) (string, string, string) {
+	key := findStartKey{written, cwd, home}
+	r.mu.Lock()
+	known, found := r.starts[key]
+	r.mu.Unlock()
+	if !found {
+		known[0], known[1], known[2] = findRootStart(written, cwd, home)
+		r.mu.Lock()
+		r.starts[key] = known
+		r.mu.Unlock()
+	}
+	return known[0], known[1], known[2]
+}
+
+// root is newFindRoot, read once (prefix is root ending in one separator).
+func (r *findReads) root(root, prefix string) findRoot {
+	r.mu.Lock()
+	known, found := r.roots[root]
+	r.mu.Unlock()
+	if found && known.prefix == prefix {
+		return known
+	}
+	known = newFindRoot(root, prefix, r)
+	r.mu.Lock()
+	r.roots[root] = known
+	r.mu.Unlock()
+	return known
+}
+
+// resolve is ResolveWriteTarget(path), read once.
+func (r *findReads) resolve(path string) (string, bool) {
+	if r == nil {
+		return ResolveWriteTarget(path)
+	}
+	r.mu.Lock()
+	known, found := r.targets[path]
+	r.mu.Unlock()
+	if !found {
+		if r.spellings != nil && filepath.IsAbs(path) && filepath.Clean(path) == path {
+			known.resolved, known.ok = r.spellings.walk(path)
+		} else {
+			known.resolved, known.ok = ResolveWriteTarget(path)
+		}
+		r.mu.Lock()
+		r.targets[path] = known
+		r.mu.Unlock()
+	}
+	return known.resolved, known.ok
+}
+
+// newFindRoot reads root (prefix is root ending in one separator); targets
+// keeps the paths resolved for the other roots (nil: none).
+func newFindRoot(root, prefix string, targets *findReads) findRoot {
+	r := findRoot{root: root, prefix: prefix, targets: targets}
 	if !hasDotDotStep(root) {
 		return r
 	}
@@ -1299,7 +1404,7 @@ func (r findRoot) holds(path string) bool {
 	if rootSpellingHolds(r.physical, r.physicalPrefix, path) {
 		return true
 	}
-	resolved, ok := ResolveWriteTarget(path)
+	resolved, ok := r.targets.resolve(path)
 	return ok && resolved != path && rootSpellingHolds(r.physical, r.physicalPrefix, resolved)
 }
 
@@ -1465,9 +1570,10 @@ func registrationFindReach(words []string, cwd, home string, protected, all prot
 	for i, name := range names {
 		nameTests[i], _ = newFindTest(nameOption, name, "")
 	}
+	finds := all.findReads()
 	for _, written := range roots {
-		written, root, prefix := findRootStart(written, cwd, home)
-		walked := newFindRoot(root, prefix)
+		written, root, prefix := finds.start(written, cwd, home)
+		walked := finds.root(root, prefix)
 		below := func(target protectedFile) bool {
 			return walked.holds(target.path)
 		}

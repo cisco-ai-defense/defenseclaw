@@ -683,16 +683,48 @@ func init() {
 // through no link: a dot-dot step after it climbs to its parent folder, as
 // the cleaned spelling says (rel-1-0-10:GAP-1648). A path that cannot be
 // read is not one.
+//
+// Off Windows the folders are read from the top and the first link ends the
+// read: OperandPath asks again for every reader of the operand, and under a
+// home reached through a link the full link walk of each ask made a find of
+// 50 such roots 1.3 times the 1.0.10 hook time (rel-1-0-10:GAP-2299). The
+// answer is the one of the link walk: a path whose every folder is a folder
+// and no link is the path the walk resolves. Windows (where the walk also
+// reads mount points and short names) and a fixture tree that maps the path
+// keep the full walk.
 func plainDirectory(dir string) bool {
 	if !filepath.IsAbs(dir) {
 		return false
 	}
 	clean := filepath.Clean(dir)
+	if runtime.GOOS != "windows" && fixturefs.Map(clean) == clean {
+		return noLinkFolders(clean)
+	}
 	if info, err := pathStat(clean); err != nil || !info.IsDir() {
 		return false
 	}
 	real, err := pathEvalSymlinks(clean)
 	return err == nil && real == clean
+}
+
+// noLinkFolders reports a clean absolute POSIX path whose every component,
+// read from the root down, is a folder and not a link.
+func noLinkFolders(clean string) bool {
+	for end := 1; ; end++ {
+		next := strings.IndexByte(clean[end:], '/')
+		prefix := clean
+		if next >= 0 {
+			prefix = clean[:end+next]
+		}
+		info, err := pathLstat(prefix)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+		if next < 0 {
+			return true
+		}
+		end += next
+	}
 }
 
 // directoryHasLink reports a directory whose path, or the longest existing
@@ -1569,6 +1601,9 @@ type protectedFile struct {
 	// from (nil: none): target stats through it rather than finding the
 	// call again for every target (rel-1-0-10:GAP-1293).
 	call *hookCall
+	// finds is the find memory shared by the set registrationWriteReachedAs
+	// narrows (nil: none; findReads).
+	finds *findReads
 }
 
 // stat is callStat through the hook call the set was read in.

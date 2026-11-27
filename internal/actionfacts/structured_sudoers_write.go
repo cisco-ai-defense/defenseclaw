@@ -222,6 +222,12 @@ func hasDotDotStep(slashed string) bool {
 // the walk starts at its root) and applies each ".." step as text when the
 // kernel applies it to the same folder (see OperandPath). ok is false when a
 // step must stay raw.
+//
+// A folder the walk has proved plain (it exists and its path has no link)
+// proves every folder above it plain too, so a later step that climbs from
+// one of them is not read again: find with 50 roots of three steps each read
+// each root three times, 1.27 times the 1.0.10 hook time
+// (rel-1-0-10:GAP-2299).
 func applyDotDotSteps(base, name string) (string, bool) {
 	slashed := filepath.ToSlash(name)
 	prefix, named := filepath.Clean(base), false
@@ -230,7 +236,7 @@ func applyDotDotSteps(base, name string) (string, bool) {
 		prefix, named = volume+string(filepath.Separator), true
 		slashed = filepath.ToSlash(name[len(volume):])
 	}
-	steps := 0
+	steps, plain := 0, ""
 	for _, part := range strings.Split(slashed, "/") {
 		switch part {
 		case "", ".":
@@ -238,7 +244,14 @@ func applyDotDotSteps(base, name string) (string, bool) {
 			if steps++; steps > maxOperandDotDotSteps {
 				return "", false
 			}
-			if named && !operandPlainDirProbe(prefix) || !named && operandLinkProbe(prefix) {
+			if named {
+				if !folderAtOrAbove(prefix, plain) {
+					if !operandPlainDirProbe(prefix) {
+						return "", false
+					}
+					plain = prefix
+				}
+			} else if operandLinkProbe(prefix) {
 				return "", false
 			}
 			prefix = filepath.Dir(prefix)
@@ -247,6 +260,15 @@ func applyDotDotSteps(base, name string) (string, bool) {
 		}
 	}
 	return prefix, true
+}
+
+// folderAtOrAbove reports whether the clean folder is the clean folder below
+// or one of the folders above it, by spelling (below "" is no folder).
+func folderAtOrAbove(folder, below string) bool {
+	if below == "" || !strings.HasPrefix(below, folder) {
+		return false
+	}
+	return len(below) == len(folder) || strings.HasSuffix(folder, string(filepath.Separator)) || below[len(folder)] == filepath.Separator
 }
 
 // mayNameSudoers is the cheap test that keeps an ordinary file-tool call from
