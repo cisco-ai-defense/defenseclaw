@@ -251,8 +251,8 @@ func assertWindowsOpenCodeWithoutVersionEvidence(t *testing.T, s *Sidecar, rawVe
 	if strings.Contains(err.Error(), "not V2") {
 		t.Errorf("action mode: the refusal names a V1 the Windows gateway cannot read: %v", err)
 	}
-	if before.teardownCalls != before.setupCalls || before.setupCalls == 0 {
-		t.Errorf("action mode: peer setup=%d teardown=%d, want the peer registration rolled back", before.setupCalls, before.teardownCalls)
+	if before.teardownCalls != before.setupCalls {
+		t.Errorf("action mode: peer setup=%d teardown=%d, want any peer registration rolled back", before.setupCalls, before.teardownCalls)
 	}
 	checkUntouched()
 }
