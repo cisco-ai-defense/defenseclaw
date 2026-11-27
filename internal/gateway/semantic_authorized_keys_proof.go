@@ -1655,6 +1655,28 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if guestRootProof && (guestProtected(target) || guestAliasProtected(target)) {
 			return confirmed()
 		}
+		// A guest write spelled through its own cwd link that the placed
+		// reading does not prove protected keeps the reading of the link as
+		// written: where this gateway cannot place the link itself the write
+		// stays unknown on every gateway OS, as before the placement
+		// (rel-1-0-10:GAP-2265 parity). The placement only adds a proof.
+		if written != target && hookpaths.ProcCWDWriteOperand(written) {
+			if !strings.HasPrefix(written, "/proc/self/cwd/") {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			}
+			if resolved, present := request.ResolvedWriteTargets[written]; present {
+				if resolved == "" {
+					return unproven(hookpaths.UnprovenTargetUnresolved, written)
+				}
+				if isProtected(resolved) {
+					return confirmed()
+				}
+			} else if cannotResolveLocally {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			} else if _, ok := hookpaths.ResolveProcSelfCWDTarget(written, clientCWD); !ok {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			}
+		}
 		if runtime.GOOS == "linux" && guestAliasUnproved(target, cannotResolveLocally && request.sandboxGuest) {
 			return unproven(hookpaths.UnprovenTargetUnresolved, target)
 		}
