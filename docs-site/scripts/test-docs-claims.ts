@@ -2046,6 +2046,8 @@ const r105Rows: DocRow[] = [
   { gap: "substrate-1 GAP-0886", page: "substrate/threat-model.mdx", section: "Known limits", has: ["On very long commands the laptop may alert at its evaluation limit where a Substrate actor blocks a private-key read."] },
   // Documented limit the lead ruled (substrate-1 GAP-0555): Claude settings edits in a sandbox without the kit
   { gap: "substrate-1 GAP-0555", page: "substrate/threat-model.mdx", section: "Known limits", has: ["In a sandbox without the DefenseClaw kit, edits of Claude settings files are refused; full rewrites that keep DefenseClaw hooks and new files are judged."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0705): files changed by inline interpreter code
+  { gap: "substrate-1 GAP-0705", page: "substrate/threat-model.mdx", section: "Known limits", has: ["Files changed by inline interpreter code (perl -pi, python -c) are judged by the interpreter rules, not by file path."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
