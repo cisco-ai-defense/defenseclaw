@@ -23,10 +23,14 @@ const HoldRuns = 3
 //     regression the bar guards moves the median, a host tail does not;
 //   - the worst hold must stay under bar stretched by the host slowdown read
 //     before the run (1 on an idle host, so the first run is judged on the bar
-//     itself); a run over that window is measured again, up to HoldRuns runs,
-//     each at three times the window of the one before (the hookpaths
-//     recovered-parse bound does the same), so a hold that is over the window
-//     in every run still fails.
+//     itself), and at most one hold of the run may be at or over bar: a host
+//     tail is one hold, while a product that is slow on some of its passes
+//     (a quarter of them, say) puts several holds over bar with the median
+//     still under it. A run that misses either is measured again, up to
+//     HoldRuns runs, each at three times the window of the one before (the
+//     hookpaths recovered-parse bound does the same), so a hold that is over
+//     the window in every run, or several holds over bar in every run, still
+//     fails.
 //
 // measure runs the leg once and returns its holds. The verdict is ok with the
 // holds of the run that decided it, and a one-line report of every run for the
@@ -53,11 +57,11 @@ func HoldsUnderBar(bar time.Duration, measure func() []time.Duration) (holds []t
 		if median >= bar {
 			return holds, false, report + "the median hold is at or over the bar: every pass is slow, not one"
 		}
-		if worst < window {
+		if worst < window && over <= 1 {
 			return holds, true, report
 		}
 		if run == HoldRuns {
-			return holds, false, report + fmt.Sprintf("the worst hold stayed over its window in %d runs", HoldRuns)
+			return holds, false, report + fmt.Sprintf("in each of %d runs the worst hold was over its window or more than one hold was at or over the bar", HoldRuns)
 		}
 		slow = 3 * max(slow, HostSlowdown())
 	}

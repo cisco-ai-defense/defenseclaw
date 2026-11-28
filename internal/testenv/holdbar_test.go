@@ -9,8 +9,8 @@ import (
 )
 
 // HoldsUnderBar passes a leg whose one slow hold clears on a second run,
-// and fails a leg that is slow in its median or whose worst hold is over its
-// window in every run.
+// and fails a leg that is slow in its median, whose worst hold is over its
+// window in every run, or that has several holds over bar in every run.
 func TestHoldsUnderBarSeparatesAHostTailFromASlowProduct(t *testing.T) {
 	t.Setenv(ScaleEnv, "1")
 	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
@@ -32,6 +32,8 @@ func TestHoldsUnderBarSeparatesAHostTailFromASlowProduct(t *testing.T) {
 		{"one tail, tail again, clean third run", [][]time.Duration{leg(ms(225)), leg(ms(602)), leg()}, true},
 		{"a tail that stays in the second window", [][]time.Duration{leg(ms(650)), leg(ms(450))}, true},
 		{"worst hold over every window", [][]time.Duration{leg(ms(2000)), leg(ms(2000)), leg(ms(2000))}, false},
+		{"a quarter of the holds slow in every run", [][]time.Duration{leg(ms(700), ms(700), ms(700), ms(700), ms(700))}, false},
+		{"two holds just over the bar in every run", [][]time.Duration{leg(ms(210), ms(210))}, false},
 		{"every pass takes the slow path", [][]time.Duration{leg(ms(230), ms(230), ms(230), ms(230), ms(230), ms(230), ms(230), ms(230), ms(230), ms(230), ms(230), ms(230))}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,6 +51,9 @@ func TestHoldsUnderBarSeparatesAHostTailFromASlowProduct(t *testing.T) {
 			}
 			if tc.name == "every pass takes the slow path" && next != 1 {
 				t.Fatalf("a slow median must fail at once, measured %d runs", next)
+			}
+			if !tc.want && tc.name != "every pass takes the slow path" && next != HoldRuns {
+				t.Fatalf("a leg over its bar must be measured %d times before it fails, measured %d", HoldRuns, next)
 			}
 		})
 	}
