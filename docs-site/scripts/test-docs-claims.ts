@@ -2050,6 +2050,8 @@ const r105Rows: DocRow[] = [
   { gap: "substrate-1 GAP-0705", page: "substrate/threat-model.mdx", section: "Known limits", has: ["Files changed by inline interpreter code (perl -pi, python -c) are judged by the interpreter rules, not by file path."] },
   // Documented limit the lead ruled (substrate-1 GAP-0700): a home file spelled with a drive letter in Git Bash text
   { gap: "substrate-1 GAP-0700", page: "substrate/threat-model.mdx", section: "Known limits", has: ["On Windows, a home file spelled with a drive letter in Git Bash text is judged by the Windows path rules."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-2169): Windows hook binary size in 1.0.11
+  { gap: "rel-1-0-10 GAP-2169", page: "support-matrix.mdx", section: "Platforms", has: ["The Windows hook binary is about 44 MB in 1.0.11; the added size is the command parsers that read what each tool call does."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
