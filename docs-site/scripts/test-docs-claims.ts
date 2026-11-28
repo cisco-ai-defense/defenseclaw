@@ -2060,6 +2060,8 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-0350", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A write whose target comes from an unset variable, a command substitution or a default expansion is judged by what DefenseClaw can resolve; when that reaches no protected file, the write is allowed."] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-0018): routine administration that is also an attack step
   { gap: "rel-1-0-10 GAP-0018", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["DefenseClaw alerts, without blocking, on some routine administration that is also a known attack step: granting file capabilities or making files world-writable, reading a process environment, destructive SQL statements, and in strict mode reading .env files. Review these alerts in the context of the task."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0609): deeply encoded powershell
+  { gap: "rel-1-0-10 GAP-0609", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A PowerShell script that is encoded three or four times inside other encoded launchers is read, and its findings are recorded, but a finding that needs proof from the decoded script may alert rather than block; deeper nesting is blocked as over the evaluation limit."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
