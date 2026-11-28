@@ -206,6 +206,13 @@ func TestGAP1653PrintVerbNameBoundToAReadIsARead(t *testing.T) {
 		{"import-alias", py + ` -c "from builtins import open as debug; print(debug` + read + `"`, true},
 		{"benign-print-name", py + ` -c "print('` + env + `')"`, false},
 		{"benign-info-name", py + ` -c "import logging; logging.info('` + env + `')"`, false},
+		// A print or log name bound to a print or log call still only prints
+		// (CHK-TSECRET1 N1), and a bare name the text binds leaves a
+		// qualified call of the same last name a print verb.
+		{"benign-print-alias", py + ` -c "log = print; log('` + env + `')"`, false},
+		{"benign-write-alias", py + ` -c "import sys; write = sys.stdout.write; write('` + env + `')"`, false},
+		{"benign-console-alias", "no" + "de" + ` -e "const log = console.log; log('` + env + `')"`, false},
+		{"benign-bare-binding-qualified-call", py + ` -c "import logging; import json as error; logging.error('` + env + `')"`, false},
 	}
 	tsecretCheckReads(t, "gap1653", dir, rows)
 }
