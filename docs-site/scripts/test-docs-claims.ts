@@ -2064,6 +2064,8 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-0609", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A PowerShell script that is encoded three or four times inside other encoded launchers is read, and its findings are recorded, but a finding that needs proof from the decoded script may alert rather than block; deeper nesting is blocked as over the evaluation limit."] },
   // Documented limit the lead ruled (substrate-1 GAP-0503): a read in the ssh folder after a shell function or cdpath move
   { gap: "substrate-1 GAP-0503", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A read inside the SSH folder after a move made by a shell function or a CDPATH prefix can also name the authorized-keys rule beside the read rule; the verdict is the same or stricter."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0990): a trap or alias from an unreadable command
+  { gap: "substrate-1 GAP-0990", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A trap or alias installed by a command DefenseClaw cannot read statically is not followed into later functions."] },
 ];
 
 function pageSection(name: string, heading?: string): string {

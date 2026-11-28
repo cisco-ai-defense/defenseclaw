@@ -103,3 +103,4 @@ The last column of the attacker table says what covers each row. Parts marked **
 - **Inline interpreter code.** Files changed by inline interpreter code (perl -pi, python -c) are judged by the interpreter rules, not by file path.
 - **Windows home files in Git Bash text.** On Windows, a home file spelled with a drive letter in Git Bash text is judged by the Windows path rules.
 - **A read in the SSH folder after a shell function or CDPATH move.** A read inside the SSH folder after a move made by a shell function or a CDPATH prefix can also name the authorized-keys rule beside the read rule; the verdict is the same or stricter.
+- **A trap or alias from an unreadable command.** A trap or alias installed by a command DefenseClaw cannot read statically is not followed into later functions.
