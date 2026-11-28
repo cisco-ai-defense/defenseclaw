@@ -48,7 +48,11 @@ import (
 // .gitignore and .ignore rules that skip a file are not modelled: a file
 // they skip counts. Their whitelist ("!") lines are (rel-1-0-10:GAP-1652):
 // one makes rg search a dot-named file or folder it matches, so the hidden
-// rule no longer skips a name any of them matches (rgIgnoreWhitelist).
+// rule no longer skips a name any of them matches (rgIgnoreWhitelist). The
+// model reads every ignore file rg may read, the parent and VCS ones too,
+// even under --no-ignore-parent, --no-ignore-vcs or --no-ignore-dot: that
+// counts more names, never fewer. Past the bound of ignore files one call
+// reads (rgIgnoreFileChecks), the hidden rule is off (count when unsure).
 // grep -r has no rgFilter (credentialWalkFilter).
 type rgFilter struct {
 	hidden   bool
@@ -190,6 +194,14 @@ func (f *rgFilter) whitelisted(name string) bool {
 // searches hidden names), and an rg that reads its ignore files.
 func (f *rgFilter) readsIgnoreFiles() bool {
 	return f != nil && !f.hidden && !f.noIgnore
+}
+
+// withHidden is the filter with its hidden rule off, a copy: the filter of
+// an rg whose ignore files were not all read (rel-1-0-10:GAP-1652).
+func (f *rgFilter) withHidden() *rgFilter {
+	c := *f
+	c.hidden = true
+	return &c
 }
 
 // withWhitelist is the filter with more whitelist globs: a copy, so a

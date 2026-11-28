@@ -662,6 +662,13 @@ type credentialPathResolver struct {
 	rgConfig bool
 	seen     map[PathFact]bool
 	reads    []PathFact
+	// ignoreGlobs holds the whitelist globs of each ignore file the
+	// resolve looked up (nil: none there), so the folders above many
+	// searched folders are read once per call; ignoreChecks counts those
+	// lookups, on their own bound (rgIgnoreFileChecks), never the lookups
+	// budget (rel-1-0-10:GAP-1652).
+	ignoreGlobs  map[string][]rgGlob
+	ignoreChecks int
 }
 
 // credentialPathResult is the private record of one parse, made by the
@@ -1998,10 +2005,15 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	dir, shown = filepath.Clean(dir), filepath.ToSlash(shown)
 	// rg reads the ignore files of the folder and of every folder above
 	// it: a whitelist line there lifts its hidden rule for the names it
-	// matches (rel-1-0-10:GAP-1652).
+	// matches (rel-1-0-10:GAP-1652). Past the bound of those lookups the
+	// hidden rule is off: count when unsure.
 	read := map[string]bool{}
 	if filter.rg.readsIgnoreFiles() {
-		filter.rg = filter.rg.withWhitelist(r.ignoreWhitelistAbove(dir, read))
+		if globs, ok := r.ignoreWhitelistAbove(dir, read); ok {
+			filter.rg = filter.rg.withWhitelist(globs)
+		} else {
+			filter.rg = filter.rg.withHidden()
+		}
 	}
 	r.probeWithin(id, dir, shown, filter)
 	left := credentialPathWalkBounds.minus(r.walkUsed)
@@ -2014,20 +2026,43 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	if filter.rg.readsIgnoreFiles() && !walk.cut {
 		// An ignore file below the folder whitelists more names: walk again
-		// with them, once (a whitelist line there is rare).
+		// with them, once (a whitelist line there is rare). Past the bound
+		// of the ignore-file lookups, walk again with the hidden rule off.
 		var globs []rgGlob
+		unsure := false
 		for _, file := range walk.ignores {
-			if !read[file] && len(read) < rgIgnoreFilesRead && r.lookups.Take() {
-				read[file] = true
-				globs = append(globs, rgIgnoreWhitelist(file)...)
+			if read[file] {
+				continue
 			}
+			read[file] = true
+			found, ok := r.ignoreFileWhitelist(file, true)
+			if !ok {
+				unsure = true
+				break
+			}
+			globs = append(globs, found...)
 		}
-		if len(globs) > 0 {
-			filter.rg = filter.rg.withWhitelist(globs)
+		if unsure || len(globs) > 0 {
+			if unsure {
+				filter.rg = filter.rg.withHidden()
+			} else {
+				filter.rg = filter.rg.withWhitelist(globs)
+			}
 			if left = credentialPathWalkBounds.minus(r.walkUsed); !left.spent() {
 				again := credentialPathWalk(r.wait, dir, shown, filter, left, credentialWalkRoomOf(r))
 				r.walkUsed = r.walkUsed.plus(again.used)
-				walk.found, walk.cut = append(walk.found, again.found...), again.cut
+				// The second walk's filter admits all the first one did:
+				// a file both found is judged once.
+				first := make(map[string]bool, len(walk.found))
+				for _, file := range walk.found {
+					first[file] = true
+				}
+				for _, file := range again.found {
+					if !first[file] {
+						walk.found = append(walk.found, file)
+					}
+				}
+				walk.cut = again.cut
 			} else {
 				walk.cut = true
 			}
@@ -2045,30 +2080,59 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	}
 }
 
-// rgIgnoreFilesRead bounds the ignore files one searched folder reads for
-// whitelist lines (rel-1-0-10:GAP-1652).
-const rgIgnoreFilesRead = 64
+// rgIgnoreFileChecks bounds the ignore files one resolve looks up for
+// whitelist lines, each at most once (rel-1-0-10:GAP-1652): a folder and
+// every folder above it, three names each, and the ignore files the walks
+// meet. The bound is its own, not the lookups budget, so many searched
+// folders never cut the resolve; past it, rg is taken to search hidden
+// names (count when unsure).
+const rgIgnoreFileChecks = 1024
 
-// ignoreWhitelistAbove returns the whitelist globs (rgIgnoreWhitelist) of
-// the ignore files in dir and in every folder above it, and marks each file
-// read. Each folder costs one lookup per ignore file name; a spent budget
-// stops it.
-func (r *credentialPathResolver) ignoreWhitelistAbove(dir string, read map[string]bool) []rgGlob {
+// ignoreFileWhitelist returns the whitelist globs (rgIgnoreWhitelist) of
+// the ignore file at file, looked up once per resolve; there reports a file
+// the walk met (no stat needed). ok is false once the bound of lookups
+// (rgIgnoreFileChecks) is spent: the answer is unknown.
+func (r *credentialPathResolver) ignoreFileWhitelist(file string, there bool) ([]rgGlob, bool) {
+	if globs, seen := r.ignoreGlobs[file]; seen {
+		return globs, true
+	}
+	if r.ignoreChecks >= rgIgnoreFileChecks {
+		return nil, false
+	}
+	r.ignoreChecks++
+	if !there {
+		info, err := os.Stat(file)
+		there = err == nil && info.Mode().IsRegular()
+	}
+	var globs []rgGlob
+	if there {
+		globs = rgIgnoreWhitelist(file)
+	}
+	if r.ignoreGlobs == nil {
+		r.ignoreGlobs = make(map[string][]rgGlob)
+	}
+	r.ignoreGlobs[file] = globs
+	return globs, true
+}
+
+// ignoreWhitelistAbove returns the whitelist globs of the ignore files in
+// dir and in every folder above it (ignoreFileWhitelist), and marks each
+// file read. ok is false once the bound of those lookups is spent.
+func (r *credentialPathResolver) ignoreWhitelistAbove(dir string, read map[string]bool) ([]rgGlob, bool) {
 	var globs []rgGlob
 	for folder := dir; ; {
 		for _, name := range rgIgnoreFileNames {
-			if !r.lookups.Take() {
-				return globs
-			}
 			file := filepath.Join(folder, name)
-			if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
-				read[file] = true
-				globs = append(globs, rgIgnoreWhitelist(file)...)
+			found, ok := r.ignoreFileWhitelist(file, false)
+			if !ok {
+				return globs, false
 			}
+			read[file] = true
+			globs = append(globs, found...)
 		}
 		parent := filepath.Dir(folder)
 		if parent == folder {
-			return globs
+			return globs, true
 		}
 		folder = parent
 	}
