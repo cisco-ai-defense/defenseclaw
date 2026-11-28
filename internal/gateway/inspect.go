@@ -1213,6 +1213,10 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		}
 	}()
 	findings = trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
+	// An MCP or app tool call whose arguments pass the shared reading's
+	// bounds is also judged on bounded projections and gets the unknown tier,
+	// never a silent allow (substrate-1:GAP-1096).
+	findings = overBoundToolArgsFindings(ctx, action, findings, mcpServer, secureClient)
 	for _, nested := range windowsNestedReadings(action) {
 		// A statement the call runs inside a subexpression, an operand, a
 		// loop body or a powershell -c or cmd /c script is judged by the

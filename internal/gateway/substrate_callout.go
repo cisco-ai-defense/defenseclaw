@@ -120,6 +120,10 @@ func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
 // substrateMCPVerdict runs the hook path's MCP evaluation for the call.
 func (a *APIServer) substrateMCPVerdict(ctx context.Context, reg registry.Registration, req substrateCalloutRequest) SubstrateCalloutVerdict {
 	ctx = a.substrateEvaluationContext(ctx, reg, sandboxauth.RouteHook)
+	// substrateMCPBoundedVerdict judges the projections of over-bound
+	// arguments within the bridge's budgets and floors them; the shared
+	// reading does not judge them again (overBoundToolArgsFindings).
+	ctx = withToolArgsProjected(ctx)
 	connectorName := sandboxauth.CanonicalConnector(reg.Connector)
 	server := strings.TrimSpace(req.MCP.Server)
 	tool := strings.TrimSpace(req.MCP.Tool)
