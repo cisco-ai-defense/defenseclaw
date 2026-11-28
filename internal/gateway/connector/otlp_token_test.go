@@ -7,6 +7,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,9 +97,9 @@ func TestCodexScopedOTLPToken_SetupTeardownRace(t *testing.T) {
 func TestCodexScopedOTLPToken_CrossProcessSetupTeardownRace(t *testing.T) {
 	dir := t.TempDir()
 	for iteration := 0; iteration < 10; iteration++ {
-		setup := exec.Command(os.Args[0], "-test.run=^TestOTLPPathTokenCrossProcessHelper$")
+		setup := exec.Command(os.Args[0])
 		setup.Env = append(os.Environ(), "DEFENSECLAW_OTLP_TOKEN_HELPER=ensure", "DEFENSECLAW_OTLP_TOKEN_HELPER_DIR="+dir)
-		teardown := exec.Command(os.Args[0], "-test.run=^TestOTLPPathTokenCrossProcessHelper$")
+		teardown := exec.Command(os.Args[0])
 		teardown.Env = append(os.Environ(), "DEFENSECLAW_OTLP_TOKEN_HELPER=remove", "DEFENSECLAW_OTLP_TOKEN_HELPER_DIR="+dir)
 		if err := setup.Start(); err != nil {
 			t.Fatalf("iteration %d start setup helper: %v", iteration, err)
@@ -119,24 +120,39 @@ func TestCodexScopedOTLPToken_CrossProcessSetupTeardownRace(t *testing.T) {
 	}
 }
 
-func TestOTLPPathTokenCrossProcessHelper(t *testing.T) {
-	action := os.Getenv("DEFENSECLAW_OTLP_TOKEN_HELPER")
-	if action == "" {
-		t.Skip("subprocess helper")
-	}
+// otlpTokenCrossProcessHelper is the child process of
+// TestCodexScopedOTLPToken_CrossProcessSetupTeardownRace: a copy of the test
+// binary that TestMain hands to it (runCrossProcessHelper) instead of running
+// the tests, so the helper is never a test row of its own.
+func otlpTokenCrossProcessHelper() error {
 	dir := os.Getenv("DEFENSECLAW_OTLP_TOKEN_HELPER_DIR")
 	var err error
+	action := os.Getenv("DEFENSECLAW_OTLP_TOKEN_HELPER")
 	switch action {
 	case "ensure":
 		_, err = EnsureOTLPPathToken(dir, OTLPScopeCodex)
 	case "remove":
 		err = RemoveOTLPPathToken(dir, OTLPScopeCodex)
 	default:
-		t.Fatalf("unknown helper action")
+		return fmt.Errorf("unknown helper action")
 	}
 	if err != nil {
-		t.Fatalf("%s scoped token: %v", action, err)
+		return fmt.Errorf("%s scoped token: %w", action, err)
 	}
+	return nil
+}
+
+// runCrossProcessHelper answers as the child of a cross-process test when the
+// test binary was started with a helper action in its environment. It reports
+// whether it ran a helper, and the helper's error.
+func runCrossProcessHelper() (bool, error) {
+	if os.Getenv("DEFENSECLAW_OTLP_TOKEN_HELPER") != "" {
+		return true, otlpTokenCrossProcessHelper()
+	}
+	if os.Getenv("DEFENSECLAW_CODEX_LIFECYCLE_HELPER") != "" {
+		return true, codexLifecycleCrossProcessHelper()
+	}
+	return false, nil
 }
 
 // TestCodexLifecycle_CrossProcessSetupTeardownTransaction starts the two full
@@ -285,7 +301,7 @@ func codexLifecycleHelperCommand(
 	ctx context.Context,
 	action, dir, configPath, barrier, ready string,
 ) (*exec.Cmd, *bytes.Buffer) {
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCodexLifecycleCrossProcessHelper$")
+	cmd := exec.CommandContext(ctx, os.Args[0])
 	cmd.Env = append(
 		os.Environ(),
 		"DEFENSECLAW_CODEX_LIFECYCLE_HELPER="+action,
@@ -315,11 +331,10 @@ func waitForCodexLifecycleFile(ctx context.Context, path string) error {
 	}
 }
 
-func TestCodexLifecycleCrossProcessHelper(t *testing.T) {
+// codexLifecycleCrossProcessHelper is the child process of
+// TestCodexLifecycle_CrossProcessSetupTeardownTransaction (see runCrossProcessHelper).
+func codexLifecycleCrossProcessHelper() error {
 	action := os.Getenv("DEFENSECLAW_CODEX_LIFECYCLE_HELPER")
-	if action == "" {
-		t.Skip("subprocess helper")
-	}
 	dir := os.Getenv("DEFENSECLAW_CODEX_LIFECYCLE_DIR")
 	configPath := os.Getenv("DEFENSECLAW_CODEX_LIFECYCLE_CONFIG")
 	barrier := os.Getenv("DEFENSECLAW_CODEX_LIFECYCLE_BARRIER")
@@ -327,14 +342,14 @@ func TestCodexLifecycleCrossProcessHelper(t *testing.T) {
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
 	if err := os.WriteFile(ready, []byte("ready\n"), 0o600); err != nil {
-		t.Fatalf("publish helper readiness: %v", err)
+		return fmt.Errorf("publish helper readiness: %w", err)
 	}
 	// The wait for the barrier includes the other helper's start; the
 	// lifecycle gets its own codexLifecycleHelperBound from the barrier on.
 	barrierCtx, cancelBarrier := context.WithTimeout(context.Background(), codexLifecycleHelperStartBound)
 	defer cancelBarrier()
 	if err := waitForCodexLifecycleFile(barrierCtx, barrier); err != nil {
-		t.Fatalf("wait for lifecycle barrier: %v", err)
+		return fmt.Errorf("wait for lifecycle barrier: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexLifecycleHelperBound)
 	defer cancel()
@@ -347,11 +362,12 @@ func TestCodexLifecycleCrossProcessHelper(t *testing.T) {
 	case "teardown":
 		err = connector.Teardown(ctx, opts)
 	default:
-		t.Fatalf("unknown lifecycle action %q", action)
+		return fmt.Errorf("unknown lifecycle action %q", action)
 	}
 	if err != nil {
-		t.Fatalf("%s Codex lifecycle: %v", action, err)
+		return fmt.Errorf("%s Codex lifecycle: %w", action, err)
 	}
+	return nil
 }
 
 func repeat(b byte, n int) string {

@@ -201,6 +201,10 @@ func TestPromptCapturesFromOneSandboxAreBounded(t *testing.T) {
 // fill all of theirs, prompt and model side, with values of one kind leave
 // a third sandbox, captures with no sandbox, and the person's own adds
 // untouched, and the third sandbox's value of that kind still gets a name.
+// It also pins the documented limit that remains (rel-1-0-10:GAP-2105): with
+// no harness-attested event channel, a sandbox's own forged events can fill
+// its own room, after which its genuine prompt is refused with
+// ErrSandboxCaptureFull (the prompt is still stopped, fail closed).
 func TestOneSandboxCannotFillAnotherSandboxsRoom(t *testing.T) {
 	s := newStore(t)
 	value := func(sb string, i int) string { return fmt.Sprintf("%s%s%04d", fakeStripe(), sb, i) }

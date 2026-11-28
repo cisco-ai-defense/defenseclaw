@@ -280,7 +280,18 @@ func classifyPOSIXNoExecCandidate(
 }
 
 func classifyCommand(out *parseOutput, command *CommandFact) {
-	if command == nil || command.Executable == "" {
+	if command == nil {
+		return
+	}
+	if command.Executable == "" {
+		// A PowerShell pipeline element that is an expression ("k" >> f,
+		// ("k") > f) or a dynamic command name still writes its output to
+		// its redirection targets: they are the element's paths, read like
+		// those of a command (an unresolved folder marks them too), and the
+		// parse stays partial for the element itself (rel-1-0-10:GAP-2259).
+		if command.Dialect == DialectPowerShell {
+			classifyRedirects(out, command)
+		}
 		return
 	}
 	if len(command.Argv) == 0 || command.Argv[0] == "" {
@@ -9212,6 +9223,22 @@ func parseChrootInvocation(argv []string) chrootInvocation {
 		result.complete = false
 	}
 	return result
+}
+
+// ChrootRun reads a chroot call (argv as the program runs it): the new root,
+// the index of the child program and whether the child keeps the working
+// folder (--skip-chdir; otherwise it starts at the new root). ok is false
+// for a call the chroot grammar does not read completely, a preview
+// (--help, --version) and a call with no child.
+func ChrootRun(argv []string) (root string, child int, skipChdir, ok bool) {
+	parsed := parseChrootInvocation(argv)
+	if !parsed.complete || parsed.preview || parsed.childIndex <= 0 {
+		return "", 0, false, false
+	}
+	for _, arg := range argv[1:parsed.childIndex] {
+		skipChdir = skipChdir || arg == "--skip-chdir"
+	}
+	return parsed.root, parsed.childIndex, skipChdir, true
 }
 
 func classifyChroot(out *parseOutput, command *CommandFact) {

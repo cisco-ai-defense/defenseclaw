@@ -1031,8 +1031,8 @@ rv7-B43 pushd shadowed	U|
 rv7-B44 function cd redirects	U|
 rv7-B45 tee shadowed by function	U|append:/home/u/.bashrc,write:/t/a/x
 rv7-B46 cp shadowed by function	U|
-rv7-B47 ps Set-Content shadowed	U|write:c:\t\a,write:c:\users\u\.ssh\authorized_keys
-rv7-B48 ps Set-Location shadowed	U|
+rv7-B47 ps Set-Content shadowed	K|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\.ssh\authorized_keys
+rv7-B48 ps Set-Location shadowed	K|write:c:\users\u\.ssh\authorized_keys
 rv7-B52 enable -n cd	U|
 rv7-B53 cdable_vars	U|
 rv7-B54 mv shadowed alias-free	U|delete:/t/a
@@ -1099,7 +1099,7 @@ rv7-E04 mirror cd fail ; write	K|append:/home/u/.ssh_none/authorized_keys,append
 rv7-E05 mirror find -execdir	U|
 rv7-E06 mirror env -C fused	K|write:/t/a/.bashrc
 rv7-E07 mirror sudo -i rel	U|
-rv7-E08 mirror ps Set-Location shadow	U|
+rv7-E08 mirror ps Set-Location shadow	K|write:c:\users\u\authorized_keys
 rv7-E09 mirror gb HOME prefix child	K|append:c:\t\h\.bashrc
 rv7-E10 mirror printf -v HOME	U|
 rv7-G1 gb cd then cmd //c	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys

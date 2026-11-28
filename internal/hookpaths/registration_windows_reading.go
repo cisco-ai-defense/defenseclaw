@@ -16,8 +16,12 @@ import (
 // reader decided on the matches read before the cap and none was a
 // registered file: the reading is truncated, which the caller judges at
 // least at the unknown tier (the one bound rule, rel-1-0-10:GAP-1468).
-func RegistrationWriteReachedBounded(command, cwd, home string, names []string) (reached []string, truncated bounded.CapSet) {
-	truncated = globCutOf(func() { reached = RegistrationWriteReached(command, cwd, home, names) })
+//
+// spellings keeps the physical spellings of the names for the hook call
+// (NewRegistrationSpellings; nil reads them afresh): a caller that reads the
+// statements of one call against the same names passes one set.
+func RegistrationWriteReachedBounded(command, cwd, home string, names []string, spellings *RegistrationSpellings) (reached []string, truncated bounded.CapSet) {
+	truncated = globCutOf(func() { reached = registrationWriteReachedIn(command, cwd, home, names, spellings) })
 	return reached, truncated
 }
 
@@ -29,12 +33,21 @@ func RegistrationWriteReachedBounded(command, cwd, home string, names []string) 
 // a backslash inside a word read as a path separator
 // (WindowsShellReading). A member either reading reaches is reached.
 func RegistrationWriteReached(command, cwd, home string, names []string) []string {
-	reached := registrationWriteReachedAs(command, cwd, home, names)
+	return registrationWriteReachedIn(command, cwd, home, names, nil)
+}
+
+// registrationWriteReachedIn is RegistrationWriteReached with the spellings
+// of the call (nil: read afresh); both readings share them.
+func registrationWriteReachedIn(command, cwd, home string, names []string, spellings *RegistrationSpellings) []string {
+	if spellings == nil {
+		spellings = NewRegistrationSpellings()
+	}
+	reached := registrationWriteReachedAs(command, cwd, home, names, spellings)
 	reading, windows := WindowsShellReading(command)
 	if !windows || len(reached) == len(names) {
 		return reached
 	}
-	more := registrationWriteReachedAs(reading, cwd, home, names)
+	more := registrationWriteReachedAs(reading, cwd, home, names, spellings)
 	if len(more) == 0 {
 		return reached
 	}

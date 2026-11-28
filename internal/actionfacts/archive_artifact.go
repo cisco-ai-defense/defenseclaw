@@ -113,8 +113,10 @@ func classifyTarArchiveProducer(out *parseOutput, command *CommandFact) {
 		return
 	}
 	if file == "-" {
-		// The archive goes to stdout: the members are still read.
+		// The archive goes to stdout: the members are read, as a cat reads
+		// its operands, and no archive file is made (substrate-1:GAP-0995).
 		appendArchiveSourceReads(out, command, tarCreateSources(command.Argv))
+		return
 	}
 	if !staticArchiveArtifactPath(file) {
 		out.markPartial(IssueUnsupportedConstruct)
@@ -216,11 +218,24 @@ func tarCreateArchiveFile(argv []string) (file string, created, complete bool) {
 	if !ok {
 		file, ok = parsed.values["--file"]
 	}
-	if !ok || file == "" {
+	if !ok {
+		// No archive file: GNU tar and bsdtar write the archive to stdout
+		// (tarDefaultArchive).
+		return tarDefaultArchive, true, true
+	}
+	if file == "" {
 		return "", false, false
 	}
 	return file, true, true
 }
+
+// tarDefaultArchive is the archive of a tar -c without -f or --file:
+// stdout, the default archive of GNU tar and bsdtar builds (TAPE may name
+// another, but the members are read either way). Before, such a create was
+// unknown grammar and its members no read: tar cz ~/.ssh/id_ed25519 was a
+// partial call that allowed where base64 of the key blocks
+// (substrate-1:GAP-0995, RV-0922 row s40).
+const tarDefaultArchive = "-"
 
 func traditionalTarCreateArchiveFile(argv []string) (file string, created, complete bool) {
 	cluster := argv[1]
@@ -255,15 +270,20 @@ func traditionalTarCreateArchiveFile(argv []string) (file string, created, compl
 	if !created {
 		return "", false, true
 	}
-	if fileIndex < 0 || fileIndex >= len(argv) || argv[fileIndex] == "" {
+	if fileIndex < 0 {
+		return tarDefaultArchive, true, true
+	}
+	if fileIndex >= len(argv) || argv[fileIndex] == "" {
 		return "", false, false
 	}
 	return argv[fileIndex], true, true
 }
 
-func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
-	parsed := parseOwnedPOSIXOptions(
-		command.Argv,
+// parseZipOptions is the option grammar of a zip argv (the program word
+// first) that classifyZipArchiveProducer and ReadsFolderTree read.
+func parseZipOptions(argv []string) ownedPOSIXOptionParse {
+	return parseOwnedPOSIXOptions(
+		argv,
 		exactOptionSet(
 			"-b", "-n", "-t", "-tt", "-x", "-i", "-P", "-O",
 			"--out", "--output-file",
@@ -274,6 +294,10 @@ func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
 		),
 		exactOptionSet("-h", "-hh", "--help"),
 	)
+}
+
+func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
+	parsed := parseZipOptions(command.Argv)
 	if parsed.preview {
 		command.Effect = EffectPreview
 		return

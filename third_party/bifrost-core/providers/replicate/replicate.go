@@ -562,6 +562,9 @@ func (provider *ReplicateProvider) TextCompletionStream(ctx *schemas.BifrostCont
 	if err != nil {
 		return nil, providerUtils.EnrichError(ctx, err, jsonData, nil, provider.sendBackRawRequest, provider.sendBackRawResponse, latency)
 	}
+	// The prediction runs (and bills) whether or not its stream URL then
+	// answers: the call was accepted.
+	ctx.SetValue(schemas.BifrostContextKeyProviderAccepted, true)
 
 	// Verify stream URL is available
 	if prediction.URLs == nil || prediction.URLs.Stream == nil || *prediction.URLs.Stream == "" {
@@ -904,6 +907,9 @@ func (provider *ReplicateProvider) ChatCompletionStream(ctx *schemas.BifrostCont
 	if err != nil {
 		return nil, providerUtils.EnrichError(ctx, err, jsonData, nil, provider.sendBackRawRequest, provider.sendBackRawResponse, latency)
 	}
+	// The prediction runs (and bills) whether or not its stream URL then
+	// answers: the call was accepted.
+	ctx.SetValue(schemas.BifrostContextKeyProviderAccepted, true)
 
 	// Verify stream URL is available
 	if prediction.URLs == nil || prediction.URLs.Stream == nil || *prediction.URLs.Stream == "" {

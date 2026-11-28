@@ -13,8 +13,9 @@ import (
 )
 
 // GAP-1483: a shell fed by a here-document runs in its launcher's child
-// folder. The root child is benign; protected and unresolved child roots
-// retain their guardrail verdicts.
+// folder. The root child is benign; protected child roots retain their
+// guardrail verdicts, and an unresolved root gets its -c spelling's
+// (rel-1-0-10:GAP-2132).
 func TestGAP1483HereDocChildFolderVerdicts(t *testing.T) {
 	const home = "/tmp/det111-g1483-home"
 	t.Setenv("HOME", home)
@@ -72,6 +73,10 @@ func TestGAP1483HereDocChildFolderVerdicts(t *testing.T) {
 					if tier.name == "strict" || tier.name == "managed strict" {
 						wantAction = "block"
 					}
+				case "unknown-root":
+					// The -c spelling's cell: the body behind an unresolved
+					// root is read nowhere (rel-1-0-10:GAP-2132).
+					wantAction, wantSeverity = "alert", "CRITICAL"
 				case "compound-sequence", "compound-and", "compound-pipe", "two-chroot":
 					wantAction, wantSeverity = "alert", ""
 					if tier.name == "strict" || tier.name == "managed strict" {

@@ -18,6 +18,7 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
@@ -30,12 +31,15 @@ const (
 	MethodSpendPush   = "SpendPush"
 	MethodSpendTotals = "SpendTotals"
 	MethodSpendSums   = "SpendSums"
-	MethodUsagePush   = "UsagePush"
-	MethodUsageQuery  = "UsageQuery"
+	// MethodSpendUnknown shares the unknown-cost marks of the replicas
+	// (substrate-1:GAP-1118).
+	MethodSpendUnknown = "SpendUnknown"
+	MethodUsagePush    = "UsagePush"
+	MethodUsageQuery   = "UsageQuery"
 )
 
 // Methods lists every method Serve registers (the gateway's permission set).
-var Methods = []string{MethodSpendPush, MethodSpendTotals, MethodSpendSums, MethodUsagePush, MethodUsageQuery}
+var Methods = []string{MethodSpendPush, MethodSpendTotals, MethodSpendSums, MethodSpendUnknown, MethodUsagePush, MethodUsageQuery}
 
 const (
 	// maxSpendRows bounds one spend push or answer (Client pushes in chunks
@@ -51,6 +55,9 @@ const (
 	maxKeys        = 5000
 	// maxOver bounds the budgets of one read's Over.
 	maxOver = 256
+	// maxUnknownMarks bounds the unknown-cost marks the leader holds (past
+	// it the oldest mark goes) and so one answer of them.
+	maxUnknownMarks = maxKeys
 )
 
 var epochRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,64}$`)
@@ -130,6 +137,24 @@ type SpendSumsAnswer struct {
 	Sums []SpendSum `json:"sums"`
 }
 
+// SpendMark is the wire form of a routingadmin.UnknownMark: At is in Unix
+// seconds.
+type SpendMark struct {
+	Key string `json:"key"`
+	At  int64  `json:"at"`
+}
+
+// SpendUnknownRequest is one replica's unknown-cost marks.
+type SpendUnknownRequest struct {
+	Epoch string      `json:"epoch"`
+	Marks []SpendMark `json:"marks,omitempty"`
+}
+
+// SpendUnknownAnswer is every replica's marks within UnknownTTL.
+type SpendUnknownAnswer struct {
+	Marks []SpendMark `json:"marks,omitempty"`
+}
+
 // UsagePushRequest is one replica's absolute hourly usage buckets.
 type UsagePushRequest struct {
 	Epoch string                 `json:"epoch"`
@@ -164,6 +189,12 @@ type Service struct {
 	Usage *modelusage.Store
 	// Now replaces the clock (tests).
 	Now func() time.Time
+
+	// marks holds the replicas' unknown-cost marks in memory, for
+	// UnknownTTL: a leader restart loses them, and each replica then has
+	// only its own until the next mark (substrate-1:GAP-1118).
+	marksMu sync.Mutex
+	marks   map[string]time.Time
 }
 
 // Serve registers the spend and usage methods on srv. Pushes are absolute
@@ -179,6 +210,7 @@ func Serve(srv *leader.Server, s *Service) {
 		srv.HandleRead(MethodSpendPush, leader.Typed(s.spendPush))
 		srv.HandleRead(MethodSpendTotals, leader.Typed(s.spendTotals))
 		srv.HandleRead(MethodSpendSums, leader.Typed(s.spendSums))
+		srv.HandleRead(MethodSpendUnknown, leader.Typed(s.spendUnknown))
 	}
 	if s.Usage != nil {
 		srv.HandleRead(MethodUsagePush, leader.Typed(s.usagePush))
@@ -265,6 +297,76 @@ func (s *Service) spendSums(ctx context.Context, in SpendSumsRequest) (SpendSums
 		out.Sums = append(out.Sums, SpendSum{Prefix: p.Prefix, Total: p.Total, Peak: p.Peak, Subjects: p.Subjects, Exceeded: p.Exceeded})
 	}
 	return out, nil
+}
+
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+// spendUnknown keeps the marks of one replica (a key keeps its latest mark;
+// one dated after the leader's clock counts from now) and answers every
+// live mark.
+func (s *Service) spendUnknown(_ context.Context, in SpendUnknownRequest) (SpendUnknownAnswer, error) {
+	if !epochRE.MatchString(in.Epoch) || len(in.Marks) > maxUnknownMarks {
+		return SpendUnknownAnswer{}, bad("epoch is required")
+	}
+	for _, m := range in.Marks {
+		if !markKey(m.Key) || m.At <= 0 {
+			return SpendUnknownAnswer{}, bad("a mark is a user, actor or batch key and a time")
+		}
+	}
+	now := s.now()
+	s.marksMu.Lock()
+	defer s.marksMu.Unlock()
+	for key, at := range s.marks {
+		if now.Sub(at) >= routingadmin.UnknownTTL {
+			delete(s.marks, key)
+		}
+	}
+	for _, m := range in.Marks {
+		at := time.Unix(m.At, 0)
+		if at.After(now) {
+			at = now
+		}
+		if now.Sub(at) >= routingadmin.UnknownTTL {
+			continue
+		}
+		prev, ok := s.marks[m.Key]
+		if ok && !at.After(prev) {
+			continue
+		}
+		if !ok && len(s.marks) >= maxUnknownMarks {
+			s.dropOldestMarkLocked()
+		}
+		if s.marks == nil {
+			s.marks = map[string]time.Time{}
+		}
+		s.marks[m.Key] = at
+	}
+	out := SpendUnknownAnswer{Marks: make([]SpendMark, 0, len(s.marks))}
+	for key, at := range s.marks {
+		out.Marks = append(out.Marks, SpendMark{Key: key, At: at.Unix()})
+	}
+	return out, nil
+}
+
+func (s *Service) dropOldestMarkLocked() {
+	var oldest string
+	var at time.Time
+	for key, t := range s.marks {
+		if oldest == "" || t.Before(at) {
+			oldest, at = key, t
+		}
+	}
+	delete(s.marks, oldest)
+}
+
+// markKey is a user:, actor: or batch: key within maxKeyLen.
+func markKey(k string) bool {
+	return len(k) <= maxKeyLen && (strings.HasPrefix(k, "user:") || strings.HasPrefix(k, "actor:") || strings.HasPrefix(k, "batch:"))
 }
 
 // budgetPrefix is "actor:<id>:" or "batch:<id>:" within maxKeyLen.

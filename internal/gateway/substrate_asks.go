@@ -47,7 +47,7 @@ import (
 //	GET  /api/v1/substrate/approvals[?all=1]            -> standing approvals (substrate_approvals.go)
 //	GET  /api/v1/substrate/decisions[?actor=a/n][&limit=][&all=1]
 //	GET  /api/v1/substrate/policy/explain[?actor=a/n][&host=][&method=][&tool=]
-//	POST /api/v1/substrate/callout/ask   (callout token) {actor, host|tool, summary, reason, severity, ask_id?}
+//	POST /api/v1/substrate/callout/ask   (callout token) {actor, host, summary, reason, severity, rule?, ask_id?}
 //	     ask_id reads that ask again (the callout's hold); a host already
 //	     approved for the actor answers approved. A once approval answers
 //	     approved for one request only, the first that takes it (GAP-0484).
@@ -405,7 +405,6 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 				UID      string `json:"uid,omitempty"`
 			} `json:"actor"`
 			Host     string `json:"host,omitempty"`
-			Tool     string `json:"tool,omitempty"`
 			Summary  string `json:"summary,omitempty"`
 			Reason   string `json:"reason,omitempty"`
 			Severity string `json:"severity,omitempty"`
@@ -414,7 +413,7 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 		}
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&in); err != nil || in.Actor.Atespace == "" || in.Actor.Name == "" || (in.Host == "" && in.Tool == "") || len(in.Rule) > 256 {
+		if err := dec.Decode(&in); err != nil || in.Actor.Atespace == "" || in.Actor.Name == "" || strings.TrimSpace(in.Host) == "" || len(in.Rule) > 256 {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
@@ -430,7 +429,7 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 		}
 		ask := asks.Ask{
 			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Profile: reg.Profile,
-			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
+			Host: strings.ToLower(strings.TrimSpace(in.Host)), Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
 			Rule: strings.TrimSpace(in.Rule),
 		}
 		hostWide := asks.HostWide(ask.Rule)
@@ -487,49 +486,45 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 				return
 			}
 		}
-		if ask.Host != "" {
-			// Approved always for this actor (the controller adds a host-wide
-			// one to the policy on its next pass): not asked twice.
-			standing := hostWide && slices.Contains(reg.Approved, ask.Host)
-			standing = standing || slices.ContainsFunc(list, func(a asks.Ask) bool { return a.Always && approvedFor(a) })
-			if standing {
-				writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
-				return
-			}
-			// A once approval nobody used yet lets this one request through
-			// (the agent's retry after its held request was refused as
-			// pending); every later request asks again (GAP-0484).
-			now := time.Now()
-			for _, a := range list {
-				if a.Always || !approvedFor(a) || !a.UsedAt.IsZero() || !now.Before(a.DecidedAt.Add(asks.OnceWindow)) {
-					continue
-				}
-				got, ok, err := use(a.ID)
-				if err != nil {
-					writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
-					return
-				}
-				if ok {
-					writeSubstrateJSON(w, http.StatusOK, askView(got))
-					return
-				}
-			}
+		// Approved always for this actor (the controller adds a host-wide
+		// one to the policy on its next pass): not asked twice.
+		standing := hostWide && slices.Contains(reg.Approved, ask.Host)
+		standing = standing || slices.ContainsFunc(list, func(a asks.Ask) bool { return a.Always && approvedFor(a) })
+		if standing {
+			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
+			return
 		}
-		if ask.Host != "" {
-			// approve --always keeps the approval for later runs of the same
-			// person and profile: a new actor of theirs is not asked again
-			// for the same host (host-wide) or rule (GAP-0387). Before, Always
-			// was only recorded, and every new run asked again.
-			mine, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, OwnerID: ask.OwnerID})
+		// A once approval nobody used yet lets this one request through
+		// (the agent's retry after its held request was refused as
+		// pending); every later request asks again (GAP-0484).
+		now := time.Now()
+		for _, a := range list {
+			if a.Always || !approvedFor(a) || !a.UsedAt.IsZero() || !now.Before(a.DecidedAt.Add(asks.OnceWindow)) {
+				continue
+			}
+			got, ok, err := use(a.ID)
 			if err != nil {
 				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 				return
 			}
-			if slices.ContainsFunc(mine, func(a asks.Ask) bool { return alwaysApprovalCovers(a, ask) }) {
-				writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved,
-					"reason": "approved with --always for this person and profile"})
+			if ok {
+				writeSubstrateJSON(w, http.StatusOK, askView(got))
 				return
 			}
+		}
+		// approve --always keeps the approval for later runs of the same
+		// person and profile: a new actor of theirs is not asked again
+		// for the same host (host-wide) or rule (GAP-0387). Before, Always
+		// was only recorded, and every new run asked again.
+		mine, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, OwnerID: ask.OwnerID})
+		if err != nil {
+			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+			return
+		}
+		if slices.ContainsFunc(mine, func(a asks.Ask) bool { return alwaysApprovalCovers(a, ask) }) {
+			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved,
+				"reason": "approved with --always for this person and profile"})
+			return
 		}
 		if reg.Unattended {
 			// D12: an unattended run's ask is a deny unless the profile's

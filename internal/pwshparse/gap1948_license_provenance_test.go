@@ -20,7 +20,10 @@ func TestGAP1948LicenseProvenancePinsTheTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, entry, ok := strings.Cut(string(raw), "  Module: github.com/PowerShell/PowerShell\n")
+	// A Windows checkout may convert the file to CRLF (core.autocrlf): the
+	// entry is read by its lines, not its line ends.
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	_, entry, ok := strings.Cut(text, "  Module: github.com/PowerShell/PowerShell\n")
 	if !ok {
 		t.Fatal("no github.com/PowerShell/PowerShell module entry")
 	}

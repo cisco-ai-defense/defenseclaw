@@ -1095,6 +1095,11 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// While it runs, report the hook calls that ran fail-open since
 	// (rel-1-0-2 GAP-0446 item 3); no timer on a managed gateway.
 	go s.watchHookFailureCalls(ctx)
+	if cfg := s.currentConfig(); cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		// The first count of the managed hook's host records, so status and
+		// doctor have it once the gateway answers (rel-1-0-10:GAP-2042).
+		hostRecords.kick()
+	}
 	// A changed cached OpenClaw version re-checks the install policy, and the
 	// retry timers of a failed refresh stop with the gateway (GAP-1198).
 	defer s.startOpenClawInstallPolicyWatch(ctx)()
@@ -4727,6 +4732,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		s.handleAdmissionResult(r)
 	})
 	w.SetMCPToolObserver(s.observeMCPToolListing)
+	s.mcpTools.setListingSource(true)
+	defer s.mcpTools.setListingSource(false)
 	if enrolled != nil {
 		// A folder that appeared since the previous watcher (a user made
 		// ~/.claude/skills, or a user was enrolled) holds what was added

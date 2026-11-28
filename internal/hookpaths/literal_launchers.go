@@ -55,10 +55,12 @@ func simpleShellParameter(word *syntax.Word) string {
 // literalProgramOperands descends only through launchers with known argument
 // positions. An unknown option does not turn an option value into a program.
 func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool) []string {
-	return literalProgramOperandsKnown(words, stmt, cwd, home, depth, allowFileRead, nil, nil)
+	return literalProgramOperandsKnown(words, stmt, cwd, home, depth, allowFileRead, nil, nil, nil)
 }
 
-func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool, environment actionValues, include func(string) bool) []string {
+// literalProgramOperandsKnown is literalProgramOperands with known values;
+// made are the links the command makes (commandMadeLinks).
+func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool, environment actionValues, include func(string) bool, made madeLinks) []string {
 	for wrapper := 0; wrapper < 8 && len(words) > 0; wrapper++ {
 		program := programBase(words[0])
 		switch program {
@@ -249,14 +251,14 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
 		case "awk", "gawk", "mawk", "nawk":
-			operands := directLiteralProgramOperands(words, stmt, cwd, home, depth, allowFileRead)
+			operands := directLiteralProgramOperands(words, stmt, cwd, home, depth, allowFileRead, made)
 			if include != nil {
 				operands = append(operands, knownEntryChangeOperands(words, cwd)...)
 			}
 			// The commands the program starts are judged as the shell body
 			// they are (GAP-0499).
 			if shell, _ := awkCommandShell(words, cwd, allowFileRead); shell != nil {
-				operands = append(operands, literalProgramOperandsKnown(shell, stmt, cwd, home, depth, allowFileRead, environment, include)...)
+				operands = append(operands, literalProgramOperandsKnown(shell, stmt, cwd, home, depth, allowFileRead, environment, include, made)...)
 			}
 			return operands
 		default:
@@ -265,7 +267,7 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 					return operands
 				}
 			}
-			operands := directLiteralProgramOperands(words, stmt, cwd, home, depth, allowFileRead)
+			operands := directLiteralProgramOperands(words, stmt, cwd, home, depth, allowFileRead, made)
 			// An interpreter child whose code no reader proves read-only is handed
 			// its argument paths as possible writes (rel-1-0-10:GAP-0365).
 			for _, name := range actionfacts.InlineCodeHandedWords(words) {
@@ -305,7 +307,7 @@ func literalDuration(value string) bool {
 	return err == nil
 }
 
-func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool) []string {
+func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool, made madeLinks) []string {
 	if len(words) == 0 {
 		return nil
 	}
@@ -403,81 +405,18 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			}
 			break
 		}
-		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); dest != "" {
+		if dest := cpDestinationWith(words[1:], makeStatic(len(words)-1), cwd, made); dest != "" {
 			return []string{dest}
 		}
-	case program == "mv" || program == "gmv":
+	case program == "mv" || program == "gmv" || program == "install" || program == "ginstall" || program == "rsync":
 		// mv, install and rsync have their own readers (the rename, the
 		// move onto a link, the recursive copy scope). Only a destination
 		// below a process link, which those readers cannot place, is listed
-		// here (rel-1-0-10:GAP-2227, GAP-2237); listing every destination
+		// here (rel-1-0-10:GAP-2227, GAP-2237), and one placed through a
+		// link a dot-dot steps out of (GAP-2287); listing every destination
 		// judged a plain rename onto a link and a recursive folder sync as
 		// writes through links (rel-1-0-10:GAP-2275).
-		op, ok := parseRename(words[1:], cwd)
-		if !ok || len(op.sources) == 0 {
-			return nil
-		}
-		if op.targetDir != "" {
-			var names []string
-			for _, source := range op.sources {
-				names = append(names, OperandPath(op.targetDir, cwd)+"/"+filepath.Base(source))
-			}
-			return processLinkWrites(names, cwd)
-		}
-		if op.dest != "" {
-			return processLinkWrites([]string{OperandPath(op.dest, cwd)}, cwd)
-		}
-	case program == "install" || program == "ginstall":
-		if len(words) < 3 {
-			return nil
-		}
-		var destination string
-		var sources []string
-		for i := 1; i < len(words); i++ {
-			word := words[i]
-			switch {
-			case word == "--":
-				sources = append(sources, words[i+1:]...)
-				i = len(words)
-			case word == "-d" || word == "--directory":
-				return nil
-			case word == "-t" || word == "--target-directory":
-				i++
-				if i >= len(words) {
-					return nil
-				}
-				destination = words[i]
-			case strings.HasPrefix(word, "--target-directory="):
-				destination = strings.TrimPrefix(word, "--target-directory=")
-			case strings.HasPrefix(word, "-t") && len(word) > 2:
-				destination = word[2:]
-			case strings.HasPrefix(word, "-"):
-				continue
-			default:
-				sources = append(sources, word)
-			}
-		}
-		if destination != "" {
-			if len(sources) == 0 {
-				return nil
-			}
-			var names []string
-			for _, source := range sources {
-				names = append(names, OperandPath(destination, cwd)+"/"+filepath.Base(source))
-			}
-			return processLinkWrites(names, cwd)
-		}
-		if len(sources) >= 2 {
-			return processLinkWrites([]string{OperandPath(sources[len(sources)-1], cwd)}, cwd)
-		}
-	case program == "rsync":
-		if len(words) < 3 {
-			return nil
-		}
-		dest := archiveCopyDestination(words[1:], makeStatic(len(words)-1), cwd)
-		if dest != "" {
-			return processLinkWrites([]string{dest}, cwd)
-		}
+		return processLinkWrites(moveWrites(program, words, cwd), cwd, made)
 	case program == "tee" || program == "gtee":
 		var names []string
 		for _, word := range words[1:] {
@@ -1151,4 +1090,79 @@ func xargsPerlChild(words []string) bool {
 		}
 	}
 	return false
+}
+
+// moveWrites lists the files a static mv, install or rsync call writes (words[0]
+// is the program), each placed with its dot-dot kept (OperandPath): the
+// destination, or the file each source takes in a target folder. It lists
+// nothing for a call it does not understand.
+func moveWrites(program string, words []string, cwd string) []string {
+	switch program {
+	case "mv", "gmv":
+		op, ok := parseRename(words[1:], cwd)
+		if !ok || len(op.sources) == 0 {
+			return nil
+		}
+		if op.targetDir != "" {
+			var names []string
+			for _, source := range op.sources {
+				names = append(names, OperandPath(op.targetDir, cwd)+"/"+filepath.Base(source))
+			}
+			return names
+		}
+		if op.dest != "" {
+			return []string{OperandPath(op.dest, cwd)}
+		}
+	case "install", "ginstall":
+		if len(words) < 3 {
+			return nil
+		}
+		var destination string
+		var sources []string
+		for i := 1; i < len(words); i++ {
+			word := words[i]
+			switch {
+			case word == "--":
+				sources = append(sources, words[i+1:]...)
+				i = len(words)
+			case word == "-d" || word == "--directory":
+				return nil
+			case word == "-t" || word == "--target-directory":
+				i++
+				if i >= len(words) {
+					return nil
+				}
+				destination = words[i]
+			case strings.HasPrefix(word, "--target-directory="):
+				destination = strings.TrimPrefix(word, "--target-directory=")
+			case strings.HasPrefix(word, "-t") && len(word) > 2:
+				destination = word[2:]
+			case strings.HasPrefix(word, "-"):
+				continue
+			default:
+				sources = append(sources, word)
+			}
+		}
+		if destination != "" {
+			if len(sources) == 0 {
+				return nil
+			}
+			var names []string
+			for _, source := range sources {
+				names = append(names, OperandPath(destination, cwd)+"/"+filepath.Base(source))
+			}
+			return names
+		}
+		if len(sources) >= 2 {
+			return []string{OperandPath(sources[len(sources)-1], cwd)}
+		}
+	case "rsync":
+		if len(words) < 3 {
+			return nil
+		}
+		if word := archiveCopyDestinationWord(words[1:], makeStatic(len(words)-1)); word != "" {
+			return []string{OperandPath(word, cwd)}
+		}
+	}
+	return nil
 }

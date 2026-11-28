@@ -44,6 +44,8 @@ func TestDET111KnownProtectedWriteIsThePlainSpelling(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // the active home on Windows
+	sh := filepath.ToSlash(home)  // the home as POSIX text spells it (hardP5Path)
 	py := func(mode string) string {
 		return `python3 -c "open('{t}','` + mode + `').write('x')"`
 	}
@@ -67,18 +69,18 @@ func TestDET111KnownProtectedWriteIsThePlainSpelling(t *testing.T) {
 		".docker/config.json":      {"python -c"},
 	}
 	benign := []string{
-		"sort -o " + home + "/proj/data.txt " + home + "/proj/notes.txt",
-		"rsync -av --log-file=" + home + "/proj/rs.log " + home + "/proj/ /tmp/bk/",
-		"sed -n 'w /tmp/o.txt' " + home + "/proj/notes.txt",
+		"sort -o " + sh + "/proj/data.txt " + sh + "/proj/notes.txt",
+		"rsync -av --log-file=" + sh + "/proj/rs.log " + sh + "/proj/ /tmp/bk/",
+		"sed -n 'w /tmp/o.txt' " + sh + "/proj/notes.txt",
 		`python3 -c "open('out.txt','w').write('x')"`,
-		`python3 -c "print(open('` + home + `/.claude/settings.json').read())"`,
+		`python3 -c "print(open('` + sh + `/.claude/settings.json').read())"`,
 	}
 	useDefaultEffectsLane(t)
 	for _, tier := range boundedTestTiers {
-		for _, route := range []string{"claudecode", "codex"} {
+		for _, route := range hardP5Routes() {
 			api := gap0589TierAPI(t, route, tier.posture, tier.managed, tier.tier)
 			for target, names := range targets {
-				member := filepath.Join(home, target)
+				member := hardP5Path(home, target)
 				wantAction, wantSev := hardP2Verdict(t, api, route, home, strings.ReplaceAll(writers["plain control"], "{t}", member))
 				if wantAction == "allow" && tier.name == "default" {
 					t.Fatalf("%s %s: plain control on %s allows: the control is void", tier.name, route, target)

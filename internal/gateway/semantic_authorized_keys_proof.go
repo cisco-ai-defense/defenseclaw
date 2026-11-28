@@ -2195,8 +2195,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
 			target = candidate.Normalized
 		}
-		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
-			target = raw
+		if _, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
+			// A dot-dot operand is judged by its OperandPath spelling: the
+			// dot-dot steps applied where the kernel climbs to the same
+			// folder, every other step raw for the link-aware walk
+			// (rel-1-0-10:GAP-1648), the spelling the copy destinations and
+			// the link reading use. RawDotDotOperand itself is the uncleaned
+			// key of the client's answers since rel-1-0-10:GAP-2294; taken
+			// here, cp ../../a.txt ../../b.txt after cd .cache; $CMD; cd sub;
+			// $CMD raised the authorized keys rule on the laptop
+			// (TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates b-cp).
+			target = hookpaths.OperandPath(candidate.Value, clientCWD)
 		}
 		// The own destination of the copy, also after a directory change
 		// that the path facts follow (GAP-2579).

@@ -64,11 +64,12 @@ func ExpectedFinalPathBelow(finalRoot, root, path string) (string, error) {
 	return current, nil
 }
 
-// SameWindowsPath compares two Windows paths case-insensitively, with the
-// \\?\ (and \\?\UNC\) prefix, forward slashes and a trailing separator
+// SameWindowsPath compares two Windows paths case-insensitively as NTFS
+// compares names (EqualNames, not Unicode folding: rel-1-0-10:GAP-2211), with
+// the \\?\ (and \\?\UNC\) prefix, forward slashes and a trailing separator
 // normalised.
 func SameWindowsPath(a, b string) bool {
-	return strings.EqualFold(plainWindowsPath(a), plainWindowsPath(b))
+	return EqualNames(plainWindowsPath(a), plainWindowsPath(b))
 }
 
 // plainWindowsPath is path with backslashes, without the \\?\ prefix
@@ -88,15 +89,23 @@ func plainWindowsPath(path string) string {
 	return path
 }
 
+// windowsRelativeBelow is the elements of path below root. Each element of
+// root is compared with the element of path at its place by name, as NTFS
+// compares names (EqualNames): a byte prefix under strings.EqualFold took a
+// folder named with a Kelvin sign for the k-spelled folder beside it
+// (rel-1-0-10:GAP-2211).
 func windowsRelativeBelow(root, path string) ([]string, error) {
-	prefix := root
-	if !strings.HasSuffix(prefix, `\`) {
-		prefix += `\`
-	}
-	if len(path) <= len(prefix) || !strings.EqualFold(path[:len(prefix)], prefix) {
+	rootParts := strings.Split(strings.TrimSuffix(root, `\`), `\`)
+	pathParts := strings.Split(path, `\`)
+	if len(pathParts) <= len(rootParts) {
 		return nil, fmt.Errorf("%w: %s is not below %s", errNotBelowRoot, path, root)
 	}
-	parts := strings.Split(path[len(prefix):], `\`)
+	for i, part := range rootParts {
+		if !EqualNames(part, pathParts[i]) {
+			return nil, fmt.Errorf("%w: %s is not below %s", errNotBelowRoot, path, root)
+		}
+	}
+	parts := pathParts[len(rootParts):]
 	for _, part := range parts {
 		if part == "" || part == "." || part == ".." {
 			return nil, fmt.Errorf("%w: %s has an empty, . or .. element", errNotBelowRoot, path)

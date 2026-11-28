@@ -452,6 +452,9 @@ func sequenceStatementDetailsWalk(source string, compound, allSimple, straight, 
 	}
 	subshells := 0
 	functions := make(map[string]*syntax.Stmt)
+	// certainDefinitions marks the function bodies whose definition the
+	// shell surely ran where the walk met it.
+	certainDefinitions := make(map[*syntax.Stmt]bool)
 	functionDepth := 0
 	// expanded are the function bodies a call walked; definitions are the
 	// functions the walk met, to be walked where defined when no call did.
@@ -568,6 +571,11 @@ func sequenceStatementDetailsWalk(source string, compound, allSimple, straight, 
 				return true, false
 			}
 			functions[typed.Name.Value] = typed.Body
+			// A definition surely ran before a later call only when nothing
+			// around it may skip it: no && or ||, branch, loop, pipeline,
+			// subshell or background around it, only the bodies of the
+			// functions being run (substrate-1:GAP-0713, CHK-T6-SCB).
+			certainDefinitions[typed.Body] = skippable == 0 && subshells == 0 && sequenceScopeOnlyFunctionBodies(scope)
 			definitions = append(definitions, functionDefinition{body: typed.Body, at: len(statements),
 				scope: scope, binds: slices.Clone(loopBinds), subshells: subshells, depth: functionDepth})
 			return true, true
@@ -821,7 +829,16 @@ func sequenceStatementDetailsWalk(source string, compound, allSimple, straight, 
 						functionDepth++
 						calling = append(calling, call)
 						expanded[body] = true
-						ok := childScope('f', func() bool { return flatten(body) })
+						run := body
+						if body == functions[program] && program == name && certainDefinitions[body] {
+							if args, ok := sequenceRunnerCallArgs(call, body); ok {
+								// After f() { "$@"; }, the body runs the call's
+								// arguments in this shell: f cd X is the cd X
+								// (substrate-1:GAP-0713).
+								run = &syntax.Stmt{Cmd: &syntax.CallExpr{Args: args}}
+							}
+						}
+						ok := childScope('f', func() bool { return flatten(run) })
 						calling = calling[:len(calling)-1]
 						functionDepth--
 						if !ok {
@@ -930,6 +947,57 @@ func sequenceStatementDetailsWalk(source string, compound, allSimple, straight, 
 		}
 	}
 	return statements, reduced, true
+}
+
+// sequenceScopeOnlyFunctionBodies reports a walk scope that is the top
+// level or the bodies of functions run by this shell alone (kind f).
+func sequenceScopeOnlyFunctionBodies(scope string) bool {
+	parts := strings.Split(scope, "/")
+	for _, part := range parts[1:] {
+		if !strings.HasPrefix(part, "f") {
+			return false
+		}
+	}
+	return true
+}
+
+// sequenceRunnerCallArgs returns the arguments a call of a function whose
+// body only runs them in the shell (workFolderArgRunner) runs as a command:
+// the words after the function name. It declines a call with assignments,
+// and an argument with a substitution (already walked with the call) or a
+// positional or special parameter (it reads another value in the body).
+//
+// It reads only a folder change (cd, pushd, popd: f cd X moves the shell as
+// cd X, substrate-1:GAP-0713); any other command keeps the reading of the
+// body it had. Flattened, run sh -c 'if false; then printf c >>
+// ~/.defenseclaw/config.yaml; fi' after run() { "$@"; } became the plain sh
+// -c call, whose dead branch the plain reading judges, and the ordinary
+// row of TestGAP0456WrappedStateWriteVerdictParity blocked where rel allows.
+func sequenceRunnerCallArgs(call *syntax.CallExpr, body *syntax.Stmt) ([]*syntax.Word, bool) {
+	if len(call.Assigns) != 0 || len(call.Args) < 2 || !workFolderArgRunner(body) {
+		return nil, false
+	}
+	switch call.Args[1].Lit() {
+	case "cd", "pushd", "popd":
+	default:
+		return nil, false
+	}
+	args := call.Args[1:]
+	plain := true
+	for _, arg := range args {
+		syntax.Walk(arg, func(node syntax.Node) bool {
+			switch typed := node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+				plain = false
+			case *syntax.ParamExp:
+				if typed.Param == nil || !simpleVariableName(typed.Param.Value) {
+					plain = false
+				}
+			}
+			return plain
+		})
+	}
+	return args, plain
 }
 
 // simpleUncalledBodyCommand classifies node, a command of the body of a

@@ -15,6 +15,13 @@ import (
 
 func t20cCodexBash(t *testing.T, pack, command string) codexHookResponse {
 	t.Helper()
+	// A POSIX host's Codex Bash call (CWD /repo): on a Windows host Codex runs
+	// its shell in PowerShell (codexShellRunsPowerShell) and the hook adds its
+	// PowerShell and cmd readings, which keep their own bound rule
+	// (posixInputLimitCommand).
+	previousHost, previousShell := windowsHookHost, codexShellRunsPowerShell
+	windowsHookHost, codexShellRunsPowerShell = func() bool { return false }, false
+	t.Cleanup(func() { windowsHookHost, codexShellRunsPowerShell = previousHost, previousShell })
 	const connector = "codex"
 	installToolCallCorpusProfileConnector(t, connector, pack)
 	cfg := &config.Config{}

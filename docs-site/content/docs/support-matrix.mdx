@@ -118,6 +118,8 @@ enterprise packages, under **Requirements** on the
 [Linux](/docs/enterprise/linux) and
 [macOS](/docs/enterprise/macos) pages.
 
+On Windows, `defenseclaw-hook.exe` is about 53 MiB in the 1.0.10 release, because the OpenClaw extension bundle is built into it. Allow for a hook of that size when you plan disk space, a package share or a download limit.
+
 Agents that connect through the guardrail proxy aren't part of this matrix.
 Their pages are listed under [Connectors](/docs/connectors).
 
@@ -226,9 +228,11 @@ How many Claude Code tool calls a second one host can check depends on the opera
 | Managed | RHEL 9 | m8i.2xlarge (8) | 50 calls a second | 50 calls a second (0.06 s) | 100 calls a second: 50% answered in time, 54% with 10 sessions |
 | Managed | macOS | mac2.metal, Apple M1 (8) | 25 calls a second (next to interactive sessions, on a 1.0.9 audit store upgraded in place) | not reached at the lowest step: 0.89 s at 25 calls a second | 100 calls a second: none answered in time |
 | Managed | Windows Server 2025 | c5a.2xlarge (8) | 13 calls a second | 10 calls a second (0.29 s) | 16 calls a second: 21% answered in time |
-| Per-user and managed | Linux, one very large command (not a rate) | c7i.16xlarge (64) | A 1 MiB command takes about 0.75 s and 246 MiB of memory for one hook check | not a rate | Larger commands cost more in proportion; a shared parse that cuts this is planned for 1.0.11 |
+| Per-user and managed | Linux, one very large command (not a rate) | c7i.16xlarge (64) | A command near 1 MiB, such as a large here-document, takes longer to judge: a few hundred milliseconds (about 0.3 s) and about 100 MiB of memory for one hook check | not a rate | Larger commands cost more in proportion |
 
 **Known limit:** 1.0.10 does not reach 100 tool calls a second on one host. The target applies to Linux with 8 or more vCPU, and a managed RHEL 9 host on 8 vCPU reaches 50. Raising the rate is planned for a later release. The rate grows with the free CPU cores of the host. These rows are not limits for other instance types: check a different instance type with your own agents and the counts below.
+
+**Known limit:** the rates in this table are the 1.0.10 rates. In 1.0.11 a sustained burst of hook calls for one user above about 80 calls a second on a 4 vCPU Linux host, or about 30 on Windows, is answered late, even on a host with free CPU ([Hook floods on Windows](#hook-floods-on-windows)). A call past its answer budget follows the configured fail mode ([Fail modes](/docs/reference/fail-modes)). Each hook call adds about 20 KB to the local audit store.
 
 One interactive agent makes a few tool calls a second at most, so these rates matter for many agents, or agent loops and scripts, on one host. Past its rate a host answers late: a managed hook then blocks the call and says that DefenseClaw is at capacity, not that a policy blocked it; a per-user hook in the default fail mode lets the call run unchecked after its answer budget and records it.
 
@@ -274,6 +278,9 @@ Shell can express the same write in many ways, and some unusual forms are not re
 - **Link text with line breaks.** A link whose text has line breaks is a limit of the command reader.
 - **A socket opened from an interpreter command line.** The deterministic socket rule recognises the minimal one-liner form only. Other spellings are left to the LLM judge.
 - **PowerShell text sent to the Claude Code Bash tool on Windows.** The Bash tool runs Git Bash, so DefenseClaw reads the call as Git Bash and PowerShell cmdlet text with a comment that names a protected path is blocked. Run PowerShell commands through PowerShell.
+- **Script arguments.** A credentials file passed by name to a script (for example a Python or Node script) is not tracked as a read; DefenseClaw does not read the script's code.
+
+**A Perl program that decides an open mode in a way the hook cannot compute** is recognised, not missed, and the hook does not let it through unchecked. DefenseClaw reads the inline Perl program only; a file the program loads with `require` or `do` can change values the hook cannot see, so an open of a hook file whose mode depends on such a file is reported as an unproven write. Subroutine and constant definitions made inside a string `eval` are not evaluated; an affected open of a hook file is reported as an unproven write. A Perl open mode changed by anything other than a plain assignment is not computed; the open of a hook file is reported as an unproven write. The hook reports the unproven write and asks for a literal path or a command split into simpler steps.
 
 A few harmless commands are blocked because their text matches a protected write and the hook cannot see what they do when they run:
 

@@ -12,6 +12,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestGAP1792RsyncDestinationRootIsNotAnAuthorizedKeysWrite(t *testing.T) {
@@ -24,7 +25,22 @@ func TestGAP1792RsyncDestinationRootIsNotAnAuthorizedKeysWrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("synthetic\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := `rm -rf ` + out + ` && mkdir -p ` + out + ` && cd ` + cwd + ` && grep -E "\\.(ts|tsx|mjs|mts)$" /tmp/synthetic-files.txt > /tmp/synthetic-codefiles.txt && rsync -a --files-from=/tmp/synthetic-codefiles.txt ./ ` + out + `/ && cd ` + out + ` && python3 /tmp/synthetic-tools/clean_refs.py $(cat /tmp/synthetic-codefiles.txt) | tail -3 && diff -ru ` + cwd + `/src ` + out + `/src | grep "^[-+]" | grep -v "^+++" | head -20`
+	// The command spells the paths with forward slashes, as Git Bash reads a
+	// Windows path (a backslash in POSIX text is an escape); elsewhere they
+	// are unchanged.
+	sout, scwd := filepath.ToSlash(out), filepath.ToSlash(cwd)
+	if runtime.GOOS == "windows" {
+		// The source tree holds a link, so the copy may materialize one in
+		// the destination. Off Linux a missing source carries no link
+		// (diskSourceMayLink: the ProtectHome reading of a missing home path
+		// is Linux only), so the Linux fixture's missing working folder
+		// proves nothing there.
+		if err := os.MkdirAll(cwd, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		testenv.Symlink(t, filepath.Join(home, "Desktop"), filepath.Join(cwd, "link"))
+	}
+	command := `rm -rf ` + sout + ` && mkdir -p ` + sout + ` && cd ` + scwd + ` && grep -E "\\.(ts|tsx|mjs|mts)$" /tmp/synthetic-files.txt > /tmp/synthetic-codefiles.txt && rsync -a --files-from=/tmp/synthetic-codefiles.txt ./ ` + sout + `/ && cd ` + sout + ` && python3 /tmp/synthetic-tools/clean_refs.py $(cat /tmp/synthetic-codefiles.txt) | tail -3 && diff -ru ` + scwd + `/src ` + sout + `/src | grep "^[-+]" | grep -v "^+++" | head -20`
 	input := actionfacts.Input{Tool: "Bash", Command: command, ActiveHome: home, CWD: cwd, DialectHint: actionfacts.DialectPOSIX}
 	facts := actionfacts.Analyze(input)
 	installDefaultProfileConnector(t, "claudecode")

@@ -303,6 +303,7 @@ func (host *windowsBundleRestoreHost) assertRestored(t *testing.T, result enterp
 }
 
 func TestWindowsBundleEnsureRestoresConfigChangedOutsideTheLifecycle(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	for _, tc := range []struct {
 		name    string
 		deleted bool
@@ -497,6 +498,7 @@ func TestWindowsBundleRestoreDoesNotKeepUncommittedCandidate(t *testing.T) {
 }
 
 func TestWindowsBundleRepairRestoresConfigChangedOutsideTheLifecycle(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	host := newWindowsBundleRestoreHost(t)
 	edited := host.tamper(t, false)
 	stub := host.installer(t, installedStatus("repair"))

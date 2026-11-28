@@ -375,16 +375,20 @@ func defaultResolver(p string) (string, bool) {
 // hostGOOS is the system whose file system the resolver reads; a test pins it.
 var hostGOOS = runtime.GOOS
 
-// resolverFor is the link resolver of a call's path flavor: the hook's file
+// resolverForWith is the link resolver of a call's path flavor: the hook's file
 // system reader for the host's own flavor, else the placed path itself. A
 // Windows path judged on a POSIX host (or a POSIX path on Windows) names no
 // file of this file system, so there is no link to follow: its placed path is
 // the whole answer, a member or not by name, never an unresolved target that
 // reaches every set (DET111 D3; it graded every Windows home write the
 // unknown tier).
-func resolverFor(flavor effects.Flavor) resolver {
+// host is the resolver of the host's own flavor (nil: defaultResolver).
+func resolverForWith(flavor effects.Flavor, host resolver) resolver {
 	if (flavor == effects.FlavorWindows) != (hostGOOS == "windows") {
 		return func(p string) (string, bool) { return p, true }
+	}
+	if host != nil {
+		return host
 	}
 	return defaultResolver
 }

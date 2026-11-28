@@ -9,8 +9,8 @@ import "testing"
 // rel-1-0-10:GAP-1156: a plain call of a function the script defines runs
 // its body in the session, so a Set-Location in the body moves the folder
 // of the statements after the call; the definition alone moves nothing. A
-// call with arguments, a recursive call and a dynamic call keep the walker's
-// unknown folder.
+// recursive call and a dynamic call keep the walker's unknown folder
+// (a call with arguments runs the body too, GAP-2257).
 func TestGAP1156PowerShellFunctionCallMovesFolder(t *testing.T) {
 	const home = `C:\Users\alice`
 	opts := Options{Flavor: FlavorWindows, Dialect: DialectPowerShell, Home: home, CWD: home}
@@ -23,7 +23,7 @@ func TestGAP1156PowerShellFunctionCallMovesFolder(t *testing.T) {
 		{`function G { Set-Location .defenseclaw }; g; Set-Content -Path config.yaml -Value x`, home + `\.defenseclaw\config.yaml`},
 		{`function g { cd .defenseclaw }; Set-Content -Path config.yaml -Value x`, home + `\config.yaml`},
 		{"function g { cd .defenseclaw }\ng\nSet-Content -Path config.yaml -Value x", home + `\.defenseclaw\config.yaml`},
-		{`function g { cd .defenseclaw }; g x; Set-Content -Path config.yaml -Value x`, ""},
+		{`function g { cd .defenseclaw }; g x; Set-Content -Path config.yaml -Value x`, home + `\.defenseclaw\config.yaml`}, // GAP-2257
 		{`function g { g }; g; Set-Content -Path config.yaml -Value x`, ""},
 		{`function g { cd .defenseclaw }; & $n; Set-Content -Path config.yaml -Value x`, ""},
 	}

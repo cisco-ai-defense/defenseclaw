@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
@@ -81,6 +82,11 @@ func TestGAP1915GuessedDialectShapesKeepTheT21aRaise(t *testing.T) {
 	}
 	for _, pack := range gap0437Packs[:2] { // default, strict
 		server := gap0437Server(t, pack, "openclaw", "action")
+		// Policy semantics, not latency: on a native Windows host the
+		// find -exec shapes take 160-240 ms of the 200 ms production
+		// deadline at 47dab74894 and after, so a production deadline made
+		// the verdict a coin toss (rel-1-0-10:GAP-2303).
+		server.inspectToolScanTimeout = 30 * time.Second
 		setLiveEffectsLane(t, "on")
 		for _, target := range []string{home + `\.defenseclaw\config.yaml`, home + `\.defenseclaw\audit.db`, home + `\.ssh\authorized_keys`} {
 			// default alerts on a DefenseClaw state file and blocks an
@@ -93,6 +99,14 @@ func TestGAP1915GuessedDialectShapesKeepTheT21aRaise(t *testing.T) {
 				got, findings := inspect(server, command)
 				// an authorized_keys write may carry the persistence rule instead.
 				restricted := slices.ContainsFunc(findings, func(f string) bool { return strings.HasPrefix(f, "effect.protected_target_restricted") })
+				// The 1.0.10 state reader reads these shapes itself (on
+				// Linux and macOS too: GAP-1151 reads the dot-stdin text as
+				// current-shell statements), and the effect finding folds
+				// into its finding, which names the set (DET111 ruling A;
+				// LEAD 2026-11-27 R3: same verdict, every OS).
+				if slices.ContainsFunc(findings, func(f string) bool { return strings.HasPrefix(f, "tamper.detector_state_write") }) {
+					restricted = true
+				}
 				if got != want || (!restricted && !strings.Contains(target, ".ssh")) {
 					t.Errorf("%s %s -> %s: %s %v, want %s with effect.protected_target_restricted", pack.name, name, target, got, findings, want)
 				}

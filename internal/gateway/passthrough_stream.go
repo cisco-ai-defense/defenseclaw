@@ -242,6 +242,9 @@ func (s *passthroughStream) run() {
 	p, w, r, resp, mode, label := s.p, s.w, s.r, s.resp, s.mode, s.label
 	ctx := r.Context()
 	blockedReply := func(msg string) {
+		// The upstream answered: a block from here on cuts the provider's
+		// answer (substrate-1:GAP-1119).
+		usageStreamBlocked(w)
 		out := w
 		if s.bedrock != nil {
 			// The reply headers are out already: the block frames follow them.
@@ -280,6 +283,9 @@ func (s *passthroughStream) run() {
 		flusher.Flush()
 	}
 	var accumulated responseText
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(ctx, newMidStreamScanState())
 	streamResponseModel := ""
 	lastScanLen := 0
 	// lastFullScanLen is the text the last full mid-stream check read: the
@@ -401,6 +407,7 @@ func (s *passthroughStream) run() {
 	// under way, in its own shape after the last content block the agent
 	// got (GAP-1206). Held events are dropped.
 	endBlock := func() {
+		usageStreamBlocked(w)
 		switch {
 		case released == 0:
 			blockedReply(sseBlockMsg)
@@ -463,7 +470,7 @@ func (s *passthroughStream) run() {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.CheckText(), label, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(midCtx, accumulated.CheckText(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -492,6 +499,36 @@ func (s *passthroughStream) run() {
 		accumulated.ReleaseOpenSecret()
 		secretOpen, secretKey = false, false
 		return boundHit(c, why)
+	}
+	// runHeldBound decides the held bound behind an open token or digit run
+	// once per call (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z): past
+	// streamSecretMaxHeld the text read so far is checked and the unknown tier
+	// of the pack decides, so a reply that keeps a run open at every piece end
+	// (a numeric table, GAP-1265) gets the TRUNCATED verdict, never none.
+	// release: the pieces from the first byte of the run are over the bound
+	// themselves, so the run is given up and goes out once decided; otherwise
+	// the pieces before it go out and the run stays held for its own check
+	// (GAP-1306). A later pass of the same call is not decided again.
+	runHeldHit := false
+	runHeldBound := func(release bool) bool {
+		if runHeldHit {
+			// Not decided again, but a run given up still gets the full
+			// check of the text read so far before it goes out, as at the
+			// parent (CHK-RF-1478B N1).
+			if release {
+				if !scanText(true) {
+					return false
+				}
+				accumulated.ReleaseOpenSecret()
+				secretOpen, secretKey = false, false
+			}
+			return true
+		}
+		runHeldHit = true
+		if release {
+			return secretBound(bounded.Bytes, streamRunHeldWhy)
+		}
+		return scanText(true) && boundHit(bounded.Bytes, streamRunHeldWhy)
 	}
 	// maskParkedReasoning preserves an unresolved reasoning run without
 	// holding unrelated answer events behind it (GAP-2170). The existing
@@ -539,12 +576,12 @@ func (s *passthroughStream) run() {
 		case queueBytes > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case queueBytes > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): the events
+			// Only a token or a digit run is open (GAP-1265): the bound
+			// decides it once (runHeldBound, GAP-1767), then the events
 			// before the one with the run's first byte go out once the
-			// check has read them, with no verdict, and the run stays held
-			// (GAP-1306). When the events from the run's first byte are
-			// over the bound themselves, the bound decides the run
-			// (TRUNCATED, GAP-1767), then all go. When only reasoning runs parked
+			// check has read them and the run stays held (GAP-1306). When
+			// the events from the run's first byte are over the bound
+			// themselves, the run goes out once decided. When only reasoning runs parked
 			// by the switch to the answer are open (o.answerParkedOnly,
 			// GAP-2170: parked until the message ends while the answer
 			// streams behind it), all go out as rel does, with no verdict: a
@@ -560,7 +597,12 @@ func (s *passthroughStream) run() {
 			runBytes := queueBytes - bufferedBytes(queue[:k])
 			if k > 0 && runBytes <= streamSecretMaxHeld {
 				heldCut = k
-				return false, true
+				// A parked run keeps the parent's release with no verdict
+				// (GAP-2170, GAP-2224).
+				if o.parkedOnly {
+					return false, true
+				}
+				return false, runHeldBound(false)
 			}
 			if o.answerParkedOnly {
 				return false, true
@@ -568,7 +610,7 @@ func (s *passthroughStream) run() {
 			if o.parkedOnly && runBytes-sumInts(queueUntexted[k:]) <= streamSecretMaxHeld {
 				return false, true
 			}
-			return false, secretBound(bounded.Bytes, streamRunHeldWhy)
+			return false, runHeldBound(true)
 		}
 		return true, true
 	}
@@ -692,7 +734,7 @@ func (s *passthroughStream) run() {
 		}
 		if accumulated.Len() > lastScanLen {
 			checkContent := accumulated.CheckText()
-			initVerdict := p.inspector.InspectMidStream(ctx, "completion", checkContent,
+			initVerdict := p.inspector.InspectMidStream(midCtx, "completion", checkContent,
 				[]ChatMessage{{Role: "assistant", Content: checkContent}}, label, mode)
 			p.resolveConfirm(ctx, r, initVerdict, "completion", label, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {

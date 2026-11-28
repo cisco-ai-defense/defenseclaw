@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,6 +35,11 @@ import (
 // entry for entry: that test's result then depends on the walk alone, not on
 // how loaded the box is. OverrideNetworkSharesForTest turns the share walk on,
 // so the test runs off Windows too.
+//
+// Where the file system gives no change time (statChangeTime: Windows) the
+// index is kept for the hook call only (activeStateIdentities), never across
+// calls: there each lookup runs in a hook call of its own and the index read
+// is the one that call kept (rel-1-0-10:GAP-2300).
 func TestGAP1789KnownFolderReadPastAnswerWait(t *testing.T) {
 	resetActiveStateIndex(t)
 	resetPlainFolders(t)
@@ -62,6 +68,11 @@ func TestGAP1789KnownFolderReadPastAnswerWait(t *testing.T) {
 	if err := os.Link(twin, twinLink); err != nil {
 		t.Fatal(err)
 	}
+	homeInfo, err := os.Stat(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, acrossCalls := statChangeTime(homeInfo)
 	// A state folder changed within activeStateViewGuard (or the present
 	// filesystem clock tick) is not kept across calls (activeStateSettleLimit,
 	// DET111): let the new state settle so the index is kept and can be read.
@@ -87,16 +98,51 @@ func TestGAP1789KnownFolderReadPastAnswerWait(t *testing.T) {
 	}
 	t.Cleanup(func() { walkLstat = read })
 
+	// callIndexes are the indexes the hook call of the last lookup kept
+	// where none is kept across calls.
+	var callIndexes map[string][]activeStateIdentity
 	state := func(path string) bool {
 		resetActiveStateIndex(t)
-		return actionProtectedStatePath(path, &actionStateHome{home: home})
+		if acrossCalls {
+			return actionProtectedStatePath(path, &actionStateHome{home: home})
+		}
+		call, end := beginHookCall()
+		defer end()
+		if call == nil {
+			t.Fatal("no hook call began on the test goroutine")
+		}
+		got := actionProtectedStatePath(path, &actionStateHome{home: home})
+		callIndexes = maps.Clone(call.stateIdentities)
+		return got
+	}
+	indexCount := func() int {
+		if acrossCalls {
+			return gap1789IndexCount()
+		}
+		return len(callIndexes)
+	}
+	indexNames := func() []string {
+		t.Helper()
+		if acrossCalls {
+			return gap1789IndexNames(t)
+		}
+		if len(callIndexes) != 1 {
+			t.Fatalf("%d active state indexes kept for the hook call, want 1", len(callIndexes))
+		}
+		var names []string
+		for _, files := range callIndexes {
+			for _, file := range files {
+				names = append(names, file.relative)
+			}
+		}
+		return names
 	}
 	idle := func(when string) []string {
 		t.Helper()
 		if !state(alias) {
 			t.Fatalf("%s: the hard link to a state file was not found", when)
 		}
-		names := gap1789IndexNames(t)
+		names := indexNames()
 		if state(twin) || state(plain) {
 			t.Fatalf("%s: an ordinary project write (a hard link pair of its own, a single-link file) read as a state write", when)
 		}
@@ -128,7 +174,7 @@ func TestGAP1789KnownFolderReadPastAnswerWait(t *testing.T) {
 	if !heldState(alias) {
 		t.Fatal("a hard link to a state file whose folder read was past the answer wait read as no state write (fail open)")
 	}
-	if n := gap1789IndexCount(); n != 0 {
+	if n := indexCount(); n != 0 {
 		t.Fatalf("%d indexes kept from a walk whose read did not answer", n)
 	}
 	if !heldState(twinLink) {
@@ -147,7 +193,7 @@ func TestGAP1789KnownFolderReadPastAnswerWait(t *testing.T) {
 	if !heldState(alias) {
 		t.Fatal("under the one-minute wait the hard link to a state file was not found while one folder read was slower than the default wait")
 	}
-	if got := gap1789IndexNames(t); !slices.Equal(got, idleIndex) {
+	if got := indexNames(); !slices.Equal(got, idleIndex) {
 		t.Fatalf("under the one-minute wait the index holds %d files, the idle index %d: %v", len(got), len(idleIndex), got)
 	}
 

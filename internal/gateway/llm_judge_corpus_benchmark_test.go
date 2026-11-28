@@ -15,14 +15,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // This benchmark deliberately lives in package gateway (rather than a parallel
@@ -313,201 +311,6 @@ type corpusJudgePrediction struct {
 	RequestSHA256       []string `json:"request_sha256,omitempty"`
 }
 
-type corpusJudgeMetadata struct {
-	SchemaVersion   string    `json:"schema_version"`
-	GeneratedAt     time.Time `json:"generated_at"`
-	Corpus          string    `json:"corpus"`
-	CorpusSHA256    string    `json:"corpus_sha256"`
-	Model           string    `json:"model"`
-	BaseURL         string    `json:"base_url"`
-	RulePack        string    `json:"rule_pack"`
-	CaseCount       int       `json:"case_count"`
-	InvocationCount int       `json:"invocation_count"`
-	WallClockMS     float64   `json:"wall_clock_ms"`
-	Temperature     float64   `json:"temperature"`
-	ResponseFormat  string    `json:"response_format"`
-	ProductionPath  string    `json:"production_path"`
-	Concurrency     int       `json:"concurrency"`
-	BedrockRegion   string    `json:"bedrock_region,omitempty"`
-	BedrockAuthMode string    `json:"bedrock_auth_mode,omitempty"`
-}
-
-func TestLLMJudgeDeterministicCorpus(t *testing.T) {
-	if os.Getenv("GUARDRAIL_BENCHMARK_LLM") != "1" {
-		t.Skip("set GUARDRAIL_BENCHMARK_LLM=1 to run the production-path LLM judge benchmark")
-	}
-	corpusPath := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_CORPUS"))
-	outputPath := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_OUTPUT"))
-	model := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_MODEL"))
-	if corpusPath == "" || outputPath == "" || model == "" {
-		t.Fatal("DEFENSECLAW_JUDGE_BENCHMARK_CORPUS, _OUTPUT, and _MODEL are required")
-	}
-	baseURL := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_BASE_URL"))
-	if baseURL == "" {
-		baseURL = "http://127.0.0.1:11434"
-	}
-	rulePackPath := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_RULE_PACK"))
-	rulePack, err := guardrail.LoadRulePack(rulePackPath)
-	if err != nil {
-		t.Fatalf("load rule pack: %v", err)
-	}
-	if !strings.Contains(model, "/") {
-		model = "ollama/" + model
-	}
-	concurrency := benchmarkConcurrency(t)
-
-	cases, corpusData, err := readCorpusJudgeCases(corpusPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.JudgeConfig{
-		Enabled: true, Injection: true, PII: true, PIIPrompt: true,
-		PIICompletion: true, Exfil: true, ToolInjection: true,
-		Timeout: 120, AdjudicationTimeout: 120,
-	}
-	llm := benchmarkLLMConfig(model, baseURL)
-	judge := NewLLMJudge(cfg, llm, "", rulePack, nil)
-	if judge == nil {
-		t.Fatal("production LLM judge failed to initialize")
-	}
-	recorder := &judgeBenchmarkProvider{delegate: judge.provider}
-	judge.provider = recorder
-
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	startIndex := 0
-	priorInvocations := 0
-	priorWallClockMS := float64(0)
-	openFlags := os.O_CREATE | os.O_TRUNC | os.O_WRONLY
-	if os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_RESUME") == "1" {
-		prior, readErr := readCorpusJudgePredictions(outputPath)
-		if readErr != nil {
-			t.Fatalf("resume prior predictions: %v", readErr)
-		}
-		if os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_RETRY_FAILURES") == "1" {
-			prefix := successfulCorpusJudgePrefix(prior)
-			if len(prefix) != len(prior) {
-				if err := writeCorpusJudgePredictions(outputPath, prefix); err != nil {
-					t.Fatalf("repair failed prediction suffix: %v", err)
-				}
-				t.Logf("judge benchmark retry: removed %d failed suffix rows", len(prior)-len(prefix))
-				prior = prefix
-			}
-		}
-		if len(prior) > len(cases) {
-			t.Fatalf("resume output has %d rows for %d cases", len(prior), len(cases))
-		}
-		for index := range prior {
-			if prior[index].CaseID != cases[index].ID || prior[index].Model != model {
-				t.Fatalf("resume output row %d does not match corpus/model", index+1)
-			}
-			if err := validateCorpusJudgeResumeContract(t.Context(), judge, model, cases[index], prior[index]); err != nil {
-				t.Fatalf("resume output row %d: %v", index+1, err)
-			}
-			priorInvocations += prior[index].InvocationCount
-			priorWallClockMS += prior[index].EndToEndLatencyMS
-		}
-		startIndex = len(prior)
-		if startIndex > 0 {
-			openFlags = os.O_CREATE | os.O_APPEND | os.O_WRONLY
-			t.Logf("judge benchmark resume: %d/%d cases, %d prior model calls", startIndex, len(cases), priorInvocations)
-		}
-	}
-	output, err := os.OpenFile(outputPath, openFlags, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoder := json.NewEncoder(output)
-	runStarted := time.Now()
-	type indexedPrediction struct {
-		index      int
-		prediction corpusJudgePrediction
-	}
-	jobs := make(chan int, concurrency)
-	results := make(chan indexedPrediction, concurrency)
-	var workers sync.WaitGroup
-	for range concurrency {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for index := range jobs {
-				results <- indexedPrediction{
-					index:      index,
-					prediction: runCorpusJudgeCase(t.Context(), judge, recorder, model, cases[index]),
-				}
-			}
-		}()
-	}
-	go func() {
-		for index := startIndex; index < len(cases); index++ {
-			jobs <- index
-		}
-		close(jobs)
-		workers.Wait()
-		close(results)
-	}()
-
-	// Preserve corpus order on disk so resume remains a validated prefix even
-	// when provider calls complete out of order. The small pending map is also
-	// what lets a completed contiguous prefix survive an interrupted large run.
-	next := startIndex
-	pending := make(map[int]corpusJudgePrediction, concurrency)
-	var encodeErr error
-	for result := range results {
-		pending[result.index] = result.prediction
-		for encodeErr == nil {
-			prediction, ok := pending[next]
-			if !ok {
-				break
-			}
-			if err := encoder.Encode(prediction); err != nil {
-				encodeErr = err
-				break
-			}
-			delete(pending, next)
-			next++
-			if next%10 == 0 || next == len(cases) {
-				t.Logf("judge benchmark progress: %d/%d cases, %d model calls", next, len(cases), recorder.count())
-			}
-		}
-	}
-	if encodeErr != nil {
-		_ = output.Close()
-		t.Fatal(encodeErr)
-	}
-	if next != len(cases) {
-		_ = output.Close()
-		t.Fatalf("judge benchmark completed %d/%d ordered cases", next, len(cases))
-	}
-	if err := output.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	digest := sha256.Sum256(corpusData)
-	metadata := corpusJudgeMetadata{
-		SchemaVersion: "1", GeneratedAt: time.Now().UTC(), Corpus: corpusPath,
-		CorpusSHA256: hex.EncodeToString(digest[:]), Model: model, BaseURL: llm.BaseURL,
-		RulePack: rulePackPath, CaseCount: len(cases), InvocationCount: priorInvocations + recorder.count(),
-		WallClockMS: priorWallClockMS + float64(time.Since(runStarted).Microseconds())/1000,
-		Temperature: 0, ResponseFormat: "json_schema",
-		ProductionPath: "gateway.LLMJudge.RunJudges/RunToolJudge via Bifrost",
-		Concurrency:    concurrency,
-	}
-	if llm.Bedrock != nil {
-		metadata.BedrockRegion = llm.Bedrock.Region
-		metadata.BedrockAuthMode = llm.Bedrock.AuthMode
-	}
-	metadataData, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	metadataPath := outputPath + ".meta.json"
-	if err := os.WriteFile(metadataPath, append(metadataData, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func benchmarkLLMConfig(model, baseURL string) config.LLMConfig {
 	llm := config.LLMConfig{
 		Model:      model,
@@ -542,19 +345,6 @@ func TestBenchmarkLLMConfigBedrock(t *testing.T) {
 	if llm.Bedrock == nil || llm.Bedrock.Region != "us-east-1" || llm.Bedrock.AuthMode != "profile" || llm.Bedrock.ProfileName != "judge-benchmark" {
 		t.Fatalf("unexpected Bedrock benchmark config: %+v", llm.Bedrock)
 	}
-}
-
-func benchmarkConcurrency(t *testing.T) int {
-	t.Helper()
-	raw := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_BENCHMARK_CONCURRENCY"))
-	if raw == "" {
-		return 1
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < 1 || value > 64 {
-		t.Fatalf("DEFENSECLAW_JUDGE_BENCHMARK_CONCURRENCY must be an integer from 1 through 64, got %q", raw)
-	}
-	return value
 }
 
 func readCorpusJudgePredictions(path string) ([]corpusJudgePrediction, error) {
@@ -634,31 +424,6 @@ func equalCorpusJudgeStrings(left, right []string) bool {
 		}
 	}
 	return true
-}
-
-func writeCorpusJudgePredictions(path string, predictions []corpusJudgePrediction) error {
-	temporary := path + ".repair.tmp"
-	output, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	encoder := json.NewEncoder(output)
-	for index := range predictions {
-		if err := encoder.Encode(predictions[index]); err != nil {
-			_ = output.Close()
-			_ = os.Remove(temporary)
-			return err
-		}
-	}
-	if err := output.Close(); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	return nil
 }
 
 func TestReadCorpusJudgePredictionsForResume(t *testing.T) {
@@ -749,41 +514,6 @@ func TestJudgeBenchmarkCleanSchemaResponse(t *testing.T) {
 	if parsed == nil || len(parsed) != len(injectionCategories) {
 		t.Fatalf("injection clean response = %s", content)
 	}
-}
-
-func readCorpusJudgeCases(path string) ([]corpusJudgeCase, []byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	var cases []corpusJudgeCase
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	seen := make(map[string]struct{})
-	for lineNumber := 1; scanner.Scan(); lineNumber++ {
-		if strings.TrimSpace(scanner.Text()) == "" {
-			continue
-		}
-		var benchmarkCase corpusJudgeCase
-		if err := json.Unmarshal(scanner.Bytes(), &benchmarkCase); err != nil {
-			return nil, nil, fmt.Errorf("%s:%d: %w", path, lineNumber, err)
-		}
-		if benchmarkCase.SchemaVersion != "1" || strings.TrimSpace(benchmarkCase.ID) == "" {
-			return nil, nil, fmt.Errorf("%s:%d: invalid case identity", path, lineNumber)
-		}
-		if _, exists := seen[benchmarkCase.ID]; exists {
-			return nil, nil, fmt.Errorf("%s:%d: duplicate case ID %q", path, lineNumber, benchmarkCase.ID)
-		}
-		seen[benchmarkCase.ID] = struct{}{}
-		cases = append(cases, benchmarkCase)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, err
-	}
-	if len(cases) == 0 {
-		return nil, nil, errors.New("corpus is empty")
-	}
-	return cases, data, nil
 }
 
 func runCorpusJudgeCase(

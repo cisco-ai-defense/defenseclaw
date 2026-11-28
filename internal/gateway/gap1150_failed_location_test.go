@@ -176,7 +176,9 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 				out := gap1150Post(t, a, route, r.cwd, r.command, home, p.managed)
 				raw, _ := json.Marshal(out)
 				action, _ := out["action"].(string)
-				state := strings.Contains(string(raw), "tamper.detector_state_write")
+				// The rule id in any spelling: a Windows host's reader names it
+				// TAMPER.DETECTOR_STATE_WRITE (canonicalTrustedRuleID folds both).
+				state := strings.Contains(strings.ToLower(string(raw)), "tamper.detector_state_write")
 				// A proven state write is a HIGH alert outside strict and
 				// managed strict, a block there (GAP-0747 owner tiering 2026-11-15T15:20Z).
 				want := gap1173Want("write", p.name)

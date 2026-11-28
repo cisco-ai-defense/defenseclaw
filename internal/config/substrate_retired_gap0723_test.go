@@ -49,3 +49,14 @@ func TestRetiredSubstrateActorCertOIDWarnsAndIsNotValidated(t *testing.T) {
 		t.Fatalf("retired-key warning = %q", got)
 	}
 }
+
+// GAP-0723: the v8 JSON schema does not validate the retired key either, so
+// the Go and Python loaders both accept whatever a 1.0.10 config holds there.
+func TestRetiredSubstrateActorCertOIDSchemaAcceptsAnyValue(t *testing.T) {
+	for _, value := range []string{"not-an-oid", "1.3.6.1.4.1.11129.2.12.2", `""`} {
+		doc := "config_version: 9\nsubstrate:\n  identity:\n    actor_cert_oid: " + value + "\n"
+		if err := ValidateV8SchemaBytes("retired-oid.yaml", []byte(doc)); err != nil {
+			t.Fatalf("v8 schema refused the retired actor_cert_oid %s: %v", value, err)
+		}
+	}
+}

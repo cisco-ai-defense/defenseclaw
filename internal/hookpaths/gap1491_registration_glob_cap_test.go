@@ -52,7 +52,7 @@ func TestGAP1491RegistrationGlobPastSixtyFourMatches(t *testing.T) {
 		{"rm -f " + folder + "/a0*.json", false, false},
 		{"rm -f " + wide + "/w*", false, true},
 	} {
-		reached, truncated := RegistrationWriteReachedBounded(row.command, home, home, []string{registered})
+		reached, truncated := RegistrationWriteReachedBounded(row.command, home, home, []string{registered}, nil)
 		if got := len(reached) != 0; got != row.reached {
 			t.Errorf("%q: reached %q, want reached=%v", row.command, reached, row.reached)
 		}

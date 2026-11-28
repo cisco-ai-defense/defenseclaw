@@ -7,6 +7,7 @@ package effectrules
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -53,6 +54,9 @@ func TestDET111R3HomeShapedProtectedTailsAreKnown(t *testing.T) {
 }
 
 func TestDET111R3TildePeerDotDotUsesResolvedHomePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the peer/.. step up is placed by plainStepUpProof, which is a POSIX-host proof (promote returns on a Windows host) and place reads POSIX absolute paths; a Windows temp folder is a drive path")
+	}
 	root := t.TempDir()
 	home := filepath.Join(root, "active")
 	peer := filepath.Join(root, "peer")

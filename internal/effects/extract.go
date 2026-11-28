@@ -1909,16 +1909,28 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// or a shell that sources startup files. A program's own effects are then
 	// unaccounted; a shell or code runner keeps the effects of the code it
 	// runs and gets one unaccounted exec for the input.
-	envUA, envShell := false, false
+	envUA, envShell, envName := false, false, ""
 	shellCode := known && entry.ShellCode
-	if dialect == DialectPOSIX && (w.unreviewedEnvInput(program, strings.Contains(prog.Value, "/"), shellCode, spec) != "" || shellStartupFlag(program, inner[1:])) {
-		if shellCode {
-			envShell = true
-		} else {
-			envUA = true
+	if dialect == DialectPOSIX {
+		envName = w.unreviewedEnvInput(program, strings.Contains(prog.Value, "/"), shellCode, spec)
+		if envName != "" || shellStartupFlag(program, inner[1:]) {
+			if shellCode {
+				envShell = true
+			} else {
+				envUA = true
+			}
 		}
 	}
 	unaccounted := wrapperUA || declUA || bsdReject || entry.BuiltinUnknown || envUA
+	// envOnly: the one unaccounted input is an env input the allow list does
+	// not account for: a NAME= prefix, env or sudo NAME=, an export, a changed
+	// PATH, or a HOME other than the caller's (sudo, doas, runuser, su,
+	// env -i). It may give the program config of its own to read, or make the
+	// word name another program; it does not change the paths the call names,
+	// which the caller's shell already expanded, so the write the call names on
+	// an exact protected member stays that write (GAP-1478). A shell startup
+	// flag alone leaves envName empty and is not one.
+	envOnly := envUA && envName != "" && !wrapperUA && !declUA && !bsdReject && !entry.BuiltinUnknown
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
@@ -1933,7 +1945,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			end = nestedStart
 		}
 		for i := cmdStart; i < end; i++ {
-			w.res.Effects[i].addReason(ReasonUnknownFlag, ScopeRole)
+			e := &w.res.Effects[i]
+			if envOnly && len(e.Reasons) == 0 && e.RoleState == RoleStateKnown && e.TargetState == TargetStateKnown &&
+				e.Target.Type == TargetPath {
+				e.addReason(ReasonEnvInput, ScopeRole)
+			}
+			e.addReason(ReasonUnknownFlag, ScopeRole)
 		}
 	}()
 	baseIdx := w.emit(base)
@@ -2704,7 +2721,7 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 		// interpreter reads its code from that file or descriptor, which we
 		// cannot see (round 8 R, GAP-0132; a stdin redirect we do not model
 		// is one too, GAP-2214).
-		if r.Op != RedirHeredoc && r.Op != RedirHereString && stdinRedirect(r) && !hasCodeOperand(args, entry.ShellCode) {
+		if r.Op != RedirHeredoc && r.Op != RedirHereString && stdinRedirect(r) && !hasCodeOperand(args, entry.ShellCode, entry.ShOptions) {
 			hasStdin = true
 		}
 	}
@@ -2713,13 +2730,13 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	}
 	// A shell given a script or -c operand reads that, not its standard input:
 	// a heredoc / here-string is then data for the script, not code to unwrap.
-	if entry.ShellCode && !entry.StdinCode && !c.PipeIn && hasCodeOperand(args, true) {
+	if entry.ShellCode && !entry.StdinCode && !c.PipeIn && hasCodeOperand(args, true, entry.ShOptions) {
 		return
 	}
 	// The text the call feeds it (here-document, here-string, an exact printer
 	// upstream of the pipe, a printing process substitution, a file the call
 	// wrote) is the script it runs (DET111 R1, GAP-1151, GAP-1593).
-	if text, tcond, ok := w.stdinText(c); ok && entry.ShellCode && (entry.StdinCode || !hasCodeOperand(args, true)) {
+	if text, tcond, ok := w.stdinText(c); ok && entry.ShellCode && (entry.StdinCode || !hasCodeOperand(args, true, entry.ShOptions)) {
 		w.unwrapCodeScopedInput(text, true, dialect, depth, cond || tcond, origin, true, true)
 		return
 	}
@@ -2728,7 +2745,7 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	e.addReason(ReasonOpaqueCode, ScopeTarget)
 	if c.PipeIn {
 		source := baseIdx
-		if len(w.stageIn.fetches) == 1 && !hasCodeOperand(args, true) {
+		if len(w.stageIn.fetches) == 1 && !hasCodeOperand(args, true, entry.ShOptions) {
 			source = w.stageIn.fetches[0]
 		}
 		if source > 0 {
@@ -2744,7 +2761,58 @@ func stdinFD(r Redir) bool { return r.FD <= 0 }
 // hasCodeOperand reports a script operand or an inline-code flag (-c, -e, -m)
 // among an interpreter's arguments; without one the interpreter's code is its
 // standard input. A lone `-` operand names stdin, so it is not a script.
-func hasCodeOperand(args []Word, shell bool) bool {
+//
+// sh is set for the sh-style shells (Program.ShOptions: bash, sh, zsh, dash,
+// ksh), whose invocation options are read up to the first operand, `--` or
+// `-`. There -s, alone or in a cluster such as -xs, makes every operand a
+// positional parameter, so the code is standard input (POSIX sh; -c wins over
+// -s), and each o or O in a cluster (-o posix, +O extglob) and --rcfile /
+// --init-file take the next word as their value, never a script (GAP-2290).
+func hasCodeOperand(args []Word, shell, sh bool) bool {
+	if sh {
+		sawS, sawC, skip := false, false, 0
+		for i, a := range args {
+			if skip > 0 {
+				skip--
+				continue
+			}
+			if !a.Static {
+				continue
+			}
+			v := a.Value
+			switch {
+			case v == "-c" || v == "--command":
+				return true
+			case v == "--" || v == "-":
+				if sawS && !sawC {
+					return false
+				}
+				return legacyCodeOperand(args[i+1:], shell)
+			case v == "--rcfile" || v == "--init-file":
+				skip = 1
+				continue
+			case strings.HasPrefix(v, "--"):
+				continue
+			case len(v) > 1 && (v[0] == '-' || v[0] == '+'):
+				flags := v[1:]
+				if v[0] == '-' && strings.ContainsRune(flags, 'c') {
+					sawC = true
+				} else if v[0] == '-' && strings.ContainsRune(flags, 's') {
+					sawS = true
+				}
+				skip = strings.Count(flags, "o") + strings.Count(flags, "O")
+				continue
+			}
+			return sawC || !sawS
+		}
+		return false
+	}
+	return legacyCodeOperand(args, shell)
+}
+
+// legacyCodeOperand is hasCodeOperand without the sh-style option scan: the
+// first static word that is not an option is the script.
+func legacyCodeOperand(args []Word, shell bool) bool {
 	for _, a := range args {
 		if !a.Static {
 			continue

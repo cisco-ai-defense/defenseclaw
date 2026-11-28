@@ -115,6 +115,11 @@ type responseBoundary struct {
 	secret                    secretLane
 	line                      string // cached once the first answer line is final
 	final                     bool
+	// Where line comes from, while it is not final (rel-1-0-10:GAP-2219):
+	// line[:leftLen] is reasoning lane bytes from leftAt, line[split:] is
+	// answer lane bytes from rightAt (split is leftLen plus the joining
+	// space of a line break).
+	leftAt, leftLen, split, rightAt int
 }
 
 type responseText struct {
@@ -352,6 +357,9 @@ func (r *responseText) boundaryLine(b *responseBoundary) string {
 	right := r.lanes[b.answer].String()[b.answerStart:]
 	hadBreak := strings.HasSuffix(left, "\n") || strings.HasPrefix(right, "\n")
 	final := len(right) > maxSide
+	// left is only cut from the front and trimmed at the back, right the
+	// other way round: leftEnd and rightAt follow the trims (GAP-2219).
+	leftEnd, rightAt := b.reasoningEnd, b.answerStart
 	if len(left) > maxSide+1 {
 		left = left[len(left)-maxSide-1:]
 		for len(left) > 0 && !utf8.RuneStart(left[0]) {
@@ -361,8 +369,12 @@ func (r *responseText) boundaryLine(b *responseBoundary) string {
 	if len(right) > maxSide+1 {
 		right = right[:maxSide+1]
 	}
+	n := len(left)
 	left = strings.TrimRight(left, "\r\n")
+	leftEnd -= n - len(left)
+	n = len(right)
 	right = strings.TrimLeft(right, "\r\n")
+	rightAt += n - len(right)
 	if n := strings.LastIndexByte(left, '\n'); n >= 0 {
 		left = left[n+1:]
 	}
@@ -385,13 +397,41 @@ func (r *responseText) boundaryLine(b *responseBoundary) string {
 			right = right[:len(right)-1]
 		}
 	}
+	split := len(left)
 	if hadBreak {
-		b.line = strings.TrimRight(left, " \t") + " " + strings.TrimLeft(right, " \t")
+		trimmed := strings.TrimRight(left, " \t")
+		leftEnd -= len(left) - len(trimmed)
+		left = trimmed
+		trimmed = strings.TrimLeft(right, " \t")
+		rightAt += len(right) - len(trimmed)
+		right = trimmed
+		b.line, split = left+" "+right, len(left)+1
 	} else {
 		b.line = left + right
 	}
+	b.leftAt, b.leftLen, b.split, b.rightAt = leftEnd-len(left), len(left), split, rightAt
 	b.final = final
 	return b.line
+}
+
+// boundaryRunFrom is the reply text offset of the first byte of the open
+// token or digit run of boundary b's line, -1 for none: an open run there
+// can start where no lane run does, the lane and the line differing in their
+// word boundary (rel-1-0-10:GAP-2219).
+func (r *responseText) boundaryRunFrom(b *responseBoundary) int {
+	line := r.boundaryLine(b)
+	if b.final {
+		return -1
+	}
+	st := b.secret.tokenStart(line)
+	switch {
+	case st < 0:
+		return -1
+	case st < b.leftLen:
+		return r.secret[b.reasoning].textAt(b.leftAt + st)
+	default:
+		return r.secret[b.answer].textAt(b.rightAt + max(st-b.split, 0))
+	}
 }
 
 // CheckText adds only same-choice reasoning-to-answer boundaries. String

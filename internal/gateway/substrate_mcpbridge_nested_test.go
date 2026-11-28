@@ -65,7 +65,7 @@ func TestSubstrateMCPNestedReadFieldVariants(t *testing.T) {
 		`{"command":"x","input":{"script":` + string(cmd) + `}}`,
 		`{"request":{"parameters":{"command":"x","scripT":` + string(cmd) + `}}}`,
 	} {
-		base, alts, changed, overflow, _, _ := substrateMCPReadFieldVariantsUpTo(json.RawMessage(args), int(^uint(0)>>1))
+		base, alts, changed, overflow, _ := substrateMCPReadFieldVariantsUpTo(json.RawMessage(args), int(^uint(0)>>1))
 		if !changed || overflow || len(alts) == 0 {
 			t.Fatalf("variants for %s: changed=%v overflow=%v alternates=%d", args, changed, overflow, len(alts))
 		}
@@ -82,7 +82,7 @@ func TestSubstrateMCPNestedReadFieldVariants(t *testing.T) {
 	// Choosing the second envelope also keeps its path value, so this is
 	// a complete reading of every field visible in that envelope.
 	args := `{"input":{"command":"x","path":"/notes/first"},"parameters":{"script":` + string(cmd) + `,"path":"/notes/second"}}`
-	_, alts, changed, overflow, _, _ := substrateMCPReadFieldVariantsUpTo(json.RawMessage(args), int(^uint(0)>>1))
+	_, alts, changed, overflow, _ := substrateMCPReadFieldVariantsUpTo(json.RawMessage(args), int(^uint(0)>>1))
 	if !changed || overflow {
 		t.Fatalf("two envelopes: changed=%v overflow=%v", changed, overflow)
 	}
@@ -146,7 +146,7 @@ func TestSubstrateMCPReadFieldByteBudget(t *testing.T) {
 	}
 	raw := json.RawMessage("{" + strings.Join(members, ",") + "}")
 	const budget = 130 << 10
-	base, alts, changed, overflow, byteExhausted, _ := substrateMCPReadFieldVariantsUpTo(raw, budget)
+	base, alts, changed, overflow, byteExhausted := substrateMCPReadFieldVariantsUpTo(raw, budget)
 	if !changed || !overflow || !byteExhausted || len(alts) == 0 {
 		t.Fatalf("variants changed=%v overflow=%v alternates=%d; want bounded coverage and an unknown-tier floor", changed, overflow, len(alts))
 	}

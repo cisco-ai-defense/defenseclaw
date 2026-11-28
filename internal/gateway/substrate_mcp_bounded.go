@@ -26,8 +26,9 @@ import (
 // facts, so padding a denied command with a large value made a bridged
 // tools/call (and the methods judged like one, and the callout route) an
 // allow; the bridge carries up to mcp_bridge.message_max_bytes, 1 MiB by
-// default (substrate-1:GAP-1094). The shared reading is unchanged (the hook
-// path has the same bound); the substrate verdict judges bounded projections
+// default (substrate-1:GAP-1094). The shared reading is unchanged; the hook
+// routes judge the same projections (overBoundToolArgsFindings, GAP-1096),
+// and the substrate verdict judges bounded projections
 // of such arguments as well and keeps the strictest verdict, then floors an
 // allow at the unknown tier of the pack, as the hook routes floor a
 // truncated reading: an alert with the evaluation-limit finding in the
@@ -69,6 +70,12 @@ const (
 	// substrateMCPTailRoom is what a tail cut keeps free for the placeholder
 	// word it puts where the cut dropped one (substrateMCPCut).
 	substrateMCPTailRoom = len("x ")
+	// substrateMCPFreeCandidates is the most hidden actions a call carries
+	// before its judging takes the over-cap admission (substrateMCPReadingScans.overCap).
+	substrateMCPFreeCandidates = 8
+	// substrateMCPStringLevels is how many JSON-in-string levels the hidden
+	// action scan opens.
+	substrateMCPStringLevels = 2
 )
 
 // substrateMCPStringLimits are the longest strings a projection keeps, the
@@ -84,6 +91,174 @@ type substrateMCPReading struct {
 	rulesOnly  bool
 	left       *int
 	extraBytes *int
+	// scan is this reading's argument scan (substrateMCPScanArguments) and
+	// judged the hidden-action readings the call already judged.
+	scan   *substrateMCPArgumentScan
+	judged map[string]bool
+}
+
+// substrateMCPArgumentScan is what the bridge finds in one argument reading
+// beyond what the shared reader reads (substrate-1 SUB-MCP-0841):
+//   - depthLimited: the reader's own envelopes (input, parameters, request,
+//     args, as objects or JSON-object strings) reach its projection depth
+//     (actionfacts.MaxArgsProjectionDepth). The call floors at the unknown
+//     tier whatever the envelope holds and whatever the key under it: one
+//     rule for every key, as fix0841 landed it (9cb524bc1d; GAP-1129,
+//     GAP-1137, GAP-1140 were narrowings of it).
+//   - candidates: actions the reader cannot read where they sit (under an
+//     unknown key, in an array, in a payload or other non-envelope
+//     container, in a JSON string under an unknown or envelope key), each
+//     as the one-key reading {key: value} the reader reads at the top level.
+//     The rules judge them; they are never marked unknown for being there
+//     (GAP-1125, GAP-1127, GAP-1131, GAP-1138; GAP-1130). Payload strings
+//     stay opaque, and only a value the reader reads as an action (a
+//     non-empty string, or an all-string array) is one (GAP-1126).
+//   - overflow: candidates past MaxJSONMembers or MaxArgsJSONBytes, which
+//     only arguments already past the reader's bounds (and floored) reach.
+type substrateMCPArgumentScan struct {
+	depthLimited bool
+	candidates   []json.RawMessage
+	overflow     bool
+}
+
+func substrateMCPScanArguments(raw json.RawMessage) substrateMCPArgumentScan {
+	var scan substrateMCPArgumentScan
+	if len(raw) == 0 {
+		return scan
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var root any
+	if dec.Decode(&root) != nil {
+		return scan
+	}
+	seen := make(map[string]bool)
+	bytesLeft := actionfacts.MaxArgsJSONBytes
+	add := func(key string, value any) {
+		if scan.overflow {
+			return
+		}
+		enc, err := substrateMCPEncode(map[string]any{key: value})
+		if err != nil || seen[string(enc)] {
+			return
+		}
+		if len(scan.candidates) >= actionfacts.MaxJSONMembers || len(enc) > bytesLeft {
+			scan.overflow = true
+			return
+		}
+		seen[string(enc)] = true
+		bytesLeft -= len(enc)
+		scan.candidates = append(scan.candidates, enc)
+	}
+	var hidden func(v any, levels int)
+	hidden = func(v any, levels int) {
+		switch x := v.(type) {
+		case map[string]any:
+			for key, child := range x {
+				field, known := actionfacts.ReadArgumentField(key)
+				envelope := known && (field == "nested" || field == "args")
+				if s, isString := child.(string); isString && (!known || envelope) && levels < substrateMCPStringLevels {
+					if nested, ok := substrateMCPJSONString(s); ok {
+						hidden(nested, levels+1)
+						continue
+					}
+				}
+				if known && (envelope || field == "command" || field == "argv") && substrateMCPActionValue(child) {
+					add(key, child)
+					continue
+				}
+				hidden(child, levels)
+			}
+		case []any:
+			for _, e := range x {
+				hidden(e, levels)
+			}
+		}
+	}
+	var visible func(obj map[string]any, depth int)
+	visible = func(obj map[string]any, depth int) {
+		for key, value := range obj {
+			field, known := actionfacts.ReadArgumentField(key)
+			switch {
+			case !known:
+				if s, isString := value.(string); isString {
+					if nested, ok := substrateMCPJSONString(s); ok {
+						hidden(nested, 1)
+					}
+					continue
+				}
+				hidden(value, 0)
+			case field == "nested" || field == "args":
+				if depth >= actionfacts.MaxArgsProjectionDepth {
+					// The shared reader reports IssueDepthLimit for this
+					// envelope: the floor, before forwarding.
+					scan.depthLimited = true
+					continue
+				}
+				if s, isString := value.(string); isString {
+					if nested, ok := substrateMCPJSONString(s); ok {
+						value = nested
+					}
+				}
+				switch x := value.(type) {
+				case map[string]any:
+					visible(x, depth+1)
+				case []any:
+					if !substrateMCPActionValue(x) {
+						hidden(x, 0)
+					}
+				}
+			case field == "command" || field == "argv":
+				if !substrateMCPActionValue(value) {
+					hidden(value, 0)
+				}
+			default:
+				// cwd, path, url, method, source, destination, target and
+				// payloads: a container may hide an action; a string is the
+				// reader's (payload strings stay opaque).
+				hidden(value, 0)
+			}
+		}
+	}
+	if obj, ok := root.(map[string]any); ok {
+		visible(obj, 0)
+	} else {
+		hidden(root, 0)
+	}
+	return scan
+}
+
+// substrateMCPActionValue is a value the reader reads as an action under a
+// command or argv key: a non-empty string or a non-empty all-string array.
+func substrateMCPActionValue(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x) != ""
+	case []any:
+		for _, e := range x {
+			if _, ok := e.(string); !ok {
+				return false
+			}
+		}
+		return len(x) > 0
+	}
+	return false
+}
+
+// substrateMCPJSONString is s decoded when it is a JSON object or array
+// within the reader's bounds, as the reader opens an envelope string.
+func substrateMCPJSONString(s string) (any, bool) {
+	t := strings.TrimSpace(s)
+	if t == "" || (t[0] != '{' && t[0] != '[') || actionfacts.ArgsLimitIssue(json.RawMessage(t)) != "" {
+		return nil, false
+	}
+	dec := json.NewDecoder(strings.NewReader(t))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return nil, false
+	}
+	return v, true
 }
 
 type substrateMCPReadingKey struct{}
@@ -102,7 +277,8 @@ func substrateMCPReadingOf(ctx context.Context) substrateMCPReading {
 // early. Item and input limits use the configured unknown tier; a spent
 // bridge byte budget refuses an unresolved alias.
 func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry.Registration, connectorName string,
-	args json.RawMessage, full SubstrateCalloutVerdict, judge func(json.RawMessage) SubstrateCalloutVerdict) SubstrateCalloutVerdict {
+	args json.RawMessage, full SubstrateCalloutVerdict, judge func(json.RawMessage) SubstrateCalloutVerdict,
+	hidden *substrateMCPHiddenReadings) SubstrateCalloutVerdict {
 	issue := actionfacts.ArgsLimitIssue(args)
 	rd := substrateMCPReadingOf(ctx)
 	out := full
@@ -110,21 +286,39 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 	var alternates []json.RawMessage
 	overflow := false
 	byteExhausted := false
-	depthLimit := false
 	changed := false
+	var scan substrateMCPArgumentScan
+	if rd.scan != nil {
+		scan = *rd.scan // the bridge's readings only, as the variants
+	}
 	if rd.left != nil && out.Verdict != "deny" {
 		limit := int(^uint(0) >> 1)
 		if rd.extraBytes != nil {
 			limit = min(*rd.extraBytes, substrateMCPVariantBytesPerArgs)
 		}
-		base, alternates, changed, overflow, byteExhausted, depthLimit = substrateMCPReadFieldVariantsUpTo(args, limit)
-		if depthLimit && issue == "" {
+		base, alternates, changed, overflow, byteExhausted = substrateMCPReadFieldVariantsUpTo(args, limit)
+		if scan.depthLimited && issue == "" {
 			issue = actionfacts.IssueDepthLimit
 		}
+		overflow = overflow || scan.depthLimited || scan.overflow
 	}
 	// Keep small calls with no conflicting values on their original path.
-	if issue == "" && !overflow && len(alternates) == 0 {
+	if issue == "" && !overflow && len(alternates) == 0 && len(scan.candidates) == 0 {
 		return out
+	}
+	// Hidden actions are rules readings of their own; they spend neither the
+	// projection count nor the byte reserve, so a call is never floored for
+	// how many it carries (the scan bounds them by the call's own size).
+	// They started with the full reading (substrateMCPHiddenReadings: each
+	// candidate no earlier reading of the call judged) and fold here in scan
+	// order; a deny is final for the call.
+	if out.Verdict == "deny" {
+		return out
+	}
+	for _, v := range hidden.wait() {
+		if out = substrateMCPStricter(out, v); out.Verdict == "deny" {
+			return out
+		}
 	}
 	read := func(raw json.RawMessage) {
 		if out.Verdict == "deny" {
@@ -225,19 +419,21 @@ func (a *APIServer) substrateMCPBoundedVerdict(ctx context.Context, reg registry
 // candidate keeps one value of every conflicting resolved field, including
 // conflicts between a parent object and a nested envelope. Values in other
 // fields stay in place, so every candidate is a complete rules reading.
-func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json.RawMessage, []json.RawMessage, bool, bool, bool, bool) {
+// The envelope depth bound is substrateMCPScanArguments' (one walk decides
+// the floor and the actor admission).
+func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json.RawMessage, []json.RawMessage, bool, bool, bool) {
 	if len(raw) == 0 {
-		return raw, nil, false, false, false, false
+		return raw, nil, false, false, false
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
 	if dec.Decode(&v) != nil {
-		return raw, nil, false, true, false, false
+		return raw, nil, false, true, false
 	}
 	root, ok := v.(map[string]any)
 	if !ok {
-		return raw, nil, false, false, false, false
+		return raw, nil, false, false, false
 	}
 
 	first := make(map[string]substrateMCPVariantEntry)
@@ -246,7 +442,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 	values := make(map[string][]any)
 	entries := make(map[string][]substrateMCPVariantEntry)
 	var alternates []substrateMCPVariantEntry
-	changed, overflow, depthLimit := false, false, false
+	changed, overflow := false, false
 	var walk func(map[string]any, []string, int)
 	walk = func(obj map[string]any, parent []string, depth int) {
 		for _, key := range substrateMCPKeyOrder(obj) {
@@ -311,10 +507,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 				continue
 			}
 			if depth >= actionfacts.MaxArgsProjectionDepth {
-				// The shared reader reports IssueDepthLimit for this envelope.
-				// Carry it to the unknown-tier floor before forwarding.
-				depthLimit, overflow = true, true
-				continue
+				continue // substrateMCPScanArguments floors it
 			}
 			switch x := value.(type) {
 			case map[string]any:
@@ -326,7 +519,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 	}
 	walk(root, nil, 0)
 	if !changed {
-		return raw, nil, false, overflow, false, depthLimit
+		return raw, nil, false, overflow, false
 	}
 
 	selected := make(map[string][]string, len(first))
@@ -375,7 +568,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 	}
 	base, err := makeReading(nil)
 	if err != nil {
-		return raw, nil, false, true, false, depthLimit
+		return raw, nil, false, true, false
 	}
 	out := make([]json.RawMessage, 0, len(alternates))
 	remaining := byteLimit - len(base)
@@ -413,7 +606,7 @@ func substrateMCPReadFieldVariantsUpTo(raw json.RawMessage, byteLimit int) (json
 		remaining -= len(alt)
 		out = append(out, alt)
 	}
-	return base, out, true, overflow, byteExhausted, depthLimit
+	return base, out, true, overflow, byteExhausted
 }
 
 type substrateMCPVariantEntry struct {
@@ -534,29 +727,75 @@ func substrateMCPArgsProjections(raw json.RawMessage) []json.RawMessage {
 // differs), cut at a word boundary so a cut never makes a word the call did
 // not carry.
 func substrateMCPProjectionsUpTo(raw json.RawMessage, limit int) []json.RawMessage {
+	out, _ := substrateMCPProjectionsRead(raw, limit, false)
+	return out
+}
+
+// substrateMCPProjectionsRead is substrateMCPProjectionsUpTo, and whether
+// the projections leave unread a part of raw the structured reading reads
+// (substrate-1:GAP-1096): a command, argv, cwd, path, source, destination,
+// target, url or method value, at the top level or in an input, parameters
+// or request envelope, that a projection cuts or drops a part of, a member
+// of such an object it drops that the reading reads (a payload field too:
+// the reading keeps that it is there), or a window it does not judge. A cut
+// payload field keeps what the reading keeps of it, its kind and that it is
+// not empty; members, containers and strings the reading does not read lose
+// nothing. False only when every part the rules read was judged whole.
+//
+// With readOnly the projections keep only the members the structured
+// reading reads (substrateMCPReadKey, at the top level and in envelopes):
+// the hook routes judge the whole call as well, so a projection there only
+// has to give the structured reading its facts, and dropping the rest keeps
+// a padded call to one small extra reading (substrate-1:GAP-1096).
+func substrateMCPProjectionsRead(raw json.RawMessage, limit int, readOnly bool) ([]json.RawMessage, bool) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
 	if limit <= 0 || dec.Decode(&v) != nil {
-		return nil
+		return nil, true
 	}
 	windows := [][]string{nil}
-	if obj, ok := v.(map[string]any); ok && len(obj) > substrateMCPWindowMembers {
+	var dropped []string // top-level keys past the last window
+	obj, isObj := v.(map[string]any)
+	if isObj && readOnly {
+		kept := make(map[string]any, len(obj))
+		for k, e := range obj {
+			if substrateMCPReadKey(k) {
+				kept[k] = e
+			}
+		}
+		obj, v = kept, kept
+	}
+	if isObj && len(obj) > substrateMCPWindowMembers {
 		keys := substrateMCPKeyOrder(obj)
 		windows = nil
-		for i := 0; i < len(keys) && len(windows) < substrateMCPMaxWindows; i += substrateMCPWindowMembers {
+		i := 0
+		for ; i < len(keys) && len(windows) < substrateMCPMaxWindows; i += substrateMCPWindowMembers {
 			windows = append(windows, keys[i:min(i+substrateMCPWindowMembers, len(keys))])
 		}
+		if i < len(keys) {
+			dropped = keys[i:]
+		}
 	}
+	unread := false
+	keysUnread := func(keys []string) {
+		for _, k := range keys {
+			if !unread && substrateMCPReadKey(k) {
+				unread = true
+			}
+		}
+	}
+	keysUnread(dropped)
 	var out []json.RawMessage
-	for _, window := range windows {
+	for w, window := range windows {
 		var head json.RawMessage
+		judged := false
 		for _, tail := range []bool{false, true} {
 			if len(out) >= limit {
-				return out
+				break
 			}
 			for _, strMax := range substrateMCPStringLimits {
-				p := substrateMCPProjector{tail: tail, strMax: strMax}
+				p := substrateMCPProjector{tail: tail, strMax: strMax, readOnly: readOnly}
 				enc, err := substrateMCPEncode(p.value(v, 0, window))
 				if err != nil || actionfacts.ArgsLimitIssue(enc) != "" {
 					continue
@@ -564,14 +803,47 @@ func substrateMCPProjectionsUpTo(raw json.RawMessage, limit int) []json.RawMessa
 				if !tail {
 					head = enc
 					out = append(out, enc)
+					judged = true
+					unread = unread || p.lost
 				} else if !bytes.Equal(enc, head) {
 					out = append(out, enc)
 				}
 				break
 			}
 		}
+		if !judged {
+			// No projection of this window fits, or the limit stops first.
+			if !isObj || window == nil {
+				return out, true
+			}
+			keysUnread(window)
+		}
+		if len(out) >= limit {
+			for _, rest := range windows[w+1:] {
+				keysUnread(rest)
+			}
+			return out, unread
+		}
 	}
-	return out
+	return out, unread
+}
+
+// substrateMCPReadKey reports a key the structured reading reads where it
+// reads keys (actionfacts.ReadArgumentField): losing such a member, a
+// payload field too, changes what the reading sees.
+func substrateMCPReadKey(key string) bool {
+	_, known := actionfacts.ReadArgumentField(key)
+	return known
+}
+
+// substrateMCPReadsAKey reports an object with a key the reading reads.
+func substrateMCPReadsAKey(obj map[string]any) bool {
+	for k := range obj {
+		if substrateMCPReadKey(k) {
+			return true
+		}
+	}
+	return false
 }
 
 // substrateMCPKeyOrder is obj's keys in projection order: the keys the
@@ -625,16 +897,35 @@ type substrateMCPProjector struct {
 	tail    bool
 	strMax  int
 	members int
+	// lost is set when the projection cuts or drops a part the structured
+	// reading reads (substrateMCPProjectionsRead).
+	lost bool
+	// readOnly drops the members of an envelope the reading does not read.
+	readOnly bool
 }
 
 // value is v within the reading's bounds; only, when set, is the keys a
 // top-level object keeps.
 func (p *substrateMCPProjector) value(v any, depth int, only []string) any {
+	_, obj := v.(map[string]any)
+	return p.valueRead(v, depth, only, !obj, obj)
+}
+
+// valueRead is value. read reports v is (inside) the value of a field the
+// structured reading reads whole (a command, argv, path or url value), and
+// envelope an object whose keys it reads (the top level and an input,
+// parameters or request object: actionfacts extractJSONObject); it reads
+// nothing else, so cutting or dropping anything else loses nothing.
+func (p *substrateMCPProjector) valueRead(v any, depth int, only []string, read, envelope bool) any {
 	switch x := v.(type) {
 	case string:
+		if read && len(x) > p.strMax {
+			p.lost = true
+		}
 		return substrateMCPCut(x, p.strMax, p.tail)
 	case map[string]any:
 		if depth >= actionfacts.MaxJSONDepth {
+			p.lost = p.lost || read && len(x) > 0 || envelope && substrateMCPReadsAKey(x)
 			return nil
 		}
 		keys := only
@@ -642,8 +933,14 @@ func (p *substrateMCPProjector) value(v any, depth int, only []string) any {
 			keys = substrateMCPKeyOrder(x)
 		}
 		out := make(map[string]any, len(keys))
-		for _, k := range keys {
+		for i, k := range keys {
+			if p.readOnly && envelope && !read && !substrateMCPReadKey(k) {
+				continue
+			}
 			if p.members >= actionfacts.MaxJSONMembers {
+				for _, rest := range keys[i:] {
+					p.lost = p.lost || read || envelope && substrateMCPReadKey(rest)
+				}
 				break
 			}
 			ck := k
@@ -651,10 +948,12 @@ func (p *substrateMCPProjector) value(v any, depth int, only []string) any {
 				ck = substrateMCPCut(ck, substrateMCPKeyMax, false)
 			}
 			if _, dup := out[ck]; dup {
+				p.lost = p.lost || read || envelope && substrateMCPReadKey(k)
 				continue
 			}
 			p.members++
-			if field, known := actionfacts.ReadArgumentField(k); known && substrateMCPPayloadField(field) {
+			field, known := actionfacts.ReadArgumentField(k)
+			if known && substrateMCPPayloadField(field) {
 				if text, ok := x[k].(string); ok && len(text) > 64 {
 					// The shared reader retains only payload kind and
 					// non-emptiness. The full reading still sees every
@@ -663,20 +962,31 @@ func (p *substrateMCPProjector) value(v any, depth int, only []string) any {
 					continue
 				}
 			}
-			out[ck] = p.value(x[k], depth+1, nil)
+			childRead, childEnvelope := read, false
+			if !read && envelope && known && !substrateMCPPayloadField(field) {
+				_, obj := x[k].(map[string]any)
+				if field == "nested" && obj {
+					childEnvelope = true
+				} else {
+					childRead = true
+				}
+			}
+			out[ck] = p.valueRead(x[k], depth+1, nil, childRead, childEnvelope)
 		}
 		return out
 	case []any:
 		if depth >= actionfacts.MaxJSONDepth {
+			p.lost = p.lost || read && len(x) > 0
 			return nil
 		}
 		out := make([]any, 0, min(len(x), actionfacts.MaxJSONMembers))
 		for _, e := range x {
 			if p.members >= actionfacts.MaxJSONMembers {
+				p.lost = p.lost || read
 				break
 			}
 			p.members++
-			out = append(out, p.value(e, depth+1, nil))
+			out = append(out, p.valueRead(e, depth+1, nil, read, false))
 		}
 		return out
 	}

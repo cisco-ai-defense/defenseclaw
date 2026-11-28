@@ -104,3 +104,12 @@ func TestSubstrateMCPReaderLimitsUseActorAdmission(t *testing.T) {
 		})
 	}
 }
+
+// substrateMCPOverCap is whether judging c takes the over-cap admission.
+func substrateMCPOverCap(c substrateMCPJudgedCall) bool {
+	readings := c.args
+	if c.params != nil {
+		readings = append(slices.Clip(c.args), c.params)
+	}
+	return substrateMCPScanReadings(readings).overCap()
+}

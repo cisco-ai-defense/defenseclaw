@@ -5157,6 +5157,27 @@ function Convert-HooksForRestore([string]$Slot) {
     Invoke-Quietly { Convert-HooksForRollback $live $back }
 }
 
+function Test-ClaudeHooksUnchangedSinceConversion {
+    # True only when the abort left the Claude Code settings exactly as the
+    # gateway saved them before converting (backups\claudecode-settings.before-
+    # rollback.json), and no other connector kept rollback evidence that this
+    # check cannot read. Any doubt is false: the caller then keeps its warning.
+    try {
+        $backups = Join-Path $DataDir "backups"
+        $saved = Join-Path $backups "claudecode-settings.before-rollback.json"
+        $configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
+        $settings = Join-Path $configDir "settings.json"
+        foreach ($file in @($saved, $settings)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $false }
+            if ((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        }
+        $others = @(Get-ChildItem -LiteralPath $backups -File -Force -ErrorAction Stop |
+            Where-Object { $_.Name -like "*before-rollback*" -and $_.Name -notlike "claudecode-settings.before-rollback*.json" })
+        if ($others.Count -gt 0) { return $false }
+        return (Get-Sha256 $saved) -eq (Get-Sha256 $settings)
+    } catch { return $false }
+}
+
 function Restore-HooksAfterAbortedRollback {
     # Only the current reader may recover a published conversion and restore
     # its exact owned hooks. A saved settings copy is not overwrite authority.
@@ -5171,7 +5192,13 @@ function Restore-HooksAfterAbortedRollback {
         $restored = Invoke-Native $gateway @("connector", "prepare-rollback", "--restore", "--data-dir", $DataDir)
         if ($null -eq $restored -or $restored -ne 0) { throw "the current reader did not verify hook restoration" }
     } catch { $failure = $_.Exception.Message }
-    if ($failure) {
+    if ($failure -and (Test-ClaudeHooksUnchangedSinceConversion)) {
+        # GAP-1092: the current reader refused its restore check, but the one
+        # agent file the abort could have left changed is byte for byte the
+        # copy it saved before converting: the hooks are as they were.
+        Write-Info "Hook protection is unchanged: the Claude Code settings are the copy saved before the downgrade attempt ($failure)"
+        Write-Info "The connector recovery receipts are kept; 'defenseclaw doctor' lists the hooks."
+    } elseif ($failure) {
         Write-Warn "Current hook protection is unverified after the aborted rollback ($failure)"
         Write-Info "Keep the connector recovery receipts and repair with the current DefenseClaw release before continuing agent tool calls."
         Write-Info "Retry the current reader: & `"$gateway`" connector prepare-rollback --restore --data-dir `"$DataDir`""

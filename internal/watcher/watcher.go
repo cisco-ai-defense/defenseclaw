@@ -5061,6 +5061,11 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 }
 
+// quarantineLstat inspects a quarantine destination. A test replaces it to
+// make the destination uninspectable on Windows, where a folder the account
+// may not enter cannot be made (the process bypasses traverse checking).
+var quarantineLstat = os.Lstat
+
 // quarantineUnmaterialized reports that a failed quarantine (err) left no
 // copy its pending record must keep: the destination does not exist, or it
 // cannot be inspected (a quarantine folder the gateway may not enter) and
@@ -5072,7 +5077,7 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 // the record is what restores it. The source still being in place proves
 // nothing, as a published copy whose source removal failed leaves both.
 func quarantineUnmaterialized(plan enforce.AssetQuarantinePlan, err error, fresh bool) bool {
-	_, statErr := os.Lstat(plan.QuarantinePath)
+	_, statErr := quarantineLstat(plan.QuarantinePath)
 	if os.IsNotExist(statErr) {
 		return true
 	}

@@ -390,3 +390,18 @@ def test_the_printed_uninstall_step_is_the_documented_reminder():
     assert cmd_uninstall._COWORK_PLUGIN_STAYS in text
     assert "best effort" in text
     assert "guaranteed reminder" in text
+
+
+def test_the_vm_sensor_page_says_the_bundle_is_unsigned_and_points_to_the_checksum():
+    """The release workflow ships the Cowork VM packages unsigned until the Cowork-only key exists.
+
+    While no ``.sig`` is published the page must say so and tell the reader to
+    verify the download by checksum. When the workflow gains a signed path that
+    runs by default, this pin and the page change together.
+    """
+    page = _sensor_page()
+    assert "defenseclaw-cowork-*.tar.gz" in page
+    assert "is not signed yet; verify it with the SHA-256 checksum published with the release" in page
+    assert "`checksums.txt`" in page
+    release = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
+    assert "COWORK_GPG_PRIVATE_KEY is not set; defenseclaw-cowork-*.tar.gz ship without .sig files" in release

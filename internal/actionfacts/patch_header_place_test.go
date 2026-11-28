@@ -61,7 +61,7 @@ var patchHeaderFields = []string{"command", "input", "patch", "patchText", "patc
 // without a file).
 var (
 	patchHomeTargets                = []string{"~", "~/notes.txt", `~\notes.txt`}
-	patchWindowsOnlyUnplacedTargets = []string{`C:notes.txt`, `\\.\pipe\notes`, `\\?\Volume{1234}\notes.txt`,
+	patchWindowsOnlyUnplacedTargets = []string{`D:notes.txt`, `\\.\pipe\notes`, `\\?\Volume{1234}\notes.txt`,
 		`\\server\share`, `\\localhost\c$\`, `\\?\C:`, `\\`}
 )
 
@@ -94,7 +94,7 @@ func TestPatchHeaderOfAShareIsAWriteFact(t *testing.T) {
 					if !found {
 						t.Fatalf("no %s fact for the header: %#v", envelope.access, facts.Paths)
 					}
-					if PatchNamesUnplacedTarget("apply_patch", args) {
+					if PatchNamesUnplacedTarget(Input{Tool: "apply_patch", Args: args}) {
 						t.Fatal("a placed header is reported unplaced")
 					}
 				})
@@ -130,10 +130,10 @@ func TestPatchHeaderNoReaderPlacesIsUnplaced(t *testing.T) {
 					} else if facts.Authoritative() {
 						t.Fatalf("an unplaced header is a fact: %#v", facts.Paths)
 					}
-					if !PatchNamesUnplacedTarget("apply_patch", args) {
+					if !PatchNamesUnplacedTarget(Input{Tool: "apply_patch", Args: args}) {
 						t.Fatal("the unplaced header is not reported")
 					}
-					if PatchNamesUnplacedTarget("Write", args) {
+					if PatchNamesUnplacedTarget(Input{Tool: "Write", Args: args}) {
 						t.Fatal("a tool that is no patch tool is reported")
 					}
 				})
@@ -142,12 +142,12 @@ func TestPatchHeaderNoReaderPlacesIsUnplaced(t *testing.T) {
 		t.Run("rejected "+target, func(t *testing.T) {
 			// No End Patch line: the tool applies nothing.
 			args, _ := json.Marshal(map[string]string{"command": "*** Begin Patch\n*** Add File: " + target + "\n+x\n"})
-			if PatchNamesUnplacedTarget("apply_patch", args) {
+			if PatchNamesUnplacedTarget(Input{Tool: "apply_patch", Args: args}) {
 				t.Fatal("a rejected envelope is reported")
 			}
 			// A line that is no part of the grammar after the header.
 			args, _ = json.Marshal(map[string]string{"command": "*** Begin Patch\n*** Add File: " + target + "\nx\n*** End Patch"})
-			if PatchNamesUnplacedTarget("apply_patch", args) {
+			if PatchNamesUnplacedTarget(Input{Tool: "apply_patch", Args: args}) {
 				t.Fatal("an envelope with a stray line is reported")
 			}
 		})
@@ -183,7 +183,7 @@ func TestPatchHeaderOffWindowsIsARelativeName(t *testing.T) {
 					if !found {
 						t.Fatalf("no %s fact for the header: %#v", envelope.access, facts.Paths)
 					}
-					if PatchNamesUnplacedTarget("apply_patch", args) {
+					if PatchNamesUnplacedTarget(Input{Tool: "apply_patch", Args: args}) {
 						t.Fatal("a relative name is reported unplaced")
 					}
 				})
@@ -192,7 +192,7 @@ func TestPatchHeaderOffWindowsIsARelativeName(t *testing.T) {
 	}
 	for _, target := range patchHomeTargets {
 		args, _ := json.Marshal(map[string]string{"command": "*** Begin Patch\n*** Add File: " + target + "\n+x\n*** End Patch"})
-		if !PatchNamesUnplacedTarget("apply_patch", args) {
+		if !PatchNamesUnplacedTarget(Input{Tool: "apply_patch", Args: args}) {
 			t.Fatalf("the home form %q is not reported unplaced", target)
 		}
 	}

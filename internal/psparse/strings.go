@@ -58,7 +58,9 @@ func collapseDoubled(s string, isClass func(rune) bool) string {
 	var b strings.Builder
 	for i := 0; i < len(rs); i++ {
 		if isClass(rs[i]) && i+1 < len(rs) && isClass(rs[i+1]) {
-			b.WriteRune(rs[i]) // a doubled quote collapses to that same quote char
+			// a doubled quote is its second quote char, as pwsh reads it:
+			// 'a’‘b' is a‘b (rel-1-0-10:GAP-1854)
+			b.WriteRune(rs[i+1])
 			i++
 			continue
 		}

@@ -172,6 +172,7 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 			{"sessionStart", "", ""},
 		} {
 			t.Run("mode "+map[string]string{"": "unset"}[mode]+mode+"/"+tc.event, func(t *testing.T) {
+				parallelHookCase(t)
 				home := t.TempDir()
 				// One session per event: an outage warns once per session.
 				out, errOut, code := runPerUserHookIn(t, home, []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, script,

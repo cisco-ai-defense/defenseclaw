@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -143,6 +144,15 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			}
 		} else if absolute {
 			s.logical = filepath.Clean(directory)
+		} else if directory != "" && os.IsPathSeparator(directory[0]) && filepath.IsAbs(s.logical) {
+			// A rooted Windows name with no drive (cd /tmp) is on the
+			// volume of the folder, as OperandPath places it for every
+			// other reader of the command (the link walk and its copy
+			// scopes, the directory stack). Joined below the folder, a
+			// write after such a cd missed the copy scope the link walk
+			// keyed on the volume and an unread link was allowed
+			// (rel-1-0-10:GAP-2303).
+			s.logical = filepath.Clean(OperandPath(directory, s.logical))
 		} else {
 			s.logical = filepath.Join(s.logical, directory)
 		}

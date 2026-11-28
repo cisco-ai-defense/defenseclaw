@@ -90,7 +90,7 @@ func TestDET111R3ResolverForFlavor(t *testing.T) {
 		{"windows", effects.FlavorPOSIX, `/home/alice/x`},
 	} {
 		hostGOOS = tc.goos
-		if got, ok := resolverFor(tc.flavor)(tc.path); !ok || got != tc.path {
+		if got, ok := resolverForWith(tc.flavor, nil)(tc.path); !ok || got != tc.path {
 			t.Errorf("%s host, %s path %q: resolver gave %q %v, want the placed path", tc.goos, tc.flavor, tc.path, got, ok)
 		}
 	}

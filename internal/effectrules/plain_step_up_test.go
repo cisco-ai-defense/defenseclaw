@@ -6,10 +6,14 @@ package effectrules
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestPlainStepUpNeedsRealDirectoryAndReadBudget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("plainStepUpProof is a POSIX-host proof (promote returns on a Windows host) and place reads POSIX absolute paths; a Windows temp folder is a drive path")
+	}
 	root := t.TempDir()
 	plain := filepath.Join(root, "plain")
 	outside := filepath.Join(root, "outside", "child")

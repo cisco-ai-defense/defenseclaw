@@ -418,6 +418,12 @@ from the disk: rotate a secret if that matters to you.
 - A host that echoes the `Authorization` header back would return the value to
   the agent. Bind secrets to the API host itself.
 - Any program in the sandbox can use a secret against its host.
+- A program in a sandbox can send made-up captures until that sandbox's room
+  (8 from prompts, 8 from tool calls and output) is full. Nothing tells them
+  apart from its agent's, so its real prompts are then still stopped but their
+  secrets are not captured until you remove the made-up entries
+  (`defenseclaw sandbox vault list` shows the sandbox each came from). Other
+  sandboxes and your own secrets keep their room.
 - Going back to an earlier DefenseClaw version: an earlier version counts every
   captured secret, from prompts and from tool calls and output alike, against
   the single limit of 16, so it can report the vault full; confirm, replace or

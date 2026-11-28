@@ -4,7 +4,6 @@
 """GAP-2148: the doctor's POSIX hooks-dir claim resolves . and .. as Setup does."""
 
 import pytest
-
 from defenseclaw import hook_integrity
 
 HOOKS = "/home/u/.defenseclaw/hooks"

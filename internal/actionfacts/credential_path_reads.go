@@ -486,7 +486,7 @@ const (
 	credentialReadsSources
 	// dd if=FILE, openssl -in FILE.
 	credentialReadsOptionValue
-	// jq: the first operand is the filter unless -f gives it.
+	// jq and yq: the first operand is the filter unless an option gives it.
 	credentialReadsJSON
 )
 
@@ -510,7 +510,7 @@ func credentialReaderFormOf(program string) credentialReaderForm {
 		return credentialReadsSources
 	case "dd", "openssl":
 		return credentialReadsOptionValue
-	case "jq":
+	case "jq", "yq":
 		return credentialReadsJSON
 	}
 	if strings.HasPrefix(program, "python3.") || strings.HasPrefix(program, "python2.") {
@@ -653,15 +653,20 @@ type credentialPathResolver struct {
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
 	wait       CredentialWalkBudget     // the wait for walk slots left, the call's
-	// walkedBy holds the folders each command already searched, as named
-	// and as resolved: a folder named again by the same command adds
-	// nothing, so grep -r K . . . walks it once (rel-1-0-10:GAP-1668).
+	// walkedBy holds the folders each command already searched, by the
+	// cleaned folder: a folder named again by the same command, in any
+	// spelling (. ./ ././), adds nothing, so grep -r K . ./ ././ walks it
+	// once (rel-1-0-10:GAP-1668).
 	walkedBy map[credentialWalkKey]bool
 	// rgConfig: the call sets RIPGREP_CONFIG_PATH, so an rg may read
 	// options (--hidden) from a file (substrate-1:GAP-0682).
 	rgConfig bool
-	seen     map[PathFact]bool
-	reads    []PathFact
+	// rgExclude: an rg's ignore lines may remove a read (rgExclude), and
+	// rgIgnores reads the ignore files (substrate-1:GAP-0660, GAP-0661).
+	rgExclude bool
+	rgIgnores *rgIgnoreReader
+	seen      map[PathFact]bool
+	reads     []PathFact
 }
 
 // credentialPathResult is the private record of one parse, made by the
@@ -809,6 +814,7 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 			return strings.HasPrefix(word, "RIPGREP_CONFIG_PATH=")
 		})
 	})
+	r.rgExclude = rgExclude(r.commands)
 	for _, command := range r.commands {
 		if !credentialPathCommandReadable(command) {
 			continue
@@ -1081,7 +1087,11 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 		}
 		return operands
 	case credentialReadsJSON:
-		operands = r.jsonOperands(command)
+		if command.Program == "yq" {
+			operands = yqOperands(argv)
+		} else {
+			operands = r.jsonOperands(command)
+		}
 	}
 	for _, index := range operands {
 		r.argument(command.ID, command.Arguments[index], false)
@@ -1122,6 +1132,79 @@ func (r *credentialPathResolver) jsonOperands(command CommandFact) []int {
 		case options && strings.HasPrefix(arg, "-") && arg != "-":
 		case filter:
 			filter = false
+		default:
+			operands = append(operands, i)
+		}
+	}
+	return operands
+}
+
+// yqValueOptions are the yq options that take the next word as their value:
+// mikefarah yq 4 (-o, -p, -I, -s, --expression, --from-file and the format
+// options) and the jq options of kislyuk yq, which runs jq (--arg, --argjson
+// take two words, yqTwoValueOptions).
+var yqValueOptions = map[string]bool{
+	"-o": true, "--output-format": true, "-p": true, "--input-format": true,
+	"-I": true, "--indent": true, "-s": true, "--split-exp": true,
+	"--expression": true, "--from-file": true, "-f": true, "--front-matter": true,
+	"--xml-attribute-prefix": true, "--xml-content-name": true,
+	"--xml-directive-name": true, "--xml-proc-inst-prefix": true,
+	"--xml-raw-token": true,
+	"--lua-prefix":    true, "--lua-suffix": true, "--properties-separator": true,
+	"--csv-separator": true, "--tsv-separator": true, "-L": true,
+}
+
+var yqTwoValueOptions = map[string]bool{
+	"--arg": true, "--argjson": true, "--slurpfile": true, "--rawfile": true,
+}
+
+// yqOperands is the files yq reads (substrate-1:GAP-0233): the operands
+// after the expression; every operand when --expression or --from-file
+// gives the expression; and the one operand of `yq FILE`, which yq 4 reads
+// as a file when it is one (count when unsure: a lone expression names no
+// credentials file). The file of --from-file and of kislyuk yq's
+// --slurpfile and --rawfile is read too. An eval, e, eval-all or ea
+// subcommand is skipped.
+func yqOperands(argv []string) []int {
+	var operands []int
+	expression := true
+	options := true
+	start := 1
+	if len(argv) > 1 {
+		switch argv[1] {
+		case "eval", "e", "eval-all", "ea":
+			start = 2
+		}
+	}
+	for i := start; i < len(argv); i++ {
+		arg := argv[i]
+		switch {
+		case options && arg == "--":
+			options = false
+		case options && (arg == "--args" || arg == "--jsonargs"):
+			return operands
+		case options && yqTwoValueOptions[arg]:
+			if (arg == "--slurpfile" || arg == "--rawfile") && i+2 < len(argv) {
+				operands = append(operands, i+2)
+			}
+			i += 2
+		case options && yqValueOptions[arg]:
+			if (arg == "--from-file" || arg == "-f") && i+1 < len(argv) {
+				operands = append(operands, i+1)
+			}
+			if arg == "--expression" || arg == "--from-file" || arg == "-f" {
+				expression = false
+			}
+			i++
+		case options && (strings.HasPrefix(arg, "--expression=") || strings.HasPrefix(arg, "--from-file=")):
+			expression = false
+		case options && strings.HasPrefix(arg, "-") && arg != "-":
+		case expression:
+			expression = false
+			if !slices.ContainsFunc(argv[i+1:], func(word string) bool { return word != "-" && !strings.HasPrefix(word, "-") }) {
+				// yq FILE: the lone operand is the file when there is one.
+				operands = append(operands, i)
+			}
 		default:
 			operands = append(operands, i)
 		}
@@ -1867,14 +1950,14 @@ func (r *credentialPathResolver) searchWorkFolders(command CommandFact, each boo
 		return []string{r.cwd}, r.outerCommandsStay(command)
 	}
 	if len(folders) == 1 {
-		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folders[0])
+		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, r.gitBashDriveSteps(folders[0]))
 		return []string{filepath.FromSlash(logical)}, ok
 	}
 	if !each {
 		return unplaced, false
 	}
 	for _, folder := range folders {
-		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, folder)
+		logical, ok := resolveWorkFolder(filepath.ToSlash(r.cwd), r.home, r.gitBashDriveSteps(folder))
 		if !ok || logical != "" && !simplePathAbs(logical) {
 			return unplaced, false
 		}
@@ -1889,6 +1972,36 @@ func (r *credentialPathResolver) searchWorkFolders(command CommandFact, each boo
 		}
 	}
 	return bases, true
+}
+
+// gitBashDrive is the drive spelling (C:/x) of a Git Bash or Cygwin drive
+// mount (/c/x, /cygdrive/c/x) when the call runs under a Windows drive
+// home, and value unchanged otherwise. Git Bash hands a native program (rg,
+// grep) the drive path for such a word and runs a cd to it in that folder,
+// so the search reads and names C:/x: before, the walk joined /c/x onto the
+// hook folder (filepath.IsAbs is false without a volume) and a recursive
+// search of a Git Bash folder counted no credentials read where its C:/x
+// spelling did (substrate-1:GAP-0691). Under a POSIX home /c/x is the folder
+// it names.
+func (r *credentialPathResolver) gitBashDrive(value string) string {
+	if !DriveLetterPath(r.home) {
+		return value
+	}
+	return MSYSDrivePath(value)
+}
+
+// gitBashDriveSteps is folder with each step a Git Bash drive mount spelled
+// as its drive path (gitBashDrive).
+func (r *credentialPathResolver) gitBashDriveSteps(folder workFolder) workFolder {
+	if !DriveLetterPath(r.home) || !slices.ContainsFunc(folder.steps, func(step string) bool { return MSYSDrivePath(step) != step }) {
+		return folder
+	}
+	steps := make([]string, len(folder.steps))
+	for i, step := range folder.steps {
+		steps[i] = MSYSDrivePath(step)
+	}
+	folder.steps = steps
+	return folder
 }
 
 // searchFolderWord is the folder a recursive search's operand names: its
@@ -1920,6 +2033,7 @@ func (r *credentialPathResolver) searchFolderWord(argument ArgumentFact) string 
 // so the search itself is judged as it was before the walk (T6 ruling
 // 2026-11-18).
 func (r *credentialPathResolver) searchFolder(id int64, folder, base string, placed bool, filter credentialWalkFilter) {
+	folder = r.gitBashDrive(folder)
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
@@ -1943,7 +2057,12 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	if (shown == "~" || strings.HasPrefix(shown, "~/")) && r.home != "" {
 		shown = r.home + shown[1:]
 	}
-	key := credentialWalkKey{id: id, dir: filepath.Clean(dir), shown: shown}
+	key := credentialWalkKey{id: id, dir: filepath.Clean(dir)}
+	if filter.readsPath() {
+		// an rg glob reads the path as rg names it, so another spelling of
+		// the folder may admit other files: it is its own walk
+		key.shown = shown
+	}
 	if r.walkedBy[key] {
 		return
 	}
@@ -1967,7 +2086,11 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 	}
 	walk := credentialPathWalk(r.wait, dir, shown, filter, left, credentialWalkRoomOf(r))
 	r.walkUsed = r.walkUsed.plus(walk.used)
-	for _, file := range walk.found {
+	found := walk.found
+	if rg := filter.rg; rg != nil && rg != rgFilterAll && rg.ignore.any() {
+		found = r.rgIgnoreFound(dir, shown, rg, walk)
+	}
+	for _, file := range found {
 		if r.stopped() {
 			return
 		}
@@ -1977,6 +2100,41 @@ func (r *credentialPathResolver) searchFolder(id int64, folder, base string, pla
 		r.probeUnder(id, dir, shown, filter)
 		r.add(id, "", true)
 	}
+}
+
+// rgIgnoreFound is the files an rg search of dir reads among those its walk
+// found, with its ignore files read (rg_ignore.go; substrate-1:GAP-0660,
+// GAP-0661): when a whitelist line may name a hidden credentials file, the
+// folder is walked again with hidden on and what it adds counts where a
+// whitelist passes its hidden names; an ignore line removes a file only
+// where rgExclude allows it. The second walk shares the resolve's walk
+// budget and changes no cut: a cut second walk keeps what the first found
+// as well, so a search is never judged below its first walk.
+func (r *credentialPathResolver) rgIgnoreFound(dir, shown string, rg *rgFilter, walk credentialPathWalkResult) []string {
+	if r.rgIgnores == nil {
+		r.rgIgnores = &rgIgnoreReader{}
+	}
+	found := walk.found
+	if !rg.hidden && r.rgIgnores.mayWhitelistHidden(rg.ignore, dir, walk.ignoreDirs, walk.ignoreOver) {
+		if left := credentialPathWalkBounds.minus(r.walkUsed); !left.spent() {
+			hidden := *rg
+			hidden.hidden = true
+			again := credentialPathWalk(r.wait, dir, shown, credentialWalkFilter{rg: &hidden}, left, credentialWalkRoomOf(r))
+			r.walkUsed = r.walkUsed.plus(again.used)
+			if again.cut {
+				found = append(slices.Clip(found), again.found...)
+			} else {
+				found = again.found
+			}
+		}
+	}
+	kept := make([]string, 0, len(found))
+	for _, file := range found {
+		if r.rgIgnores.reads(rg, dir, shown, file, r.rgExclude) {
+			kept = append(kept, file)
+		}
+	}
+	return kept
 }
 
 // probeUnder looks up every probe of the credentials table under the folder
@@ -2082,8 +2240,8 @@ func credentialFolderEndsIn(dir string, segments []string) bool {
 	return true
 }
 
-// credentialWalkKey is one folder one command searched: its resolved path
-// and its spelling, which the found files are named under.
+// credentialWalkKey is one folder one command searched: its cleaned path,
+// and its spelling only when an rg glob reads the path as rg names it.
 type credentialWalkKey struct {
 	id         int64
 	dir, shown string
@@ -2119,6 +2277,10 @@ type credentialPathWalkResult struct {
 	found []string
 	cut   bool
 	used  credentialPathWalkLimits
+	// ignoreDirs: the folders read that hold an rg ignore file (an rg walk
+	// only), ignoreOver: more than rgIgnoreFolderMax of them.
+	ignoreDirs []string
+	ignoreOver bool
 }
 
 // credentialPathWalk walks dir breadth first and reads each folder once, a
@@ -2202,7 +2364,14 @@ func credentialPathWalk(wait CredentialWalkBudget, dir, shown string, filter cre
 			wg.Wait()
 		}
 		count := 0
-		for _, s := range scans {
+		for i, s := range scans {
+			if s.ignores {
+				if len(walk.ignoreDirs) < rgIgnoreFolderMax {
+					walk.ignoreDirs = append(walk.ignoreDirs, level[i].dir)
+				} else {
+					walk.ignoreOver = true
+				}
+			}
 			for _, file := range s.found {
 				if room.admit(file) {
 					walk.found = append(walk.found, file)
@@ -2278,6 +2447,8 @@ type credentialPathFolderScan struct {
 	names []byte
 	ends  []int
 	shown []string
+	// ignores: the folder holds an rg ignore file (an rg walk only).
+	ignores bool
 }
 
 // credentialWalkFolder is one folder of a walk and its path as rg names it.
@@ -2301,6 +2472,9 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter cred
 	readCredentialWalkFolder(folder.dir, func(name []byte, isDir, regular bool, dirfd int) bool {
 		if !b.take(&b.entries, b.limits.entries) {
 			return false
+		}
+		if filter.rg != nil && !isDir && len(name) > 0 && name[0] == '.' && rgIgnoreFileName(name) {
+			s.ignores = true
 		}
 		for _, probe := range groups[string(name)] {
 			if !filter.admits(folder.shown, probe.segments) {

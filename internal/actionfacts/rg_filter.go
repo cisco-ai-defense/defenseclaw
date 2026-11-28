@@ -43,8 +43,8 @@ import (
 //     type matches is skipped. Types never decide a folder;
 //   - else a dot-named file or folder is skipped unless hidden is on.
 //
-// .gitignore and .ignore rules are not modelled: a file they skip counts.
-// grep -r has no rgFilter (credentialWalkFilter).
+// The ignore files (.rgignore, .ignore, .gitignore) are read after the walk
+// (rg_ignore.go, ignore). grep -r has no rgFilter (credentialWalkFilter).
 type rgFilter struct {
 	hidden   bool
 	globs    []rgGlob // the -g globs, then the --iglob globs, as rg adds them
@@ -52,6 +52,7 @@ type rgFilter struct {
 	types    []rgTypeSelection
 	selected bool // a -t selection: a file no selected type matches is skipped
 	cwd      string
+	ignore   rgIgnoreRead // the ignore files rg reads (rg_ignore.go)
 }
 
 // rgFilterAll is the filter of an rg this model is unsure of (count when
@@ -153,6 +154,12 @@ func (f *rgFilter) reads(p, name string) bool {
 	case -1:
 		return false
 	}
+	return f.readsName(name, false)
+}
+
+// readsName is reads past the override globs: the types, then the hidden
+// rule, which a file an ignore file whitelists passes (rgIgnoreReader.reads).
+func (f *rgFilter) readsName(name string, whitelisted bool) bool {
 	for i := len(f.types) - 1; i >= 0; i-- {
 		if f.types[i].matches(name) {
 			return !f.types[i].exclude
@@ -161,7 +168,7 @@ func (f *rgFilter) reads(p, name string) bool {
 	if f.selected {
 		return false
 	}
-	return f.hidden || !strings.HasPrefix(name, ".")
+	return whitelisted || f.hidden || !strings.HasPrefix(name, ".")
 }
 
 // admits reports a probe path under the folder rg names parent: every

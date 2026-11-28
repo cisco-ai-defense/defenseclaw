@@ -137,6 +137,17 @@ func gap2249OwnShellWalkReference(command, cwd, home string) (map[guestShellRead
 				return leftOK, nil
 			}
 		}
+		// A { ... } group runs in the call shell (substrate-1 GAP-0948).
+		if group, ok := stmt.Cmd.(*syntax.Block); ok && !stmt.Background && !stmt.Negated && len(stmt.Redirs) == 0 && len(group.Stmts) != 0 {
+			current := in
+			for at, inner := range group.Stmts {
+				succeeded, failed = step(inner, current)
+				if at < len(group.Stmts)-1 {
+					current = join(succeeded, failed)
+				}
+			}
+			return succeeded, failed
+		}
 		mark(stmt, in)
 		defer func() { unread = unread || guestNodeRunsUnreadCommand(stmt, home) }()
 		if stmt.Background {

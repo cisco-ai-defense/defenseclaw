@@ -44,6 +44,12 @@ type StreamParser struct {
 	anthFinal bool
 	// chat, responses, gemini and ollama blocks replace the previous one.
 	hasBlock bool
+	// Gemini sends usageMetadata in every chunk, a running count until the
+	// chunk with the finishReason: geminiFinish is set once a finishReason
+	// arrived, geminiFinal once a usage block arrived with or after it, and
+	// geminiOpen (set by Usage) when the usage read is only a running count
+	// (substrate-1:GAP-1120).
+	geminiFinish, geminiFinal, geminiOpen bool
 
 	tail []byte // gemini non-SSE fallback
 	es   eventStreamState
@@ -181,6 +187,9 @@ func (s *StreamParser) handleJSON(doc []byte) {
 			s.replace(u, c.Response.Model)
 		}
 	case FamilyGemini:
+		// Quotes inside a JSON string are escaped, so reply text cannot
+		// match the key.
+		s.geminiFinish = s.geminiFinish || bytes.Contains(doc, []byte(`"finishReason"`))
 		if !bytes.Contains(doc, []byte("usageMetadata")) {
 			return
 		}
@@ -192,6 +201,7 @@ func (s *StreamParser) handleJSON(doc []byte) {
 			var u Usage
 			c.UsageMetadata.apply(&u)
 			s.replace(u, c.ModelVersion)
+			s.geminiFinal = s.geminiFinal || (s.geminiFinish && u.Has != 0)
 		}
 	case FamilyOllama:
 		if !bytes.Contains(doc, []byte(`"done":true`)) && !bytes.Contains(doc, []byte(`"done": true`)) {
@@ -308,11 +318,22 @@ func (s *StreamParser) handleInvocationMetrics(doc []byte) {
 
 func (s *StreamParser) keepTail(p []byte) { appendTail(&s.tail, p, maxTailBytes) }
 
-// Opening reports whether the usage read so far is only the opening count
-// of an Anthropic stream that never sent its final usage (message_start
-// but no message_delta). Call it after Usage. Safe on a nil receiver.
+// Opening reports whether the usage read so far is not the stream's final
+// usage: the opening count of an Anthropic stream that never sent its final
+// usage (message_start but no message_delta), or the running count of a
+// Gemini stream that never sent its finishReason chunk
+// (substrate-1:GAP-1120). Call it after Usage. Safe on a nil receiver.
 func (s *StreamParser) Opening() bool {
-	return s != nil && (s.family == FamilyMessages || s.family == FamilyInvoke) && s.hasBlock && !s.anthFinal
+	if s == nil {
+		return false
+	}
+	switch s.family {
+	case FamilyMessages, FamilyInvoke:
+		return s.hasBlock && !s.anthFinal
+	case FamilyGemini:
+		return s.geminiOpen
+	}
+	return false
 }
 
 // Usage finalises and returns the usage read so far. Call it after the body
@@ -339,8 +360,15 @@ func (s *StreamParser) Usage() Usage {
 		u = s.u
 	default:
 		u = s.u
-		if s.family == FamilyGemini && u.Has == 0 {
-			u = usageFromTail(FamilyGemini, s.tail)
+		if s.family == FamilyGemini {
+			if u.Has == 0 {
+				// The JSON array stream (no alt=sse): the last chunk read
+				// is final only with its finishReason.
+				u = usageFromTail(FamilyGemini, s.tail)
+				s.geminiOpen = u.Has != 0 && !bytes.Contains(s.tail, []byte(`"finishReason"`))
+			} else {
+				s.geminiOpen = !s.geminiFinal
+			}
 		}
 	}
 	if u.Has != 0 {

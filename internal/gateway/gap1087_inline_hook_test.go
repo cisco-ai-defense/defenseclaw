@@ -1,14 +1,13 @@
 package gateway
 
 import (
-	"path/filepath"
 	"testing"
 )
 
 func TestGAP1087InlineHookConfigDeletionFiveTiers(t *testing.T) {
 	home := hardP5Home(t)
 	member := ".claude/settings.json"
-	project := filepath.Join(home, "proj", "notes.txt")
+	project := hardP5Path(home, "proj", "notes.txt")
 	cases := map[string][]string{
 		"rm " + member: {
 			"python3 -c 'import os; os.remove(\"" + member + "\")'",
@@ -21,7 +20,7 @@ func TestGAP1087InlineHookConfigDeletionFiveTiers(t *testing.T) {
 	}
 	benign := []string{
 		"python3 -c 'import os; os.remove(\"" + project + "\")'",
-		"python3 -c 'import os; os.rename(\"" + project + "\", \"" + filepath.Join(home, "proj", "moved.txt") + "\")'",
+		"python3 -c 'import os; os.rename(\"" + project + "\", \"" + hardP5Path(home, "proj", "moved.txt") + "\")'",
 		"node -e 'require(\"fs\").unlinkSync(\"" + project + "\")'",
 		"ruby -e 'File.delete(\"" + project + "\")'",
 	}

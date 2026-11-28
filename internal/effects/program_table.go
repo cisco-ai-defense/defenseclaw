@@ -116,6 +116,7 @@ type Program struct {
 	PermissionFlags []string // options that make PosConditionalPerm positionals permission changes
 
 	ShellCode      bool     // the code operand is shell text we can unwrap
+	ShOptions      bool     // sh-style invocation options: -s makes the operands positional and stdin the code, -o/-O take a value (hasCodeOperand, GAP-2290)
 	StdinCode      bool     // stdin is code even when other args name an account
 	FirstPosIgnore bool     // first positional is a script/pattern, not a path (sed/grep)
 	FirstPosText   TextKind // the grammar that must accept that first positional (sed script, awk program, grep pattern)
@@ -588,7 +589,12 @@ func resolveLong(fn string, all []string) (string, bool) {
 // is the inner program itself and, being unmodeled, is not fully known; a
 // listed wrapper is transparent only for the options named in its row.
 var wrapperTable = map[string]Wrapper{
-	"sudo": {kind: wrapIdentity, shorts: "AbEeHiKklnPSsVvB",
+	// sudo [options] [NAME=value ...] PROGRAM: the NAME=value words before the
+	// program are env inputs of the program (their values stay unseen: the
+	// sudo policy decides them); before rel-1-0-10:GAP-1478 the first of them
+	// was read as the program, so a named write behind sudo FOO=1 was an
+	// unmodeled program's.
+	"sudo": {kind: wrapIdentity, shorts: "AbEeHiKklnPSsVvB", envAssign: true,
 		valued:      []string{"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-T", "--user", "--group", "--chdir", "--close-from", "--host", "--prompt", "--role", "--type", "--other-user", "--command-timeout"},
 		userOptions: []string{"-u", "--user"},
 		longs:       []string{"--preserve-env", "--login", "--set-home", "--shell", "--background", "--non-interactive", "--reset-timestamp", "--remove-timestamp", "--stdin", "--askpass", "--preserve-groups", "--bell"},
@@ -871,7 +877,7 @@ func buildPOSIXTable() {
 			"--ignore-case", "--invert-match", "--line-number", "--files-with-matches", "--count", "--word-regexp", "--fixed-strings", "--only-matching", "--quiet", "--no-messages", "--with-filename", "--no-filename", "--null")})
 	add(Program{Names: []string{"fd"}, Pos: PosAllRead, Pattern: true,
 		Flags: map[string]Flag{"-x": {Role: RoleExecProgram}, "-X": {Role: RoleExecProgram}, "--exec": {Role: RoleExecProgram}}})
-	add(Program{Names: []string{"bash", "sh", "zsh", "dash", "ksh"}, Pos: PosFirstCode, ShellCode: true,
+	add(Program{Names: []string{"bash", "sh", "zsh", "dash", "ksh"}, Pos: PosFirstCode, ShellCode: true, ShOptions: true,
 		Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "-s": {Role: RoleNone}, "-l": {Role: RoleNone}, "-i": {Role: RoleNone}}})
 	add(Program{Names: []string{"eval", "source", "."}, Pos: PosFirstCode, ShellCode: true})
 	add(Program{Names: []string{"su", "runuser"}, Pos: PosNone, ShellCode: true, Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "--command": {Value: true, Role: RoleExecCode}, "-s": {Value: true, Role: RoleIgnore}, "-l": {}, "-": {}}})

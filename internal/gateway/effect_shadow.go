@@ -518,7 +518,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		// preserves the registered entries is no hook mutation; the legacy
 		// readers still grade the call. Deletes, truncations and opaque data
 		// keep their effect grade (GAP-1478).
-		if fullyAccounted && len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 {
+		// An EnvInput write keeps its known member only to be decided by its
+		// proof (GAP-1478); it was never a preserved write before.
+		if fullyAccounted && len(known) == 1 && known[0] == effectrules.SetAgentHookConfig && len(maybe) == 0 &&
+			!effectrules.EnvInput(f) {
 			preserved := false
 			if env.preservedHookConfigPaths != nil {
 				_, preserved = env.preservedHookConfigPaths[effectHookConfigTargetKey(t.GetPath())]
@@ -556,7 +559,18 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if proof, ok := stateFolderWriteProof(f, flavor); ok {
 			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
 		}
-		r := factReach(f, known, unknownEffect, env, flavor)
+		var mutationProofs []decide.Proof
+		if fullyAccounted {
+			mutationProofs = knownProtectedMutationProofs(f, flavor)
+		}
+		// A named mutation that is known but for an env input of its program
+		// (effectNamedRoleKnown: sudo rsync --log-file=MEMBER, FOO=1 rsync
+		// --log-file=MEMBER) is decided by its proof like the unwrapped
+		// spelling, not by reach (GAP-1478).
+		r := ""
+		if !unknownEffect || len(mutationProofs) == 0 {
+			r = factReach(f, known, unknownEffect, env, flavor)
+		}
 		if len(known) == 0 && r == "" {
 			continue
 		}
@@ -580,15 +594,14 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			c.known = true
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		}
-		if fullyAccounted {
-			for _, proof := range knownProtectedMutationProofs(f, flavor) {
-				c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
-				c.known, c.knownMutation = true, true
-				// The authorized-keys ruling blocks in every pack.
-				if proof.Target == decide.TargetAuthorizedKeys {
-					c.restricted, c.restrictedRuling = true, true
-					c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
-				}
+		// mutationProofs is only set when fullyAccounted (above).
+		for _, proof := range mutationProofs {
+			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+			c.known, c.knownMutation = true, true
+			// The authorized-keys ruling blocks in every pack.
+			if proof.Target == decide.TargetAuthorizedKeys {
+				c.restricted, c.restrictedRuling = true, true
+				c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
 			}
 		}
 		if c.program == "" && c.kind == "" {
@@ -1138,6 +1151,21 @@ func stateFolderWriteProof(f *semanticpb.EffectFact, flavor effects.Flavor) (dec
 	return decide.Proof{}, false
 }
 
+// effectNamedRoleKnown reports an effect whose role the call words decide:
+// fully known, or known but for an unaccounted env input of its program
+// (effectrules.EnvInput: a NAME= prefix, env or sudo NAME=, an export, PATH,
+// or a HOME change: sudo, doas, env -i). The program run with that input may
+// read config of its own, which is why the effect is not fully known, but the
+// write, append or delete the call names on a member is still that mutation
+// (rel-1-0-10:GAP-1478: sudo rsync --log-file and FOO=1 rsync --log-file on
+// the audit db were allowed while the unwrapped spelling alerted).
+func effectNamedRoleKnown(f *semanticpb.EffectFact) bool {
+	if f.GetRoleState() == "known" {
+		return len(f.GetReasons()) == 0
+	}
+	return effectrules.EnvInput(f)
+}
+
 // knownProtectedMutationProofs are the decision proofs of one Known write,
 // append or delete of an exact member of a protected set, whatever program
 // the program table modeled it for (redirection, cp, tee, sort -o, rsync, a
@@ -1163,7 +1191,7 @@ func knownProtectedMutationProofs(f *semanticpb.EffectFact, flavor effects.Flavo
 	default:
 		return nil
 	}
-	if f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
+	if f.GetTargetState() != "known" || !effectNamedRoleKnown(f) ||
 		!effectrules.CanonicalAbsolute(f.GetTarget().GetPath(), flavor) {
 		return nil
 	}

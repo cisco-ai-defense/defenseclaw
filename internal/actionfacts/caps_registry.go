@@ -55,7 +55,7 @@ var (
 	_ = bounded.Register("actionfacts.maxNestedCommandBytes", bounded.Depth, int(maxNestedCommandBytes))
 	_ = bounded.Register("actionfacts.maxNestedShellStrings", bounded.Depth, int(maxNestedShellStrings))
 	_ = bounded.Register("actionfacts.maxNetworkFacts", bounded.Time, int(maxNetworkFacts))
-	_ = bounded.Register("actionfacts.maxOperandLeadingSteps", bounded.Time, int(maxOperandLeadingSteps))
+	_ = bounded.Register("actionfacts.maxOperandDotDotSteps", bounded.Time, int(maxOperandDotDotSteps))
 	_ = bounded.Register("actionfacts.maxOverLimitWriteArgsBytes", bounded.Bytes, int(maxOverLimitWriteArgsBytes))
 	_ = bounded.Register("actionfacts.maxPOSIXDepth", bounded.Depth, int(maxPOSIXDepth))
 	_ = bounded.Register("actionfacts.maxPOSIXNodes", bounded.Nodes, int(maxPOSIXNodes))

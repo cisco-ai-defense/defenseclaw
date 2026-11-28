@@ -45,8 +45,6 @@ var det111R1VerdictPending = map[string]string{
 	"GAP-1508/var":   "fetch piped to a shell under coproc: remote-code verdict, not an effect target (decision side)",
 	"GAP-1508/var2":  "fetch piped to a shell under coproc { }: remote-code verdict, not an effect target (decision side)",
 	"GAP-1561/seed5": ".git/config is not a protected set (decision side)",
-	"GAP-1640/var":   "the written script's text (os.system) is a content verdict, not an effect target (R7 / content scanners)",
-	"GAP-1640/var2":  "the written script's text (os.system) is a content verdict, not an effect target (R7 / content scanners)",
 	"GAP-1653/seed":  ".env read: .env is not a protected set (decision side)",
 	"GAP-1653/seed2": ".env read: .env is not a protected set (decision side)",
 	"GAP-1653/var":   ".env read through an alias of open: .env is not a protected set (decision side)",

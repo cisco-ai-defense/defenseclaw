@@ -162,6 +162,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// the request cwd for the text scan.
 	// Git Bash spells a Windows drive /c/... (GAP-0781 RV8-1).
 	windowsHost := runtime.GOOS == "windows" && actionWindowsHome(home)
+	// globRead: the value is a word of a statement the scan reads as
+	// read-only, where a pattern walk stopped at its bound is TRUNCATED; in
+	// every other position (a writer operand, a redirect, an assignment, a
+	// nested body, the text scan) it keeps the rel/1.0.10 protected-target
+	// verdict (rel-1-0-10:GAP-2300, GAP-1324).
+	globRead := false
 	// literal: the value is one entry name whose *, ?, [ and ] were quoted
 	// or escaped, so they are not a pattern (GAP-0293).
 	checkValue := func(value string, tilde bool, base string, literal bool) bool {
@@ -191,7 +197,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if actionPosixWindowsHome(home) {
 				return actionPosixWindowsProtectedGlob(value, base, home)
 			}
-			return actionProtectedFileGlobReach(value, base, protected, ssh, home, globs)
+			return actionProtectedFileGlobReach(value, base, protected, ssh, home, globs, !globRead)
 		}
 		if actionPosixWindowsHome(home) {
 			if stateOnly {
@@ -199,7 +205,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			}
 			return actionPosixWindowsProtected(value, base, home)
 		}
-		operand := OperandPath(value, base)
+		operand := MentionOperandPath(value, base)
 		if stateOnly {
 			return actionProtectedStatePath(operand, stateHome)
 		}
@@ -220,12 +226,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// resolved once per scan, because its answer depends only on the value,
 	// its tilde form and its base (GAP-2279, answer budget).
 	type mention struct {
-		value, base    string
-		tilde, literal bool
+		value, base          string
+		tilde, literal, read bool
 	}
 	answers := map[mention]bool{}
 	checkAs := func(value string, tilde bool, base string, literal bool) bool {
-		key := mention{value: value, base: base, tilde: tilde, literal: literal}
+		key := mention{value: value, base: base, tilde: tilde, literal: literal, read: globRead}
 		found, seen := answers[key]
 		if !seen {
 			found = checkValue(value, tilde, base, literal)
@@ -373,7 +379,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// through the one resolver, and every candidate it names is
 			// judged by identity (GAP-0293, GAP-0324, GAP-0325).
 			if resolverWord {
-				resolved := resolveWriteWord(word, values, effectiveCWD, globOptions)
+				options := globOptions
+				options.readPosition = globRead
+				resolved := resolveWriteWord(word, values, effectiveCWD, options)
 				for _, candidate := range resolved.candidates {
 					if checkAs(candidate, false, effectiveCWD, true) {
 						return true
@@ -505,6 +513,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				if !stateOnly {
 					inert = append(inert, actionSSHDirectorySetupWords(call, values, effectiveCWD, home)...)
 				}
+				// An archive or copy --exclude value names what the call leaves
+				// out, never a file it writes (substrate-1 GAP-0994).
+				inert = append(inert, actionExcludeOptionValueWords(call, home)...)
 				judgedWords = append(judgedWords, inert...)
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
@@ -601,6 +612,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// A cd in a read-only group moves only the group, where
 				// nothing writes: its folder word is no write target.
 				groupedCD := groupedReads[stmt] && actionCallChangesDirectory(call, home)
+				globRead = readOnly
 				for _, word := range call.Args {
 					if blankReads && len(removedEntries) == 0 && len(replacedEntries) == 0 {
 						judgedWords = append(judgedWords, word)
@@ -655,6 +667,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// destination, as the next word of -t DIR is. Each word above is
 				// judged whole, so the folder is read out of it with the shared
 				// writer reader (rel-1-0-10:GAP-0186, GAP-1149).
+				globRead = false
 				for _, destination := range actionAttachedCopyDestinations(call, home) {
 					if actionExpandedWordGlob(destination, values, effectiveCWD, home, check) ||
 						checkBraceFields(destination, false) || checkWord(destination) {
@@ -1023,12 +1036,13 @@ var actionInterpreterHomeCall = lazyregexp.New(`Path\.home\(\)|expanduser\(`)
 // a path built only inside inert text writes nothing (GAP-0475 row).
 func actionInterpreterCodeWrites(code, language string) bool {
 	python := newPythonCodeScanner(code)
+	scan := newLiteralCodeScanner(code, language)
 	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
 		if language == "python" || strings.HasPrefix(language, "python3") {
 			if python.at(location[0]) {
 				return true
 			}
-		} else if literalCodePosition(code, location[0], language) {
+		} else if scan.at(location[0]) {
 			return true
 		}
 	}
@@ -2094,24 +2108,46 @@ func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
 // the user and sends its answer (GlobFactPrefix); that answer decides, as
 // the walk of a gateway that can see the home would (GAP-1460 review). With
 // no answer, the name fallback below keeps the pattern closed.
-func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs) bool {
-	return actionProtectedFileGlobReachAs(pattern, cwd, protected, ssh, home, globs, false)
+//
+// write: the pattern is a word in a write position. There a walk stopped at
+// its bound keeps the rel/1.0.10 verdict, a protected target: what it did not
+// read may hold a link to a key file (a folder the walk reads last), and
+// nothing short of reading past the bound tells a benign capped write from
+// one. Elsewhere (a word of a read-only statement) the capped walk is
+// TRUNCATED (rel-1-0-10:GAP-1324, GAP-2300).
+func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, write bool) bool {
+	return actionProtectedFileGlobReachAs(pattern, cwd, protected, ssh, home, globs, false, write)
 }
 
 // actionProtectedFileGlobReachAs is actionProtectedFileGlobReach; windows
 // reads the pattern as a PowerShell or cmd wildcard, which matches a leading
 // dot, where a POSIX shell's * and ? skip it (Git Bash too, GAP-1717).
-func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, windows bool) bool {
+func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, windows, write bool) bool {
 	literal := ""
 	if !filepath.IsAbs(pattern) {
 		literal = filepath.Clean(cwd)
 	}
+	// The client's answer is keyed by the uncleaned spelling as well:
+	// OperandPath applies a dot-dot step only where this process reads the
+	// folder in front of it as a plain directory (rel-1-0-10:GAP-1648), so
+	// a gateway that cannot read the user's home keeps the step and asks by
+	// that spelling (rel-1-0-10:GAP-2294, rm -rf build/../out/*).
+	raw := operandRawSpelling(pattern, cwd)
 	pattern = OperandPath(pattern, cwd)
+	if raw == pattern || !hasDotDotStep(raw) {
+		raw = ""
+	}
+	note := func(answer string) {
+		globs.note(pattern, answer)
+		if raw != "" {
+			globs.note(raw, answer)
+		}
+	}
 	dots := sync.OnceValue(func() bool { return windows || globs.dotNames() || actionShellProfileMayDotglob(home) })
 	// The names are matched in the folder the pattern's dot-dot steps lead
 	// to: rm -f x/../.ssh/* after cd .. names the authorized keys files as
 	// rm -f .ssh/* does (actionGlobPatternPlaced, rel-1-0-10:GAP-1020).
-	placed := actionGlobPatternPlaced(pattern)
+	placed := actionGlobPatternPlaced(pattern, home)
 	for _, target := range append([]string{ssh}, ProtectedAuthorizedKeysPaths(home)...) {
 		// In a POSIX shell * and ? skip a leading dot: at the home folder
 		// echo * names no .ssh unless dotglob may be on (rel-1-0-6:GAP-0211).
@@ -2139,31 +2175,42 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			continue
 		}
 		if protectedReachResolved(resolved, protected, ssh) {
-			globs.note(pattern, "1")
+			note("1")
 			return true
 		}
 	}
 	if complete && (!hidden || !unseen) {
-		globs.note(pattern, "0")
+		note("0")
 		return false
 	}
 	if capped {
 		// The walk read every folder it reached and stopped only at a
-		// counted bound, with no protected file among the matches it read:
-		// the reading is TRUNCATED (the one bound rule), recorded on the
-		// hook call (noteGlobCut), not a protected target. The name match
+		// counted bound, with no protected file among the matches it read.
+		// In a write position that stays a protected target, as on
+		// rel/1.0.10; elsewhere the reading is TRUNCATED (the one bound
+		// rule), recorded on the hook call (noteGlobCut). The name match
 		// above still holds a pattern that can spell .ssh or a key file
-		// (rel-1-0-10:GAP-1324).
-		globs.note(pattern, GlobFactCapped)
+		// (rel-1-0-10:GAP-1324, GAP-2300).
+		note(GlobFactCapped)
+		if write {
+			return true
+		}
 		noteGlobCut(bounded.Of(bounded.Paths))
 		return false
 	}
 	if hidden && unseen {
-		if answer := globs.answer(pattern); answer != "" {
+		answer := globs.answer(pattern)
+		if answer == "" && raw != "" {
+			answer = globs.answer(raw)
+		}
+		if answer != "" {
 			// A walk this process could not see defers to the client,
 			// which expanded the pattern as the user; its walk past a
-			// bound is TRUNCATED, as this process's own would be.
+			// bound reads as this process's own would (above).
 			if answer == GlobFactCapped {
+				if write {
+					return true
+				}
 				noteGlobCut(bounded.Of(bounded.Paths))
 				return false
 			}
@@ -3884,6 +3931,11 @@ func actionKnownReadOnlyShellMode(file *syntax.File, home string, depth int, bod
 		case "uniq", "tar", "gtar", "bsdtar", "find", "gfind":
 			words, known := actionStaticWords(call.Args, home)
 			safe = known && actionReadsOnlyWords(words)
+		case "git":
+			// git status reports the work tree and writes no file a rule
+			// protects (substrate-1 GAP-0994: cd ~/.ssh && git status).
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionGitStatusOnly(words[1:])
 		case "pwsh", "powershell":
 			// pwsh -Command "Get-ChildItem ~/.ssh" lists names, as ls does
 			// (rel-1-0-6:GAP-0145).
@@ -6211,7 +6263,7 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	// On the host, expand every component through junctions and links
 	// (GAP-1445).
 	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReachAs(
-		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil, true) {
+		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil, true, true) {
 		return true
 	}
 	if strings.ContainsAny(parent, "*?[") {
@@ -6707,4 +6759,139 @@ func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bo
 // glob reading of a quoted pattern came back there (rel-1-0-10:GAP-1627).
 func actionPlainValueJudged(resolverPattern, windowsHost bool, value string) bool {
 	return !resolverPattern || windowsHost && strings.Contains(value, `\`)
+}
+
+// actionExcludeOptionValueWords are the words of a tar or rsync call that
+// hold an --exclude pattern (--exclude=.ssh, or the word after --exclude):
+// what the call leaves out of an archive or a copy, never a file it reads
+// or writes (substrate-1 GAP-0994). A word after -- is an operand. A word
+// that is the value of the option before it is no --exclude
+// (actionExcludeValueTaken): in rsync -a /tmp/k -e --exclude
+// ~/.ssh/authorized_keys the --exclude is the -e command and the next word
+// the destination, and reading it as a pattern lowered the
+// persistence.ssh_authorized_keys_command block of base to an allow
+// (CHK-T6-SGB rows E1, E8). The last word of an rsync call is never a
+// pattern: it is the destination wherever rsync does not take it as one.
+func actionExcludeOptionValueWords(call *syntax.CallExpr, home string) []*syntax.Word {
+	if call == nil || len(call.Args) < 2 {
+		return nil
+	}
+	program, known := staticProgramWord(call.Args[0], home)
+	if !known {
+		return nil
+	}
+	base := programBase(program)
+	switch base {
+	case "tar", "gtar", "bsdtar", "rsync":
+	default:
+		return nil
+	}
+	rsync := base == "rsync"
+	last := len(call.Args) - 1
+	// pending counts the words the options before take as their values:
+	// a tar old-style first word (cf) takes one per value letter, in order.
+	pending := 0
+	var out []*syntax.Word
+	for i := 1; i < len(call.Args); i++ {
+		word, static := StaticWord(call.Args[i], home)
+		if !static || word == "--" && pending == 0 {
+			break
+		}
+		if pending > 0 {
+			pending--
+			continue
+		}
+		name, _, valued := strings.Cut(word, "=")
+		switch {
+		case valued && name == "--exclude":
+			if !rsync || i != last {
+				out = append(out, call.Args[i])
+			}
+		case word == "--exclude" && i+1 < len(call.Args):
+			if _, static := StaticWord(call.Args[i+1], home); !static || rsync && i+1 == last {
+				return out
+			}
+			out = append(out, call.Args[i+1])
+			i++
+		default:
+			pending = actionExcludeValueTaken(word, rsync, i == 1)
+		}
+	}
+	return out
+}
+
+// actionExcludeValueTaken is how many of the next words an option word of
+// a tar or rsync call takes as values: 1 for a long option with no = that
+// is, or abbreviates, one that takes a value (getopt_long takes a unique
+// prefix), and for a short cluster whose first letter that takes a value
+// ends it (-e, -ae, -czf); for a tar old-style first word with no dash
+// (cf, czf), one per letter that takes a value. Any other word takes none.
+// An unknown long option that abbreviates a value option counts as one.
+// The options that take a value (GNU tar, bsdtar and rsync 3.x manuals; a
+// letter or name that takes one in any of the tars counts for every tar)
+// are tables of tminTableSpec, so they add no literals to the package sweep
+// (TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget).
+func actionExcludeValueTaken(word string, rsync, first bool) int {
+	shortValues, longValues := tminTable(tminExcludeTarLetters)[0], tminTable(tminExcludeTarOptions)
+	if rsync {
+		shortValues, longValues = tminTable(tminExcludeRsyncLetters)[0], tminTable(tminExcludeRsyncOptions)
+	}
+	switch {
+	case strings.HasPrefix(word, "--"):
+		name := word[2:]
+		if name == "" || strings.Contains(name, "=") {
+			return 0
+		}
+		for _, long := range longValues {
+			if strings.HasPrefix(long, name) {
+				return 1
+			}
+		}
+		return 0
+	case strings.HasPrefix(word, "-") && len(word) > 1:
+		for at := 1; at < len(word); at++ {
+			if strings.IndexByte(shortValues, word[at]) >= 0 {
+				if at == len(word)-1 {
+					return 1
+				}
+				return 0
+			}
+		}
+		return 0
+	case first && !rsync && word != "" && !strings.ContainsFunc(word, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsLetter(r) }):
+		count := 0
+		for at := 0; at < len(word); at++ {
+			if strings.IndexByte(shortValues, word[at]) >= 0 {
+				count++
+			}
+		}
+		return count
+	}
+	return 0
+}
+
+// actionGitStatusDisplayOptions are the display options of git status that
+// actionGitStatusOnly accepts; one ending in = takes any value. One spec
+// string, not a literal per option: every string literal of the package is
+// a word or an option of the GAP-0749 bounded sweep.
+var actionGitStatusDisplayOptions = strings.Fields(`-s --short -b --branch --long
+	--porcelain --porcelain=v1 --porcelain=v2 --show-stash -u -uno -unormal -uall
+	--untracked-files --untracked-files= --ahead-behind --no-ahead-behind --no-renames --renames`)
+
+// actionGitStatusOnly reports git arguments that are a plain status with
+// only display options: no global option before the subcommand (-C, -c,
+// --git-dir and the like change what git reads or runs), no pathspec
+// (substrate-1 GAP-0994).
+func actionGitStatusOnly(args []string) bool {
+	if len(args) == 0 || args[0] != "status" {
+		return false
+	}
+	for _, arg := range args[1:] {
+		if !slices.ContainsFunc(actionGitStatusDisplayOptions, func(option string) bool {
+			return arg == option || strings.HasSuffix(option, "=") && strings.HasPrefix(arg, option)
+		}) {
+			return false
+		}
+	}
+	return true
 }

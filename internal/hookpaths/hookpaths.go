@@ -674,7 +674,63 @@ func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
 }
 
-func init() { actionfacts.SetOperandLinkProbe(directoryHasLink) }
+// MentionOperandPath is actionfacts.MentionOperandPath.
+func MentionOperandPath(name, cwd string) string {
+	return actionfacts.MentionOperandPath(name, cwd)
+}
+
+func init() {
+	actionfacts.SetOperandLinkProbe(directoryHasLink)
+	actionfacts.SetOperandPlainDirProbe(plainDirectory)
+}
+
+// plainDirectory reports a directory that exists and whose path passes
+// through no link: a dot-dot step after it climbs to its parent folder, as
+// the cleaned spelling says (rel-1-0-10:GAP-1648). A path that cannot be
+// read is not one.
+//
+// Off Windows the folders are read from the top and the first link ends the
+// read: OperandPath asks again for every reader of the operand, and under a
+// home reached through a link the full link walk of each ask made a find of
+// 50 such roots 1.3 times the 1.0.10 hook time (rel-1-0-10:GAP-2299). The
+// answer is the one of the link walk: a path whose every folder is a folder
+// and no link is the path the walk resolves. Windows (where the walk also
+// reads mount points and short names) and a fixture tree that maps the path
+// keep the full walk.
+func plainDirectory(dir string) bool {
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	clean := filepath.Clean(dir)
+	if runtime.GOOS != "windows" && fixturefs.Map(clean) == clean {
+		return noLinkFolders(clean)
+	}
+	if info, err := pathStat(clean); err != nil || !info.IsDir() {
+		return false
+	}
+	real, err := pathEvalSymlinks(clean)
+	return err == nil && real == clean
+}
+
+// noLinkFolders reports a clean absolute POSIX path whose every component,
+// read from the root down, is a folder and not a link.
+func noLinkFolders(clean string) bool {
+	for end := 1; ; end++ {
+		next := strings.IndexByte(clean[end:], '/')
+		prefix := clean
+		if next >= 0 {
+			prefix = clean[:end+next]
+		}
+		info, err := pathLstat(prefix)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+		if next < 0 {
+			return true
+		}
+		end += next
+	}
+}
 
 // directoryHasLink reports a directory whose path, or the longest existing
 // part of it, passes through a link. A directory that does not exist yet is
@@ -1537,10 +1593,22 @@ type protectedFile struct {
 	path    string
 	info    os.FileInfo
 	unknown bool
+	// physical is the path the link-aware walk resolves path to
+	// (ResolveWriteTarget), when it differs: a registered hook file or
+	// folder below a HOME reached through a link is spelled through the
+	// link, while every operand is compared resolved, so a recursive rm of
+	// the hook folder reached none of it while the find reader, which
+	// compares both spellings, did (rel-1-0-10:GAP-2285). Empty for a set
+	// that lists its resolved spellings as entries of their own (the key
+	// files).
+	physical string
 	// call is the hook call whose memory newProtectedFiles read the set
 	// from (nil: none): target stats through it rather than finding the
 	// call again for every target (rel-1-0-10:GAP-1293).
 	call *hookCall
+	// finds is the find memory shared by the set registrationWriteReachedAs
+	// narrows (nil: none; findReads).
+	finds *findReads
 }
 
 // stat is callStat through the hook call the set was read in.
@@ -1648,7 +1716,7 @@ func newProtectedFilesWith(home string, memo *TargetMemo) protectedFiles {
 // has reports a resolved target that is one of the protected paths.
 func (files protectedFiles) has(resolved string) bool {
 	for _, p := range files {
-		if samePathName(resolved, p.path) {
+		if samePathName(resolved, p.path) || p.physical != "" && samePathName(resolved, p.physical) {
 			return true
 		}
 	}
@@ -2642,6 +2710,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
 		}
+		written := path
 		path = OperandPath(path, cwd)
 		if old, present := targets[path]; present {
 			if safeRedirect {
@@ -2787,6 +2856,47 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			if cost := len(jsonString(key)) + 1 + len(jsonString("1")) + 1; size+cost <= maxEncodedTargets {
 				targets[key] = "1"
 				size += cost
+			}
+		}
+		// OperandPath applies a dot-dot step only where this process reads
+		// the folder in front of it as a plain directory
+		// (rel-1-0-10:GAP-1648). A managed gateway that cannot read the
+		// user's home keeps the same operand raw and asks by that spelling,
+		// so the answer is listed under the uncleaned spelling as well: the
+		// step was applied because the kernel climbs to the same folder, so
+		// both name the same file. Listed by the clean spelling alone, a
+		// managed gateway found no answer for a write through
+		// ordinary/../link or ../project/link and allowed what the
+		// per-user gateway blocks (rel-1-0-10:GAP-2294).
+		if raw := operandRawSpelling(written, cwd); raw != path && hasDotDotStep(filepath.ToSlash(raw)) && len(raw) <= MaxWriteTargetPathBytes {
+			// The raw spelling follows the clean key's rule: a later writer
+			// of the same spelling replaces the answer of an earlier one
+			// (safeRedirect keeps it), or a gateway that keeps the step raw
+			// read the earlier, weaker answer (CHK-RF-VB7D N1).
+			if old, present := targets[raw]; present && !safeRedirect {
+				size -= len(jsonString(raw)) + 1 + len(jsonString(old)) + 1
+				delete(targets, raw)
+			}
+			if _, present := targets[raw]; !present {
+				cost := len(jsonString(raw)) + 1 + len(jsonString(resolved)) + 1
+				if linkText != "" {
+					cost += len(jsonString(LinkTextFactPrefix+raw)) + 1 + len(jsonString(linkText)) + 1
+				}
+				if entryOnly {
+					cost += len(jsonString(ReplacedLinkFactPrefix+raw)) + 1 + len(jsonString("1")) + 1
+				}
+				if len(targets)-1 >= MaxWriteTargets || size+cost > maxEncodedTargets {
+					truncated, overBudget = true, true
+				} else {
+					size += cost
+					targets[raw] = resolved
+					if linkText != "" {
+						targets[LinkTextFactPrefix+raw] = linkText
+					}
+					if entryOnly {
+						targets[ReplacedLinkFactPrefix+raw] = "1"
+					}
+				}
 			}
 		}
 		if resolved != "" && !entryOnly {
@@ -3866,12 +3976,29 @@ func Decode(value string) (map[string]string, bool) {
 	return targets, true
 }
 
-// rawDotDotOperand keeps the shell spelling when a link can precede "..".
+// RawDotDotOperand keeps the shell spelling when a link can precede "..":
+// the operand when it is absolute, else the operand joined to cwd with one
+// separator, uncleaned. It is the key the hook client lists its walk under
+// and a managed gateway asks by, so it reads no file: OperandPath applies a
+// dot-dot step where this process reads the folder in front of it as a
+// plain directory (rel-1-0-10:GAP-1648), and a client that reads the home
+// would key a clean spelling that a gateway that cannot read it never asks
+// for (rel-1-0-10:GAP-2294).
 func RawDotDotOperand(value, cwd string) (string, bool) {
 	if !strings.Contains(filepath.ToSlash(value), "/../") || strings.ContainsAny(value, "*?[]$`~") || !filepath.IsAbs(cwd) {
 		return "", false
 	}
-	return OperandPath(value, cwd), true
+	return operandRawSpelling(value, cwd), true
+}
+
+// operandRawSpelling is an operand with every dot-dot step kept: the operand
+// when it is absolute or cwd is not, else the operand joined to cwd with one
+// separator, uncleaned.
+func operandRawSpelling(name, cwd string) string {
+	if filepath.IsAbs(name) || !filepath.IsAbs(cwd) {
+		return name
+	}
+	return cwd + string(filepath.Separator) + name
 }
 
 // pathFactIsNativeWrite reports whether a path fact is the target of a write
@@ -6856,6 +6983,15 @@ func ProcCWDWriteOperand(path string) bool {
 // archiveCopyDestination reads the final destination of an rsync, pax, or
 // cpio copy. Their operand grammar differs from cp's option grammar.
 func archiveCopyDestination(args []string, static []bool, cwd string) string {
+	if word := archiveCopyDestinationWord(args, static); word != "" {
+		return copyDestinationPath(word, cwd, nil)
+	}
+	return ""
+}
+
+// archiveCopyDestinationWord is the destination word archiveCopyDestination
+// places, as written.
+func archiveCopyDestinationWord(args []string, static []bool) string {
 	for i := len(args) - 1; i >= 0; i-- {
 		if !static[i] {
 			return ""
@@ -6864,7 +7000,7 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 			continue
 		}
 		if !strings.HasPrefix(args[i], "-") {
-			return copyDestinationPath(args[i], cwd)
+			return args[i]
 		}
 	}
 	return ""
@@ -7498,11 +7634,16 @@ func (l *shellLinks) copyLinks(copied linkCopy, facts map[string]string) bool {
 }
 
 func cpDestination(args []string, static []bool, cwd string) string {
+	return cpDestinationWith(args, static, cwd, nil)
+}
+
+// cpDestinationWith is cpDestination with the links the command makes.
+func cpDestinationWith(args []string, static []bool, cwd string, made madeLinks) string {
 	parsed := cpOperands(args, static)
 	if !parsed.ok {
 		return ""
 	}
-	return copyDestinationPath(parsed.destination, cwd)
+	return copyDestinationPath(parsed.destination, cwd, made)
 }
 
 // copyDestinationPath places a copy destination. A destination below a
@@ -7511,9 +7652,12 @@ func cpDestination(args []string, static []bool, cwd string) string {
 // (rel-1-0-10:GAP-2227, GAP-2237). Every other destination is cleaned as
 // before, so readers that match it against a registered file (the hook
 // config guard) see the file it names: keeping a plain dot-dot raw lost the
-// tamper finding of a copy into a hook config through x/.. (GAP-2274).
-func copyDestinationPath(name, cwd string) string {
-	if placed := OperandPath(name, cwd); throughProcessLink(placed) {
+// tamper finding of a copy into a hook config through x/.. (GAP-2274). A
+// dot-dot that steps out of a link, one the command makes (made) or one on
+// disk, also stays raw: the kernel applies it from the link target, which a
+// clean erases (rel-1-0-10:GAP-2287).
+func copyDestinationPath(name, cwd string, made madeLinks) string {
+	if placed := OperandPath(name, cwd); throughProcessLink(placed) || made.linkBeforeStep(placed) {
 		return placed
 	}
 	if !filepath.IsAbs(name) {
@@ -8252,7 +8396,13 @@ func programBase(word string) string {
 	if index := strings.LastIndexAny(word, `/\`); index >= 0 {
 		word = word[index+1:]
 	}
-	return strings.TrimSuffix(strings.ToLower(word), ".exe")
+	word = strings.TrimSuffix(strings.ToLower(word), ".exe")
+	// A versioned perl binary (perl5.38, perl5.38.2) is perl to every
+	// reader (GAP-1097).
+	if len(word) > len("perl") && strings.HasPrefix(word, "perl") && strings.Trim(word[len("perl"):], "0123456789.") == "" {
+		return "perl"
+	}
+	return word
 }
 
 // Long options of ln and cp that matter here, and the flags that share their

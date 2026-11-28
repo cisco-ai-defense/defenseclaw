@@ -195,6 +195,58 @@ func (l *Ledger) Unknown(key, period string, now time.Time) bool {
 	return now.Sub(at) < UnknownTTL && dayNumber(at) >= windowStart(period, now)
 }
 
+// UnknownMark is the last call of unknown cost of one key. The replicas of
+// a cluster share their marks through the leader on each sync, so a key one
+// replica marked is unknown on every replica within about one sync
+// interval, as known spend is (substrate-1:GAP-1118).
+type UnknownMark struct {
+	Key string
+	At  time.Time
+}
+
+// UnknownMarks returns the marks of this ledger within UnknownTTL of now.
+func (l *Ledger) UnknownMarks(now time.Time) []UnknownMark {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []UnknownMark
+	for key, at := range l.unknown {
+		if now.Sub(at) < UnknownTTL {
+			out = append(out, UnknownMark{Key: key, At: at})
+		}
+	}
+	return out
+}
+
+// MergeUnknown takes the marks other replicas made: a key keeps its latest
+// mark, a mark dated after now counts from now, and only the keys
+// MarkUnknown marks are taken.
+func (l *Ledger) MergeUnknown(marks []UnknownMark) {
+	if l == nil || len(marks) == 0 {
+		return
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, m := range marks {
+		if !strings.HasPrefix(m.Key, "user:") && !capped(m.Key) {
+			continue
+		}
+		at := m.At
+		if at.After(now) {
+			at = now
+		}
+		if now.Sub(at) >= UnknownTTL {
+			continue
+		}
+		if prev, ok := l.unknown[m.Key]; !ok || at.After(prev) {
+			l.unknown[m.Key] = at
+		}
+	}
+}
+
 // Spend returns the key's spend (local and remote) in the current period
 // window and whether its budget's remote spend is loaded.
 func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {

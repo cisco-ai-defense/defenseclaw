@@ -46,6 +46,37 @@ var (
 
 var errNoLeader = errors.New("budget spend: no leader")
 
+// UnknownRPC is the leader's side of the shared unknown-cost marks
+// (spendleader.Client): it takes this replica's marks and answers every
+// replica's live ones (substrate-1:GAP-1118).
+type UnknownRPC interface {
+	SpendUnknown(ctx context.Context, epoch string, marks []UnknownMark) ([]UnknownMark, error)
+}
+
+// UnknownSharer is a counter that shares the unknown-cost marks of the
+// replicas (LeaderCounter).
+type UnknownSharer interface {
+	ShareUnknown(ctx context.Context, epoch string, marks []UnknownMark) ([]UnknownMark, error)
+}
+
+var _ UnknownSharer = (*LeaderCounter)(nil)
+
+// ShareUnknown sends this replica's unknown-cost marks and returns every
+// replica's. A leader transport without the method fails it, and the marks
+// stay this replica's own.
+func (c *LeaderCounter) ShareUnknown(ctx context.Context, epoch string, marks []UnknownMark) ([]UnknownMark, error) {
+	if c == nil || c.rpc == nil {
+		return nil, errNoLeader
+	}
+	u, ok := c.rpc.(UnknownRPC)
+	if !ok {
+		return nil, errNoLeader
+	}
+	ctx, cancel := c.ctx(ctx)
+	defer cancel()
+	return u.SpendUnknown(ctx, epoch, marks)
+}
+
 // PrefixSums reads the per-budget sums of every epoch (a failed read keeps
 // the view this replica's).
 func (c *LeaderCounter) PrefixSums(ctx context.Context, epoch string, q []SumQuery) ([]PrefixSum, error) {

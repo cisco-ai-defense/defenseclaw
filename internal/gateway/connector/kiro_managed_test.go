@@ -254,13 +254,6 @@ func writeKiroCustomDefaultAgent(t *testing.T, home string) (custom, settings st
 // Teardown then puts the user's setting back with nothing of DefenseClaw
 // left in their agent.
 func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Managed Windows Setup refuses a profile that still has the
-		// .defenseclaw folder a per-user install left (users uninstall it
-		// first), and the managed locks refuse that install's lock files, so
-		// no managed Setup follows a per-user one there.
-		t.Skip("a per-user footprint is removed before a managed Windows install")
-	}
 	home := t.TempDir()
 	workspace := t.TempDir()
 	dataDir := t.TempDir()
@@ -352,14 +345,7 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 // the reclaim already took DefenseClaw's hooks out of the user's own
 // agent, which must not stay the default without them.
 func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Managed Windows Setup refuses a profile that still has the
-		// .defenseclaw folder a per-user install left (users uninstall it
-		// first), and the managed locks refuse that install's lock files, so
-		// no managed Setup follows a per-user one there.
-		t.Skip("a per-user footprint is removed before a managed Windows install")
-	}
-	if os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only folder")
 	}
 	home := t.TempDir()
@@ -375,10 +361,7 @@ func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T
 		t.Fatalf("per-user Setup: %v", err)
 	}
 	hooks := filepath.Join(workspace, ".kiro", "hooks")
-	if err := os.Chmod(hooks, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
+	holdKiroWorkspaceCopyAgainstRemoval(t, hooks)
 
 	managed := perUser
 	managed.ManagedEnterprise = true

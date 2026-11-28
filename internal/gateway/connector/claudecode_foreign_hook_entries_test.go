@@ -141,9 +141,6 @@ func mustReadClaudeSettingsForTest(t *testing.T, path string) string {
 // back after a failed start, its cached hook path keeps blocking with the
 // cause instead of exiting 0.
 func TestClaudeCode_MalformedSettingsRefusedAndRollbackKeepsBlocking(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher")
-	}
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	ClaudeCodeSettingsPathOverride = settingsPath
@@ -175,6 +172,17 @@ func TestClaudeCode_MalformedSettingsRefusedAndRollbackKeepsBlocking(t *testing.
 	if !opts.FailedSetupFailClosed {
 		t.Fatal("a closed Claude Code connector is not reported fail-closed")
 	}
+	if after, readErr := os.ReadFile(settingsPath); readErr != nil || string(after) != "{\"model\": \"x\"}\n{ broken\n" {
+		t.Fatalf("the refused Setup changed settings.json: %q, %v", after, readErr)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows registers the native launcher behind a cmd.exe guard, not a
+		// hook script, so there is no placeholder script to leave. The
+		// registered command is what keeps blocking, with the cause, once the
+		// launcher cannot start.
+		claudeCodeWindowsRegisteredCommandBlocksWhenLauncherMissing(t, opts, filepath.Join(dir, "gone", windowsHookBinaryName))
+		return
+	}
 	if err := writeDisabledHookTombstone(opts, "claude-code-hook.sh", "Claude Code"); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +200,8 @@ func TestClaudeCode_MalformedSettingsRefusedAndRollbackKeepsBlocking(t *testing.
 // otherwise, and an old-home guarded entry is still claimed for repair.
 func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher")
+		claudeCodeWindowsPerUserCommandFailsClosedWhenLauncherMissing(t)
+		return
 	}
 	dir := t.TempDir()
 	script := filepath.Join(dir, "Alice Smith", ".defenseclaw", "hooks", "claude-code-hook.sh")

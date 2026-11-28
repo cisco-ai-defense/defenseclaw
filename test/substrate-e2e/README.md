@@ -21,6 +21,10 @@ Against a cluster that already runs Substrate (a dev cluster), in your own names
 
     E2E_CLUSTER_MODE=existing E2E_NAMESPACE=mine E2E_ATESPACE=mine-gv test/substrate-e2e/run.sh
 
+The chart as shipped has the skill scanner sidecar off. The default run turns it on (and builds its image) to prove the sidecar; this run installs the chart without that setting and checks the gateway pod carries no scanner container, so no image beyond the gateway's is needed:
+
+    E2E_SKILL_SCANNER=off test/substrate-e2e/run.sh
+
 The settings are the `E2E_*` variables at the top of `run.sh`. Results go to `$E2E_ARTIFACTS/results.tsv`, and a failure writes pod logs and events to `$E2E_ARTIFACTS/diagnostics/`. The script exits non-zero when any check fails.
 
 The stub agent in `stub/` is test code. It holds no credentials and is never shipped.

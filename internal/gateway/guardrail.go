@@ -1925,10 +1925,12 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // (proxyRuleGeneration).
 //
 // A prompt with a parts view (withPromptPartsView) is also scanned as the
-// model reads it, and the two verdicts are unioned (GAP-0465).
+// model reads it, and the two verdicts are unioned (GAP-0465). A mid-stream
+// check of a stream reads content with the stream's memo
+// (midStreamScanState, GAP-0515); the parts view is read whole.
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
 	rules, patterns := proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx))
-	verdict := scanLocalPatternsWithActivation(direction, content, rules, patterns)
+	verdict := scanLocalPatternsWithState(direction, content, rules, patterns, midStreamScanStateOf(ctx))
 	if view := promptPartsViewOf(ctx, content); view != "" {
 		verdict = unionLocalPatternVerdicts(verdict, scanLocalPatternsWithActivation(direction, view, rules, patterns))
 	}
@@ -1961,17 +1963,24 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 // single pass. One reading is the proxy's own: a weak password assigned to a
 // bare password key (weakPasswordAssignmentFindings).
 func scanUntrustedContentRules(generation *compiledRulePackCategories, content string) []RuleFinding {
-	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
-	findings = unionRuleFindings(findings, weakPasswordAssignmentFindings(generation, content))
+	return scanUntrustedContentRulesWithState(generation, content, nil)
+}
+
+// scanUntrustedContentRulesWithState is scanUntrustedContentRules for a
+// mid-stream check of a stream: every text it reads keeps its answers in st
+// (midStreamScanState, GAP-0515; nil: none).
+func scanUntrustedContentRulesWithState(generation *compiledRulePackCategories, content string, st *midStreamScanState) []RuleFinding {
+	findings := scanContentRulesWithOptions(generation, content, "", ruleContentScopeUntrusted, ruleScanOptions{memo: st, memoRole: "content"})
+	findings = unionRuleFindings(findings, weakPasswordAssignmentFindings(generation, content, st))
 	if secureClientGeneration() {
 		return findings
 	}
 	if folded := trustPatternText(content); folded != content {
 		findings = unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
-			contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+			contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit", memo: st, memoRole: "trust",
 		}))
 	}
-	return withZeroWidthSecretFindings(generation, findings, content, "", ruleContentScopeUntrusted)
+	return withZeroWidthSecretFindingsWithState(generation, findings, content, "", ruleContentScopeUntrusted, st)
 }
 
 // withZeroWidthSecretFindings adds to findings the secret rules found on
@@ -1989,12 +1998,18 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 // two findings (unionRuleFindings). Off under Secure Client, like the folded
 // trust pass: callers skip it there.
 func withZeroWidthSecretFindings(generation *compiledRulePackCategories, findings []RuleFinding, content, toolName string, scope ruleContentScope) []RuleFinding {
+	return withZeroWidthSecretFindingsWithState(generation, findings, content, toolName, scope, nil)
+}
+
+// withZeroWidthSecretFindingsWithState is withZeroWidthSecretFindings with
+// the memo of a stream's mid-stream checks (GAP-0515; nil: none).
+func withZeroWidthSecretFindingsWithState(generation *compiledRulePackCategories, findings []RuleFinding, content, toolName string, scope ruleContentScope, st *midStreamScanState) []RuleFinding {
 	invisible := credentialVisibleText(content)
 	if invisible == content {
 		return findings
 	}
 	return unionRuleFindings(findings, scanRuleGeneration(generation, invisible, toolName, ruleScanOptions{
-		contentScope: scope, onlyCategory: "secret",
+		contentScope: scope, onlyCategory: "secret", memo: st, memoRole: "visible",
 	}))
 }
 
@@ -2012,14 +2027,17 @@ func withZeroWidthSecretFindings(generation *compiledRulePackCategories, finding
 // pattern, so a pack that disables or replaces SEC-PASSWORD-ASSIGN turns this
 // off or changes them. The text without its invisible characters
 // (credentialVisibleText) is read too, as rel read its normalized text.
-func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string) []RuleFinding {
+//
+// st is the memo of a stream's mid-stream checks (GAP-0515; nil: none): the
+// literal check of content reads it through the memo.
+func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string, st *midStreamScanState) []RuleFinding {
 	if generation == nil {
 		return nil
 	}
 	if len(generation.members) > 0 {
 		var out []RuleFinding
 		for i, member := range generation.members {
-			findings := weakPasswordAssignmentFindings(member, content)
+			findings := weakPasswordAssignmentFindings(member, content, st)
 			if i < len(generation.memberNames) {
 				for j := range findings {
 					findings[j].profile = generation.memberNames[i]
@@ -2042,7 +2060,11 @@ func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, cont
 				continue
 			}
 			for _, text := range texts {
-				if !(&ruleScanText{text: text}).mayMatch(rule.Pattern) {
+				scan := &ruleScanText{text: text}
+				if st != nil && text == content {
+					scan, _ = st.scanTexts("content", text)
+				}
+				if !scan.mayMatch(rule.Pattern) {
 					continue
 				}
 				for _, loc := range rule.Pattern.FindAllStringIndex(text, -1) {
@@ -2104,6 +2126,19 @@ func scanLocalPatternsWithActivation(
 	rules *compiledRulePackCategories,
 	activation *localPatternsActivation,
 ) *ScanVerdict {
+	return scanLocalPatternsWithState(direction, content, rules, activation, nil)
+}
+
+// scanLocalPatternsWithState is scanLocalPatternsWithActivation with the
+// memo of one stream's mid-stream checks (midStreamScanState, GAP-0515; nil:
+// none). The normalized text and the matches of the PII data regexes come
+// from the memo; they are the ones the whole text gives.
+func scanLocalPatternsWithState(
+	direction, content string,
+	rules *compiledRulePackCategories,
+	activation *localPatternsActivation,
+	st *midStreamScanState,
+) *ScanVerdict {
 	// managed_enterprise: local regex detection is disabled — Cisco AI
 	// Defense is authoritative. Return an allow verdict so any residual
 	// call site (router lane, etc.) produces no local signal.
@@ -2134,7 +2169,7 @@ func scanLocalPatternsWithActivation(
 	// normalized string so "/ etc / passwd" and "/etc//passwd" still
 	// flag; the judge still receives `content` (the unmodified original)
 	// to avoid false-positive leakage from normalization.
-	lower := normalizeForTriage(content)
+	lower := st.normalizeForTriage(content)
 	var flags []string
 	isHigh := false
 	type localPIICandidate struct {
@@ -2186,7 +2221,7 @@ func scanLocalPatternsWithActivation(
 	// be a lie: PII/secret regexes are exactly the surfaces an attacker
 	// would target with invisible-character splicing.
 	for _, re := range piiDRegexes {
-		if match, _, ok := findAcceptedLocalPIIMatch(content, lower, re); ok {
+		if match, _, ok := st.findAcceptedLocalPIIMatch(content, lower, re); ok {
 			localPIICandidates = append(localPIICandidates, localPIICandidate{
 				evidence: normalizedPIIEvidenceKey(sanitizeEvidence(match)),
 			})
@@ -2220,7 +2255,7 @@ func scanLocalPatternsWithActivation(
 	// hit is at least MEDIUM, HIGH for the high-signal ones. A rule-pack
 	// finding carries its own severity and nothing else (rel-1-0-10:GAP-0172).
 	maxRuleSev := "NONE"
-	ruleFindings := scanUntrustedContentRules(rules, content)
+	ruleFindings := scanUntrustedContentRulesWithState(rules, content, st)
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {

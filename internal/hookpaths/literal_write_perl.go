@@ -592,10 +592,13 @@ func perlProvenWrites(code, cwd, home string, depth int) []string {
 		return nil
 	}
 	calls := perlCalls(tokens)
-	override := perlResolveOverrides(tokens, calls)
-	paths := perlResolveDirectWrites(tokens, calls, override.skip)
+	// One S1 index answers every scalar the readers below resolve
+	// (rel-1-0-10:GAP-2230).
+	s1 := &perlS1Lazy{}
+	override := perlResolveOverrides(s1, tokens, calls)
+	paths := perlResolveDirectWrites(s1, tokens, calls, override.skip)
 	paths = append(paths, override.paths...)
-	paths = append(paths, perlSysopenWrites(tokens, calls, perlNamedDefinitions(tokens), override.skip)...)
+	paths = append(paths, perlSysopenWrites(s1, tokens, calls, perlNamedDefinitions(s1, tokens), override.skip)...)
 	return append(paths, perlPipeWrites(tokens, calls, override.skip, cwd, home, depth)...)
 }
 
@@ -615,17 +618,21 @@ type perlBlock struct {
 func perlBlockContexts(tokens []perlToken) ([]perlBlock, bool) {
 	blocks := []perlBlock{{parent: -1, kind: "root"}}
 	stack := []int{0}
-	stmtStart := 0
+	stmtStart, marked := 0, 0
 	for i := range tokens {
 		tokens[i].block = stack[len(stack)-1]
 		tokens[i].blockKind = blocks[stack[len(stack)-1]].kind
 		switch tokens[i].text {
 		case "while", "until", "for", "foreach":
-			if i > stmtStart {
-				for j := stmtStart; j < i; j++ {
-					tokens[j].modifierLoop = true
-				}
+			// Each loop word marks the statement before it. The words before
+			// an earlier loop word of the statement are marked already, so
+			// only the rest is: a statement of n loop words was read n times
+			// (rel-1-0-10:GAP-2230).
+			from := max(stmtStart, marked)
+			for j := from; j < i; j++ {
+				tokens[j].modifierLoop = true
 			}
+			marked = max(marked, i)
 		case ";":
 			stmtStart = i + 1
 		case "{":
