@@ -1,6 +1,7 @@
 package actionfacts
 
 import (
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -131,6 +132,12 @@ func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
 		{"nsenter target root", "nsenter --target=1 --root sh -c ': >> .defenseclaw/config.yaml'", "", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			if row.name == "nsenter relative parent" && runtime.GOOS == "windows" {
+				// A relative --wd keeps its native meaning on a Windows
+				// host, where the gateway cannot place it: the child folder
+				// is unknown (staticNSEnterWorkDir, rel-1-0-10:GAP-1881).
+				row.cwd, row.unknown = "", true
+			}
 			input := Input{Tool: "Bash", Command: row.command, CWD: "/home/u", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
 			got := SimpleCommands(input, Analyze(input))
 			if !slices.ContainsFunc(got, func(s SimpleCommand) bool {
