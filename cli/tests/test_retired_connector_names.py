@@ -120,9 +120,11 @@ VENDORED_LOCAL_FILES: dict[str, frozenset[str]] = {
         {
             VENDORED_README,
             "bifrost.go",
+            "providers/replicate/replicate.go",
             "providers/utils/proxy_conn.go",
             "providers/utils/roundtripper.go",
             "providers/utils/utils.go",
+            "schemas/bifrost.go",
         }
     ),
     "fsnotify": frozenset({VENDORED_README, "backend_kqueue.go", "backend_windows.go"}),
