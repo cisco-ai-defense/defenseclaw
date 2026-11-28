@@ -2028,6 +2028,8 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-2293", page: "support-matrix.mdx", section: "Platforms", has: ["On Windows, `defenseclaw-hook.exe` is about 53 MiB in the 1.0.10 release, because the OpenClaw extension bundle is built into it."], lacks: ["against about 41 MiB without it"] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-1639): a credentials file passed by name to a script is not tracked as a read.
   { gap: "rel-1-0-10 GAP-1639", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A credentials file passed by name to a script (for example a Python or Node script) is not tracked as a read; DefenseClaw does not read the script's code."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0898): a find -exec reader over another account's home outside the home roots is not tracked as a read.
+  { gap: "rel-1-0-10 GAP-0898", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A find -exec reader over another account's home outside /home and /Users is not raised as a read of that account's credentials; use file permissions for shared or mounted homes."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
