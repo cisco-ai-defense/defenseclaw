@@ -2492,10 +2492,14 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	// pass was a strict block where the laptop and both rels allow
 	// (substrate-1 GAP-0998, SEC10-K K12). A function, an alias or an enable
 	// that may change what break or continue runs, or a function that may
-	// run continue (guestFuncMayContinue), keeps every loop.
+	// run continue (guestFuncMayContinue), keeps every loop. So does an eval,
+	// source or . anywhere in the script: the text it runs may define a
+	// function the loop calls that runs continue, which the file does not
+	// declare (CHK-P49U P1, P3).
 	if slices.ContainsFunc(loops, func(loop span) bool { return loop.once }) &&
 		!slices.ContainsFunc(bodies, func(body span) bool { return body.name == "break" || body.name == "continue" }) &&
-		!slices.Contains(programs, "alias") && !slices.Contains(programs, "enable") && (len(bodies) == 0 || !guestFuncMayContinue(file)) {
+		!slices.Contains(programs, "alias") && !slices.Contains(programs, "enable") && (len(bodies) == 0 || !guestFuncMayContinue(file)) &&
+		!slices.ContainsFunc(callNodes, func(call *syntax.CallExpr) bool { return guestCallRunsText(call, home) }) {
 		loops = slices.DeleteFunc(loops, func(loop span) bool { return loop.once })
 	}
 	if len(loops) == 0 && len(bodies) == 0 {
@@ -2780,6 +2784,28 @@ func guestLoopMayContinue(call *syntax.CallExpr) bool {
 			continue
 		}
 		return lit == "" || lit == "continue" || lit == "eval" || lit == "source" || lit == "."
+	}
+	return false
+}
+
+// guestCallRunsText reports a call of eval, source or ., also run through
+// builtin or command and their options: the text it runs may define a
+// function (substrate-1 GAP-0998, CHK-P49U). Each word is read as bash reads
+// it (hookpaths.StaticWord), so a quoted or backslash runner word is one
+// too (CHK-0998C); a word with an expansion is no runner, as a dynamic
+// program word before the loop keeps the loop once (SEC10-K K12).
+func guestCallRunsText(call *syntax.CallExpr, home string) bool {
+	wrapped := false
+	for _, word := range call.Args {
+		lit, _ := hookpaths.StaticWord(word, home)
+		switch {
+		case lit == "builtin" || lit == "command":
+			wrapped = true
+			continue
+		case wrapped && strings.HasPrefix(lit, "-"):
+			continue
+		}
+		return lit == "eval" || lit == "source" || lit == "."
 	}
 	return false
 }
