@@ -2052,6 +2052,20 @@ const r105Rows: DocRow[] = [
   { gap: "substrate-1 GAP-0700", page: "substrate/threat-model.mdx", section: "Known limits", has: ["On Windows, a home file spelled with a drive letter in Git Bash text is judged by the Windows path rules."] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-2169): Windows hook binary size in 1.0.11
   { gap: "rel-1-0-10 GAP-2169", page: "support-matrix.mdx", section: "Platforms", has: ["The Windows hook binary is about 44 MB in 1.0.11; the added size is the command parsers that read what each tool call does."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0929): a here-document and a command chosen at run time
+  { gap: "rel-1-0-10 GAP-0929", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A command that feeds a here-document to a data reader and also runs a command chosen at run time, or has more statements after the reader, is judged at the unknown tier (an alert in default) even when the here-document holds only data."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1324): a write target that needs many folder reads
+  { gap: "rel-1-0-10 GAP-1324", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["When a write target pattern needs more folder reads to expand than DefenseClaw allows, the write keeps the protected-target verdict (a block), as in 1.0.10, even when the pattern would reach only ordinary files."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0350): a write target from an unset variable or substitution
+  { gap: "rel-1-0-10 GAP-0350", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A write whose target comes from an unset variable, a command substitution or a default expansion is judged by what DefenseClaw can resolve; when that reaches no protected file, the write is allowed."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0018): routine administration that is also an attack step
+  { gap: "rel-1-0-10 GAP-0018", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["DefenseClaw alerts, without blocking, on some routine administration that is also a known attack step: granting file capabilities or making files world-writable, reading a process environment, destructive SQL statements, and in strict mode reading .env files. Review these alerts in the context of the task."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0609): deeply encoded powershell
+  { gap: "rel-1-0-10 GAP-0609", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A PowerShell script that is encoded three or four times inside other encoded launchers is read, and its findings are recorded, but a finding that needs proof from the decoded script may alert rather than block; deeper nesting is blocked as over the evaluation limit."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0503): a read in the ssh folder after a shell function or cdpath move
+  { gap: "substrate-1 GAP-0503", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A read inside the SSH folder after a move made by a shell function or a CDPATH prefix can also name the authorized-keys rule beside the read rule; the verdict is the same or stricter."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0990): a trap or alias from an unreadable command
+  { gap: "substrate-1 GAP-0990", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A trap or alias installed by a command DefenseClaw cannot read statically is not followed into later functions."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
