@@ -167,6 +167,13 @@ type PathFact struct {
 	// (hookpaths.PrivateHomePlace): the destination of an own SSH folder
 	// copy, which alerts as on the laptop (substrate-1 GAP-0549).
 	PrivateHome bool `json:"private_home,omitempty"`
+	// Protected is set, for a CommandWordField fact of a call past the
+	// statement budget, on a word with no other place that may reach a
+	// protected file (hookpaths.ProtectedReach): a hard link to one, or its
+	// place in the SSH folder. The gateway reads the kit's protected-write
+	// proof past the budget only with such a claim, a link or a private
+	// home place (substrate-1 GAP-1156).
+	Protected bool `json:"protected,omitempty"`
 	// LinkChain lists each symlink hop from Abs, in order.
 	LinkChain []string `json:"link_chain,omitempty"`
 	// Type is file, dir, symlink (dangling), other or missing.

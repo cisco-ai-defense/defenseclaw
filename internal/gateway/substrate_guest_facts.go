@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -32,14 +33,14 @@ import (
 // the gateway uses them only to add the finding the laptop makes, never to
 // remove one; a claim that does not match the call it came with is ignored.
 
-// The kit sends at most 32 path facts (kit maxPathFacts) and two proofs. An
+// The kit sends at most 40 path facts (32 ordinary plus 8 shell-link facts) and two proofs. An
 // envelope with more facts, or more than 8 proofs, is not the kit's, and none of
 // its claims is read: the call is judged as one with no facts, which is never
 // more lenient than with them (substrate-1 GAP-0548). Reading the claims of
 // an envelope decodes each argument of its call once, so it is linear in the
 // envelope's size.
 const (
-	maxSubstrateGuestPathFacts = 32
+	maxSubstrateGuestPathFacts = 40
 	maxSubstrateGuestProofs    = 8
 	// maxSubstrateGuestLinkClaims bounds the file-tool link claims one call
 	// carries.
@@ -74,6 +75,12 @@ type substrateGuestClaims struct {
 	// lk has two (substrate-1 GAP-0623). words then keeps only a spelling
 	// with one place.
 	placedWords map[hookpaths.CommandWordAt]hookpaths.CommandWordPlace
+	// twinWords are the distinct places, in the kit's order, of each
+	// spelling words drops for having more than one. With no wordDir the
+	// twins read them one place per reading, so a spelling placed in two
+	// folders keeps both readings instead of losing its claim: echo x >> lk;
+	// cd docs && cat lk with no cwd (substrate-1 GAP-1156).
+	twinWords map[string][]hookpaths.CommandWordPlace
 	// wordDir is the folder the kit placed the words from
 	// (kit.ShellCommandDir); empty when it is not known, and the words are
 	// read as LinkResolvedCommand reads them.
@@ -85,6 +92,10 @@ type substrateGuestClaims struct {
 	// homePlaces are the places of the command's path words that the kit
 	// found private in the actor's home (kit.PathFact.PrivateHome).
 	homePlaces map[string]bool
+	// protectedWord is set when the kit found, past the statement budget, a
+	// path word of the command with no other place that may reach a
+	// protected file (kit.PathFact.Protected; substrate-1 GAP-1156).
+	protectedWord bool
 }
 
 // homePlaceView reads the kit's private home places; nil for no claims.
@@ -154,11 +165,23 @@ func substrateGuestClaimsOf(env substrateEnvelope) *substrateGuestClaims {
 				if places[fact.Path]++; places[fact.Path] == 1 {
 					claims.words[fact.Path] = place
 				} else {
-					delete(claims.words, fact.Path)
+					if first, single := claims.words[fact.Path]; single {
+						if claims.twinWords == nil {
+							claims.twinWords = map[string][]hookpaths.CommandWordPlace{}
+						}
+						claims.twinWords[fact.Path] = []hookpaths.CommandWordPlace{first}
+						delete(claims.words, fact.Path)
+					}
+					if !slices.Contains(claims.twinWords[fact.Path], place) {
+						claims.twinWords[fact.Path] = append(claims.twinWords[fact.Path], place)
+					}
 				}
 				if abs := substrateGuestPlace(fact.Abs); abs != "" {
 					claims.placedWords[hookpaths.CommandWordAt{Text: fact.Path, Abs: abs}] = place
 				}
+			}
+			if fact.Protected {
+				claims.protectedWord = true
 			}
 			if fact.PrivateHome {
 				for _, private := range []string{substrateGuestPlace(fact.Abs), place.Followed, place.Entry} {
@@ -220,7 +243,7 @@ func substrateGuestClaimsOf(env substrateEnvelope) *substrateGuestClaims {
 		}
 	}
 	if claims.keyReadCommand == "" && claims.protectedWriteCommand == "" && len(claims.links) == 0 &&
-		len(claims.placedWords) == 0 && len(claims.homePlaces) == 0 && !claims.cut {
+		len(claims.placedWords) == 0 && len(claims.homePlaces) == 0 && !claims.protectedWord && !claims.cut {
 		return nil
 	}
 	return claims
@@ -298,9 +321,9 @@ func substrateGuestCommandTwinRequests(request trustedActionRequest, claims *sub
 	for reading := range maxSubstrateGuestCommandTwins {
 		resolved, changed, more := command, false, false
 		if claims.wordDir == "" {
-			if reading == 0 {
-				resolved, changed = hookpaths.LinkResolvedCommand(command, request.Input.ActiveHome, claims.words)
-			}
+			var words map[string]hookpaths.CommandWordPlace
+			words, more = claims.wordsReading(reading)
+			resolved, changed = hookpaths.LinkResolvedCommand(command, request.Input.ActiveHome, words)
 		} else {
 			resolved, changed, more = hookpaths.PlacedLinkResolvedCommand(command, claims.wordDir,
 				request.Input.ActiveHome, claims.placedWords, claims.words, reading)
@@ -319,6 +342,28 @@ func substrateGuestCommandTwinRequests(request trustedActionRequest, claims *sub
 		}
 	}
 	return twins, true
+}
+
+// wordsReading are the places by spelling of one reading of a call whose
+// folder the kit's claims do not name: each spelling with one place, and
+// each spelling with more places (twinWords) at its place for reading, its
+// last one past them. more is set when a later reading places a spelling
+// differently. A twin only adds findings, so reading every place is never
+// more lenient than reading none (substrate-1 GAP-1156).
+func (claims *substrateGuestClaims) wordsReading(reading int) (words map[string]hookpaths.CommandWordPlace, more bool) {
+	if len(claims.twinWords) == 0 {
+		if reading == 0 {
+			return claims.words, false
+		}
+		return nil, false
+	}
+	words = make(map[string]hookpaths.CommandWordPlace, len(claims.words)+len(claims.twinWords))
+	maps.Copy(words, claims.words)
+	for text, places := range claims.twinWords {
+		words[text] = places[min(reading, len(places)-1)]
+		more = more || len(places) > reading+1
+	}
+	return words, more
 }
 
 // substrateGuestLinkTwinRequest is a file-tool call of an actor with each

@@ -114,6 +114,7 @@ type SubstratePathFact struct {
 	Resolved    string   `json:"resolved,omitempty"`
 	Entry       string   `json:"entry,omitempty"`
 	PrivateHome bool     `json:"private_home,omitempty"`
+	Protected   bool     `json:"protected,omitempty"`
 	LinkChain   []string `json:"link_chain,omitempty"`
 	Type        string   `json:"type"`
 	Mode        string   `json:"mode,omitempty"`

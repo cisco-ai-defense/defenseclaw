@@ -64,8 +64,8 @@ func TestGAP1153WordFactsMemoKeepsEveryFact(t *testing.T) {
 			}
 			for _, dir := range dirs {
 				for _, privacy := range []bool{false, true} {
-					want, wantListed := commandWordFact(word, dir, home, privacy, nil)
-					got, gotListed := commandWordFact(word, dir, home, privacy, memo)
+					want, wantListed := commandWordFact(word, dir, home, privacy, false, nil)
+					got, gotListed := commandWordFact(word, dir, home, privacy, false, memo)
 					if gotListed != wantListed || !reflect.DeepEqual(got, want) {
 						t.Fatalf("word %q in %q, privacy %v: memo %+v %v, walk %+v %v", word.Text, dir, privacy, got, gotListed, want, wantListed)
 					}

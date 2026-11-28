@@ -238,9 +238,11 @@ func TestGAP1153ActorOverBudgetVerdictIdentity(t *testing.T) {
 		}
 	}
 	t.Logf("GAP-1153 identity: %d commands, %d over the budget (%d with rel's protected-write proof, %d of them without it at head), %d with byte-identical facts, %d facts-differ calls judged twice in %d configurations (%d answers, all ACTION-COMPOUND-LIMIT)", len(corpus), gated, withProofs, skipped, same, judged/len(gap1153Configs()), len(gap1153Configs()), limited)
-	// p47b placement keeps the decision on more link and private-home words;
-	// require a meaningful proof-only set without assuming the pre-p47b count.
-	if shards == 1 && !testing.Short() && (gated < 800 || withProofs < 100 || skipped < 20) {
+	// p47b placement keeps the decision on more link and private-home words,
+	// and GAP-1156 item 4 on every word that names a protected file, so only
+	// a call whose protected target no placed word names still skips it:
+	// require a proof-only set without assuming an older count.
+	if shards == 1 && !testing.Short() && (gated < 800 || withProofs < 100 || skipped < 1) {
 		t.Fatalf("corpus too thin: %d over the budget, %d with a rel proof, %d without it at head", gated, withProofs, skipped)
 	}
 }
