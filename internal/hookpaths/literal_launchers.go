@@ -251,7 +251,7 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
 		case "awk", "gawk", "mawk", "nawk":
-			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead, made)
+			operands := directLiteralProgramOperands(words, stmt, cwd, home, depth, allowFileRead, made)
 			if include != nil {
 				operands = append(operands, knownEntryChangeOperands(words, cwd)...)
 			}
@@ -267,7 +267,7 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 					return operands
 				}
 			}
-			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead, made)
+			operands := directLiteralProgramOperands(words, stmt, cwd, home, depth, allowFileRead, made)
 			// An interpreter child whose code no reader proves read-only is handed
 			// its argument paths as possible writes (rel-1-0-10:GAP-0365).
 			for _, name := range actionfacts.InlineCodeHandedWords(words) {
@@ -307,7 +307,7 @@ func literalDuration(value string) bool {
 	return err == nil
 }
 
-func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, allowFileRead bool, made madeLinks) []string {
+func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool, made madeLinks) []string {
 	if len(words) == 0 {
 		return nil
 	}
@@ -322,17 +322,17 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 	case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node" || program == "nodejs":
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if code, ok := pythonLiteralCode(words); ok {
-				return add(literalInterpreterWrites(code, "python", cwd, home))
+				return add(literalInterpreterWritesDepth(code, "python", cwd, home, depth))
 			}
 		}
 		if code, language, ok := literalInlineProgram(words); ok {
-			return add(literalInterpreterWrites(code, language, cwd, home))
+			return add(literalInterpreterWritesDepth(code, language, cwd, home, depth))
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if stmt != nil && (len(words) == 1 || len(words) >= 2 && words[1] == "-") {
 				for _, redirect := range stmt.Redirs {
 					if code, ok := literalQuotedHereDocument(redirect); ok {
-						return add(literalInterpreterWrites(code, "python", cwd, home))
+						return add(literalInterpreterWritesDepth(code, "python", cwd, home, depth))
 					}
 				}
 			}

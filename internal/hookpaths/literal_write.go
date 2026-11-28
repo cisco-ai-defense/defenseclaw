@@ -946,12 +946,20 @@ func sedBSDInPlace(words []string) (files []string, suffix string, inPlace bool)
 }
 
 func literalInterpreterWrites(code, language, cwd, home string) []string {
+	return literalInterpreterWritesDepth(code, language, cwd, home, 0)
+}
+
+// literalInterpreterWritesDepth is literalInterpreterWrites for code a shell
+// at reader depth depth runs: a Perl pipe command is read one level below it,
+// so alternating Perl and shell layers share the shell reader's depth bound
+// (rel-1-0-10:GAP-2229).
+func literalInterpreterWritesDepth(code, language, cwd, home string, depth int) []string {
 	if len(code) > 16<<10 {
 		return nil
 	}
 	paths := literalInterpreterWritesBase(code, language, cwd, home)
 	if language == "perl" {
-		paths = append(paths, perlProvenWrites(code, cwd, home)...)
+		paths = append(paths, perlProvenWrites(code, cwd, home, depth)...)
 	}
 	return paths
 }
@@ -1113,9 +1121,10 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 		}
 	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
+		python := newPythonCodeScanner(code)
 		for _, loc := range unprovenWriter.FindAllStringIndex(code, -1) {
 			name := strings.TrimSpace(code[loc[0] : loc[1]-1])
-			if (name != "write_text" && name != "write_bytes") || !pythonExecutableCodePosition(code, loc[0]) {
+			if (name != "write_text" && name != "write_bytes") || !python.at(loc[0]) {
 				continue
 			}
 			if destination, fixed := pythonReboundReceiver(code, loc[1], home); fixed {
@@ -1123,7 +1132,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 			}
 		}
 		for _, match := range literalPathHomeJoinOpen.FindAllStringSubmatchIndex(code, -1) {
-			if !pythonExecutableCodePosition(code, match[0]) {
+			if !python.at(match[0]) {
 				continue
 			}
 			call, fixed := literalBoundedCall(code, match[1]-1)
@@ -1139,7 +1148,7 @@ func literalInterpreterWritesBase(code, language, cwd, home string) []string {
 			}
 		}
 		for _, loc := range literalPythonPathCall.FindAllStringIndex(code, -1) {
-			if !pythonExecutableCodePosition(code, loc[0]) {
+			if !python.at(loc[0]) {
 				continue
 			}
 			call, fixed := literalBoundedCall(code, loc[1]-1)

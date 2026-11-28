@@ -1592,8 +1592,9 @@ var (
 
 // pythonStringWriterText reports writer call text outside executable code.
 func pythonStringWriterText(code string) bool {
+	python := newPythonCodeScanner(code)
 	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
-		if !pythonExecutableCodePosition(code, location[0]) {
+		if !python.at(location[0]) {
 			return true
 		}
 	}
@@ -1727,9 +1728,10 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 		// run writer text that otherwise looks like inert Python data.
 		return "interpreter-path", true
 	}
+	python := newPythonCodeScanner(code)
 	if language == "python" || strings.HasPrefix(language, "python3") {
 		for _, location := range literalCopyCall.FindAllStringIndex(scan, -1) {
-			if scan != code && !pythonExecutableCodePosition(code, location[0]) {
+			if scan != code && !python.at(location[0]) {
 				continue
 			}
 			api := strings.TrimSuffix(code[location[0]:location[1]], "(")
@@ -1782,7 +1784,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 	}
 	for _, location := range unprovenWriter.FindAllStringIndex(scan, -1) {
 		if (language == "python" || strings.HasPrefix(language, "python3")) &&
-			scan != code && !pythonExecutableCodePosition(code, location[0]) {
+			scan != code && !python.at(location[0]) {
 			continue
 		}
 		call, ok := literalBoundedCall(code, location[1]-1)

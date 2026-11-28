@@ -385,7 +385,6 @@ func perlSysopenWrites(s1 *perlS1Lazy, tokens []perlToken, calls []perlCall, def
 	var paths []string
 	defs := make(map[string]perlDef)
 	next := 0
-	const accmode = 3
 	for _, call := range calls {
 		if skip[call.start] {
 			continue
@@ -410,9 +409,16 @@ func perlSysopenWrites(s1 *perlS1Lazy, tokens []perlToken, calls []perlCall, def
 		if !known {
 			continue
 		}
-		if flags&accmode != 0 || flags&uint64(os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0 {
+		if perlFlagsWrite(flags, perlPlatformWriteBits) {
 			paths = append(paths, path)
 		}
 	}
 	return paths
+}
+
+// perlFlagsWrite reports whether sysopen flags ask for a change to the path:
+// an access mode other than read only, or one of the write bits of the
+// platform (perlPlatformWriteBits).
+func perlFlagsWrite(flags, writeBits uint64) bool {
+	return flags&3 != 0 || flags&writeBits != 0
 }

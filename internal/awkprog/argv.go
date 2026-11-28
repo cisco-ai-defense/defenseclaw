@@ -454,9 +454,15 @@ func (c Call) commands() (commands []string, started []bool, reading Reading) {
 
 // gawkInetRedirect maps a literal GNU awk /inet[46]/PROTO/LPORT/HOST/RPORT
 // output to the Bash network redirect with the same remote endpoint. The
-// caller quotes it with Output.Redirect, so endpoint text remains data.
+// caller quotes it with Output.Redirect, so endpoint text remains data. A
+// plain awk is GNU awk on RHEL, Fedora and Amazon Linux, so it gets the gawk
+// reading on every host, the stronger of the two (rel-1-0-10:GAP-2205);
+// mawk and nawk keep the file reading.
 func gawkInetRedirect(words []string, target string) (string, bool) {
-	if len(words) == 0 || path.Base(words[0]) != "gawk" {
+	if len(words) == 0 {
+		return "", false
+	}
+	if program := path.Base(words[0]); program != "gawk" && program != "awk" {
 		return "", false
 	}
 	for _, word := range words[1:] {

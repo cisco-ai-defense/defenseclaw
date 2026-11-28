@@ -7,7 +7,7 @@ import "testing"
 
 func TestDirectLiteralProgramOperandsBareCopyNoPanic(t *testing.T) {
 	for _, words := range [][]string{{"cp"}, {"gcp"}, {"cp", "a.txt"}} {
-		if got := directLiteralProgramOperands(words, nil, t.TempDir(), t.TempDir(), false, nil); got != nil {
+		if got := directLiteralProgramOperands(words, nil, t.TempDir(), t.TempDir(), 0, false, nil); got != nil {
 			t.Errorf("%v: got %v, want no write", words, got)
 		}
 	}

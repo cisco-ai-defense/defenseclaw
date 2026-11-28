@@ -1893,7 +1893,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			return "dynamic-argument"
 		}
 	}
-	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, false, nil) {
+	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, 0, false, nil) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
 		}
