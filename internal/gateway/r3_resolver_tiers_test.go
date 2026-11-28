@@ -50,9 +50,10 @@ type r3TierRoute struct {
 // Keyed by gap id, with the lane that closes each. Every row, pending or
 // not, is held to at least its lane-off (1.0.10) verdict; a pending row that
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
-var r3VerdictPending = map[string]string{
-	"GAP-0898": "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-}
+//
+// None is pending now: the GAP-0898 rows reach their target since the
+// passwd-named mounted homes (GAP-0899) and the ~name lookup.
+var r3VerdictPending = map[string]string{}
 
 // r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and
 // the pending table.
@@ -142,7 +143,11 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		// in TestDET111R3AccountTildeFiveTiers.
 		{gap: "GAP-1677 fp: ~root/.. is not the active home", command: `echo k >> ~root/../` + login + `/.ssh/authorized_keys`, want: "allow"},
 		{gap: "GAP-0948 fp: ~.. is a literal folder", command: `echo k >> ~../x`, want: "allow"},
-		{gap: "GAP-0898 other account credential", command: `cat /srv/homes/bob/.aws/credentials`, want: "maybe"},
+		// GAP-0898/GAP-0899: a folder is another account's home only when
+		// the passwd lookup names it, never by its shape. bob has no passwd
+		// entry here, so the read keeps its 1.0.10 allow; the passwd-named
+		// mounted home forms are TestGAP0898OtherAccountCredentialSpellingsFiveTiers.
+		{gap: "GAP-0898 fp: no passwd home, not a home by shape", command: `cat /srv/homes/bob/.aws/credentials`, want: "allow"},
 		// GAP-0899: a mounted home the passwd lookup names is
 		// TestDET111R3KnownResolverFactsFiveTiers; one it does not name stays
 		// at its 1.0.10 verdict there (an unknown home never raises).
@@ -231,7 +236,10 @@ func TestDET111R3AccountTildeFiveTiers(t *testing.T) {
 		// another account's credential stays the other-home credential read
 		// once the lookup places it (GAP-0898)
 		{gap: "GAP-0898 ~peer credential", command: `cat ~dcr3peer/.ssh/id_rsa`, cwd: ".", want: "maybe"},
-		{gap: "GAP-0898 ~peer aws credential", command: `cat ~dcr3peer/.aws/credentials`, cwd: ".", want: "maybe"},
+		// An AWS credentials read keeps the own-read cell of the plain
+		// /home/<u> spelling (PATH-AWS-CREDS: no alert in permissive, an
+		// alert in strict, owner 2026-11-27 R1), not the unknown tier.
+		{gap: "GAP-0898 ~peer aws credential", command: `cat ~dcr3peer/.aws/credentials`, cwd: ".", want: "ctl:cat /home/dcr3peer/.aws/credentials"},
 		{gap: "GAP-1677 fp: ~peer plain file", command: `echo k >> ~dcr3peer/notes.txt`, cwd: ".", want: "allow"},
 		{gap: "GAP-1677 fp: ~peer/../login project file", command: `echo k >> ~dcr3peer/../` + base + `/proj/notes.txt`, cwd: ".", want: "allow"},
 	})

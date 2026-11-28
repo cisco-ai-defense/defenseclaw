@@ -48,14 +48,20 @@ import (
 // is never below the base's on any input:
 //   - a whitelist only adds a read. A line this model does not read exactly
 //     (rgGlobRegexp nil), a file it cannot read (unreadable, over
-//     rgIgnoreFileMax bytes) and a folder past rgIgnoreFolderMax whitelist
-//     nothing: hidden files stay unread there, as before;
+//     rgIgnoreFileMax bytes) and a folder past rgIgnoreFolderMax lift the
+//     hidden rule as a whitelist does (count when unsure; the folders are
+//     read once per call, on their own bound, never the lookups budget:
+//     rel-1-0-10:GAP-1652). A .gitignore outside a repository, or above
+//     its top folder, whitelists as well: whether a .git holds the folder
+//     is not always seen here (a parent past the chain, a worktree file),
+//     and its whitelist lines only add reads (rel-1-0-10:GAP-1652);
 //   - an ignore line removes a read only when the call cannot have changed
 //     the ignore files or rg's options before rg runs (rgExclude: every
 //     command of the call is a reader in rgExcludeSafePrograms and no
 //     redirect writes a file, every word known) and nothing on the path is
 //     unsure: an unsure
-//     whitelist line, file or folder keeps the file.
+//     whitelist line, file or folder keeps the file, and a .gitignore
+//     removes one only inside a repository (GAP-0661).
 // Not modelled (a file they skip still counts, a hidden file they whitelist
 // stays unread, as before): .git/info/exclude, the global gitignore
 // (core.excludesFile) and an ambient RIPGREP_CONFIG_PATH (an inline one
@@ -111,8 +117,8 @@ const (
 	rgIgnoreNone      = 0
 	rgIgnoreWhitelist = 1
 	rgIgnoreIgnore    = -1
-	// rgIgnoreUnsure: an unsure line or file decides: neither whitelisted
-	// nor ignored.
+	// rgIgnoreUnsure: an unsure line or file decides: never ignored, and
+	// a hidden name passes as whitelisted (count when unsure).
 	rgIgnoreUnsure = 2
 )
 
@@ -268,7 +274,14 @@ func (r *rgIgnoreReader) match(read rgIgnoreRead, root, entry string, dir bool) 
 			switch {
 			case decided[kind] != rgIgnoreNone:
 			case kind < 2 && !read.dot:
-			case kind == 2 && (!read.vcs || !anyGit || sawGit):
+			case kind == 2 && !read.vcs:
+			case kind == 2 && (!anyGit || sawGit):
+				// Outside a repository: its whitelist lines still lift
+				// the hidden rule, its ignore lines remove nothing
+				// (rel-1-0-10:GAP-1652).
+				if d := folder.files[kind].match(rel, dir); d != rgIgnoreIgnore {
+					decided[kind] = d
+				}
 			default:
 				decided[kind] = folder.files[kind].match(rel, dir)
 			}
@@ -309,7 +322,7 @@ func (r *rgIgnoreReader) reads(f *rgFilter, root, shown, file string, exclude bo
 		if decision == rgIgnoreIgnore && exclude {
 			return false
 		}
-		whitelisted := decision == rgIgnoreWhitelist
+		whitelisted := decision == rgIgnoreWhitelist || decision == rgIgnoreUnsure
 		if dir {
 			if !whitelisted && !f.hidden && strings.HasPrefix(segment, ".") {
 				return false
@@ -342,7 +355,7 @@ func (r *rgIgnoreReader) mayWhitelistHidden(read rgIgnoreRead, root string, fold
 				continue
 			}
 			if file.unsure {
-				continue // whitelists nothing: hidden files stay unread
+				return true // count when unsure (rel-1-0-10:GAP-1652)
 			}
 			for _, line := range file.lines {
 				if line.exclude && rgWhitelistMayNameHidden(line) {
