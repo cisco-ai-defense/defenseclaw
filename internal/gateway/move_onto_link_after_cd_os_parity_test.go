@@ -76,20 +76,23 @@ func judgeMoveOntoLinkParityRows(t *testing.T, rows []moveOntoLinkParityRow) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, header := range []bool{true, false} {
 			for _, row := range rows {
+				// A row that does not apply to this connector on this OS
+				// is not run: a Windows spelling off Windows, a PowerShell
+				// row for any shell but the PowerShell Codex runs on
+				// Windows, a GNU mv option there. No subtest is made for
+				// it, so a native run never reads a by-design skip of it as
+				// lost coverage (rel-1-0-10:GAP-1621).
+				switch {
+				case row.windowsOnly && runtime.GOOS != "windows",
+					row.codexOnly && (connector != "codex" || !codexShellRunsPowerShell),
+					row.noPowerShell && connector == "codex" && codexShellRunsPowerShell:
+					continue
+				}
 				name := connector + "/" + row.name
 				if !header {
 					name += "/no-header"
 				}
 				t.Run(name, func(t *testing.T) {
-					if row.windowsOnly && runtime.GOOS != "windows" {
-						t.Skip("a Windows spelling")
-					}
-					if row.codexOnly && (connector != "codex" || !codexShellRunsPowerShell) {
-						t.Skip("PowerShell, which Codex runs on Windows")
-					}
-					if row.noPowerShell && connector == "codex" && codexShellRunsPowerShell {
-						t.Skip("a GNU mv option PowerShell refuses")
-					}
 					command := strings.NewReplacer("{P}", slashProject, "{M}", msysProject).Replace(row.command)
 					payload := mustJSON(t, map[string]any{"session_id": "mv-link-parity", "hook_event_name": "PreToolUse",
 						"cwd": project, "permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_mv",
