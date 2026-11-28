@@ -2026,6 +2026,8 @@ const r105Rows: DocRow[] = [
   // Documented limits the owner approved (rel-1-0-10 GAP-0009, GAP-0011, GAP-2293): the support matrix states them.
   { gap: "rel-1-0-10 GAP-0009, GAP-0011", page: "support-matrix.mdx", section: "Hook sizing", has: ["the rates in this table are the 1.0.10 rates. In 1.0.11 a sustained burst of hook calls for one user above about 80 calls a second on a 4 vCPU Linux host, or about 30 on Windows, is answered late, even on a host with free CPU", "A call past its answer budget follows the configured fail mode", "Each hook call adds about 20 KB to the local audit store."], lacks: ["or dropped on a small host"] },
   { gap: "rel-1-0-10 GAP-2293", page: "support-matrix.mdx", section: "Platforms", has: ["On Windows, `defenseclaw-hook.exe` is about 53 MiB in the 1.0.10 release, because the OpenClaw extension bundle is built into it."], lacks: ["against about 41 MiB without it"] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1639): a credentials file passed by name to a script is not tracked as a read.
+  { gap: "rel-1-0-10 GAP-1639", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A credentials file passed by name to a script (for example a Python or Node script) is not tracked as a read; DefenseClaw does not read the script's code."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
