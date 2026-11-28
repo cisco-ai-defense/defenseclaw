@@ -15,11 +15,11 @@ import (
 // the working folder at the home, C:.ssh\authorized_keys is judged by the
 // path rule of the account's authorized_keys file, as its full drive path is
 // (TestWindowsApplyPatchAbsoluteTargetsAreJudged). The hookpaths write
-// target reader keeps every C:name unknown on purpose (patchTargetPaths):
-// that only adds the unknown-target answer, never lowers the path rule.
-// Copilot CLI blocks both headers as an unparsed tool call
-// (HOOK-TOOL-CALL-UNPARSED), as rel ef865bb868 does (native rows,
-// rel-1-0-10:GAP-2283): its row pins the block.
+// target reader places the name in the same folder (patchTargetPaths), so the
+// Copilot CLI write-call check proves the call and its path rule answers too:
+// it no longer blocks it as an unparsed tool call (HOOK-TOOL-CALL-UNPARSED),
+// which rel ef865bb868 did for every drive-relative header
+// (rel-1-0-10:GAP-2283).
 func TestGAP1078DriveRelativePatchHeaderIsJudgedByThePathRule(t *testing.T) {
 	for _, profile := range []string{"default", "strict"} {
 		for _, connectorName := range []string{"codex", "copilot"} {
@@ -28,12 +28,6 @@ func TestGAP1078DriveRelativePatchHeaderIsJudgedByThePathRule(t *testing.T) {
 				f.project = f.home
 				target := filepath.VolumeName(f.home) + `.ssh\authorized_keys`
 				got, out := postWindowsApplyPatch(t, f, connectorName, profile, windowsUpdatePatch(target))
-				if connectorName == "copilot" {
-					if got != "block" {
-						t.Fatalf("decision %s, want block: %.600s", got, out)
-					}
-					return
-				}
 				if !strings.Contains(out, "persistence.ssh_authorized_keys_command") {
 					t.Fatalf("the patch of %s does not name the authorized_keys rule: %.600s", target, out)
 				}
@@ -47,9 +41,9 @@ func TestGAP1078DriveRelativePatchHeaderIsJudgedByThePathRule(t *testing.T) {
 
 // The benign twin: a drive-relative header that names a project file. Native
 // rows: Codex allow in both profiles at 487aa12e07 and at the fix (rel
-// ef865bb868 answered alert/block at the unknown tier); Copilot block as an
-// unparsed call at all three (rel-1-0-10:GAP-2283). Pinned to that, so the
-// placement raises nothing benign.
+// ef865bb868 answered alert/block at the unknown tier); Copilot blocked it as
+// an unparsed call at all three and allows it as Codex does once hookpaths
+// places the name (rel-1-0-10:GAP-2283). The placement raises nothing benign.
 func TestGAP1078DriveRelativeProjectHeaderVerdict(t *testing.T) {
 	for _, profile := range []string{"default", "strict"} {
 		for _, connectorName := range []string{"codex", "copilot"} {
@@ -66,9 +60,8 @@ func TestGAP1078DriveRelativeProjectHeaderVerdict(t *testing.T) {
 					}
 				}
 				t.Logf("VERDICT %s/%s decision=%s rule=%s", profile, connectorName, got, rule)
-				want := map[string]string{"codex": "allow", "copilot": "block"}[connectorName]
-				if got != want {
-					t.Fatalf("%s/%s: decision %s, want %s: %.600s", profile, connectorName, got, want, out)
+				if got != "allow" || strings.Contains(out, hookToolCallUnparsedRuleID) {
+					t.Fatalf("%s/%s: decision %s, want allow: %.600s", profile, connectorName, got, out)
 				}
 			})
 		}

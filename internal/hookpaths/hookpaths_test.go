@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -156,10 +157,31 @@ func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
 		if targets, ok := ApplyPatchWriteTargets("apply_patch", nil, unanswered, "", ""); ok || len(targets) != 0 {
 			t.Errorf("%q below a share that does not answer: targets %v, known %v; want unknown", unc, targets, ok)
 		}
-		// A drive-relative path depends on per-drive process state, not cwd.
-		envelope := "*** Begin Patch\n*** Update File: C:notes.txt\n@@\n+x\n*** End Patch"
-		if targets, ok := ApplyPatchWriteTargets("apply_patch", nil, envelope, cwd, ""); ok || len(targets) != 0 {
-			t.Errorf("drive-relative target: targets %v, known %v", targets, ok)
+		// A drive-relative name (C:name) is a file of the current folder of
+		// its drive: the working folder when that folder is on the same
+		// drive (rel-1-0-10:GAP-1078, GAP-2283). Another drive's current
+		// folder and a bare drive are not known.
+		project := t.TempDir()
+		drive := filepath.VolumeName(project)
+		other := "D:"
+		if strings.EqualFold(drive, other) {
+			other = "E:"
+		}
+		for _, row := range []struct {
+			name  string
+			known bool
+		}{{drive + "notes.txt", true}, {drive + `src\..\notes.txt`, true}, {other + "notes.txt", false}, {drive, false}} {
+			envelope := "*** Begin Patch\n*** Update File: " + row.name + "\n@@\n+x\n*** End Patch"
+			targets, ok := ApplyPatchWriteTargets("apply_patch", nil, envelope, project, "")
+			if !row.known {
+				if ok || len(targets) != 0 {
+					t.Errorf("drive-relative %q in %s: targets %v, known %v; want unknown", row.name, project, targets, ok)
+				}
+				continue
+			}
+			if want := filepath.Join(project, "notes.txt"); !ok || len(targets) != 1 || targets[0] != want {
+				t.Errorf("drive-relative %q in %s: targets %v, known %v; want [%s]", row.name, project, targets, ok, want)
+			}
 		}
 	}
 }
