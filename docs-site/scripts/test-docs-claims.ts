@@ -2040,6 +2040,8 @@ const r105Rows: DocRow[] = [
   { gap: "substrate-1 GAP-0260", page: "substrate/threat-model.mdx", section: "Known limits", has: ["After a credentials read, the Substrate callout refuses outbound requests for the rest of the chain window, including hosts on the egress allowlist."] },
   // Documented limit the lead ruled (substrate-1 GAP-0636): npx MCP server programs
   { gap: "substrate-1 GAP-0636", page: "substrate/threat-model.mdx", section: "Known limits", has: ["An npx MCP server's own programs are attested from the actor's npx cache; tools the server starts through PATH and a package's first, uncached run are not."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0710): commands DefenseClaw cannot fully read
+  { gap: "substrate-1 GAP-0710", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A command that DefenseClaw cannot fully read and that touches hundreds of files takes up to about twice the time of its plainly written form."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
