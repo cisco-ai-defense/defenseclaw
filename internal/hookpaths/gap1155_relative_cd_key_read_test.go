@@ -50,6 +50,9 @@ func TestGAP1155RelativeCdReadsOnlyInTheNewFolder(t *testing.T) {
 			t.Errorf("posixShellPrivateKeyRead(%q) = true, want no key read (GAP-1155)", command)
 		}
 	}
+	// The shell words spell the folders with forward slashes: a POSIX
+	// shell reads the backslashes of a Windows temp path as escapes.
+	workWord, w3Word := filepath.ToSlash(work), filepath.ToSlash(w3)
 	for _, command := range []string{
 		"cat notes",
 		"cd sub; cat notes",
@@ -63,12 +66,12 @@ func TestGAP1155RelativeCdReadsOnlyInTheNewFolder(t *testing.T) {
 		"cd ../w3 && cat notes",
 		// CDPATH or cdable_vars may send a bare relative cd back to the
 		// start folder.
-		"export CDPATH=" + work + "; cd w3 && cat notes",
-		"CD\"\"PATH=" + work + "; cd w3 && cat notes",
-		"shopt -s cdable_vars; v=" + w3 + "; cd v && cat notes",
-		"n=X; export \"$n\"=" + work + "; cd w3 && cat notes",
-		"printf -v \"$n\" %s " + work + "; cd w3 && cat notes",
-		"read -r \"$n\" <<< " + work + "; cd w3 && cat notes",
+		"export CDPATH=" + workWord + "; cd w3 && cat notes",
+		"CD\"\"PATH=" + workWord + "; cd w3 && cat notes",
+		"shopt -s cdable_vars; v=" + w3Word + "; cd v && cat notes",
+		"n=X; export \"$n\"=" + workWord + "; cd w3 && cat notes",
+		"printf -v \"$n\" %s " + workWord + "; cd w3 && cat notes",
+		"read -r \"$n\" <<< " + workWord + "; cd w3 && cat notes",
 		"declare -n r=\"$n\"; cd w3 && cat notes",
 		"f() { :; }; cd sub && cat ../notes",
 	} {
