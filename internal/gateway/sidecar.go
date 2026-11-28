@@ -4732,6 +4732,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		s.handleAdmissionResult(r)
 	})
 	w.SetMCPToolObserver(s.observeMCPToolListing)
+	s.mcpTools.setListingSource(true)
+	defer s.mcpTools.setListingSource(false)
 	if enrolled != nil {
 		// A folder that appeared since the previous watcher (a user made
 		// ~/.claude/skills, or a user was enrolled) holds what was added
