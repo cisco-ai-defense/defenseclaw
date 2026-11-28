@@ -2054,6 +2054,8 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-2169", page: "support-matrix.mdx", section: "Platforms", has: ["The Windows hook binary is about 44 MB in 1.0.11; the added size is the command parsers that read what each tool call does."] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-0929): a here-document and a command chosen at run time
   { gap: "rel-1-0-10 GAP-0929", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A command that feeds a here-document to a data reader and also runs a command chosen at run time, or has more statements after the reader, is judged at the unknown tier (an alert in default) even when the here-document holds only data."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1324): a write target that needs many folder reads
+  { gap: "rel-1-0-10 GAP-1324", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["When a write target pattern needs more folder reads to expand than DefenseClaw allows, the write keeps the protected-target verdict (a block), as in 1.0.10, even when the pattern would reach only ordinary files."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
