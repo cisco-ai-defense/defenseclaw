@@ -18,6 +18,8 @@ schemas/gateway-event-envelope.json text eol=lf
 schemas/scan-event.json text eol=lf
 schemas/scan-finding-event.json text eol=lf
 schemas/activity-event.json text eol=lf
+# internal/gatewaylog/schemas holds byte-compared copies of the four schemas above.
+internal/gatewaylog/schemas/*.json text eol=lf
 schemas/telemetry/v8/registry.yaml text eol=lf
 schemas/telemetry/v8/semconv.lock.yaml text eol=lf
 policies/sandbox/egress/*.yaml text eol=lf
